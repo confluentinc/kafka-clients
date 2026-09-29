@@ -1,0 +1,183 @@
+M17/P1 CP6 gate record: the gRPC servicers (D14, V1-V5, X14)
+============================================================
+
+Recorded by dotnet-actor 84 on 2026-09-29. Times are the host clock (IST,
+UTC+05:30). Plan: PLAN.md as frozen at the CP5 close (cp5-plan manifest,
+OK). The contract is D14 (:1018-1064), §2.4 V1-V5 (:211-224), the G9 row
+(:1339), the §4.3 CP6 row (:1381), X14 (:2106) and D15 file-forward item 1
+(:1094). This file is a short summary (§4.2). Raw logs are in the Actor's
+scratch directory; "cp6/" below means its cp6 folder. CP6 stages nothing.
+
+Base. HEAD was 8ccb0f8d (CP2) at the start (15:45:53) and at the end of the
+gates (15:51:29). The index held the Manager's three CP3 paths
+(gate/CP3.txt, SendCompletionPump.cs, SendCompletionPumpBarrierTests.cs) at
+both times, untouched.
+
+Files (git diff --numstat HEAD; wc -l; sha256)
+----------------------------------------------
+- M  grpc-server/ProducerServiceImpl.cs        +106 / -1, 463 lines
+     1796923f3ed0fee7875872db0750844db75f5dbcdd8959f9e59323d4d642fd90
+- M  grpc-server/AsyncProducerServiceImpl.cs   +108 / -1, 477 lines
+     03751b361e14bf0fd8421ac75bfb977305378ac76ea85e5eefb9e3a36629d029
+- M  grpc-server/Translate.cs                  +47 / -0, 498 lines
+     d0818e35feaaf7e0adced314646fa75a15185d038cb6f3e230ef884f9fc43fd6
+- ?? this file.
+Before-values (HEAD blobs): 4898e5f345d8..., 056224f7283e..., 6f104fc66cbe...
+No other file changed (G7). Size against §10.1's CP6 row (300-400
+production): 261 added, 2 deleted. It is under the range because each
+override copies the Flush template (19 lines with its <inheritdoc/>; the
+sync servicer's four state RPCs are exactly that long, and the async
+BeginTransaction is 21 with its comment) and adds no new xmldoc.
+
+What CP6 adds
+-------------
+Proto: multilanguage-test-server/proto/producer_service.proto, rpcs at
+:61, :64, :67, :70 and :76; TransactionRequest :168, OffsetEntry :180,
+ConsumerGroupMetadata :192, SendOffsetsToTransactionRequest :202,
+StatusResponse :225. Python: bindings/python/grpc_server.py:245-308 and
+grpc_translate.py:222-261.
+- ProducerServiceImpl (:200-302): InitTransactions, BeginTransaction,
+  CommitTransaction, AbortTransaction and SendOffsetsToTransaction, placed
+  in proto order before Flush. Each one is the Flush template: an unknown
+  id gives Translate.UnknownProducer; the call and, for SendOffsets, both
+  translations sit inside the try; catch (Exception) gives
+  Translate.ToProto. The sync members are called on the handler thread.
+- AsyncProducerServiceImpl (:213-317): the same five. Init, Commit, Abort
+  and SendOffsets are async and await the Task member with
+  ConfigureAwait(false), as Flush does. BeginTransaction calls the
+  synchronous IAsyncProducer.BeginTransaction() and returns
+  Task.FromResult, the Metrics shape: IAsyncProducer.BeginTransaction()
+  returns void, so there is nothing to await (D14: "calls
+  BeginTransaction() synchronously").
+- Translate.ProtoOffsetEntriesToDictionary (:141): absent metadata gives
+  "", absent leader_epoch gives null, a present leader_epoch is forwarded
+  as-is, and an empty list gives an empty dictionary. A duplicate
+  partition keeps the last entry, as Python's dict comprehension does.
+- Translate.ProtoToGroupMetadata (:163): a null message is read as
+  new Proto.ConsumerGroupMetadata(), giving ("", 0, "", null); an absent
+  group_instance_id gives null. It calls the [Obsolete] four-argument
+  constructor between a local #pragma warning disable CS0618 (:170) and
+  restore (:176), the AdminServiceImpl.cs:580/:603 precedent.
+- X14: "Maps the 8" -> "Maps the 13" (ProducerServiceImpl.cs:28) and
+  "maps the 8" -> "maps the 13" (AsyncProducerServiceImpl.cs:28).
+
+Shape differences from Python (recorded, not acted on)
+------------------------------------------------------
+- Translation inside the try: D14's recorded divergence from
+  grpc_server.py:302-303 (file-forward item 1). A code comment at each
+  SendOffsetsToTransaction site says so.
+- Python catches only kp.KafkaError; the .NET servicers catch Exception,
+  which is the Flush template's own shape. A non-Kafka exception becomes
+  code -4 "dotnet server: <Type>: <msg>" (Translate.ToProto).
+- Python's _take_producer reads its dict under a lock; .NET reads a
+  ConcurrentDictionary. Same observable result.
+- The async servicer does not pass context.CancellationToken to the Task
+  members, as Flush does not. This matches the template; it is not a new
+  decision.
+- No request-shape difference: every field D14 names is read, and none is
+  added.
+
+Override count (G9; control positive)
+-------------------------------------
+- command grep -c 'public override':
+  before (15:45:53)  ProducerServiceImpl.cs 8, AsyncProducerServiceImpl.cs 8
+  after  (15:50:27)  13 and 13.
+- Phrasing-independent check: the override method names in each file,
+  sorted, diff equal to the 13 rpc names in "service ProducerService"
+  (proto :43), so every rpc is overridden once and nothing else is.
+  command grep -cw override: 13 and 13 (8 and 8 at HEAD).
+- command grep -n 'the 8\b' over the two files: exit 1 after.
+
+Stale sentence (CP5 observation (b))
+------------------------------------
+- Before (15:45:53): command grep -rn 'Transactions remain deferred'
+  bindings/dotnet/src bindings/dotnet/grpc-server printed 2 hits, both in
+  grpc-server/bin/Release/net8.0/Confluent.Kafka.xml (:10571, :13093), a
+  git-ignored copy dated 2026-09-28 10:35:42.
+- After the grpc-server rebuild (first build 15:47:19): the copy is
+  2746247 bytes (2610175 before), mtime 15:40:13, with 0 hits. The
+  command exits 1 with no output (15:50:32, gates.out).
+
+Scratch evidence (cp6/probe/; outside the repo, never committed)
+---------------------------------------------------------------
+The servicers have no unit tests (the M14/P2 constraint). A scratch console,
+Probe.csproj (net10.0, Sdk.Web, ProjectReference to the grpc-server
+csproj), calls the internal helpers and servicers by reflection. It ran
+at 15:49:49: 46 of 46 checks passed, exit 0 (probe.out). Probe.cs sha
+1d58eaa1c2aa, probe.out 1e2eb9733fb8.
+- Translate, T1-T6 and G1-G4: empty list; absent metadata/epoch ("",
+  null); present (7, "m", 5); present epoch -1 kept as -1; duplicate
+  partition keeps the last; negative offset throws
+  ArgumentOutOfRangeException "Invalid negative offset"; null message
+  ("", 0, "", null); absent instance id null; present "i" kept;
+  present-empty "" kept as "" (not null).
+- Each servicer on the empty-config mock (MockProducer`2,
+  AsyncMockProducer`2):
+  - all five RPCs on id 999 give -4 "unknown producer_id 999";
+  - Commit before init gives -4 "MockProducer hasn't been initialized for
+    transactions.";
+  - Init and Begin succeed;
+  - SendOffsets with offset -5 gives -4 "dotnet server:
+    ArgumentOutOfRangeException: Invalid negative offset ..." as a
+    StatusResponse, and SentOffsets() stays false;
+  - SendOffsets (grp, 1, mem) with (t-2: 10, "md", 4) and (t-3: 11)
+    succeeds, and SentOffsets() is true;
+  - SendOffsets with group_metadata absent succeeds;
+  - after Commit, CommittedOffset reads (10, "md", 4), (11, "", null), and
+    12 under group "" for the absent-metadata request;
+  - Begin + Abort succeed; after Close the id is unknown.
+- The probe asserts values, but it is scratch. No mutation was run
+  against it and none is claimed. CP7's G10 is the gate that covers the
+  servicers over the wire.
+- Pragma control (15:47-15:49, between the first build and the probe):
+  with the two #pragma lines removed, the G9 build fails with exactly one
+  error, CS0618 on ConsumerGroupMetadata(string, int, string, string?)
+  with the D2 message. The file was then restored and matched its sha
+  (d0818e35...).
+
+Gates (cp6/gates/gates.sh; gates.out, g*.log; 15:50:23-15:51:29)
+----------------------------------------------------------------
+G9 (host route, as CP0 recorded)
+- dotnet build -c Release <grpc-server csproj>: exit 0, 0 Warning(s),
+  0 Error(s). --no-incremental: the same, 00:00:03.09; the dll was written
+  15:50:27.
+- dotnet format <grpc-server csproj> --verify-no-changes: exit 0, 0 bytes.
+- Override count: 13 and 13 (above).
+G2: cargo build --features ffi --release exit 0 ("in 0.27s"). dotnet
+  build -c Release --no-incremental <sln>: exit 0, 0W/0E, 00:00:02.24; all
+  six outputs (library netstandard2.0/net8.0/net10.0, tests
+  net462/net8.0/net10.0).
+G3: dotnet format <sln> --verify-no-changes: exit 0, 0 bytes.
+G4: net10.0 2627/2627, exit 0 (default dotnet). G5: net8.0 2627/2627 under
+  the $HOME/.dotnet env, exit 0; DOTNET_ROLL_FORWARD is unset (count 0).
+  Totals unchanged from CP5 (2627), as planned: CP6 adds no unit tests.
+G1: git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/ tests/ is 0
+  bytes, with 0 untracked files there. Header sha256
+  e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111, the CP0
+  value. Control positive: the bindings/dotnet diff from the base is 34
+  files.
+G6: internal static extern = 715. CP6 adds no extern or DllImport line.
+G7
+- The marker grep over the CP6 diff's added lines exits 1. The control
+  positive (InitTransactions|SendOffsetsToTransaction) gives 9. The
+  marker grep over the whole base diff (src, tests, grpc-server,
+  Makefile) exits 1.
+- git status --short shows the CP4-CP6 paths (M and ??),
+  COMMENTS.DONE.84.md, the agent-memory folders and the user's own
+  entries (kafka, the persona files), all untouched.
+Freeze (15:51:29): shasum -a 256 -c on the cp3 (3 OK), cp5 (17 OK) and
+  cp5-plan (1 OK) manifests and cp5/freeze-cp4.sha256 (5 OK); each exits 0.
+  COMMENTS.84.md is 0 bytes. COMMENTS.DONE.84.md was not edited.
+
+Observations for the Manager
+----------------------------
+(a) The async BeginTransaction override uses the Metrics shape
+    (Task.FromResult, not async), not the Flush template's async/await.
+    D14 says "calls BeginTransaction() synchronously", and the member
+    returns void, so there is nothing to await; Metrics is the precedent.
+    The unknown-id, try and catch structure is the template's.
+(b) Size is under §10.1's CP6 range (261 against 300-400). Nothing was left
+    out; the template is compact.
+(c) The probe's build of the grpc-server (through the ProjectReference)
+    and the G9 builds wrote only into the git-ignored grpc-server/bin and
+    obj folders.

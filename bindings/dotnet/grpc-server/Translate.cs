@@ -130,6 +130,53 @@ internal static class Translate
     }
 
     /// <summary>
+    /// Proto <c>OffsetEntry</c> list -&gt; the offsets dictionary of
+    /// <c>SendOffsetsToTransaction</c> — the port of <c>grpc_translate.py</c>'s
+    /// <c>_proto_offset_entries_to_dict</c> (<c>:222-242</c>). <c>OffsetEntry</c> is flat, and its
+    /// <c>leader_epoch</c> and <c>metadata</c> use proto3 optional-presence: an absent
+    /// <c>metadata</c> is the empty string, and an absent <c>leader_epoch</c> is
+    /// <see langword="null"/>. A present <c>leader_epoch</c> is forwarded as-is, as Python does. An
+    /// empty list yields an empty dictionary.
+    /// </summary>
+    internal static Dictionary<TopicPartition, OffsetAndMetadata> ProtoOffsetEntriesToDictionary(
+        IEnumerable<Proto.OffsetEntry> entries)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> result = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        foreach (Proto.OffsetEntry entry in entries)
+        {
+            string metadata = entry.HasMetadata ? entry.Metadata : string.Empty;
+            int? leaderEpoch = entry.HasLeaderEpoch ? entry.LeaderEpoch : (int?)null;
+            result[new TopicPartition(entry.Topic, entry.Partition)] =
+                new OffsetAndMetadata(entry.Offset, metadata, leaderEpoch);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Proto <c>ConsumerGroupMetadata</c> -&gt; binding <see cref="ConsumerGroupMetadata"/> — the
+    /// port of <c>grpc_translate.py</c>'s <c>_proto_to_group_metadata</c> (<c>:245-261</c>). An
+    /// absent <c>group_instance_id</c> is <see langword="null"/>. An absent message (the generated
+    /// property is <see langword="null"/>, where Python's attribute access yields a default
+    /// instance) is read as a default instance, giving <c>("", 0, "", null)</c> as Python does.
+    /// </summary>
+    internal static ConsumerGroupMetadata ProtoToGroupMetadata(Proto.ConsumerGroupMetadata? proto)
+    {
+        Proto.ConsumerGroupMetadata source = proto ?? new Proto.ConsumerGroupMetadata();
+
+        // The four-argument constructor is [Obsolete] as in Java. Python builds the metadata with
+        // its own four-argument constructor, so the port keeps it under a local suppression (the
+        // AdminServiceImpl ListClientMetricsResources precedent).
+#pragma warning disable CS0618 // Type or member is obsolete
+        return new ConsumerGroupMetadata(
+            source.GroupId,
+            source.GenerationId,
+            source.MemberId,
+            source.HasGroupInstanceId ? source.GroupInstanceId : null);
+#pragma warning restore CS0618
+    }
+
+    /// <summary>
     /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c> — the code this server stamps
     /// on errors it manufactures itself (an unexpected non-Kafka exception, or an
     /// unknown <c>consumer_id</c>), mirroring <c>grpc_translate.py</c>'s

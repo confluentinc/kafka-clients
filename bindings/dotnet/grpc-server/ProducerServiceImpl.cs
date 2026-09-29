@@ -25,7 +25,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Maps the 8 <c>ProducerService</c> RPCs onto the binding's synchronous
+/// Maps the 13 <c>ProducerService</c> RPCs onto the binding's synchronous
 /// <see cref="KafkaProducer{TKey, TValue}"/> / <see cref="MockProducer{TKey, TValue}"/>
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET port
 /// of <c>grpc_server.py</c>'s <c>ProducerService</c> half (M12/P1). Each RPC resolves a
@@ -193,6 +193,111 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         catch (Exception ex)
         {
             return Task.FromResult(new Proto.SendResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> InitTransactions(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            producer.InitTransactions();
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> BeginTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            producer.BeginTransaction();
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> CommitTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            producer.CommitTransaction();
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> AbortTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            producer.AbortTransaction();
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> SendOffsetsToTransaction(Proto.SendOffsetsToTransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            // Both translations run inside the try, unlike grpc_server.py, which runs them
+            // before its try: here a malformed request is a StatusResponse error like any other
+            // failure (M17/P1 PLAN D14).
+            producer.SendOffsetsToTransaction(
+                Translate.ProtoOffsetEntriesToDictionary(request.Offsets),
+                Translate.ProtoToGroupMetadata(request.GroupMetadata));
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }
 

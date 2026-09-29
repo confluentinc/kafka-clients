@@ -25,7 +25,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 8
+/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 13
 /// <c>ProducerService</c> RPCs onto the binding's <em>asynchronous</em>
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> / <see cref="AsyncMockProducer{TKey, TValue}"/>
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET analog of
@@ -206,6 +206,113 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         catch (Exception ex)
         {
             return new Proto.SendResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> InitTransactions(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
+        }
+
+        try
+        {
+            await producer.InitTransactions().ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> BeginTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            // BeginTransaction() is SYNCHRONOUS on IAsyncProducer too (it does not block in Java,
+            // CLAUDE.md §4) — call it directly, as Metrics does.
+            producer.BeginTransaction();
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> CommitTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
+        }
+
+        try
+        {
+            await producer.CommitTransaction().ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> AbortTransaction(Proto.TransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
+        }
+
+        try
+        {
+            await producer.AbortTransaction().ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> SendOffsetsToTransaction(Proto.SendOffsetsToTransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
+        }
+
+        try
+        {
+            // Both translations run inside the try, unlike grpc_server.py, which runs them
+            // before its try: here a malformed request is a StatusResponse error like any other
+            // failure (M17/P1 PLAN D14).
+            await producer.SendOffsetsToTransaction(
+                Translate.ProtoOffsetEntriesToDictionary(request.Offsets),
+                Translate.ProtoToGroupMetadata(request.GroupMetadata)).ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
     }
 
