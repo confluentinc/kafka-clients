@@ -25,11 +25,13 @@
 //! name contains `internal` maps to a `pub(crate)` Rust module.
 
 mod abstract_records;
+mod byte_buffer_log_input_stream;
 mod compression_ratio_estimator;
 mod compression_type;
 mod control_record_type;
 mod default_record;
 mod default_record_batch;
+mod legacy_record;
 mod memory_records;
 pub(crate) mod memory_records_builder;
 mod record;
@@ -38,12 +40,13 @@ mod record_version;
 mod simple_record;
 
 pub(crate) use abstract_records::AbstractRecords;
+pub(crate) use byte_buffer_log_input_stream::ByteBufferLogInputStream;
 pub(crate) use compression_ratio_estimator::CompressionRatioEstimator;
 pub(crate) use compression_type::CompressionType;
 pub(crate) use control_record_type::ControlRecordType;
 pub(crate) use default_record::{DefaultRecord, DefaultRecordRef};
 pub(crate) use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
-pub(crate) use memory_records::BatchIterator;
+pub(crate) use legacy_record::LegacyRecord;
 // Rust-only options types for `MemoryRecords::with_records_with_options` and
 // `MemoryRecords::builder_with_options` (CLAUDE.md §2's cap on derived overload
 // names). `pub(crate)`, not `pub`, for the same reason as the `SimpleRecord`
