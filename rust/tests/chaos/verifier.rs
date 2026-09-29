@@ -307,6 +307,11 @@ type PhysKey = (Uuid, i32, i64);
 /// `t1` index 5 are two distinct records. Keying the conservation maps on
 /// `(topic, index)` keeps them apart. For a single-topic run this collapses to
 /// the old `index`-only behaviour (one topic name in every key).
+///
+/// The key is unique only while each topic has ONE producer: two would both
+/// write `(t, 0..)`. `ChaosConfig::from_env` rejects a second producer spec and
+/// `ChaosHarness::build_workloads` asserts it, so no event stream reaching
+/// this verifier breaks the invariant.
 type LogicalKey = (String, u64);
 
 /// The default verifier: conservation + per-record bookkeeping on both the
@@ -692,9 +697,12 @@ impl ConservationState {
     /// Partition coverage, scored per topic: the number of distinct partitions
     /// the consumer read from on the LEAST-covered topic (0 when nothing was
     /// consumed). Counting `(topic, partition)` pairs across topics would let a
-    /// fully-read topic mask another that was never read.
+    /// fully-read topic mask another that was never read. Every topic the
+    /// producer had a record acknowledged on starts at 0, so a topic the
+    /// consumer never read counts as 0 rather than being left out of the
+    /// minimum.
     fn partitions_covered(&self) -> usize {
-        let mut per_topic: HashMap<&str, usize> = HashMap::new();
+        let mut per_topic: HashMap<&str, usize> = self.delivered.keys().map(|(topic, _)| (topic.as_str(), 0)).collect();
         for (topic, _) in &self.partitions_seen {
             *per_topic.entry(topic.as_str()).or_insert(0) += 1;
         }
@@ -2104,6 +2112,52 @@ mod tests {
             verdict.logical_duplicates, 0,
             "same index on two topics is not a logical duplicate"
         );
+    }
+
+    /// A topic the consumer never read counts as zero coverage, even when its
+    /// records are all excused (here by a recreate snapshot) so loss scoring
+    /// cannot catch it. Leaving it out of the minimum let the fully-read topic
+    /// alone satisfy the guard.
+    #[test]
+    fn a_topic_never_read_fails_partition_coverage() {
+        let v = ConservationVerifier::new();
+        for p in 0..2 {
+            v.record(WorkloadEvent::Delivered {
+                index: p as u64,
+                topic: "t0".into(),
+                topic_id: zero(),
+                partition: p,
+                offset: 0,
+            });
+            v.record(WorkloadEvent::Consumed {
+                consumer: "c".into(),
+                index: p as u64,
+                topic: "t0".into(),
+                topic_id: zero(),
+                partition: p,
+                offset: 0,
+            });
+            v.record(WorkloadEvent::Delivered {
+                index: p as u64,
+                topic: "t1".into(),
+                topic_id: zero(),
+                partition: p,
+                offset: 0,
+            });
+        }
+        v.note_expected_loss(ExpectedLossHint::AllDeliveredForTopic("t1".to_string()));
+
+        let verdict = v.verdict(2);
+        assert!(verdict.lost.is_empty(), "t1's records are excused: {verdict}");
+        assert_eq!(verdict.partitions_covered, 0, "{verdict}");
+        assert!(
+            verdict.reasons.iter().any(|r| r
+                == "partition coverage: the least-covered topic had records consumed from only 0 partition(s), \
+                    expected >= 2"),
+            "{:?}",
+            verdict.reasons
+        );
+        assert!(!verdict.is_pass());
     }
 
     /// Expected-loss scoped to ONE topic must not excuse loss on another topic.

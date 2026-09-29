@@ -82,21 +82,23 @@ const FORCED_EXIT_AFTER_PASS: &str =
 
 /// Draw one cycle's action in `--random` mode from the seeded `rng`. Returns
 /// `None` for a quiet cycle (probability `1 - action_prob`). All four fault
-/// types are candidates; every parameter is drawn from `rng` so the run is
-/// reproducible for a given seed.
+/// types are candidates (topic-recreate only when
+/// [`ChaosConfig::random_excludes_topic_recreate`] allows it); every parameter
+/// is drawn from `rng` so the run is reproducible for a given seed.
 fn random_plan(rng: &mut StdRng, cfg: &ChaosConfig) -> Option<PlannedAction> {
     if rng.random::<f64>() >= cfg.action_prob {
         return None; // quiet cycle
     }
     // Candidate faults, all equally likely, broker-roll included. TopicRecreate
-    // (candidate 3) is EXCLUDED under multi-topic: the KIP-848 consumer keeps
-    // stale positions on some partitions of a recreated topic when it is one of
-    // several subscribed topics and never reads its new generation — the same
-    // known consumer-side limitation for which `ChaosConfig::from_env` rejects
-    // `--num-topics > 1 --topic-recreate`. A single-topic run has all 4
-    // candidates; a multi-topic run draws only broker-roll / change-leader /
+    // (candidate 3) is EXCLUDED under multi-topic unless
+    // `--allow-multi-topic-recreate`: the KIP-848 consumer keeps stale positions
+    // on some partitions of a recreated topic when it is one of several
+    // subscribed topics and never reads its new generation — the same known
+    // consumer-side limitation for which `ChaosConfig::from_env` rejects
+    // `--num-topics > 1 --topic-recreate` without that flag. Otherwise all 4
+    // are candidates; an excluded run draws only broker-roll / change-leader /
     // reassign (the runner prints a notice).
-    let candidates = if cfg.num_topics > 1 { 3 } else { 4 };
+    let candidates = if cfg.random_excludes_topic_recreate() { 3 } else { 4 };
     let plan = match rng.random_range(0..candidates) {
         0 => {
             // Pick a broker that is not permanently left down. `from_env`
@@ -157,14 +159,22 @@ async fn run_planned(
             .await;
         },
         PlannedAction::ChangeLeader => {
-            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ChangeLeader }
-                .execute(brokers, admin, reports)
-                .await;
+            ChaosAction::Migrate {
+                topics: harness.topics().to_vec(),
+                mode: ReassignMode::ChangeLeader,
+                live_brokers: cfg.live_broker_ids(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
         },
         PlannedAction::ReassignPartitions => {
-            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ReassignPartitions }
-                .execute(brokers, admin, reports)
-                .await;
+            ChaosAction::Migrate {
+                topics: harness.topics().to_vec(),
+                mode: ReassignMode::ReassignPartitions,
+                live_brokers: cfg.live_broker_ids(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
         },
         PlannedAction::TopicRecreate { topic, dwell } => {
             harness.recreate_topic(&topic, dwell).await;
@@ -215,14 +225,22 @@ async fn run_action(
             }
         },
         ActionKind::ChangeLeader => {
-            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ChangeLeader }
-                .execute(brokers, admin, reports)
-                .await;
+            ChaosAction::Migrate {
+                topics: harness.topics().to_vec(),
+                mode: ReassignMode::ChangeLeader,
+                live_brokers: cfg.live_broker_ids(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
         },
         ActionKind::ReassignPartitions => {
-            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ReassignPartitions }
-                .execute(brokers, admin, reports)
-                .await;
+            ChaosAction::Migrate {
+                topics: harness.topics().to_vec(),
+                mode: ReassignMode::ReassignPartitions,
+                live_brokers: cfg.live_broker_ids(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
         },
         ActionKind::TopicRecreate => {
             // librdkafka's topic-chaos picks ONE random topic per firing
@@ -339,11 +357,11 @@ async fn chaos_run() {
     }
     if config.random {
         eprintln!("chaos: RANDOM mode — reproduce this exact run with --seed {}", config.seed);
-        if config.num_topics > 1 {
+        if config.random_excludes_topic_recreate() {
             eprintln!(
                 "chaos: NOTE topic-recreate is excluded from RANDOM candidates under --num-topics > 1 (known \
                  consumer-side limitation: a recreated topic among several keeps stale positions; see \
-                 tests/chaos/README.md)"
+                 tests/chaos/README.md). Pass --allow-multi-topic-recreate to include it"
             );
         }
     }
@@ -474,7 +492,7 @@ async fn chaos_run() {
             // migration (§`--rebalance-mid-roll`). Only when a roll actually
             // fires this cycle — otherwise there is no down-window and we fall
             // back to the top-of-cycle placement below.
-            let inject_mid_roll = cfg.rebalance_mid_roll && roll_fires_this_cycle && (do_add || do_remove);
+            let mut inject_mid_roll = cfg.rebalance_mid_roll && roll_fires_this_cycle && (do_add || do_remove);
 
             // Rebalance chaos at the top of the cycle — unless we are deferring
             // it into the roll's down-window (mid-roll).
@@ -495,8 +513,9 @@ async fn chaos_run() {
                     continue;
                 }
                 // Mid-roll injection: the FIRST broker roll of the cycle carries
-                // the deferred rebalance in its down-window. (`inject_mid_roll`
-                // is cleared after firing so a multi-roll cycle injects once.)
+                // the deferred rebalance in its down-window. `inject_mid_roll`
+                // is cleared after firing, so a cycle with more than one roll
+                // injects once.
                 if inject_mid_roll && spec.kind == ActionKind::BrokerRoll {
                     let pool_hook = &pool;
                     let hook = async move {
@@ -509,6 +528,7 @@ async fn chaos_run() {
                     };
                     run_broker_roll_with_hook(cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref, hook)
                         .await;
+                    inject_mid_roll = false;
                 } else {
                     run_action(
                         spec.kind,
