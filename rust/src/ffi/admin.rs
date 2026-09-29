@@ -503,8 +503,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// here is that throw expressed in the FFI's idiom — a Rust panic must not
 /// unwind across the C boundary (CLAUDE.md §12.1).
 ///
-/// The mock is built through [`Builder`] exactly as Java's
-/// `MockAdminClient.create().numBrokers(n).build()`, and the rejection lives
+/// The mock is built as Java's `MockAdminClient.create().numBrokers(n).build()`
+/// is, through [`MockAdminClient::create`] and its [`Builder`], and the rejection lives
 /// there: `set_num_brokers` fails for a negative count and `build` fails for
 /// zero brokers. This entry point only maps that `Err` to null, so there is one
 /// source of truth for the bound rather than a check here that could drift from
@@ -512,7 +512,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
-    let mock = match Builder::new().set_num_brokers(num_brokers).and_then(Builder::build) {
+    let mock = match MockAdminClient::create().set_num_brokers(num_brokers).and_then(Builder::build) {
         Ok(mock) => mock,
         Err(_) => return std::ptr::null_mut(),
     };
