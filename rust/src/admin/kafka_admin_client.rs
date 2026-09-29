@@ -4890,7 +4890,7 @@ impl Admin for KafkaAdminClient {
         // earlier deadline it keeps that one ("Hard shutdown time is already
         // earlier than requested"), so the deadline only ever moves forward in
         // urgency. A plain store would let `close(60s)` after `close(100ms)`
-        // re-widen the poll budget that `run_once` reads on every iteration.
+        // re-widen the poll budget that `process_pending_calls` reads on every iteration.
         //
         // Java also reassigns `newHardShutdownTimeMs = prev` on that branch, but
         // only to feed a debug log, so it has no counterpart here.
@@ -13291,6 +13291,8 @@ mod tests {
         poll_timeouts: Arc<Mutex<Vec<i64>>>,
         advance_clock: Arc<std::sync::atomic::AtomicBool>,
         stuck: Arc<std::sync::atomic::AtomicBool>,
+        park_once: Arc<std::sync::atomic::AtomicBool>,
+        parked: Arc<Notify>,
     }
 
     impl WaitingClient {
@@ -13301,7 +13303,26 @@ mod tests {
                 poll_timeouts: Arc::new(Mutex::new(Vec::new())),
                 advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 stuck: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                park_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                parked: Arc::new(Notify::new()),
             }
+        }
+
+        /// Once armed, the next `poll` parks until the client's
+        /// [`wakeup_notify`](KafkaClient::wakeup_notify) handle fires, then
+        /// behaves normally. That handle is the same `Notify` production
+        /// `submit()` and `close()` poke (it is what `KafkaAdminClient::build`
+        /// stores as `Shared::wakeup`), so the park ends exactly when a real
+        /// selector poll would be woken (DoD #12). Only the first poll after
+        /// arming parks, so the loop can finish its work afterwards.
+        fn park_once(&self) -> Arc<std::sync::atomic::AtomicBool> {
+            Arc::clone(&self.park_once)
+        }
+
+        /// Signalled (with a stored permit) when `poll` has entered the park
+        /// armed by [`park_once`](Self::park_once).
+        fn parked(&self) -> Arc<Notify> {
+            Arc::clone(&self.parked)
         }
 
         fn poll_timeouts(&self) -> Arc<Mutex<Vec<i64>>> {
@@ -13348,6 +13369,15 @@ mod tests {
             self.poll_timeouts.lock().unwrap().push(timeout);
             if self.stuck.load(Ordering::Acquire) {
                 std::future::pending::<()>().await;
+            }
+            if self.park_once.swap(false, Ordering::AcqRel) {
+                let wakeup = self.inner.wakeup_notify();
+                // Created before `parked` is signalled, so a wakeup issued the
+                // moment the test resumes is not lost: `notify_one` either wakes
+                // this waiter or leaves a permit it consumes on first poll.
+                let woken = wakeup.notified();
+                self.parked.notify_one();
+                woken.await;
             }
             let now = if self.advance_clock.load(Ordering::Acquire) {
                 self.time.sleep(timeout);
@@ -13570,6 +13600,83 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "close(50ms) must be bounded by its timeout, but it returned only after {elapsed:?}"
         );
+    }
+
+    /// A call submitted just before `close()` must still run. Java's
+    /// `processRequests` drains `newCalls` and checks `threadShouldExit` back to
+    /// back at the top of every iteration (`KafkaAdminClient.java:1498-1504`):
+    ///
+    /// ```java
+    /// // Copy newCalls into pendingCalls.
+    /// drainNewCalls();
+    ///
+    /// // Check if the AdminClient thread should shut down.
+    /// long curHardShutdownTimeMs = hardShutdownTimeMs.get();
+    /// if ((curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME) && threadShouldExit(now, curHardShutdownTimeMs))
+    ///     break;
+    /// ```
+    ///
+    /// so a call that arrived while the thread was parked in `client.poll` is in
+    /// `pendingCalls` — an active external call — when the exit decision is
+    /// made, and `close(timeout)` waits for it. When the exit check instead ran
+    /// after the whole iteration (network poll included), the call was still in
+    /// the submission channel, invisible to `has_active_external_calls`, and
+    /// `fail_all_remaining` failed it with "The AdminClient thread has exited."
+    ///
+    /// The loop is the real spawned `run()`, parked in its network poll on
+    /// `client.wakeup_notify()` — the `Notify` production `submit()` and
+    /// `close()` poke — so it wakes exactly as a production selector would.
+    #[tokio::test]
+    async fn a_call_submitted_just_before_close_is_completed() {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
+        let park_once = client.park_once();
+        let parked = client.parked();
+        let config = test_config();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        runnable.client_mut().inner.prepare_response(create_response(vec![create_result(
+            "myTopic",
+            Errors::None,
+            None,
+        )]));
+
+        // Park the I/O task in its first network poll, before anything is
+        // submitted.
+        park_once.store(true, Ordering::Release);
+        admin.spawn(runnable);
+        tokio::time::timeout(Duration::from_secs(5), parked.notified())
+            .await
+            .expect("the I/O task should park in its network poll");
+
+        // Submitted while the task is parked: the call sits in the submission
+        // channel until the task next drains it.
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
+        tokio::time::timeout(Duration::from_secs(10), admin.close_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect("close(30s) should return once the create has completed");
+
+        let value = result.values()["myTopic"].get().await;
+        assert!(
+            value.is_ok(),
+            "a createTopics submitted before close() must complete, as in Java; got {value:?}"
+        );
+        result
+            .all()
+            .get()
+            .await
+            .expect("all() of a completed createTopics must succeed");
     }
 
     /// Java publishes the hard-shutdown deadline through a compare-and-set loop
