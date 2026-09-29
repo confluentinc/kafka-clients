@@ -12555,7 +12555,16 @@ mod tests {
         );
         let partial_all = partial_failure_result.all();
         drive_until(&mut runnable, &time, 80, || partial_all.is_done()).await;
-        assert_eq!(partial_all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
+        // Java: `assertInstanceOf(KafkaException.class, exception.getCause())`
+        // then `assertInstanceOf(UnknownMemberIdException.class,
+        // exception.getCause().getCause())` — a bare Kafka error whose cause is
+        // the member's error.
+        let partial_err = partial_all.get().await.unwrap_err();
+        assert!(matches!(partial_err, Error::KafkaError(_)), "{partial_err:?}");
+        assert!(
+            matches!(partial_err.source(), Some(Error::UnknownMemberId(_))),
+            "{partial_err:?}"
+        );
 
         // removeAll with success.
         runnable
