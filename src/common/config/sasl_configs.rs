@@ -62,23 +62,6 @@ impl SaslConfigs {
 
     /// Default SASL mechanism (matches Java `DEFAULT_SASL_MECHANISM`).
     pub const DEFAULT_SASL_MECHANISM: &str = Self::GSSAPI_MECHANISM;
-
-    /// Returns whether `key` names a SASL config that Java defines as
-    /// `ConfigDef.Type.PASSWORD`, i.e. one whose value must never be rendered.
-    ///
-    /// Translates the `Type.PASSWORD` marking of `sasl.jaas.config` in
-    /// `SaslConfigs.addClientSaslSupport` (`SaslConfigs.java:380`). Java keeps
-    /// that knowledge in `ConfigDef`, which this crate does not translate, so
-    /// this predicate is its minimal carrier: it lets a holder of the raw user
-    /// map (`ProducerConfig`'s `originals`) hide exactly the values Java hides.
-    ///
-    /// Covers exactly one of the key constants defined on this struct:
-    /// [`SaslConfigs::SASL_JAAS_CONFIG`]. The other `Type.PASSWORD` keys Java
-    /// defines in `addClientSaslSupport` (`SaslConfigs.java:392`, `:402`) are
-    /// OAuth settings, which this client does not translate.
-    pub(crate) fn is_password_config(key: &str) -> bool {
-        key == Self::SASL_JAAS_CONFIG
-    }
 }
 
 /// SASL configuration for Kafka connections.
@@ -553,62 +536,6 @@ mod tests {
         assert_eq!(config.jaas_config, cloned.jaas_config);
         assert_eq!(config.username, cloned.username);
         assert_eq!(config.password, cloned.password);
-    }
-
-    /// Every `pub const` declared on [`SaslConfigs`], paired with whether Java
-    /// defines it as `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:380`).
-    /// [`test_password_config_table_lists_every_constant`] keeps it complete.
-    macro_rules! sasl_configs_constants {
-        ($($name:ident => $is_password:expr),* $(,)?) => {
-            [$((stringify!($name), SaslConfigs::$name, $is_password)),*]
-        };
-    }
-
-    fn sasl_configs_constants() -> [(&'static str, &'static str, bool); 4] {
-        sasl_configs_constants![
-            SASL_MECHANISM => false,
-            SASL_JAAS_CONFIG => true,
-            GSSAPI_MECHANISM => false,
-            DEFAULT_SASL_MECHANISM => false,
-        ]
-    }
-
-    /// Both directions over every constant: the predicate is true for exactly
-    /// the keys Java types `PASSWORD` and false for every other constant.
-    #[test]
-    fn test_is_password_config_matches_java_password_keys() {
-        let mut password_keys = Vec::new();
-        for (name, value, is_password) in sasl_configs_constants() {
-            assert_eq!(
-                SaslConfigs::is_password_config(value),
-                is_password,
-                "SaslConfigs::{name} = {value:?}"
-            );
-            if is_password {
-                password_keys.push(value);
-            }
-        }
-        // Guard against a vacuous pass: the Java `PASSWORD` set is not empty.
-        assert_eq!(password_keys, vec!["sasl.jaas.config"]);
-
-        // Keys are matched exactly, as `ConfigDef` does.
-        assert!(!SaslConfigs::is_password_config(""));
-        assert!(!SaslConfigs::is_password_config("SASL.JAAS.CONFIG"));
-        assert!(!SaslConfigs::is_password_config("sasl.jaas.config "));
-        assert!(!SaslConfigs::is_password_config("sasl.jaas"));
-    }
-
-    /// The table above must name every `pub const` this file declares, so a
-    /// constant added later cannot silently escape the exhaustive test.
-    #[test]
-    fn test_password_config_table_lists_every_constant() {
-        let declared: Vec<&str> = include_str!("sasl_configs.rs")
-            .lines()
-            .filter_map(|line| line.strip_prefix("    pub const "))
-            .map(|rest| rest.split(':').next().unwrap_or_default())
-            .collect();
-        let tabled: Vec<&str> = sasl_configs_constants().iter().map(|(name, _, _)| *name).collect();
-        assert_eq!(tabled, declared);
     }
 
     /// The finding's requested test: `{:?}` of a config holding credentials

@@ -48,9 +48,9 @@ use crate::consumer::AutoOffsetResetStrategy;
 // `Debug` is derived: every secret this struct holds is a `Password` inside
 // `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
 // ever gains a map of the raw user properties (Java's `originals()`), replace
-// the derive with a hand-written `Debug` that renders that map with the values
-// of `SslConfigs::is_password_config` / `SaslConfigs::is_password_config` keys
-// hidden, as `ProducerConfig`'s `Debug` does.
+// the derive with a hand-written `Debug` that renders that map as its key set
+// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
+// does not parse, and Java never prints a raw `originals` value.
 #[derive(Clone, Debug)]
 pub struct ConsumerConfig {
     // --- Group ---

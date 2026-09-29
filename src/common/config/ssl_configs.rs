@@ -114,36 +114,6 @@ impl SslConfigs {
 
     /// Config key: `ssl.engine.factory.class`.
     pub const SSL_ENGINE_FACTORY_CLASS_CONFIG: &str = "ssl.engine.factory.class";
-
-    /// Returns whether `key` names an SSL config that Java defines as
-    /// `ConfigDef.Type.PASSWORD`, i.e. one whose value must never be rendered.
-    ///
-    /// Translates the `Type.PASSWORD` markings in
-    /// `SslConfigs.addClientSslSupport` (`SslConfigs.java:133-137`, `:140`).
-    /// Java keeps that knowledge in `ConfigDef`, which this crate does not
-    /// translate, so this predicate is its minimal carrier: it lets a holder of
-    /// the raw user map (`ProducerConfig`'s `originals`) hide exactly the values
-    /// Java hides.
-    ///
-    /// Covers exactly six of the key constants defined on this struct, in
-    /// Java's definition order: [`SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG`],
-    /// [`SslConfigs::SSL_KEY_PASSWORD_CONFIG`],
-    /// [`SslConfigs::SSL_KEYSTORE_KEY_CONFIG`],
-    /// [`SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG`],
-    /// [`SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG`] and
-    /// [`SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG`] — the keys of the six
-    /// [`Password`]-typed [`SslConfig`] fields.
-    pub(crate) fn is_password_config(key: &str) -> bool {
-        matches!(
-            key,
-            Self::SSL_KEYSTORE_PASSWORD_CONFIG
-                | Self::SSL_KEY_PASSWORD_CONFIG
-                | Self::SSL_KEYSTORE_KEY_CONFIG
-                | Self::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG
-                | Self::SSL_TRUSTSTORE_CERTIFICATES_CONFIG
-                | Self::SSL_TRUSTSTORE_PASSWORD_CONFIG
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,8 +226,8 @@ impl SslConfig {
     /// The caller is responsible for matching the `"ssl."` prefix before calling
     /// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
     ///
-    /// Values of the keys Java defines as `Type.PASSWORD`
-    /// ([`SslConfigs::is_password_config`]) are wrapped in a [`Password`].
+    /// Values of the six keys Java defines as `Type.PASSWORD`
+    /// (`SslConfigs.java:133-137`, `:140`) are wrapped in a [`Password`].
     pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfig, key: &str, value: &str) {
         match key {
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
@@ -474,94 +444,6 @@ mod tests {
         SslConfig::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value");
         assert_eq!(ssl.truststore_type, "PEM");
         assert!(ssl.truststore_location.is_none());
-    }
-
-    /// Every `pub const` declared on [`SslConfigs`], in declaration order,
-    /// paired with whether Java defines it as `ConfigDef.Type.PASSWORD` in
-    /// `addClientSslSupport` (`SslConfigs.java:133-137`, `:140`).
-    /// [`test_password_config_table_lists_every_constant`] keeps it complete.
-    macro_rules! ssl_configs_constants {
-        ($($name:ident => $is_password:expr),* $(,)?) => {
-            [$((stringify!($name), SslConfigs::$name, $is_password)),*]
-        };
-    }
-
-    fn ssl_configs_constants() -> [(&'static str, &'static str, bool); 24] {
-        ssl_configs_constants![
-            SSL_PROTOCOL_CONFIG => false,
-            DEFAULT_SSL_PROTOCOL => false,
-            SSL_PROVIDER_CONFIG => false,
-            SSL_CIPHER_SUITES_CONFIG => false,
-            SSL_ENABLED_PROTOCOLS_CONFIG => false,
-            DEFAULT_SSL_ENABLED_PROTOCOLS => false,
-            SSL_KEYSTORE_TYPE_CONFIG => false,
-            DEFAULT_SSL_KEYSTORE_TYPE => false,
-            SSL_KEYSTORE_KEY_CONFIG => true,
-            SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => true,
-            SSL_TRUSTSTORE_CERTIFICATES_CONFIG => true,
-            SSL_KEYSTORE_LOCATION_CONFIG => false,
-            SSL_KEYSTORE_PASSWORD_CONFIG => true,
-            SSL_KEY_PASSWORD_CONFIG => true,
-            SSL_TRUSTSTORE_TYPE_CONFIG => false,
-            DEFAULT_SSL_TRUSTSTORE_TYPE => false,
-            SSL_TRUSTSTORE_LOCATION_CONFIG => false,
-            SSL_TRUSTSTORE_PASSWORD_CONFIG => true,
-            SSL_KEYMANAGER_ALGORITHM_CONFIG => false,
-            SSL_TRUSTMANAGER_ALGORITHM_CONFIG => false,
-            SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => false,
-            DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM => false,
-            SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG => false,
-            SSL_ENGINE_FACTORY_CLASS_CONFIG => false,
-        ]
-    }
-
-    /// Both directions over every constant: the predicate is true for exactly
-    /// the keys Java types `PASSWORD` and false for every other constant.
-    #[test]
-    fn test_is_password_config_matches_java_password_keys() {
-        let mut password_keys = Vec::new();
-        for (name, value, is_password) in ssl_configs_constants() {
-            assert_eq!(
-                SslConfigs::is_password_config(value),
-                is_password,
-                "SslConfigs::{name} = {value:?}"
-            );
-            if is_password {
-                password_keys.push(value);
-            }
-        }
-        // Guard against a vacuous pass: exactly Java's six `PASSWORD` keys.
-        password_keys.sort_unstable();
-        assert_eq!(
-            password_keys,
-            vec![
-                "ssl.key.password",
-                "ssl.keystore.certificate.chain",
-                "ssl.keystore.key",
-                "ssl.keystore.password",
-                "ssl.truststore.certificates",
-                "ssl.truststore.password",
-            ]
-        );
-
-        // Keys are matched exactly, as `ConfigDef` does.
-        assert!(!SslConfigs::is_password_config(""));
-        assert!(!SslConfigs::is_password_config("SSL.KEY.PASSWORD"));
-        assert!(!SslConfigs::is_password_config("ssl.key.password "));
-        assert!(!SslConfigs::is_password_config("ssl.keystore"));
-    }
-
-    /// The table above must name every `pub const` this file declares, so a
-    /// constant added later cannot silently escape the exhaustive test.
-    #[test]
-    fn test_password_config_table_lists_every_constant() {
-        let declared: Vec<&str> = include_str!("ssl_configs.rs")
-            .lines()
-            .filter_map(|line| line.strip_prefix("    pub const "))
-            .map(|rest| rest.split(':').next().unwrap_or_default())
-            .collect();
-        let tabled: Vec<&str> = ssl_configs_constants().iter().map(|(name, _, _)| *name).collect();
-        assert_eq!(tabled, declared);
     }
 
     /// `{:?}` hides the six `Type.PASSWORD` fields and keeps the others.

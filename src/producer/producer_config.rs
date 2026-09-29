@@ -20,7 +20,7 @@
 //! reflection framework. The field names and default values match the Java
 //! config keys.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{self, AtomicI32};
 
@@ -29,7 +29,7 @@ use log::{info, warn};
 use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::types::Password;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig, SslConfigs};
+use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
@@ -54,8 +54,8 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
 ///
 /// `Debug` is hand-written so that it never renders a secret: the typed
-/// secrets are [`Password`]s, and the values of the raw user map whose keys
-/// Java defines as `ConfigDef.Type.PASSWORD` render as [`Password::HIDDEN`].
+/// secrets are [`Password`]s, and the raw user map (`originals`) renders as
+/// its key set only.
 #[derive(Clone)]
 pub struct ProducerConfig {
     // --- Connection ---
@@ -322,11 +322,19 @@ impl Default for ProducerConfig {
 /// but never a secret.
 ///
 /// The typed secrets are [`Password`]s inside `sasl_config` / `ssl_config` and
-/// render as [`Password::HIDDEN`] on their own. `originals` is the raw user
-/// map, so it renders through a sorted, borrowed view whose value is
-/// [`Password::HIDDEN`] for every key Java defines as `ConfigDef.Type.PASSWORD`
-/// (`SslConfigs::is_password_config`, `SaslConfigs::is_password_config`). Java
-/// never prints `originals()` at all; a derived `Debug` would print every value.
+/// render as [`Password::HIDDEN`] on their own. `originals`, the raw user map,
+/// renders as its sorted key set, with no values at all, because Java never
+/// prints a raw `originals` value: `AbstractConfig.logAll()`
+/// (`AbstractConfig.java:371-385`) prints only the values parsed for the keys
+/// the `ConfigDef` defines (`:118`), with each `Type.PASSWORD` value rendered
+/// as `[hidden]`, and `logUnused()` (`:390-395`) prints key names only. Every
+/// known non-secret value is already visible through the typed fields of this
+/// struct, so the raw map is shown as its key set.
+///
+/// Hiding values by key instead cannot match Java: `originals` holds every key
+/// the user passed, including keys this client does not parse, such as Java's
+/// OAuth `Type.PASSWORD` keys or a serializer's credentials, and Java prints
+/// none of their values.
 impl fmt::Debug for ProducerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Destructured exhaustively: a field added to the struct fails to
@@ -373,19 +381,10 @@ impl fmt::Debug for ProducerConfig {
             two_phase_commit_enable,
             originals,
         } = self;
-        // Sorted so the rendering is deterministic; borrowed, so no key or
-        // value is copied.
-        let originals: BTreeMap<&str, &str> = originals
-            .iter()
-            .map(|(key, value)| {
-                let rendered = if SslConfigs::is_password_config(key) || SaslConfigs::is_password_config(key) {
-                    Password::HIDDEN
-                } else {
-                    value.as_str()
-                };
-                (key.as_str(), rendered)
-            })
-            .collect();
+        // The keys only, never a value (see above). Sorted so the rendering is
+        // deterministic, as Java's `logAll()` sorts; borrowed, so no key is
+        // copied.
+        let originals: BTreeSet<&str> = originals.keys().map(String::as_str).collect();
         f.debug_struct("ProducerConfig")
             .field("bootstrap_servers", bootstrap_servers)
             .field("client_id", client_id)
@@ -1777,81 +1776,102 @@ mod tests {
 
     // -- Debug redaction -----------------------------------------------------
 
-    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
-    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
-    /// values: not through the typed `sasl_config` / `ssl_config` fields, and
-    /// not through the raw `originals` map, whose secret values are replaced by
-    /// `[hidden]` by key while every other value stays visible.
+    /// `{:?}` renders no secret the user passed, and `originals` only as its
+    /// key set. The props hold the seven `Type.PASSWORD` keys this client
+    /// parses (`SslConfigs.java:133-137`, `:140`, `SaslConfigs.java:380`), the
+    /// two OAuth `Type.PASSWORD` keys it does not parse (`SaslConfigs.java:392`,
+    /// `:402`), and an unknown key carrying a serializer credential: Java
+    /// prints none of those values. The parsed secrets render as `[hidden]`
+    /// through their typed fields, and the non-secret `bootstrap.servers` value
+    /// stays visible through its typed field only.
     #[test]
-    fn test_debug_redacts_password_configs() {
+    fn test_debug_hides_secrets_and_renders_originals_as_key_set() {
         let secrets = [
             (
                 "sasl.jaas.config",
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
                  username=\"jaas-user\" password=\"jaas-S3cr3t\";",
             ),
-            ("ssl.truststore.password", "truststore-S3cr3t"),
-            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
-            ("ssl.keystore.password", "keystore-S3cr3t"),
-            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
-            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
-            ("ssl.key.password", "key-S3cr3t"),
+            ("ssl.truststore.password", "truststore-password-S3cr3t"),
+            ("ssl.truststore.certificates", "truststore-certificates-S3cr3t"),
+            ("ssl.keystore.password", "keystore-password-S3cr3t"),
+            ("ssl.keystore.key", "keystore-key-S3cr3t"),
+            ("ssl.keystore.certificate.chain", "keystore-certificate-chain-S3cr3t"),
+            ("ssl.key.password", "key-password-S3cr3t"),
+            (
+                "sasl.oauthbearer.client.credentials.client.secret",
+                "oauth-client-secret-S3cr3t",
+            ),
+            ("sasl.oauthbearer.assertion.private.key.passphrase", "oauth-passphrase-S3cr3t"),
+            ("basic.auth.user.info", "registry-key:registry-S3cr3t"),
         ];
         let mut props: HashMap<String, String> = secrets
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
-        props.insert("client.id".to_string(), "visible-client".to_string());
-        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
-        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
         let config = ProducerConfig::new(&props).unwrap();
 
-        // The secrets did reach the config, typed and raw; they are only hidden
+        // The secrets did reach the config, typed and raw (so `originals` can
+        // still be forwarded, e.g. to a `Partitioner`); they are only hidden
         // from `Debug`.
         assert_eq!(config.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
-        assert_eq!(config.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
-        assert_eq!(config.originals.get("ssl.key.password").map(String::as_str), Some("key-S3cr3t"));
+        assert_eq!(
+            config.ssl_config.key_password.as_ref().map(Password::value),
+            Some("key-password-S3cr3t")
+        );
+        for (key, value) in secrets {
+            assert_eq!(config.originals.get(key).map(String::as_str), Some(value), "{key}");
+        }
 
         for rendered in [format!("{config:?}"), format!("{config:#?}")] {
             for (key, value) in secrets {
-                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+                assert!(!rendered.contains(value), "the value of {key} leaked: {rendered}");
+                // Only `originals` renders key names, so this proves the key
+                // set is there.
+                assert!(rendered.contains(&format!("{key:?}")), "key {key} missing: {rendered}");
             }
-            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+            for fragment in ["S3cr3t", "jaas-user", "PlainLoginModule", "registry-key"] {
                 assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
             }
-            // Each secret is hidden twice: once as its typed field, once as its
-            // `originals` entry.
-            assert_eq!(rendered.matches(Password::HIDDEN).count(), 2 * secrets.len(), "{rendered}");
-            for visible in [
-                "visible-host:9092",
-                "visible-client",
-                "\"PLAIN\"",
-                "/visible/truststore.pem",
-            ] {
-                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
-            }
+            // `[hidden]` comes from the seven typed `Password` fields only.
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), 7, "{rendered}");
+            // The non-secret value renders once, through its typed field and
+            // not through `originals`.
+            assert_eq!(rendered.matches("visible-host:9092").count(), 1, "{rendered}");
         }
 
-        // `originals` renders sorted by key, with exactly the `Type.PASSWORD`
-        // values replaced.
         let rendered = format!("{config:?}");
+        assert!(rendered.contains("bootstrap_servers: [\"visible-host:9092\"]"), "{rendered}");
+        for field in [
+            "jaas_config",
+            "truststore_password",
+            "truststore_certificates",
+            "keystore_password",
+            "keystore_key",
+            "keystore_certificate_chain",
+            "key_password",
+        ] {
+            let hidden = format!("{field}: Some([hidden])");
+            assert!(rendered.contains(&hidden), "{hidden} missing: {rendered}");
+        }
+        // `originals` renders as its key set, sorted, with no value at all.
         let expected_originals = concat!(
             "originals: {",
-            "\"bootstrap.servers\": \"visible-host:9092\", ",
-            "\"client.id\": \"visible-client\", ",
-            "\"sasl.jaas.config\": \"[hidden]\", ",
-            "\"sasl.mechanism\": \"PLAIN\", ",
-            "\"ssl.key.password\": \"[hidden]\", ",
-            "\"ssl.keystore.certificate.chain\": \"[hidden]\", ",
-            "\"ssl.keystore.key\": \"[hidden]\", ",
-            "\"ssl.keystore.password\": \"[hidden]\", ",
-            "\"ssl.truststore.certificates\": \"[hidden]\", ",
-            "\"ssl.truststore.location\": \"/visible/truststore.pem\", ",
-            "\"ssl.truststore.password\": \"[hidden]\"",
-            "}",
+            "\"basic.auth.user.info\", ",
+            "\"bootstrap.servers\", ",
+            "\"sasl.jaas.config\", ",
+            "\"sasl.oauthbearer.assertion.private.key.passphrase\", ",
+            "\"sasl.oauthbearer.client.credentials.client.secret\", ",
+            "\"ssl.key.password\", ",
+            "\"ssl.keystore.certificate.chain\", ",
+            "\"ssl.keystore.key\", ",
+            "\"ssl.keystore.password\", ",
+            "\"ssl.truststore.certificates\", ",
+            "\"ssl.truststore.password\"",
+            "} }",
         );
-        assert!(rendered.contains(expected_originals), "{rendered}");
+        assert!(rendered.ends_with(expected_originals), "{rendered}");
     }
 
     /// The hand-written `Debug` renders every field, in declaration order, as
