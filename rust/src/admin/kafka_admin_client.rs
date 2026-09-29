@@ -4438,7 +4438,7 @@ impl Admin for KafkaAdminClient {
             let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
             handle.complete_with_error(Error::with_message(
                 Errors::InvalidRequest,
-                "The AclBindingFilter must not contain CreateTopicsResult::UNKNOWN elements.",
+                "The AclBindingFilter must not contain UNKNOWN elements.",
             ));
             return DescribeAclsResult::new(handle.future());
         }
@@ -5649,6 +5649,8 @@ mod tests {
         );
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
+        // Java's text, `KafkaAdminClient.java:2572-2573`.
+        assert_eq!(err.message(), "The AclBindingFilter must not contain UNKNOWN elements.");
     }
 
     /// Translated from `KafkaAdminClientTest.testCreateAcls`.
