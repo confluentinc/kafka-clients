@@ -193,7 +193,8 @@ impl ChaosHarness {
         // the coordinator can never auto-create `__consumer_offsets`
         // (InvalidReplicationFactor), FindCoordinator answers
         // COORDINATOR_NOT_AVAILABLE forever, no consumer joins, and the verdict
-        // is total loss blamed on the client. Size it to the cluster.
+        // is total loss blamed on the client. Size it to the cluster, and create
+        // it before any broker is stopped (`ensure_offsets_topic`).
         config
             .server_properties
             .insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), brokers.min(3).to_string());
@@ -267,7 +268,57 @@ impl ChaosHarness {
         for t in &harness.topics {
             harness.create_topic(t).await;
         }
+        harness.ensure_offsets_topic(Duration::from_secs(60)).await;
         harness
+    }
+
+    /// Make the broker create `__consumer_offsets` now, while every broker is
+    /// up, and wait until each of its partitions has a leader.
+    ///
+    /// The broker creates it lazily, on the first FindCoordinator for a group,
+    /// at the configured RF. The runner stops the `--leave-broker-down` broker
+    /// right after `start_with_topics` returns and before any consumer exists,
+    /// so with the lazy creation the RF-`min(brokers, 3)` topic could need more
+    /// brokers than were left unfenced: InvalidReplicationFactor,
+    /// COORDINATOR_NOT_AVAILABLE forever, and a total-loss verdict blamed on the
+    /// client. Created up front, the topic keeps its RF and only runs with one
+    /// replica out of sync while that broker is down, as any other topic does.
+    ///
+    /// The describe of the run's (still empty) group is only the trigger: its
+    /// FindCoordinator makes the broker create the topic, whatever the describe
+    /// itself answers.
+    async fn ensure_offsets_topic(&self, timeout: Duration) {
+        const OFFSETS_TOPIC: &str = "__consumer_offsets";
+        let group = format!("chaos-group-{}", self.primary_topic());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.admin.describe_consumer_groups(std::slice::from_ref(&group)).all().get(),
+            )
+            .await;
+            let described = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.admin
+                    .describe_topics_with_topics(TopicCollection::of_topic_names(vec![OFFSETS_TOPIC.to_string()]))
+                    .all_topic_names()
+                    .expect("describe by name yields a name-keyed result")
+                    .get(),
+            )
+            .await;
+            if let Ok(Ok(map)) = described
+                && let Some(desc) = map.get(OFFSETS_TOPIC)
+                && !desc.partitions().is_empty()
+                && desc.partitions().iter().all(|p| p.leader().is_some())
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{OFFSETS_TOPIC} was not created within {timeout:?}; no consumer could find its group coordinator"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// The primary topic (first in the run) — the broker-roll / smoke-test
@@ -410,9 +461,9 @@ impl ChaosHarness {
         // Capture the current topic id so we can prove the recreate produced a
         // genuinely new generation (a different id), not the old topic lingering.
         let old_id = self.current_topic_id(topic);
-        // Snapshot what's already delivered on this topic as expected-lost
-        // BEFORE deleting. For a single-topic run this is every delivered
-        // record; for a multi-topic run only this topic's records.
+        // What the delete destroys: for a single-topic run every delivered
+        // record, for a multi-topic run only this topic's records. Snapshotted
+        // once the topic is confirmed gone, below.
         let expected_lost_hint = || {
             if self.topics.len() == 1 {
                 ExpectedLossHint::AllDeliveredSoFar
@@ -421,7 +472,6 @@ impl ChaosHarness {
             }
         };
         let delete_started = std::time::Instant::now();
-        self.verifier.note_expected_loss(expected_lost_hint());
 
         self.admin
             .delete_topics(confluent_kafka::common::TopicCollection::of_topic_names(vec![
@@ -439,6 +489,16 @@ impl ChaosHarness {
         // (recreate-delayed) is applied AFTER the topic is confirmed gone.
         self.wait_topic_absent(topic, Duration::from_secs(30)).await;
 
+        // Snapshot the topic's delivered records as expected-lost only now that
+        // it is confirmed gone. The producer keeps running through the delete,
+        // so a snapshot taken before it missed every record acked between the
+        // snapshot and the delete: neither excused nor ever consumable, a false
+        // loss. The old leader answers or fails its requests before it drops the
+        // partition, so no old-generation ack lands after this point (see
+        // `delivery_callback` in `workload.rs`); a late one would carry the old
+        // id and fall to `DestroyedGeneration` below. The snapshot is what
+        // decides only when the recreate reuses the id or cannot resolve it: for
+        // identified generations the verifier judges by id (`excused`).
         self.verifier.note_expected_loss(expected_lost_hint());
 
         // Mark the topic as a recreate BLACKOUT now, while it does not exist:
@@ -480,13 +540,13 @@ impl ChaosHarness {
 
         // The old generation's records are gone. Mark its topic_id destroyed —
         // this also covers acks that land AFTER the topic vanished from metadata
-        // (the async-ack race the point-in-time snapshots above cannot close).
+        // (the async-ack race the point-in-time snapshot above cannot close).
         // The verifier excuses only the records of it that were still unread
         // when the delete began; see `DestroyedGeneration`. And mark the new
         // generation, so its skipped head is judged by id rather than by the
         // index floor. Only when the recreate minted a genuinely new id (KRaft
         // always does); a recreate that reused the id or could not resolve it
-        // relies on the snapshots and the blackout floor, since old and new
+        // relies on the snapshot and the blackout floor, since old and new
         // records then cannot be told apart by topic_id.
         if old_id != new_id && old_id != Uuid::zero() {
             self.verifier
@@ -677,6 +737,15 @@ impl ChaosHarness {
         self.msg_size.store(msg_size as u32, Ordering::Relaxed);
         *self.commit_mode.lock().expect("commit_mode poisoned") = commit_mode;
 
+        // Every producer numbers its records from 0 per topic, and the verifier
+        // identifies a record by `(topic, index)`: a second producer spec would
+        // write the same keys into the same topics and corrupt the accounting
+        // (false double writes, hidden loss). `ChaosConfig::from_env` rejects it
+        // on the CLI; this catches any other caller.
+        assert!(
+            specs.iter().filter(|s| s.role == Role::Producer).count() <= 1,
+            "at most one producer workload spec per run: the verifier keys records on (topic, index)"
+        );
         let mut running = Vec::with_capacity(specs.len());
         for spec in specs {
             match spec.role {
@@ -700,8 +769,7 @@ impl ChaosHarness {
                             let mut s = spec.clone();
                             // Derive a stable, unique instance from the base
                             // instance and the topic index (e.g. base 1, 3
-                            // topics -> 100, 101, 102), so ids stay distinct even
-                            // with multiple producer specs.
+                            // topics -> 100, 101, 102).
                             s.instance = spec.instance * 100 + topic_idx as u32;
                             s
                         };

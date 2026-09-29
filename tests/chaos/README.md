@@ -71,7 +71,7 @@ so several can compose in one run:
 |---|:---:|:---:|---|
 | `broker-roll` (default) | yes | no | `docker stop`/`kill` each broker in turn, then `docker start` and wait until it rejoins the quorum |
 | `change-leader` | no | no | AdminClient preferred-leader election (`elect_leaders`), re-issued every 5 s for up to 30 s until the leader plan is reached; if it never is, `chaos: WARN … leader plan NOT REACHED` and the plan check is skipped |
-| `reassign-partitions` | no | yes | AdminClient `alter_partition_reassignments` (rotate replicas), then poll until complete |
+| `reassign-partitions` | no | yes, if a live broker is outside the replica set | AdminClient `alter_partition_reassignments` (swap one replica onto a live broker outside the set, so it must copy the partition), then poll until complete. When every live broker already holds a replica (e.g. the default 3 brokers at replication 3) the partitions are only reordered, which moves no data; the run prints a `NOTE` and skips the replica-set check |
 | `topic-recreate` | no | yes (destroys the topic) | AdminClient delete → wait-absent → optional dwell → recreate |
 
 `broker-roll` accepts `--unclean` (SIGKILL instead of SIGTERM), rolls a
@@ -148,7 +148,7 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   > with a clear error (before any cluster is started); `--random` under
   > multi-topic **drops** topic-recreate from its candidate set (broker roll /
   > change-leader / reassign still randomize across all topics) and prints a
-  > notice. The reason is a consumer-side gap the harness surfaces, not a
+  > notice, unless `--allow-multi-topic-recreate` is given. The reason is a consumer-side gap the harness surfaces, not a
   > harness artifact: when one of several subscribed topics is recreated under
   > a new topic id, the KIP-848 consumer keeps the old generation's fetch
   > positions on some of that topic's partitions after the revoke/assign cycle,
@@ -161,7 +161,9 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   > both work and are covered. Lift the guard in `config.rs` and `run_test.rs`
   > once the consumer fix lands, and re-run that command to confirm.
   >
-  > `--allow-multi-topic-recreate` runs the combination anyway. The verdict
+  > `--allow-multi-topic-recreate` runs the combination anyway (with
+  > `--topic-recreate`, or with `--random`, where it puts topic-recreate back
+  > among the candidates). The verdict
   > still fails on the loss, and adds a `KNOWN DEFECT:` line when the failure
   > has exactly this defect's signature. Every lost partition incarnation must
   > be on a recreated topic and lose records from offset 0. Each one must also
@@ -175,13 +177,17 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   > else fails without the label.
   > [`cargo xtask chaos-matrix`](#matrix-runs-cargo-xtask-chaos-matrix) retries
   > a labelled run.
-- `--partitions N` (6) — partitions on each chaos topic
+- `--partitions N` (6) — partitions on each chaos topic (`>= 1`)
 - `--replication-factor N` — replication factor per topic; default `min(brokers,
-  3)`. FATAL (panics) if `N > brokers`, matching librdkafka.
+  3)`, or `min(brokers - 1, 3)` with `--leave-broker-down`. Rejected up front
+  unless `1 <= N <=` the live brokers (`--brokers`, minus the one left down):
+  a topic recreated while that broker is down could not be placed otherwise.
 - `--topic NAME` (`chaos-run`) — topic name (or prefix when `--num-topics > 1`)
 
 ### Workload
-- `--workload role:backend` (`producer:rust`, `consumer:rust`) — repeatable
+- `--workload role:backend` (`producer:rust`, `consumer:rust`) — repeatable for
+  consumers; at most **one** producer spec (the verifier identifies a record by
+  `(topic, index)`, and every producer numbers its records from 0)
 - `--consumers N` — shorthand for one Rust producer plus N Rust consumers
   (librdkafka's `--consumers`); not combinable with `--workload`
 - `--consumer-churn-min M` / `--consumer-churn-max X` — consumer churn: keep the
@@ -339,7 +345,9 @@ failing `committed()` call itself is reported as
 - `--no-broker-roll` — disable the implicit broker roll (e.g. a pure
   leader-migration run with `--change-leader`)
 - `--topic-recreate [N]` — also delete/recreate the topic
-- `--reassign-partitions [N]` — also reassign partitions (data moves)
+- `--reassign-partitions [N]` — also reassign partitions (data moves when
+  `--brokers`, minus any left down, exceeds the replication factor; otherwise
+  only a reorder, see the table above)
 - `--change-leader [N]` — also do a preferred-leader change (no data move)
 - `--all-brokers-down [N]` — also take **every** broker down at once (SIGKILL,
   in parallel), keep the whole cluster down for `--outage-s`, then start them
@@ -353,7 +361,9 @@ failing `committed()` call itself is reported as
 - `--stop-s N` (5) — seconds a broker stays down per roll
 - `--up-wait-s N` (60) — max seconds to wait for a broker to rejoin
 - `--leave-broker-down N` — keep broker N down for the whole run (`1..=brokers`,
-  and not with a single broker: nothing would be left to roll)
+  and not with a single broker: nothing would be left to roll). The harness
+  creates `__consumer_offsets` at startup, with every broker up, so the stopped
+  broker cannot leave too few brokers for its replication factor
 - `--seed N` (0) — reproducibility seed; `0` = auto-pick and print it
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
 
@@ -365,8 +375,9 @@ remove cycle at or before its add cycle, a zero log budget, and so on.
 - `--random` — instead of the fixed per-fault cadences, each cycle the seeded
   RNG decides **whether** a fault fires, **which** one (broker-roll,
   topic-recreate, reassign-partitions, change-leader — all four are candidates
-  on a single-topic run; under `--num-topics > 1` topic-recreate is excluded,
-  see the known limitation above), and its **parameters** (which broker,
+  on a single-topic run; under `--num-topics > 1` topic-recreate is excluded
+  unless `--allow-multi-topic-recreate`, see the known limitation above), and
+  its **parameters** (which broker,
   clean or unclean, a down duration of 3–12 s, an immediate or 3–8 s dwell),
   plus a random pre-action delay of up to `--between-s` within the cycle. Any
   action, any time. Because the mode draws all of that itself, the per-fault
@@ -746,8 +757,9 @@ Flags and their defaults:
 - `--msg-sizes 100,1048576`
 - `--rps 1000`
 - `--only ID,ID` runs only those scenarios.
-- `--run-timeout-min 240` sends a run SIGINT when it exceeds this, then SIGKILL
-  after 3 minutes. The run is recorded as `TIMEOUT`.
+- `--run-timeout-min 240` sends a run's process group SIGINT when it exceeds
+  this, waits up to 3 minutes for the test process to tear down, then sends
+  SIGKILL. The run is recorded as `TIMEOUT`.
 - `--stall-min 20` stops a run whose log has not grown for this long, which
   catches a wedged test process long before the run timeout. The run is
   recorded as `STALLED`. The harness's longest silent phases are about 5
@@ -781,6 +793,7 @@ under the output directory:
 | `results.tsv` | One machine-readable line per run. |
 | `matrix.log` | Timestamped progress. |
 | `environment.txt` | Commit, host, Docker and broker image, appended per session. |
+| `runner.pid` | The pid of the runner working on this directory, for `chaos-matrix-status`. |
 | `runs/<id>-<protocol>-<size>/run.log` | The run's complete output. |
 | `runs/<id>-<protocol>-<size>/command.txt` | The equivalent `cargo xtask chaos` command, to replay the run by hand. |
 | `runs/<id>-<protocol>-<size>/reports/` | The run's [reports](#reports---reports). |
@@ -789,6 +802,11 @@ Outcomes are `PASS`, `FAIL` (the verdict failed), `KNOWN-DEFECT`,
 `FAIL (panic)`, `FAIL (watchdog)`, `FAIL (interrupted)`, `STALLED`, `TIMEOUT`,
 `CONFIG-ERROR`, and `ERROR` (the run ended before a verdict, for example the
 cluster did not start).
+
+The runner exits non-zero when any recorded run did not pass. `KNOWN-DEFECT`
+is the exception: such a run is never counted as a pass, but it does not fail
+the matrix, so the known defect alone cannot turn a matrix red and hide a new
+failure.
 
 To follow a matrix from another terminal:
 

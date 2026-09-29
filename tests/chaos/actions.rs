@@ -16,7 +16,7 @@
 //!
 //! Implemented here: `BrokerRoll` (clean/unclean) and `Migrate`
 //! (`ChangeLeader` = preferred election, no data move; `ReassignPartitions` =
-//! rotate replicas, data moves). Topic delete/recreate lives on
+//! swap a replica onto a broker outside the set, data moves). Topic delete/recreate lives on
 //! [`super::harness::ChaosHarness::recreate_topic`] because it needs the topic
 //! config and the producer ledger (to mark expected-lost).
 
@@ -41,7 +41,8 @@ const LEADER_PLAN_REELECT_EVERY: Duration = Duration::from_secs(5);
 pub enum ReassignMode {
     /// Preferred-leader election — no data movement.
     ChangeLeader,
-    /// Move replicas — data movement.
+    /// Move replicas — data movement (when a broker outside the replica set
+    /// exists; see [`reassign_target`]).
     ReassignPartitions,
 }
 
@@ -63,7 +64,13 @@ pub enum ChaosAction {
     },
     /// Trigger a leader migration on every listed topic without bouncing
     /// brokers (librdkafka's change-leader / reassign act across all topics).
-    Migrate { topics: Vec<String>, mode: ReassignMode },
+    /// `live_brokers` are the ids a reassignment may move a replica onto (every
+    /// broker except one kept down by `--leave-broker-down`).
+    Migrate {
+        topics: Vec<String>,
+        mode: ReassignMode,
+        live_brokers: Vec<i32>,
+    },
     /// Kill every listed broker at once (SIGKILL, a whole-cluster crash), keep
     /// the cluster down for `outage`, then start them all and wait until each
     /// has re-registered (bounded by `wait_up`). Every partition, the group
@@ -148,14 +155,14 @@ impl ChaosAction {
                 log_leader_migration_all(&format!("broker {node_id} back up"), &down_state, &after, reports);
                 eprintln!("chaos: broker {node_id} back up");
             },
-            ChaosAction::Migrate { topics, mode } => {
+            ChaosAction::Migrate { topics, mode, live_brokers } => {
                 for topic in topics {
                     match mode {
                         ReassignMode::ChangeLeader => {
                             change_leader(topic, admin, reports).await;
                         },
                         ReassignMode::ReassignPartitions => {
-                            reassign_partitions(topic, admin, reports).await;
+                            reassign_partitions(topic, live_brokers, admin, reports).await;
                         },
                     }
                 }
@@ -312,14 +319,20 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
 }
 
 /// Move replicas around for every partition of `topic`: read the current
-/// replica sets via `describe_topics`, rotate each (first replica → last, so a
-/// different broker becomes preferred leader and one replica must resync),
-/// submit via `alter_partition_reassignments`, then poll
-/// `list_partition_reassignments` until the cluster reports no in-progress
+/// replica sets via `describe_topics`, swap one replica of each onto a live
+/// broker outside the set ([`reassign_target`]: the new replica must copy the
+/// partition from the leader, and a different broker becomes preferred
+/// leader), submit via `alter_partition_reassignments`, then poll
+/// `list_partition_reassignments` until the topic has no in-progress
 /// reassignments (the `kafka-reassign-partitions.sh --verify` analog). Data
 /// moves — this is the reassign-partitions mechanism, distinct from
 /// change-leader.
-async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
+///
+/// When the replica set already spans every live broker (e.g. the default
+/// 3 brokers at replication 3) there is no broker to move onto. The partition
+/// is then only reordered, which is the change-leader mechanism and moves no
+/// data; the run says so, and the replica-set check is skipped for it.
+async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: reassigning partitions for topic {topic}");
 
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
@@ -328,24 +341,37 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
         return;
     };
 
-    // 2. Rotate each partition's replica list by one. `plan` records the
-    //    intended new leader per partition (rotated[0]).
+    // 2. Compute each partition's target replica list. `plan` records the
+    //    intended new leader per partition (target[0]); `moved` the partitions
+    //    whose replica set changes (a replica swapped onto another broker).
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
     let mut plan: HashMap<i32, i32> = HashMap::new();
+    let mut moved: Vec<i32> = Vec::new();
     for (&partition, state) in &before {
         if state.replicas.len() < 2 {
             continue; // nothing to move with a single replica
         }
-        let mut rotated = state.replicas.clone();
-        rotated.rotate_left(1);
-        plan.insert(partition, rotated[0]);
-        let reassignment = NewPartitionReassignment::new(rotated).expect("non-empty replicas");
+        let (target, moves_data) = reassign_target(partition, &state.replicas, live_brokers);
+        plan.insert(partition, target[0]);
+        if moves_data {
+            moved.push(partition);
+        }
+        let reassignment = NewPartitionReassignment::new(target).expect("non-empty replicas");
         reassignments.insert(TopicPartition::new(topic, partition), Some(reassignment));
     }
 
     if reassignments.is_empty() {
         eprintln!("chaos: no partitions with >=2 replicas to reassign");
         return;
+    }
+    if moved.len() < reassignments.len() {
+        eprintln!(
+            "chaos: NOTE reassign-partitions for {topic}: {} of {} partition(s) already have a replica on every \
+             live broker ({live_brokers:?}), so they are only reordered (a preferred-leader change, no data \
+             move); run more brokers than --replication-factor to move data",
+            reassignments.len() - moved.len(),
+            reassignments.len()
+        );
     }
 
     // 3. Submit.
@@ -371,7 +397,14 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
 
     // 6. Prove the replica sets actually changed (an empty pending list is also
     //    the state where nothing moved). Reassign moves data, so this is a
-    //    distinct check from the leader-plan verification below.
+    //    distinct check from the leader-plan verification below. Sets are
+    //    compared unordered: a reorder alone moves no data. Partitions that
+    //    could only be reordered (step 2) have nothing to check here.
+    if moved.is_empty() {
+        eprintln!("chaos: reassign-partitions for {topic}: no replica set was planned to change; effect check SKIPPED");
+        verify_leader_plan("reassign", topic, &before, &plan, admin, reports).await;
+        return;
+    }
     let Some(after) = partition_state(topic, admin).await else {
         eprintln!(
             "chaos: reassign-partitions for {topic}: could not describe the topic after the reassignment; \
@@ -380,14 +413,11 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
         return;
     };
     let mut replicas_changed = 0usize;
-    for (partition, b) in &before {
-        if b.replicas.len() < 2 {
-            continue;
-        }
-        let Some(a) = after.get(partition) else {
+    for partition in &moved {
+        let (Some(b), Some(a)) = (before.get(partition), after.get(partition)) else {
             continue;
         };
-        if a.replicas != b.replicas {
+        if !same_replica_set(&a.replicas, &b.replicas) {
             replicas_changed += 1;
         }
     }
@@ -397,9 +427,52 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
          (before == after) — the reassignment had no effect"
     );
 
-    // 7. Verify each partition's leader matches the plan (rotated[0]), per
+    // 7. Verify each partition's leader matches the plan (target[0]), per
     //    partition, not just an aggregate count (A3).
     verify_leader_plan("reassign", topic, &before, &plan, admin, reports).await;
+}
+
+/// The replica list reassign-partitions moves one partition to, and whether
+/// that changes the replica *set* (so data moves).
+///
+/// One replica is removed — one on a broker outside `live_brokers` if the set
+/// has one (a broker kept down by `--leave-broker-down`), else the preferred
+/// leader. The rest are rotated by one, so a different broker becomes preferred
+/// leader, and a live broker outside the set is appended; it has to copy the
+/// partition from the leader. Which outside broker is picked by `partition`,
+/// spreading the new replicas across the candidates reproducibly.
+///
+/// When every live broker already holds a replica there is nothing to move
+/// onto, and the list is only rotated: the same set in a different order, which
+/// moves no data (`false`).
+fn reassign_target(partition: i32, replicas: &[i32], live_brokers: &[i32]) -> (Vec<i32>, bool) {
+    let outside: Vec<i32> = live_brokers.iter().copied().filter(|b| !replicas.contains(b)).collect();
+    if outside.is_empty() {
+        let mut rotated = replicas.to_vec();
+        rotated.rotate_left(1);
+        return (rotated, false);
+    }
+    let drop = replicas.iter().position(|r| !live_brokers.contains(r)).unwrap_or(0);
+    let mut target: Vec<i32> = replicas.to_vec();
+    target.remove(drop);
+    target.rotate_left(1);
+    target.push(outside[partition.unsigned_abs() as usize % outside.len()]);
+    (target, true)
+}
+
+/// Whether two replica lists hold the same brokers, in any order.
+fn same_replica_set(a: &[i32], b: &[i32]) -> bool {
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
+/// How many of `eligible` partitions must reach their planned leader for
+/// [`verify_leader_plan`] to count the plan as reached: `ceil(2/3 * eligible)`.
+fn leader_plan_quorum(eligible: usize) -> usize {
+    (2 * eligible).div_ceil(3)
 }
 
 /// Verify, **per partition**, that the post-action leader matches the plan
@@ -499,7 +572,7 @@ async fn verify_leader_plan(
     // not a client verdict. Panicking here aborted a whole run before it could
     // produce a verdict (P3-1MiB, Sep 2026 matrix). Report it loudly instead:
     // the run still exercised the leader movement that did happen.
-    let need = eligible.len().div_ceil(3) * 2; // ceil(2/3 * n)
+    let need = leader_plan_quorum(eligible.len());
     if leaders_changed == 0 || matched_plan < need {
         let line = format!(
             "{label} for {topic}: leader plan NOT REACHED — {matched_plan}/{} partitions on their planned \
@@ -564,9 +637,10 @@ fn log_leader_migration_all(
     }
 }
 
-/// Poll `list_partition_reassignments` until the cluster reports none in
-/// progress (the `kafka-reassign-partitions.sh --verify` analog), bounded by a
-/// 60s deadline.
+/// Poll `list_partition_reassignments` until none of `topic`'s partitions has a
+/// reassignment in progress (the `kafka-reassign-partitions.sh --verify`
+/// analog), bounded by a 60s deadline. Reassignments of other topics are not
+/// counted.
 async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -575,7 +649,7 @@ async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin) {
             .reassignments()
             .get()
             .await
-            .map(|m| m.len())
+            .map(|m| m.keys().filter(|tp| tp.topic() == topic).count())
             .unwrap_or(0);
         if pending == 0 {
             return;
@@ -643,4 +717,59 @@ async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collecti
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leader_plan_quorum_is_two_thirds_rounded_up() {
+        for (eligible, need) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4), (6, 4), (7, 5), (9, 6)] {
+            assert_eq!(leader_plan_quorum(eligible), need, "for {eligible} eligible partition(s)");
+            assert!(leader_plan_quorum(eligible) <= eligible);
+        }
+    }
+
+    /// With a broker outside the set, the target swaps one replica onto it: the
+    /// set changes (data moves) and a different broker becomes preferred leader.
+    #[test]
+    fn reassign_target_moves_a_replica_onto_an_outside_broker() {
+        let live = [1, 2, 3, 4, 5];
+        let (target, moves) = reassign_target(0, &[1, 2, 3], &live);
+        assert!(moves);
+        assert_eq!(target, vec![3, 2, 4]);
+        assert!(!same_replica_set(&target, &[1, 2, 3]));
+        // The outside broker is spread by partition.
+        assert_eq!(reassign_target(1, &[1, 2, 3], &live).0, vec![3, 2, 5]);
+        // Replication 2: the old second replica leads, the new one follows.
+        assert_eq!(reassign_target(0, &[2, 4], &live), (vec![4, 1], true));
+    }
+
+    /// A replica on a broker that is not live (kept down) is the one dropped,
+    /// so the target leads on a live broker and never adds the dead one.
+    #[test]
+    fn reassign_target_drops_the_replica_on_a_down_broker() {
+        let live = [1, 3, 4];
+        let (target, moves) = reassign_target(0, &[1, 2, 3], &live);
+        assert!(moves);
+        assert_eq!(target, vec![3, 1, 4]);
+        assert!(target.iter().all(|b| live.contains(b)));
+    }
+
+    /// Every live broker already holds a replica: only a reorder is possible.
+    #[test]
+    fn reassign_target_only_reorders_when_no_broker_is_outside_the_set() {
+        let (target, moves) = reassign_target(0, &[1, 2, 3], &[1, 2, 3]);
+        assert!(!moves);
+        assert_eq!(target, vec![2, 3, 1]);
+        assert!(same_replica_set(&target, &[1, 2, 3]));
+    }
+
+    #[test]
+    fn same_replica_set_ignores_order() {
+        assert!(same_replica_set(&[1, 2, 3], &[3, 1, 2]));
+        assert!(!same_replica_set(&[1, 2, 3], &[1, 2, 4]));
+        assert!(!same_replica_set(&[1, 2], &[1, 2, 3]));
+    }
 }

@@ -142,19 +142,32 @@ impl WorkloadThreads {
             std::thread::Builder::new()
                 .name(label.clone())
                 .spawn(move || {
+                    // The runtime is built outside `catch_unwind` so that it
+                    // survives a panic in the workload and is always shut down
+                    // below. A panic that unwound through it would drop it
+                    // instead, which is the unbounded wait described there.
+                    let runtime = match tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(WORKLOAD_WORKER_THREADS)
+                        .thread_name(format!("{thread_label}-rt"))
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime,
+                        Err(err) => {
+                            *state.panic.lock().expect("workload state poisoned") =
+                                Some(format!("failed to build the workload runtime: {err}"));
+                            state.finished.store(true, Ordering::SeqCst);
+                            return;
+                        },
+                    };
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let runtime = tokio::runtime::Builder::new_multi_thread()
-                            .worker_threads(WORKLOAD_WORKER_THREADS)
-                            .thread_name(format!("{thread_label}-rt"))
-                            .enable_all()
-                            .build()
-                            .expect("failed to build the workload runtime");
                         runtime.block_on(make(stop, built_tx));
-                        // Not a plain drop: that waits for every task, and a
-                        // client task that never yields would keep this thread
-                        // (and `finished`) from ever completing.
-                        runtime.shutdown_timeout(WORKLOAD_RUNTIME_SHUTDOWN);
                     }));
+                    // Not a plain drop, even after a panic: that waits for every
+                    // task, and a client task that never yields would keep this
+                    // thread (and `finished`, and the panic report) from ever
+                    // completing.
+                    runtime.shutdown_timeout(WORKLOAD_RUNTIME_SHUTDOWN);
                     if let Err(payload) = outcome {
                         *state.panic.lock().expect("workload state poisoned") = Some(panic_message(payload.as_ref()));
                     }
@@ -461,6 +474,48 @@ mod tests {
             Some(("producer-boom".to_string(), "chaos producer close failed: boom".to_string()))
         );
         assert!(threads.all_finished(None));
+    }
+
+    /// A workload that panics while one of its client tasks never yields is
+    /// still reported, with its message, once the runtime's bounded shutdown
+    /// gives up on that task. Dropping the runtime during the unwind instead
+    /// waited for the task forever, so the panic was never reported and the run
+    /// ended as a watchdog wedge with the message lost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_is_reported_even_when_a_client_task_never_yields() {
+        let threads = WorkloadThreads::default();
+        let release = Arc::new(AtomicBool::new(false));
+        let spin_release = release.clone();
+        threads
+            .spawn_with(Role::Consumer, "consumer-stuck".into(), move |_stop, built| async move {
+                let started = Arc::new(AtomicBool::new(false));
+                let spin_started = started.clone();
+                tokio::spawn(async move {
+                    spin_started.store(true, Ordering::SeqCst);
+                    // No await point: this task never yields.
+                    while !spin_release.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                });
+                while !started.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                let _ = built.send(Ok(()));
+                panic!("chaos consumer close failed: stuck");
+            })
+            .await;
+
+        let deadline = Instant::now() + WORKLOAD_RUNTIME_SHUTDOWN + Duration::from_secs(10);
+        while threads.first_panic().is_none() {
+            assert!(Instant::now() < deadline, "panic was not reported past the bounded shutdown");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            threads.first_panic(),
+            Some(("consumer-stuck".to_string(), "chaos consumer close failed: stuck".to_string()))
+        );
+        assert!(threads.all_finished(None));
+        release.store(true, Ordering::Relaxed);
     }
 
     /// A build error fails the spawn on the caller, as building on the
