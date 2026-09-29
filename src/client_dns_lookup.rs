@@ -21,7 +21,7 @@ use std::fmt;
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::SslConfig;
+use crate::common::config::{ConfigDef, SslConfig};
 use crate::common::security::SecurityProtocol;
 
 /// Controls how the client uses DNS lookups (the `client.dns.lookup`
@@ -96,11 +96,15 @@ impl ClientDnsLookup {
     /// helper is the shared translation of that validator; Java has no
     /// separate method for it because `ConfigDef` performs the check.
     ///
+    /// `client.dns.lookup` is a `Type.STRING`, so `ConfigDef.parseType` trims
+    /// the value first and `ValidString` sees (and reports) the trimmed value.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Config`] with `ValidString`'s message for any other
     /// value.
     pub(crate) fn parse_config_value(value: &str) -> Result<Self, Error> {
+        let value = ConfigDef::trim(value);
         match value {
             "use_all_dns_ips" => Ok(Self::UseAllDnsIps),
             "resolve_canonical_bootstrap_servers_only" => Ok(Self::ResolveCanonicalBootstrapServersOnly),
@@ -229,6 +233,17 @@ mod tests {
         assert_eq!(
             ClientDnsLookup::parse_config_value("resolve_canonical_bootstrap_servers_only").unwrap(),
             ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+        // `ConfigDef.parseType` trims a `Type.STRING` before validating it.
+        assert_eq!(
+            ClientDnsLookup::parse_config_value(" use_all_dns_ips\t").unwrap(),
+            ClientDnsLookup::UseAllDnsIps
+        );
+        // ... and the error reports the trimmed value.
+        assert_eq!(
+            ClientDnsLookup::parse_config_value(" default ").unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
         );
     }
 
