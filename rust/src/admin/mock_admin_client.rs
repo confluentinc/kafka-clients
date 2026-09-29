@@ -542,10 +542,11 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
         config_resource::Type::Broker => {
-            let broker_id: usize = resource.name().parse().map_err(|_| {
-                Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
-            })?;
-            match state.broker_configs.get(broker_id) {
+            // Java's `Integer.parseInt(resource.name())` throws
+            // `NumberFormatException` for a non-numeric name, which
+            // `describeConfigs` catches into the resource's future.
+            let broker_id = super::kafka_admin_client::parse_java_int(resource.name())?;
+            match usize::try_from(broker_id).ok().and_then(|id| state.broker_configs.get(id)) {
                 Some(config) => Ok(to_config_object(config)),
                 None => Err(Error::with_message(
                     Errors::InvalidRequest,
@@ -603,15 +604,15 @@ fn handle_incremental_resource_alteration(
 ) -> Result<(), Error> {
     match resource.resource_type() {
         config_resource::Type::Broker => {
-            let broker_id: usize = resource.name().parse().map_err(|_| {
-                Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
-            })?;
-            if broker_id >= state.broker_configs.len() {
+            // Java returns `Integer.parseInt`'s `NumberFormatException` for a
+            // non-numeric name (`MockAdminClient.java:923-927`).
+            let broker_id = super::kafka_admin_client::parse_java_int(resource.name())?;
+            let Some(broker_id) = usize::try_from(broker_id).ok().filter(|id| *id < state.broker_configs.len()) else {
                 return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("no such broker as {broker_id}"),
                 ));
-            }
+            };
             let mut new_map = state.broker_configs[broker_id].clone();
             apply_alter_ops(&mut new_map, ops)?;
             state.broker_configs[broker_id] = new_map;
@@ -2440,6 +2441,19 @@ mod tests {
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
         assert_eq!(err.message(), "Broker 99 not found.");
+    }
+
+    /// Java's mock parses the broker name with `Integer.parseInt`, so a
+    /// non-numeric name fails that resource with `NumberFormatException`.
+    #[tokio::test]
+    async fn describe_configs_non_numeric_broker_is_a_number_format_error() {
+        let client = admin();
+        let resource = ConfigResource::new(config_resource::Type::Broker, "x".to_string());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
+        assert_eq!(err.message(), "For input string: \"x\"");
     }
 
     #[tokio::test]
