@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -997,6 +998,100 @@ public sealed class AdminP6SubmitArgumentTests
     }
 
     /// <summary>
+    /// ⚠⚠ <b>An EMPTY entity crosses as a count of 0 over NON-NULL inner pointers</b>
+    /// (M15/P13.2 G4-4) — the entity-level inverse of the op level above. A NULL
+    /// <c>entity_types[i]</c> is what the ABI reads as "no entity types", and that fails the
+    /// <b>whole</b> call for every key; Java sends the empty entity and the broker answers it
+    /// per key (<c>KafkaAdminClient.java:4326</c>). Row 0 pins that the neighbour is
+    /// unaffected.
+    /// </summary>
+    [Fact]
+    public void AlterSubmit_AnEmptyEntity_SubmitsACountOfZero_OverNonNullInnerPointers()
+    {
+        AlterCaptured captured = CaptureAlter(
+            new[]
+            {
+                new ClientQuotaAlteration(
+                    Entity(ClientQuotaEntity.User, "valid"),
+                    new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1d) }),
+                new ClientQuotaAlteration(EmptyEntity(), s_noOps),
+            },
+            options: null);
+
+        Assert.Equal(2, captured.Count);
+        Assert.Equal(new[] { 1, 0 }, captured.EntityCounts);
+
+        // The row a NULL would turn into a whole-call "has no entity types" failure.
+        Assert.NotEqual(IntPtr.Zero, captured.EntityTypeRows[1]);
+        Assert.NotEqual(IntPtr.Zero, captured.EntityNameRows[1]);
+        Assert.Empty(captured.EntityTypes[1]);
+        Assert.Empty(captured.EntityNames[1]);
+
+        // Row 0 is exactly what it would be alone.
+        Assert.Equal(new[] { "user=valid" }, Pairs(captured.EntityTypes[0], captured.EntityNames[0]));
+        Assert.Equal(new[] { 1, 0 }, captured.OpCounts);
+        Assert.Equal(new[] { "producer_byte_rate" }, captured.OpKeys[0]);
+    }
+
+    /// <summary>
+    /// ⚠ <b>The empty entity's inner pointers address a pinned ONE-slot placeholder per level,
+    /// and <c>Dispose</c> releases both.</b> A non-null assertion alone cannot tell the
+    /// placeholder from a pinned <b>empty</b> array — whose address is non-null only by
+    /// undocumented runtime behaviour (ffi §A4) — so this reaches the pins themselves.
+    /// </summary>
+    /// <remarks>
+    /// Reflection, as <see cref="Dispose_ReleasesEveryPin"/> does, because
+    /// <c>AlterationRows</c> deliberately exposes only the seven arrays. A pinned
+    /// <c>GCHandle</c> is a strong root, so release is asserted as <b>collectability</b>: a
+    /// <c>Dispose</c> that cleared the list without freeing would keep both placeholders alive.
+    /// The weak references are taken in a non-inlined helper so no Debug-extended local roots
+    /// them here.
+    /// </remarks>
+    [Fact]
+    public void PinAlterations_AnEmptyEntity_PinsAOneSlotPlaceholderPerLevel_ReleasedByDispose()
+    {
+        ClientQuotaMarshal.AlterationRows rows = ClientQuotaMarshal.PinAlterations(
+            new[] { new ClientQuotaAlteration(EmptyEntity(), s_noOps) });
+
+        WeakReference[] placeholders = AssertOneSlotPlaceholders(rows);
+
+        rows.Dispose();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.All(
+            placeholders,
+            placeholder => Assert.False(placeholder.IsAlive, "a placeholder is still pinned after Dispose"));
+
+        // The submit's finally runs once, but an inner failure path can reach it twice.
+        rows.Dispose();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] AssertOneSlotPlaceholders(ClientQuotaMarshal.AlterationRows rows)
+    {
+        List<GCHandle> pins = (List<GCHandle>)typeof(ClientQuotaMarshal.AlterationRows)
+            .GetField("_pinnedArrays", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(rows)!;
+
+        // Exactly the two entity-level placeholders: with no ops the op level is NULL and
+        // pins nothing.
+        Assert.Equal(2, pins.Count);
+        Assert.Equal(new[] { 0 }, rows.EntityCounts);
+        Assert.Equal(IntPtr.Zero, rows.OpKeys[0]);
+
+        return new[] { rows.EntityTypes[0], rows.EntityNames[0] }
+            .Select(address =>
+            {
+                GCHandle pin = Assert.Single(pins, candidate => candidate.AddrOfPinnedObject() == address);
+                Assert.Equal(new[] { IntPtr.Zero }, Assert.IsType<IntPtr[]>(pin.Target));
+                return new WeakReference(pin.Target);
+            })
+            .ToArray();
+    }
+
+    /// <summary>
     /// <c>validateOnly</c> reaches the seam both ways — Java's
     /// <c>AlterClientQuotasOptions.validateOnly</c>, which validates without applying.
     /// </summary>
@@ -1374,6 +1469,10 @@ public sealed class AdminP6SubmitArgumentTests
         new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal) { [type] = name });
 
+    /// <summary>An entity with <b>no</b> <c>(type, name)</c> pairs (M15/P13.2 G4-4).</summary>
+    private static ClientQuotaEntity EmptyEntity() =>
+        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal));
+
     /// <summary>
     /// Row <paramref name="types"/>/<paramref name="names"/> rendered as sorted
     /// <c>type=name</c> pairs, so the assertion does not depend on the entity map's order.
@@ -1408,6 +1507,7 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.EntityCounts = (int[])entityCounts.Clone();
                 captured.OpCounts = (int[])opCounts.Clone();
                 captured.EntityTypeRows = (IntPtr[])entityTypes.Clone();
+                captured.EntityNameRows = (IntPtr[])entityNames.Clone();
                 captured.OpKeyRows = (IntPtr[])opKeys.Clone();
                 captured.OpValueRows = (IntPtr[])opValues.Clone();
                 captured.OpHasValueRows = (IntPtr[])opHasValues.Clone();
@@ -1512,6 +1612,8 @@ public sealed class AdminP6SubmitArgumentTests
         internal int[] OpCounts { get; set; } = Array.Empty<int>();
 
         internal IntPtr[] EntityTypeRows { get; set; } = Array.Empty<IntPtr>();
+
+        internal IntPtr[] EntityNameRows { get; set; } = Array.Empty<IntPtr>();
 
         internal IntPtr[] OpKeyRows { get; set; } = Array.Empty<IntPtr>();
 

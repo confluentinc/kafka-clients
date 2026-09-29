@@ -312,6 +312,24 @@ public sealed class PublicAdminP7Tests
         Assert.Equal("Not implemented yet", error.Message);
     }
 
+    /// <summary>
+    /// ⚠ A repeated user is <b>not</b> rejected (M15/P13.2 G4-2): the call returns
+    /// synchronously, as Java's does, and the mock answers it with its own message — the
+    /// same as for a single user.
+    /// </summary>
+    [Fact]
+    public async Task DescribeUserScramCredentials_ARepeatedUser_IsSent_AndFaultsWithJavasOwnMessage()
+    {
+        using MockAdminClient admin = new MockAdminClient();
+
+        DescribeUserScramCredentialsResult result =
+            admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
+
+        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        Assert.Equal("Not implemented yet", error.Message);
+        Assert.Equal(35, error.Code);
+    }
+
     /// <summary>The alter half, same message.</summary>
     [Fact]
     public async Task AlterUserScramCredentials_FaultsWithJavasOwnMessage()

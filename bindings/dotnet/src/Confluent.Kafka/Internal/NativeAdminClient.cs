@@ -3801,20 +3801,30 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>Values[entity]</c> lookup a caller makes are keyed by it (PLAN D39).
     /// </para>
     /// <para>
-    /// ⚠ Three ABI rejections are surfaced here, before any pin (PLAN D38), because the ABI
-    /// reports them by firing the callback synchronously on this thread
-    /// (<c>confluent_kafka.h:8341-8342</c>). Two of them are reachable and are checked below:
-    /// an alteration with <b>no entity types</b>, and a <b>repeated entity</b> across
-    /// alterations — which is rejected rather than collapsed, since the ABI refuses it and
-    /// silently dropping one would lose an alteration the caller wrote
-    /// (<c>h:8300-8302</c>). ⚠ <b>Java accepts a repeated entity</b>
-    /// (<c>KafkaAdminClient.java:4314-4318</c> puts the futures unconditionally, collapsing
-    /// the map, and still sends every alteration), so this is a recorded divergence
-    /// (<c>definition-of-done.md</c> §7), not parity — the one P6 RPC whose Java-faithful
-    /// <c>Collection</c> shape is not accepted verbatim. The rest are already unreachable: a repeated entity type
-    /// <em>within</em> one alteration and a null entity type cannot survive
-    /// <see cref="ClientQuotaEntity"/>'s dictionary, and a null op key cannot survive
-    /// <see cref="ClientQuotaAlteration.Op"/>'s constructor.
+    /// ⚠ One ABI rejection is surfaced here, before any pin (PLAN D38), because the ABI
+    /// reports it by firing the callback synchronously on this thread for every key
+    /// (<c>confluent_kafka.h:9438-9441</c>): a <b>repeated entity</b> across alterations —
+    /// which is rejected rather than collapsed, since the ABI refuses it and silently
+    /// dropping one would lose an alteration the caller wrote (<c>h:9395-9397</c>).
+    /// ⚠ <b>Java accepts a repeated entity</b> (<c>KafkaAdminClient.java:4314-4318</c> puts
+    /// the futures unconditionally, collapsing the map, and still sends every alteration),
+    /// so this is a recorded divergence (<c>definition-of-done.md</c> §7), not parity — the
+    /// one P6 RPC whose Java-faithful <c>Collection</c> shape is not accepted verbatim. Two
+    /// empty entities are a repeated entity, so they are rejected by the same check. The
+    /// rest are unreachable: a repeated entity type <em>within</em> one alteration and a
+    /// null entity type cannot survive <see cref="ClientQuotaEntity"/>'s dictionary, and a
+    /// null op key cannot survive <see cref="ClientQuotaAlteration.Op"/>'s constructor.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>An empty entity is sent, not rejected</b> (M15/P13.2 G4-4). Java has no client
+    /// check for it — it builds the request from the alterations as given
+    /// (<c>KafkaAdminClient.java:4326</c>) and the broker answers that one entity with
+    /// <c>INVALID_REQUEST</c> "Invalid empty client quota entity"
+    /// (<c>ClientQuotaControlManager.java:313</c>) — so rejecting it here failed every
+    /// alteration in the call for one bad row. The ABI's "an alteration with no entity
+    /// types" is a <b>NULL</b> <c>entity_types[i]</c> pointer, not a zero count, so
+    /// <see cref="ClientQuotaMarshal.AlterationRows"/> sends a <b>non-null</b> placeholder
+    /// row with a count of 0, which the ABI reads as an empty entity (PLAN §1.4, D3).
     /// </para>
     /// </remarks>
     internal AlterClientQuotasResult AlterClientQuotas(
@@ -3847,13 +3857,6 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 throw new ArgumentException(
                     "The client quota alterations must not contain a null element.", nameof(entries));
-            }
-
-            if (alteration.Entity.Entries.Count == 0)
-            {
-                throw new ArgumentException(
-                    "The client quota alterations must not contain an alteration with no entity types.",
-                    nameof(entries));
             }
 
             if (!seen.Add(alteration.Entity))
@@ -3943,6 +3946,19 @@ internal sealed class NativeAdminClient : IDisposable
     /// (<c>confluent_kafka.h:8784-8785</c>), which is why this cannot use a per-key bridge: the
     /// keys are discovered from the response. That matches Java, whose stored field is one
     /// future over raw response data — see <see cref="DescribeUserScramCredentialsViews"/>.
+    /// <para>
+    /// ⚠ <b>A repeated user is passed through verbatim, in request order</b> — not
+    /// de-duplicated (M15/P13.2 G4-2). Java copies the list as given into the request
+    /// (<c>KafkaAdminClient.java:4354-4363</c>), and so does Python
+    /// (<c>admin.py:3396-3397</c>); the ABI reads the <c>count</c> names as given — its
+    /// only precondition is that <c>users</c> "must be null or have <c>count</c> entries,
+    /// each NULL or a valid C string" (<c>confluent_kafka.h:9833-9834</c>). The broker
+    /// answers a repeat itself, with one <c>DUPLICATE_RESOURCE</c> row for that user
+    /// (<c>ScramImage.java:126-128</c>), so the response still has one row per distinct user
+    /// and the views' keys stay unique. The null-element rejection is unchanged by this: it
+    /// is stricter than Java, which skips a null user (<c>:4358</c>), and is a separate
+    /// finding (G4-3) this pass-through deliberately leaves alone.
+    /// </para>
     /// </remarks>
     internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users,
@@ -3955,9 +3971,20 @@ internal sealed class NativeAdminClient : IDisposable
             ? UnsetTimeoutMs
             : ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeUserScramCredentialsOptions));
 
-        List<string> requested = users is null
-            ? new List<string>()
-            : DistinctNames(users, "users", nameof(users));
+        List<string> requested = new List<string>(users?.Count ?? 0);
+        if (users is not null)
+        {
+            foreach (string user in users)
+            {
+                if (user is null)
+                {
+                    throw new ArgumentException(
+                        "The users must not contain a null element.", nameof(users));
+                }
+
+                requested.Add(user);
+            }
+        }
 
         SingleAdminOperation<DescribeUserScramCredentialsViews> operation =
             new SingleAdminOperation<DescribeUserScramCredentialsViews>(

@@ -64,6 +64,16 @@ public sealed class AdminP6ResultMarshalTests
     /// <summary>A stand-in for the <c>DeleteAclsResult_t *</c>; never dereferenced.</summary>
     private static readonly IntPtr s_root = new IntPtr(0x6060);
 
+    /// <summary>
+    /// A stand-in for the owned <c>DeleteAclsFilterResults_t *</c> a per-key callback is
+    /// handed; never dereferenced.
+    /// </summary>
+    private static readonly IntPtr s_value = new IntPtr(0x6161);
+
+    /// <summary>The malformed-row text, copied from <c>AclRowMarshal.ReadBinding</c>.</summary>
+    private const string NoBindingWithinCount =
+        "The admin result produced no ACL binding for an index within its own count.";
+
     // ------------------------------------------------------------------------------------
     // AclRowMarshal.ReadFilter — the key reader's null-versus-absent rule.
     // ------------------------------------------------------------------------------------
@@ -140,41 +150,98 @@ public sealed class AdminP6ResultMarshalTests
     }
 
     // ------------------------------------------------------------------------------------
-    // The inner (i, j) axis — binding XOR error, as a VALUE.
+    // The inner (i, j) axis — binding and error read INDEPENDENTLY, as a VALUE (G4-1).
     // ------------------------------------------------------------------------------------
 
     /// <summary>
-    /// An inner <c>get_result_error</c> becomes <see cref="DeleteAclsResult.FilterResult.Error"/>
-    /// with no binding; an inner <c>get_binding</c> becomes the binding with no error. Both
-    /// appear inside a filter whose own <see cref="Task"/> <b>completed</b>.
+    /// ⚠⚠ <b>M15/P13.2 G4-1.</b> The inner <c>get_binding</c> and <c>get_result_error</c> are
+    /// read <b>independently</b>: a matched ACL whose delete failed carries <b>both</b> its
+    /// binding and its error — Java's
+    /// <c>new FilterResult(aclBinding, aclError.exception(...))</c>
+    /// (<c>KafkaAdminClient.java:2705-2708</c>) — while an entry with no decodable binding
+    /// carries the error alone and a deleted ACL the binding alone. All four appear, in the
+    /// ABI's own order, inside a filter whose own <see cref="Task"/> <b>completed</b>.
     /// </summary>
     [Fact]
-    public async Task InnerEntries_AreBindingXorError_OnACompletedFilter()
+    public async Task InnerEntries_CarryTheBindingAlongsideTheError_OnACompletedFilter()
     {
         using Fixture fixture = new Fixture();
 
         AclBindingFilter key = fixture.AddFilter("mixed");
-        fixture.AddBinding(key, Binding("deleted-a"));
-        fixture.AddInnerError(key, 42, "could not delete");
-        fixture.AddBinding(key, Binding("deleted-b"));
+        fixture.AddMixedEntries(key);
 
         DeleteAclsResult result = fixture.Walk();
 
-        DeleteAclsResult.FilterResults results =
-            await TestTimeout.Run(() => result.Values[key], s_deadline);
+        AssertMixedEntries(await TestTimeout.Run(() => result.Values[key], s_deadline));
 
-        Assert.Equal(3, results.Values.Count);
+        // All() throws the first inner error it meets — the failed entry's, whose binding is
+        // still reported beside it.
+        KafkaException all = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(result.All, s_deadline));
+        Assert.Equal("could not delete", all.Message);
+        Assert.Equal(42, all.Code);
+    }
 
-        Assert.Equal(Binding("deleted-a"), results.Values[0].Binding);
-        Assert.Null(results.Values[0].Error);
+    /// <summary>
+    /// An inner entry carrying <b>neither</b> a binding nor an error is a malformed row: it
+    /// faults its own filter with the exact malformed-row text, never reaches the binding
+    /// copy-out with a null pointer, and leaves the other filters alone.
+    /// </summary>
+    [Fact]
+    public async Task InnerEntry_WithNeitherBindingNorError_FaultsItsFilter_AsAMalformedRow()
+    {
+        using Fixture fixture = new Fixture();
 
-        Assert.Null(results.Values[1].Binding);
-        Assert.Equal("could not delete", results.Values[1].Error!.Message);
-        Assert.Equal(42, results.Values[1].Error!.Code);
+        AclBindingFilter malformed = fixture.AddFilter("malformed");
+        fixture.AddBinding(malformed, Binding("before-the-gap"));
+        fixture.AddEmptyEntry(malformed);
 
-        // Order is the ABI's own, so an implementation collecting errors separately fails here.
-        Assert.Equal(Binding("deleted-b"), results.Values[2].Binding);
-        Assert.Null(results.Values[2].Error);
+        AclBindingFilter ok = fixture.AddFilter("well-formed");
+        fixture.AddBinding(ok, Binding("survivor"));
+
+        DeleteAclsResult result = fixture.Walk();
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values[malformed], s_deadline));
+        Assert.Equal(NoBindingWithinCount, failure.Message);
+
+        Assert.Equal(
+            Binding("survivor"),
+            Assert.Single((await TestTimeout.Run(() => result.Values[ok], s_deadline)).Values).Binding);
+    }
+
+    /// <summary>
+    /// ⚠⚠ <b>G4-1, the per-key twin</b> — the reader production actually wires
+    /// (<c>AdminCallbacks.DeleteAclsFilterResultsPerKeyValue</c>), driven over one owned value
+    /// handle: the same four entries, the same independence, the same order.
+    /// </summary>
+    [Fact]
+    public void PerKeyReader_CarriesTheBindingAlongsideTheError()
+    {
+        using Fixture fixture = new Fixture();
+
+        AclBindingFilter key = fixture.AddFilter("per-key-mixed");
+        fixture.AddMixedEntries(key);
+
+        AssertMixedEntries(fixture.ReadPerKey(key));
+    }
+
+    /// <summary>
+    /// The per-key reader rejects an entry with neither half with the exact malformed-row
+    /// text — thrown from the reader itself, which the per-key trampoline turns into that
+    /// key's fault.
+    /// </summary>
+    [Fact]
+    public void PerKeyReader_AnEntryWithNeitherBindingNorError_IsAMalformedRow()
+    {
+        using Fixture fixture = new Fixture();
+
+        AclBindingFilter key = fixture.AddFilter("per-key-malformed");
+        fixture.AddBinding(key, Binding("before-the-gap"));
+        fixture.AddEmptyEntry(key);
+
+        KafkaException failure = Assert.Throws<KafkaException>(() => fixture.ReadPerKey(key));
+        Assert.Equal(NoBindingWithinCount, failure.Message);
     }
 
     /// <summary>
@@ -782,6 +849,33 @@ public sealed class AdminP6ResultMarshalTests
             new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
 
     /// <summary>
+    /// The four entries <see cref="Fixture.AddMixedEntries"/> registers, in order: a deleted
+    /// ACL, a failed delete carrying <b>both</b> halves, an error with no binding, and a
+    /// second deleted ACL.
+    /// </summary>
+    private static void AssertMixedEntries(DeleteAclsResult.FilterResults results)
+    {
+        Assert.Equal(4, results.Values.Count);
+
+        Assert.Equal(Binding("deleted-a"), results.Values[0].Binding);
+        Assert.Null(results.Values[0].Error);
+
+        // ⚠ THE G4-1 row: the failed delete still names the ACL it failed on.
+        Assert.Equal(Binding("failed"), results.Values[1].Binding);
+        Assert.Equal("could not delete", results.Values[1].Error!.Message);
+        Assert.Equal(42, results.Values[1].Error!.Code);
+
+        // No binding, an error: Binding stays null and the copy-out is never handed the null.
+        Assert.Null(results.Values[2].Binding);
+        Assert.Equal("undecodable", results.Values[2].Error!.Message);
+        Assert.Equal(58, results.Values[2].Error!.Code);
+
+        // Order is the ABI's own, so an implementation collecting errors separately fails here.
+        Assert.Equal(Binding("deleted-b"), results.Values[3].Binding);
+        Assert.Null(results.Values[3].Error);
+    }
+
+    /// <summary>
     /// A synthetic <c>delete_acls</c> result table, plus the accessor sets that read it.
     /// Owns every pinned string and every <c>KafkaError</c> handle it hands the walk.
     /// </summary>
@@ -859,6 +953,61 @@ public sealed class AdminP6ResultMarshalTests
         internal void AddInnerError(AclBindingFilter key, int code, string message) =>
             RowFor(key).Entries.Add(new Entry(IntPtr.Zero, NewError(code, message)));
 
+        /// <summary>
+        /// Adds a matched ACL whose delete failed — <b>both</b> slots set, as Java's
+        /// <c>FilterResult(aclBinding, exception)</c> and the core store it (G4-1).
+        /// </summary>
+        internal void AddBindingWithInnerError(
+            AclBindingFilter key, AclBinding binding, int code, string message)
+        {
+            _bindings.Add(binding);
+            RowFor(key).Entries.Add(
+                new Entry(new IntPtr(BindingPointerBase + _bindings.Count - 1), NewError(code, message)));
+        }
+
+        /// <summary>Adds an entry with <b>neither</b> slot set — a malformed row.</summary>
+        internal void AddEmptyEntry(AclBindingFilter key) =>
+            RowFor(key).Entries.Add(new Entry(IntPtr.Zero, IntPtr.Zero));
+
+        /// <summary>The four entries <see cref="AssertMixedEntries"/> expects, in order.</summary>
+        internal void AddMixedEntries(AclBindingFilter key)
+        {
+            AddBinding(key, Binding("deleted-a"));
+            AddBindingWithInnerError(key, Binding("failed"), 42, "could not delete");
+            AddInnerError(key, 58, "undecodable");
+            AddBinding(key, Binding("deleted-b"));
+        }
+
+        /// <summary>
+        /// Runs production's <b>per-key</b> reader over one filter's entries, as the per-key
+        /// trampoline would over the owned value handle it is handed.
+        /// </summary>
+        internal DeleteAclsResult.FilterResults ReadPerKey(AclBindingFilter key)
+        {
+            Row row = RowFor(key);
+
+            Func<IntPtr, DeleteAclsResult.FilterResults> read =
+                DeleteAclsResultMarshal.FilterResultsPerKeyReader(
+                    value =>
+                    {
+                        Assert.Equal(s_value, value);
+                        return row.Entries.Count;
+                    },
+                    (value, index) =>
+                    {
+                        Assert.Equal(s_value, value);
+                        return row.Entries[index].Binding;
+                    },
+                    (value, index) =>
+                    {
+                        Assert.Equal(s_value, value);
+                        return row.Entries[index].Error;
+                    },
+                    ReadBinding);
+
+            return read(s_value);
+        }
+
         /// <summary>Runs production's walk over this table and wraps the outcome.</summary>
         internal DeleteAclsResult Walk()
         {
@@ -889,7 +1038,7 @@ public sealed class AdminP6ResultMarshalTests
                         Assert.Equal(s_root, root);
                         return _rows[index].Entries[resultIndex].Error;
                     },
-                    pointer => _bindings[(int)pointer - BindingPointerBase]);
+                    ReadBinding);
 
             SyntheticPerKeyWalk.Run(
                 operation,
@@ -947,6 +1096,17 @@ public sealed class AdminP6ResultMarshalTests
 
         private Row RowAt(IntPtr pointer) => _rows[(int)pointer - FilterPointerBase];
 
+        /// <summary>
+        /// The <c>readBinding</c> stand-in: resolves a stand-in binding pointer. ⚠ A null
+        /// pointer fails with an exception no assertion here tolerates, so a reader handing
+        /// the copy-out a null (production's would throw a <see cref="KafkaException"/>) cannot
+        /// pass as a malformed-row rejection.
+        /// </summary>
+        private AclBinding ReadBinding(IntPtr pointer) =>
+            pointer == IntPtr.Zero
+                ? throw new Xunit.Sdk.XunitException("readBinding was handed a null binding pointer")
+                : _bindings[(int)pointer - BindingPointerBase];
+
         private Row RowFor(AclBindingFilter key)
         {
             for (int index = 0; index < _rows.Count; index++)
@@ -1001,7 +1161,10 @@ public sealed class AdminP6ResultMarshalTests
             internal List<Entry> Entries { get; } = new List<Entry>();
         }
 
-        /// <summary>One inner entry: a binding pointer XOR a borrowed error handle.</summary>
+        /// <summary>
+        /// One inner entry: a binding pointer and a borrowed error handle, each of which may be
+        /// null — both set is a failed delete (G4-1), both null a malformed row.
+        /// </summary>
         private sealed class Entry
         {
             internal Entry(IntPtr binding, IntPtr error)

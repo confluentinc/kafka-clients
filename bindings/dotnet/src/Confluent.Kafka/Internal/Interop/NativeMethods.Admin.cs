@@ -3396,9 +3396,17 @@ internal static partial class NativeMethods
     internal static extern int DeleteAclsResultGetResultCount(IntPtr result, int index);
 
     /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_binding</c> — the ACL deleted by filter
+    /// <c>kafka_admin_DeleteAclsResult_get_binding</c> — the ACL matched by filter
     /// <paramref name="index"/>, entry <paramref name="resultIndex"/>, <b>borrowed</b>, or
-    /// null when that entry carries an exception instead.
+    /// null.
+    /// <para>
+    /// ⚠ Read <b>independently</b> of <see cref="DeleteAclsResultGetResultError"/>: a matched
+    /// ACL whose delete failed carries both, as Java's entries do
+    /// (<c>KafkaAdminClient.java:2705-2708</c>; M15/P13.2 G4-1). The header's "null when that
+    /// entry carries an exception instead" and "complementary" wording
+    /// (<c>confluent_kafka.h:8789-8795</c>) is a known inaccuracy the reader does not rely
+    /// on (PLAN D3) — see <c>DeleteAclsResultMarshal</c>.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DeleteAclsResultGetBinding(IntPtr result, int index, int resultIndex);
@@ -3410,9 +3418,10 @@ internal static partial class NativeMethods
     /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
     /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>VALUE</b> channel: it
     /// is stored inside a successfully completed <c>FilterResults</c> and is independent of
-    /// <see cref="DeleteAclsResultGetError"/> (<c>confluent_kafka.h:7793-7796</c>). It is
-    /// complementary to <see cref="DeleteAclsResultGetBinding"/> — for an in-range entry
-    /// precisely one of the two is non-null.
+    /// <see cref="DeleteAclsResultGetError"/> (<c>confluent_kafka.h:8811-8814</c>). It is
+    /// <b>not</b> complementary to <see cref="DeleteAclsResultGetBinding"/>, whatever the
+    /// header's <c>get_binding</c> text says: an entry whose delete failed carries this
+    /// error <b>and</b> its binding (M15/P13.2 G4-1, PLAN D3).
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_error", CallingConvention = CallingConvention.Cdecl)]
@@ -3584,8 +3593,12 @@ internal static partial class NativeMethods
     /// <para>
     /// Ordinary bad input reaches the <b>inline</b> callback path here — a NULL entity type
     /// or op key, an alteration with no entity types, or a repeated entity
-    /// (<c>confluent_kafka.h:8341-8342</c>). The managed side rejects those before any pin
-    /// (PLAN D38), which keeps the path exceptional rather than removing the obligation.
+    /// (<c>confluent_kafka.h:9438-9441</c>). The managed side keeps it exceptional rather
+    /// than removing the obligation: it rejects a repeated entity before any pin (PLAN D38),
+    /// the value types cannot carry a NULL entity type or op key, and "no entity types" —
+    /// a <b>NULL</b> <c>entity_types[i]</c>, not a zero count — is never sent, because an
+    /// empty entity crosses as a non-null placeholder row with a count of 0 (M15/P13.2
+    /// G4-4).
     /// The <c>_async</c> form is driven rather than the sync twin, which blocks until every
     /// per-entity future has resolved.
     /// </para>

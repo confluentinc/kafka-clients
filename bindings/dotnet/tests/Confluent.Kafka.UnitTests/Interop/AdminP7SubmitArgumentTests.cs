@@ -401,6 +401,49 @@ public sealed class AdminP7SubmitArgumentTests
         Assert.Equal(new[] { "alice", "bob" }, captured.Users);
     }
 
+    /// <summary>
+    /// ⚠ <b>A repeated user is passed through verbatim, in request order</b> (M15/P13.2
+    /// G4-2) — Java copies the list as given into the request
+    /// (<c>KafkaAdminClient.java:4354-4363</c>) and the broker answers the repeat itself
+    /// (<c>ScramImage.java:126-128</c>). A de-duplicating binding sends one name where Java
+    /// sends two, and reorders an interleaved repeat.
+    /// </summary>
+    [Fact]
+    public void DescribeUsers_ARepeatedUser_IsPassedThroughInOrder()
+    {
+        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) twice =
+            CaptureDescribeUsers(new[] { "alice", "alice" });
+        Assert.Equal(2, twice.Count);
+        Assert.Equal(new[] { "alice", "alice" }, twice.Users);
+
+        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) interleaved =
+            CaptureDescribeUsers(new[] { "bob", "alice", "bob" });
+        Assert.Equal(3, interleaved.Count);
+        Assert.Equal(new[] { "bob", "alice", "bob" }, interleaved.Users);
+    }
+
+    /// <summary>
+    /// A null element is still rejected <b>before</b> the native call — the pass-through
+    /// keeps this precondition (stricter than Java, which skips a null user at
+    /// <c>KafkaAdminClient.java:4358</c>; a separate finding, G4-3).
+    /// </summary>
+    [Fact]
+    public void DescribeUsers_ANullElement_IsRejectedBeforeTheNativeCall()
+    {
+        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        bool submitted = false;
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() =>
+            admin.DescribeUserScramCredentials(
+                new[] { "alice", null! },
+                options: null,
+                (handle, pinned, pinnedCount, timeoutMs, callback, data) => submitted = true));
+
+        Assert.Equal("users", error.ParamName);
+        Assert.StartsWith("The users must not contain a null element.", error.Message);
+        Assert.False(submitted, "the submit ran although a precondition failed");
+    }
+
     // ------------------------------------------------------------------------------------
     // Timeouts — the shared mapping, sampled on one RPC per submit shape.
     // ------------------------------------------------------------------------------------

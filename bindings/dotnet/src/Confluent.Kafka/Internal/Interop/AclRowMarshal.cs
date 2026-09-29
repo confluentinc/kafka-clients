@@ -47,6 +47,15 @@ namespace Confluent.Kafka.Internal.Interop;
 internal static class AclRowMarshal
 {
     /// <summary>
+    /// The malformed-row text for an index that produced no binding: shared by
+    /// <see cref="ReadBinding"/> and by <c>deleteAcls</c>' inner readers, which reject an
+    /// entry carrying neither a binding nor an error without calling
+    /// <see cref="ReadBinding"/> on its null pointer.
+    /// </summary>
+    internal const string NoBindingWithinCountMessage =
+        "The admin result produced no ACL binding for an index within its own count.";
+
+    /// <summary>
     /// The production <c>kafka_common_AclBindingFilter_*</c> set. Shared by every ACL result,
     /// so — unlike a result's own <c>get_filter</c> — it is not cross-wirable.
     /// </summary>
@@ -171,8 +180,7 @@ internal static class AclRowMarshal
     {
         if (binding == IntPtr.Zero)
         {
-            throw new KafkaException(
-                "The admin result produced no ACL binding for an index within its own count.");
+            throw new KafkaException(NoBindingWithinCountMessage);
         }
 
         ResourcePattern pattern = new ResourcePattern(

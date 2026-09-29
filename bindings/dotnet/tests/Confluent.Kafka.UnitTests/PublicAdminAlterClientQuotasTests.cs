@@ -53,6 +53,66 @@ public sealed class PublicAdminAlterClientQuotasTests
         Array.Empty<ClientQuotaAlteration.Op>();
 
     /// <summary>
+    /// ⚠⚠ <b>M15/P13.2 G4-4, the empirical premise — through the REAL ABI.</b> An alteration
+    /// whose entity is empty is <b>sent</b>, and it is answered for itself alone:
+    /// <c>[valid, empty]</c> yields <b>two</b> per-key results, each carrying the mock's own
+    /// per-entity failure, rather than the whole call failing for both keys with the ABI's
+    /// "has no entity types". That text is what a NULL <c>entity_types[i]</c> produces
+    /// (<c>read_client_quota_alterations</c>); a non-null pointer with a count of 0 parses to
+    /// an empty entity, which is what the header's "an alteration with no entity types" does
+    /// NOT cover (PLAN §1.4, D3).
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyEntity_IsSent_AndAnsweredForItselfAlone()
+    {
+        using MockAdminClient admin = new MockAdminClient(1);
+
+        ClientQuotaEntity empty = EmptyEntity();
+        AlterClientQuotasResult result = admin.AlterClientQuotas(
+            new[] { Alteration("valid", 1d), new ClientQuotaAlteration(empty, s_noOps) });
+
+        Assert.Equal(2, result.Values.Count);
+        Assert.True(result.Values.ContainsKey(Entity("valid")));
+        Assert.True(result.Values.ContainsKey(EmptyEntity()));
+
+        foreach (Task perEntity in new[] { result.Values[Entity("valid")], result.Values[empty] })
+        {
+            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+                () => TestTimeout.Run(() => perEntity, s_deadline));
+
+            // ⚠ The mock's own per-entity wording, typo included (mock_admin_client.rs:1766) —
+            // NOT "quota alteration at index 1 has no entity types", the whole-call rejection.
+            Assert.Equal(NotImplemented, failure.Message);
+            Assert.Equal(35, failure.Code);
+        }
+    }
+
+    /// <summary>
+    /// Two empty entities are one entity altered twice, so the repeated-entity rejection —
+    /// unchanged by G4-4 — still refuses them before the native call, with the empty entity's
+    /// own <see cref="ClientQuotaEntity.ToString"/> in the message.
+    /// </summary>
+    [Fact]
+    public void TwoEmptyEntities_AreARepeatedEntity()
+    {
+        using MockAdminClient admin = new MockAdminClient(1);
+
+        ArgumentException duplicate = Assert.Throws<ArgumentException>(
+            () => admin.AlterClientQuotas(
+                new[]
+                {
+                    new ClientQuotaAlteration(EmptyEntity(), s_noOps),
+                    new ClientQuotaAlteration(EmptyEntity(), s_noOps),
+                }));
+        Assert.Equal("entries", duplicate.ParamName);
+        Assert.StartsWith(
+            "The client quota alterations must not alter the entity ClientQuotaEntity(entries={}) "
+            + "more than once.",
+            duplicate.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// ⚠ <b>T-N6.</b> An entity built fresh, equal by value to the one submitted, finds its
     /// own awaitable in <see cref="AlterClientQuotasResult.Values"/>.
     /// </summary>
@@ -220,9 +280,10 @@ public sealed class PublicAdminAlterClientQuotasTests
     }
 
     /// <summary>
-    /// Preconditions are rejected before any native call (ffi §B5) — including the two ABI
-    /// rejections C# surfaces itself (PLAN D38): an alteration with no entity types, and the
-    /// same entity altered twice.
+    /// Preconditions are rejected before any native call (ffi §B5) — including the one ABI
+    /// rejection C# surfaces itself (PLAN D38): the same entity altered twice. An empty
+    /// entity is no longer among them (M15/P13.2 G4-4) — see
+    /// <see cref="AnEmptyEntity_IsSent_AndAnsweredForItselfAlone"/>.
     /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
@@ -240,20 +301,6 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.StartsWith(
             "The client quota alterations must not contain a null element.",
             nullElement.Message,
-            StringComparison.Ordinal);
-
-        ArgumentException empty = Assert.Throws<ArgumentException>(
-            () => admin.AlterClientQuotas(
-                new[]
-                {
-                    new ClientQuotaAlteration(
-                        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal)),
-                        s_noOps),
-                }));
-        Assert.Equal("entries", empty.ParamName);
-        Assert.StartsWith(
-            "The client quota alterations must not contain an alteration with no entity types.",
-            empty.Message,
             StringComparison.Ordinal);
 
         // ⚠ Rejected, NOT collapsed: the ABI refuses a repeated entity (h:8300-8302), so
@@ -332,6 +379,9 @@ public sealed class PublicAdminAlterClientQuotasTests
             {
                 [ClientQuotaEntity.User] = user,
             });
+
+    private static ClientQuotaEntity EmptyEntity() =>
+        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal));
 
     private static ClientQuotaAlteration Alteration(string user, double value) =>
         new ClientQuotaAlteration(

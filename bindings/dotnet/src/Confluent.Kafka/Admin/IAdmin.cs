@@ -1095,7 +1095,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// rejected</b> rather than collapsed, because the ABI refuses it and collapsing would
     /// drop an alteration the caller wrote — a recorded divergence: Java accepts it
     /// (<c>KafkaAdminClient.java:4314-4318</c>), so code ported from Java may need to
-    /// de-duplicate at the call site.
+    /// de-duplicate at the call site. An alteration whose entity has <b>no</b> entity types
+    /// is sent as given, as Java does, and is answered for that entity alone.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1106,8 +1107,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="entries"/> contains a null element, an alteration whose entity has no
-    /// entity types, or the same entity more than once.
+    /// <paramref name="entries"/> contains a null element, or the same entity more than once.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.

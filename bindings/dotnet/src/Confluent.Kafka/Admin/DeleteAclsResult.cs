@@ -89,24 +89,38 @@ public sealed class DeleteAclsResult
     }
 
     /// <summary>
-    /// One ACL a filter matched: either the deleted binding, or the reason deleting it
-    /// failed — Java's nested <c>FilterResult</c> (<c>:39</c>).
+    /// One ACL a filter matched: the matched binding, and the reason deleting it failed if
+    /// it did — Java's nested <c>FilterResult</c> (<c>:39</c>).
     /// </summary>
     /// <remarks>
-    /// Exactly one of the two is non-null, mirroring the ABI's complementary
-    /// <c>get_binding</c> / <c>get_result_error</c> pair.
+    /// ⚠ <b>Both can be non-null.</b> A matched ACL whose delete failed carries its binding
+    /// <em>and</em> its error: Java builds every entry as
+    /// <c>new FilterResult(aclBinding, aclError.exception(matchingAcl.errorMessage()))</c>
+    /// (<c>KafkaAdminClient.java:2705-2708</c>), storing the decoded binding unconditionally
+    /// and an error that is null only on success. So <see cref="Error"/>, not a null
+    /// <see cref="Binding"/>, is what says the delete failed. The binding is read independently
+    /// of the error for the same reason (M15/P13.2 G4-1). Java's own <c>binding()</c> Javadoc
+    /// ("or null if there was an error", <c>:49</c>) does not match the entries its client
+    /// builds; this follows what the client builds.
     /// </remarks>
     public sealed class FilterResult
     {
-        /// <summary>The deleted-binding case.</summary>
-        internal FilterResult(AclBinding binding) => Binding = binding;
-
-        /// <summary>The delete-failed case — a stored value, never a fault.</summary>
-        internal FilterResult(KafkaException error) => Error = error;
+        /// <summary>
+        /// Java's package-private <c>FilterResult(AclBinding, ApiException)</c> (<c>:43</c>):
+        /// both are stored as given. The error is a stored value, never a fault.
+        /// </summary>
+        internal FilterResult(AclBinding? binding, KafkaException? error)
+        {
+            Binding = binding;
+            Error = error;
+        }
 
         /// <summary>
-        /// The ACL that was deleted, or <see langword="null"/> if deleting it failed —
-        /// Java's <c>binding()</c> (<c>:51</c>).
+        /// The ACL the filter matched — deleted when <see cref="Error"/> is
+        /// <see langword="null"/>, and still reported when deleting it failed — Java's
+        /// <c>binding()</c> (<c>:51</c>). <see langword="null"/> only when the matched ACL could
+        /// not be decoded, which then always comes with an <see cref="Error"/>: an entry
+        /// carrying neither faults its filter's <see cref="Task"/> as a malformed result.
         /// </summary>
         public AclBinding? Binding { get; }
 

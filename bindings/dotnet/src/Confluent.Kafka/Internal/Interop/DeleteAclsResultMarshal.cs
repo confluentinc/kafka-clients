@@ -36,7 +36,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>Task</c> — it is read by <see cref="KeyedResultMarshal"/>, not here. The inner
 /// <c>get_result_error(i, j)</c> is Java's <c>FilterResult.error()</c> and is a stored
 /// <b>value</b> inside a successfully completed <c>FilterResults</c>
-/// (<c>confluent_kafka.h:7744-7747</c>, <c>:7793-7796</c>). Both are <c>const</c>, so both
+/// (<c>confluent_kafka.h:8762-8765</c>, <c>:8811-8814</c>). Both are <c>const</c>, so both
 /// are read with <see cref="KafkaException.FromBorrowedHandle"/> and neither is destroyed:
 /// const-ness answers ownership, and the Java return type answers fault-versus-value.
 /// </para>
@@ -80,23 +80,11 @@ internal static class DeleteAclsResultMarshal
 
             for (int resultIndex = 0; resultIndex < count; resultIndex++)
             {
-                IntPtr error = getResultError(result, index, resultIndex);
-                if (error != IntPtr.Zero)
-                {
-                    // ⚠ BORROWED, and a VALUE — not this filter's fault. FromBorrowedHandle
-                    // copies code/message/flags out and retains no pointer, so the stored
-                    // exception outliving the walk is correct; the handle dies with the root.
-                    values.Add(
-                        new DeleteAclsResult.FilterResult(KafkaException.FromBorrowedHandle(error)!));
-                    continue;
-                }
-
-                // Complementary to the error above: for an in-range entry precisely one of
-                // the two is non-null, so a null here with a null error is a malformed row
-                // and the copy-out rejects it rather than inventing a binding.
                 values.Add(
-                    new DeleteAclsResult.FilterResult(
-                        readBinding(getBinding(result, index, resultIndex))));
+                    ReadEntry(
+                        getBinding(result, index, resultIndex),
+                        getResultError(result, index, resultIndex),
+                        readBinding));
             }
 
             return new DeleteAclsResult.FilterResults(values);
@@ -131,17 +119,50 @@ internal static class DeleteAclsResultMarshal
 
             for (int index = 0; index < count; index++)
             {
-                IntPtr error = getError(value, index);
-                if (error != IntPtr.Zero)
-                {
-                    values.Add(
-                        new DeleteAclsResult.FilterResult(KafkaException.FromBorrowedHandle(error)!));
-                    continue;
-                }
-
-                values.Add(new DeleteAclsResult.FilterResult(readBinding(getBinding(value, index))));
+                values.Add(ReadEntry(getBinding(value, index), getError(value, index), readBinding));
             }
 
             return new DeleteAclsResult.FilterResults(values);
         };
+
+    /// <summary>
+    /// One inner entry, from its two <b>independent</b> accessors — shared by both readers so
+    /// the rule below cannot diverge between the aggregate and the per-key walk.
+    /// </summary>
+    /// <param name="binding">The entry's borrowed binding pointer, or null.</param>
+    /// <param name="error">The entry's borrowed error handle, or null.</param>
+    /// <param name="readBinding">The borrowed-binding copy-out, handed only a non-null pointer.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The binding is read whether or not the entry carries an error.</b> A matched ACL
+    /// whose delete failed has both: Java builds every entry as
+    /// <c>new FilterResult(aclBinding, aclError.exception(...))</c>
+    /// (<c>KafkaAdminClient.java:2705-2708</c>) and the core stores both the same way, so
+    /// skipping the binding once an error is seen would drop the ACL the failure is about
+    /// (M15/P13.2 G4-1). The header's <c>get_binding</c> docs call the two "complementary";
+    /// that sentence is a known inaccuracy this reader deliberately does not rely on
+    /// (PLAN D3).
+    /// </para>
+    /// <para>
+    /// An entry with <b>neither</b> is a malformed row and is rejected with the same text
+    /// <see cref="AclRowMarshal.ReadBinding"/> uses, rather than turned into an entry that
+    /// reports an unnamed ACL as deleted. <paramref name="readBinding"/> is never handed the
+    /// null pointer.
+    /// </para>
+    /// </remarks>
+    private static DeleteAclsResult.FilterResult ReadEntry(
+        IntPtr binding, IntPtr error, Func<IntPtr, AclBinding> readBinding)
+    {
+        if (binding == IntPtr.Zero && error == IntPtr.Zero)
+        {
+            throw new KafkaException(AclRowMarshal.NoBindingWithinCountMessage);
+        }
+
+        // ⚠ BORROWED, and a VALUE — not this filter's fault. FromBorrowedHandle copies
+        // code/message/flags out and retains no pointer, so the stored exception outliving
+        // the walk is correct; the handle dies with its root.
+        KafkaException? failure = KafkaException.FromBorrowedHandle(error);
+        AclBinding? matched = binding == IntPtr.Zero ? null : readBinding(binding);
+        return new DeleteAclsResult.FilterResult(matched, failure);
+    }
 }

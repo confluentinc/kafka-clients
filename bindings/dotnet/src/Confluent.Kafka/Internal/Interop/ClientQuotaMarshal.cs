@@ -373,8 +373,17 @@ internal static class ClientQuotaMarshal
         internal void Set(int index, ClientQuotaAlteration alteration)
         {
             IReadOnlyDictionary<string, string?> entries = alteration.Entity.Entries;
-            IntPtr[] types = new IntPtr[entries.Count];
-            IntPtr[] names = new IntPtr[entries.Count];
+
+            // ⚠⚠ An EMPTY entity (M15/P13.2 G4-4) still needs NON-NULL inner pointers: a NULL
+            // `entity_types[i]` is the ABI's "no entity types" and fails the WHOLE call for every
+            // key, while a non-null pointer with a count of 0 reads as an empty entity the broker
+            // then answers per key. A pinned EMPTY array's address is non-null only by
+            // undocumented runtime behaviour (ffi §A4), so each row gets a one-element
+            // placeholder instead — never read (the count is 0), pinned and released with the
+            // rest in Dispose.
+            int slots = entries.Count == 0 ? 1 : entries.Count;
+            IntPtr[] types = new IntPtr[slots];
+            IntPtr[] names = new IntPtr[slots];
             int entry = 0;
             foreach (KeyValuePair<string, string?> pair in entries)
             {
