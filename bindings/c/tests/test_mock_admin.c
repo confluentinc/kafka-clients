@@ -4430,89 +4430,118 @@ static void test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fail
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* What a single-shot group-offsets / remove-members callback delivered. Java's
+ * `AlterConsumerGroupOffsetsResult`, `DeleteConsumerGroupOffsetsResult` and
+ * `RemoveMembersFromConsumerGroupResult` each wrap ONE future, so the async
+ * callback fires exactly once with either the result handle or the
+ * whole-request error. */
 typedef struct {
     atomic_int fired;
-    atomic_int error_count;
-    char last_topic[64];
-    int32_t last_partition;
-} alter_group_offsets_async_result_t;
+    atomic_int result_count;
+    char error_message[128];
+} group_result_once_t;
 
-/* Per-key async result (Phase E): the callback now fires once per partition,
- * independently, rather than once for the whole batch - see
- * `admin_async_per_key_op` /
- * `kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t`. There is
- * no value parameter: Java's per-partition future is `KafkaFuture<Void>`, so a
- * null error *is* the success value. */
-static void on_alter_consumer_group_offsets(const char *topic, int32_t partition,
-                                            kafka_common_Error_t *error, void *user_data) {
-    alter_group_offsets_async_result_t *r = (alter_group_offsets_async_result_t *)user_data;
-    if (topic != NULL) {
-        strncpy(r->last_topic, topic, sizeof(r->last_topic) - 1);
+static void group_result_once_init(group_result_once_t *r) {
+    atomic_init(&r->fired, 0);
+    atomic_init(&r->result_count, 0);
+    r->error_message[0] = '\0';
+}
+
+static void group_result_once_record(group_result_once_t *r, int has_result,
+                                     kafka_common_Error_t *error) {
+    if (has_result) {
+        atomic_fetch_add(&r->result_count, 1);
     }
-    r->last_partition = partition;
     if (error != NULL) {
-        atomic_fetch_add(&r->error_count, 1);
+        strncpy(r->error_message, kafka_common_Error_message(error),
+                sizeof(r->error_message) - 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
 
+/* Waits for the single callback, then gives a (wrong) second one time to
+ * arrive and asserts it did not. */
+static void assert_fired_exactly_once(group_result_once_t *r) {
+    TEST_ASSERT_TRUE(wait_for(&r->fired, 1));
+    (void)wait_briefly_for_nothing(&r->fired);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r->fired));
+}
+
+/* Asserts `error` is an owned error with `message`, then frees it. */
+static void assert_owned_error(const char *message, kafka_common_Error_t *error) {
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING(message, kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+}
+
+static void on_alter_consumer_group_offsets(kafka_admin_AlterConsumerGroupOffsetsResult_t *result,
+                                            kafka_common_Error_t *error, void *user_data) {
+    group_result_once_record((group_result_once_t *)user_data, result != NULL, error);
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+}
+
+/* One callback for the whole request, as Java has one future. The mock throws
+ * UnsupportedOperationException (MockAdminClient.java:1213, Java's own typo
+ * "Not implement yet"), so the single future fails and the callback carries
+ * that whole-request error instead of a handle - for two partitions, and for an
+ * empty offsets map, which still fires exactly once. */
 static void test_mock_admin_alter_consumer_group_offsets_async(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const char *topics[1] = {"aca"};
-    const int32_t partitions[1] = {0};
-    const int64_t offsets[1] = {1};
+    const char *topics[2] = {"aca", "aca"};
+    const int32_t partitions[2] = {0, 1};
+    const int64_t offsets[2] = {1, 2};
 
-    alter_group_offsets_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
-    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
-        admin, "acg", topics, partitions, offsets, NULL, NULL, NULL, 1, -1,
-        on_alter_consumer_group_offsets, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    /* MockAdminClient always throws UnsupportedOperationException here
-     * (MockAdminClient.java:1213, Java's own typo "Not implement yet"), so the
-     * requested partition's per-key future fails with the real typed error. */
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
-    TEST_ASSERT_EQUAL_STRING("aca", r.last_topic);
-    TEST_ASSERT_EQUAL_INT32(0, r.last_partition);
+    const int32_t counts[2] = {2, 0};
+    for (int i = 0; i < 2; i++) {
+        group_result_once_t r;
+        group_result_once_init(&r);
+        kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+            admin, "acg", topics, partitions, offsets, NULL, NULL, NULL, counts[i], -1,
+            on_alter_consumer_group_offsets, &r);
+        assert_fired_exactly_once(&r);
+        TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.result_count));
+        TEST_ASSERT_EQUAL_STRING("Not implement yet", r.error_message);
+    }
 
-    /* A negative offset cannot be submitted at all, so the callback fires
-     * inline with an error - computed independently of the fallible parse, so
-     * the requested key still gets its own callback via
-     * `admin_async_per_key_op`'s fan-out. */
+    /* A negative offset cannot be submitted at all, so the single callback
+     * fires inline, before the call returns. */
     const int64_t bad_offsets[1] = {-5};
-    alter_group_offsets_async_result_t bad = {0};
-    atomic_init(&bad.fired, 0);
-    atomic_init(&bad.error_count, 0);
+    group_result_once_t bad;
+    group_result_once_init(&bad);
     kafka_admin_AdminClient_alter_consumer_group_offsets_async(
         admin, "acg", topics, partitions, bad_offsets, NULL, NULL, NULL, 1, -1,
         on_alter_consumer_group_offsets, &bad);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.fired));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.error_count));
-    TEST_ASSERT_EQUAL_STRING("aca", bad.last_topic);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&bad.result_count));
+    TEST_ASSERT_EQUAL_STRING("offset at index 0: Invalid negative offset", bad.error_message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* Two partitions: proves independent per-key delivery through the real async
- * entry point, end to end. */
-static void test_mock_admin_alter_consumer_group_offsets_async_two_partitions(void) {
+/* The synchronous handle answers Java's accessors. The mock's single future
+ * failed, and Java's `partitionResult` forwards that failure for any partition
+ * - requested or not - as does `all()`. */
+static void test_mock_admin_alter_consumer_group_offsets_result_accessors(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const char *topics[2] = {"aca2", "aca2"};
-    const int32_t partitions[2] = {0, 1};
-    const int64_t offsets[2] = {1, 2};
+    const char *topics[1] = {"acx"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {7};
 
-    alter_group_offsets_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
-    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
-        admin, "acg2", topics, partitions, offsets, NULL, NULL, NULL, 2, -1,
-        on_alter_consumer_group_offsets, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+    kafka_admin_AlterConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "acg", topics, partitions, offsets, NULL, NULL, NULL, 1, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    assert_owned_error("Not implement yet",
+                       kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result, "acx", 0));
+    assert_owned_error("Not implement yet",
+                       kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result, "other", 3));
+    assert_owned_error("Not implement yet", kafka_admin_AlterConsumerGroupOffsetsResult_all(result));
+    /* The borrowed per-key error agrees with the owned accessor. */
+    TEST_ASSERT_EQUAL_STRING(
+        "Not implement yet",
+        kafka_common_Error_message(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, 0)));
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -4546,70 +4575,59 @@ static void test_mock_admin_delete_consumer_group_offsets_reports_unsupported_pe
     kafka_admin_AdminClient_destroy(admin);
 }
 
-typedef struct {
-    atomic_int fired;
-    atomic_int error_count;
-    char last_topic[64];
-    int32_t last_partition;
-} delete_group_offsets_async_result_t;
-
-/* Per-key async result (Phase E): the callback now fires once per partition,
- * independently, rather than once for the whole batch - see
- * `admin_async_per_key_op` /
- * `kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t`. There
- * is no value parameter: Java's per-partition future is `KafkaFuture<Void>`,
- * so a null error *is* the success value. */
-static void on_delete_consumer_group_offsets(const char *topic, int32_t partition,
+static void on_delete_consumer_group_offsets(kafka_admin_DeleteConsumerGroupOffsetsResult_t *result,
                                              kafka_common_Error_t *error, void *user_data) {
-    delete_group_offsets_async_result_t *r = (delete_group_offsets_async_result_t *)user_data;
-    if (topic != NULL) {
-        strncpy(r->last_topic, topic, sizeof(r->last_topic) - 1);
-    }
-    r->last_partition = partition;
-    if (error != NULL) {
-        atomic_fetch_add(&r->error_count, 1);
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
+    group_result_once_record((group_result_once_t *)user_data, result != NULL, error);
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
 }
 
+/* One callback for the whole request (MockAdminClient.java:783 throws), for two
+ * partitions and for an empty selection; a NULL group id fires it inline. */
 static void test_mock_admin_delete_consumer_group_offsets_async(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const char *topics[1] = {"dca"};
-    const int32_t partitions[1] = {3};
+    const char *topics[2] = {"dca", "dca"};
+    const int32_t partitions[2] = {3, 4};
 
-    delete_group_offsets_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
+    const int32_t counts[2] = {2, 0};
+    for (int i = 0; i < 2; i++) {
+        group_result_once_t r;
+        group_result_once_init(&r);
+        kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+            admin, "dcg", topics, partitions, counts[i], -1, on_delete_consumer_group_offsets, &r);
+        assert_fired_exactly_once(&r);
+        TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.result_count));
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.error_message);
+    }
+
+    group_result_once_t bad;
+    group_result_once_init(&bad);
     kafka_admin_AdminClient_delete_consumer_group_offsets_async(
-        admin, "dcg", topics, partitions, 1, -1, on_delete_consumer_group_offsets, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    /* MockAdminClient always throws UnsupportedOperationException here
-     * (MockAdminClient.java:783), so the requested partition's per-key future
-     * fails with the real typed error. */
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
-    TEST_ASSERT_EQUAL_STRING("dca", r.last_topic);
-    TEST_ASSERT_EQUAL_INT32(3, r.last_partition);
+        admin, NULL, topics, partitions, 2, -1, on_delete_consumer_group_offsets, &bad);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.fired));
+    TEST_ASSERT_EQUAL_STRING("group_id must not be null", bad.error_message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* Two partitions: proves independent per-key delivery through the real async
- * entry point, end to end. */
-static void test_mock_admin_delete_consumer_group_offsets_async_two_partitions(void) {
+/* Java's `partitionResult` throws IllegalArgumentException for a partition
+ * that was not in the original request before it looks at the future, so that
+ * exact message wins over the mock's whole-request failure; a requested
+ * partition and `all()` report the failure. */
+static void test_mock_admin_delete_consumer_group_offsets_result_accessors(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const char *topics[2] = {"dca2", "dca2"};
-    const int32_t partitions[2] = {0, 1};
+    const char *topics[1] = {"dcx"};
+    const int32_t partitions[1] = {0};
 
-    delete_group_offsets_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
-    kafka_admin_AdminClient_delete_consumer_group_offsets_async(
-        admin, "dcg2", topics, partitions, 2, -1, on_delete_consumer_group_offsets, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+    kafka_admin_DeleteConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_consumer_group_offsets(
+        admin, "dcg", topics, partitions, 1, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    assert_owned_error("Not implemented yet",
+                       kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, "dcx", 0));
+    assert_owned_error("Partition other-3 was not included in the original request",
+                       kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, "other", 3));
+    assert_owned_error("Not implemented yet", kafka_admin_DeleteConsumerGroupOffsetsResult_all(result));
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -4777,117 +4795,76 @@ static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-typedef struct {
-    atomic_int fired;
-    atomic_int error_count;
-    atomic_int null_key_count;
-    char last_group_instance_id[64];
-} remove_members_async_result_t;
-
-/* Per-key async result (Phase E): the callback fires once per member,
- * independently, rather than once for the whole batch - see
- * `admin_async_per_key_op` /
- * `kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t`.
- * There is no value parameter: Java's per-member future is
- * `KafkaFuture<Void>`, so a null error *is* the success value. In `removeAll`
- * mode `memberResult` is not applicable, so the callback fires EXACTLY ONCE with
- * a NULL group instance id, carrying the whole operation's `all()` outcome. */
-static void on_remove_members(const char *group_instance_id, kafka_common_Error_t *error,
-                              void *user_data) {
-    remove_members_async_result_t *r = (remove_members_async_result_t *)user_data;
-    if (group_instance_id != NULL) {
-        strncpy(r->last_group_instance_id, group_instance_id,
-                sizeof(r->last_group_instance_id) - 1);
-    } else {
-        atomic_fetch_add(&r->null_key_count, 1);
-    }
-    if (error != NULL) {
-        atomic_fetch_add(&r->error_count, 1);
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
+static void on_remove_members(kafka_admin_RemoveMembersFromConsumerGroupResult_t *result,
+                              kafka_common_Error_t *error, void *user_data) {
+    group_result_once_record((group_result_once_t *)user_data, result != NULL, error);
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
 }
 
+/* One callback for the whole request (MockAdminClient.java:801-803 throws):
+ * with explicit members, and in `removeAll` mode, where `all()` is Java's only
+ * applicable accessor. An empty member list without `remove_all` cannot be
+ * submitted (Java's Collection constructor throws), so it fires inline. */
 static void test_mock_admin_remove_members_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const char *members[1] = {"instance-async"};
-
-    remove_members_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
-    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-        admin, "rm-group", false, members, 1, NULL, -1, on_remove_members, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    /* MockAdminClient always throws UnsupportedOperationException here
-     * (MockAdminClient.java:801-803), so the requested member's per-key future
-     * fails with the real typed error. */
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
-    TEST_ASSERT_EQUAL_STRING("instance-async", r.last_group_instance_id);
-
-    /* An empty member list without `remove_all` has no per-member key at all
-     * (`read_strings` on a NULL/zero-length array yields an empty `keys`), so
-     * the callback never fires - it is not equivalent to `removeAll`, it is
-     * simply "nothing to report to". */
-    remove_members_async_result_t bad = {0};
-    atomic_init(&bad.fired, 0);
-    atomic_init(&bad.error_count, 0);
-    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-        admin, "rm-group", false, NULL, 0, NULL, -1, on_remove_members, &bad);
-    TEST_ASSERT_TRUE(wait_briefly_for_nothing(&bad.fired));
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&bad.fired));
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-/* Two members: proves independent per-key delivery through the real async
- * entry point, end to end. */
-static void test_mock_admin_remove_members_async_two_members(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *members[2] = {"instance-a", "instance-b"};
 
-    remove_members_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
+    const bool remove_all[2] = {false, true};
+    for (int i = 0; i < 2; i++) {
+        group_result_once_t r;
+        group_result_once_init(&r);
+        kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+            admin, "rm-group", remove_all[i], remove_all[i] ? NULL : members,
+            remove_all[i] ? 0 : 2, NULL, -1, on_remove_members, &r);
+        assert_fired_exactly_once(&r);
+        TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.result_count));
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.error_message);
+    }
+
+    group_result_once_t bad;
+    group_result_once_init(&bad);
     kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-        admin, "rm-group2", false, members, 2, NULL, -1, on_remove_members, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+        admin, "rm-group", false, NULL, 0, NULL, -1, on_remove_members, &bad);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.fired));
+    TEST_ASSERT_EQUAL_STRING("Invalid empty members has been provided", bad.error_message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* `removeAll` mode: Java's `memberResult` is not applicable at all (there is
- * no member list to key by), so `all()` is the only observable. The callback
- * must fire EXACTLY ONCE with a NULL group instance id, carrying the whole
- * operation's outcome - this is what lets a caller await the operation to
- * completion (and observe its error) even in `removeAll` mode, rather than the
- * operation being fire-and-forget with nothing to await. Against the mock,
- * `removeMembersFromConsumerGroup` completes with the unsupported error
- * (MockAdminClient.java:801-803), so the single callback carries that error. */
-static void test_mock_admin_remove_members_async_remove_all_fires_whole_op_once(void) {
+/* Java's `memberResult` throws IllegalArgumentException for a member that was
+ * not in the original request before it looks at the future; a requested
+ * member and `all()` report the mock's whole-request failure. */
+static void test_mock_admin_remove_members_result_accessors(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *members[1] = {"instance-1"};
 
-    remove_members_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    atomic_init(&r.error_count, 0);
-    atomic_init(&r.null_key_count, 0);
-    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-        admin, "rm-group-all", true, NULL, 0, NULL, -1, on_remove_members, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    /* The whole-op outcome is delivered with a NULL group instance id. */
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.null_key_count));
-    /* The mock's removeAll whole-op future carries the unsupported error. */
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
-    /* Exactly once: give a second callback time to (wrongly) arrive, then
-     * confirm the count is still 1. (`wait_briefly_for_nothing` sleeps 200ms;
-     * its return value is irrelevant here since `fired` is already 1.) */
-    (void)wait_briefly_for_nothing(&r.fired);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "rm-group", false, members, 1, NULL, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    assert_owned_error("Not implemented yet",
+                       kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result,
+                                                                                      "instance-1"));
+    assert_owned_error("Member instance-9 was not included in the original request",
+                       kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result,
+                                                                                      "instance-9"));
+    assert_owned_error("Not implemented yet", kafka_admin_RemoveMembersFromConsumerGroupResult_all(result));
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A whole-request error handed to several consumers is copied, not shared:
+ * each copy is freed independently. */
+static void test_mock_admin_error_clone_is_independent(void) {
+    kafka_common_Error_t *original = kafka_common_Error_new(25, "unknown member");
+    kafka_common_Error_t *copy = kafka_common_Error_clone(original);
+    TEST_ASSERT_NOT_NULL(copy);
+    TEST_ASSERT_TRUE(copy != original);
+    kafka_common_Error_destroy(original);
+    TEST_ASSERT_EQUAL_INT32(25, kafka_common_Error_code(copy));
+    TEST_ASSERT_EQUAL_STRING("unknown member", kafka_common_Error_message(copy));
+    kafka_common_Error_destroy(copy);
 }
 
 // ---- Cross-cutting ---------------------------------------------------------
@@ -7425,10 +7402,10 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_rejects_bad_input);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_the_call);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_async);
-    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_async_two_partitions);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_result_accessors);
     RUN_TEST(test_mock_admin_delete_consumer_group_offsets_reports_unsupported_per_partition);
     RUN_TEST(test_mock_admin_delete_consumer_group_offsets_async);
-    RUN_TEST(test_mock_admin_delete_consumer_group_offsets_async_two_partitions);
+    RUN_TEST(test_mock_admin_delete_consumer_group_offsets_result_accessors);
     RUN_TEST(test_mock_admin_delete_consumer_groups_reports_unsupported_per_group);
     RUN_TEST(test_mock_admin_delete_consumer_groups_async);
     RUN_TEST(test_mock_admin_delete_consumer_groups_async_two_groups);
@@ -7436,8 +7413,8 @@ int main(void) {
     RUN_TEST(test_mock_admin_remove_all_members_has_no_per_member_outcome);
     RUN_TEST(test_mock_admin_remove_members_rejects_an_empty_member_list);
     RUN_TEST(test_mock_admin_remove_members_async);
-    RUN_TEST(test_mock_admin_remove_members_async_two_members);
-    RUN_TEST(test_mock_admin_remove_members_async_remove_all_fires_whole_op_once);
+    RUN_TEST(test_mock_admin_remove_members_result_accessors);
+    RUN_TEST(test_mock_admin_error_clone_is_independent);
     RUN_TEST(test_mock_admin_group_offsets_driver_rejects_non_mock);
     RUN_TEST(test_mock_admin_b4_null_out_result);
     RUN_TEST(test_mock_admin_create_acls_reports_unsupported_per_binding);

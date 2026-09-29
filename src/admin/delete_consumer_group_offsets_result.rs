@@ -52,18 +52,11 @@ impl DeleteConsumerGroupOffsetsResult {
     /// fails if the deletion for the partition failed (or the partition is
     /// missing from the response).
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<()>, Error> {
-        if !self.partitions.contains(partition) {
-            return Err(Error::local_illegal_argument(format!(
-                "Partition {partition} was not included in the original request"
-            )));
-        }
+        self.ensure_requested(partition)?;
         let partition = partition.clone();
         Ok(self
             .future
-            .then_apply_try(move |topic_partitions| match sub_level_error(&topic_partitions, &partition) {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }))
+            .then_apply_try(move |topic_partitions| partition_result_of(&topic_partitions, &partition)))
     }
 
     /// Returns a future which succeeds only if all the deletions succeed.
@@ -71,19 +64,87 @@ impl DeleteConsumerGroupOffsetsResult {
     ///
     /// Mirrors `all()`.
     pub fn all(&self) -> KafkaFuture<()> {
-        // Sort for a stable "first error" (Java relies on set iteration order,
-        // which is unspecified anyway).
+        let partitions = self.sorted_partitions();
+        self.future
+            .then_apply_try(move |topic_partitions| all_of(&topic_partitions, &partitions))
+    }
+
+    /// The single future every accessor derives from — Java's
+    /// `KafkaFuture<Map<TopicPartition, Errors>> future` field.
+    ///
+    /// Crate-internal so the C FFI can await the one outcome once and then
+    /// evaluate [`partition_result`](Self::partition_result) /
+    /// [`all`](Self::all) against it through
+    /// [`resolved_partition_result`](Self::resolved_partition_result) /
+    /// [`resolved_all`](Self::resolved_all).
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn future(&self) -> &KafkaFuture<PartitionErrors> {
+        &self.future
+    }
+
+    /// Evaluates [`partition_result`](Self::partition_result) against an
+    /// already-resolved outcome of [`future`](Self::future), without awaiting.
+    ///
+    /// Same derivation as the future-based accessor: the "not included in the
+    /// original request" check comes first and does not depend on the outcome
+    /// (Java throws it before touching the future); then a failed outcome
+    /// propagates its error, as Java's `whenComplete` forwards the `throwable`.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn resolved_partition_result(
+        &self,
+        outcome: &Result<PartitionErrors, Error>,
+        partition: &TopicPartition,
+    ) -> Result<(), Error> {
+        self.ensure_requested(partition)?;
+        partition_result_of(outcome.as_ref().map_err(Error::clone)?, partition)
+    }
+
+    /// Evaluates [`all`](Self::all) against an already-resolved outcome of
+    /// [`future`](Self::future), without awaiting.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn resolved_all(&self, outcome: &Result<PartitionErrors, Error>) -> Result<(), Error> {
+        all_of(outcome.as_ref().map_err(Error::clone)?, &self.sorted_partitions())
+    }
+
+    /// Java's synchronous `partitionResult` guard.
+    fn ensure_requested(&self, partition: &TopicPartition) -> Result<(), Error> {
+        if self.partitions.contains(partition) {
+            Ok(())
+        } else {
+            Err(Error::local_illegal_argument(format!(
+                "Partition {partition} was not included in the original request"
+            )))
+        }
+    }
+
+    /// The requested partitions in a stable order, for a deterministic "first
+    /// error" in `all()` (Java relies on set iteration order, which is
+    /// unspecified anyway).
+    fn sorted_partitions(&self) -> Vec<TopicPartition> {
         let mut partitions: Vec<TopicPartition> = self.partitions.iter().cloned().collect();
         partitions.sort_by_key(|tp| (tp.topic().to_string(), tp.partition()));
-        self.future.then_apply_try(move |topic_partitions| {
-            for partition in &partitions {
-                if let Some(error) = sub_level_error(&topic_partitions, partition) {
-                    return Err(error);
-                }
-            }
-            Ok(())
-        })
+        partitions
     }
+}
+
+/// The body of Java's `partitionResult` `whenComplete` lambda, for a
+/// successfully resolved map.
+fn partition_result_of(topic_partitions: &PartitionErrors, partition: &TopicPartition) -> Result<(), Error> {
+    match sub_level_error(topic_partitions, partition) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The body of Java's `all()` `whenComplete` lambda, for a successfully
+/// resolved map: the first requested partition with a sub-level error fails.
+fn all_of(topic_partitions: &PartitionErrors, partitions: &[TopicPartition]) -> Result<(), Error> {
+    for partition in partitions {
+        if let Some(error) = sub_level_error(topic_partitions, partition) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Mirrors `KafkaAdminClient.getSubLevelError` specialised for the delete-offsets
@@ -183,5 +244,50 @@ mod tests {
         assert_eq!(result.all().get().await.unwrap(), ());
         assert_eq!(result.partition_result(&tp_zero()).unwrap().get().await.unwrap(), ());
         assert_eq!(result.partition_result(&tp_one()).unwrap().get().await.unwrap(), ());
+    }
+
+    /// `partition_result` / `all` and their `resolved_*` twins share one
+    /// derivation, so they must agree on every requested key, including the
+    /// exact messages; the unrequested-partition guard fires first, whatever
+    /// the outcome.
+    #[tokio::test]
+    async fn resolved_accessors_agree_with_the_future_based_ones() {
+        let handle: KafkaFutureImpl<PartitionErrors> = KafkaFutureImpl::new();
+        handle.complete(HashMap::from([(tp_zero(), Errors::None)]));
+        let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
+        let outcome = result.future().get().await;
+
+        for tp in [tp_zero(), tp_one()] {
+            let via_future = result.partition_result(&tp).unwrap().get().await;
+            let resolved = result.resolved_partition_result(&outcome, &tp);
+            assert_eq!(format!("{via_future:?}"), format!("{resolved:?}"), "{tp}");
+        }
+        assert_eq!(
+            result.resolved_partition_result(&outcome, &tp_one()).unwrap_err().message(),
+            "Offset deletion result for partition \"topic-1\" was not included in the response"
+        );
+        assert_eq!(
+            format!("{:?}", result.all().get().await),
+            format!("{:?}", result.resolved_all(&outcome))
+        );
+
+        let unrequested = TopicPartition::new("invalid-topic", 0);
+        let via_future = result.partition_result(&unrequested).unwrap_err();
+        let failed: Result<PartitionErrors, Error> = Err(Error::group_authorization("g"));
+        for outcome in [&outcome, &failed] {
+            let resolved = result.resolved_partition_result(outcome, &unrequested).unwrap_err();
+            assert_eq!(format!("{via_future:?}"), format!("{resolved:?}"));
+            assert_eq!(
+                resolved.message(),
+                "Partition invalid-topic-0 was not included in the original request"
+            );
+        }
+
+        // A failed outcome reaches the requested-key accessors unchanged.
+        assert!(matches!(
+            result.resolved_partition_result(&failed, &tp_zero()),
+            Err(Error::GroupAuthorization(_))
+        ));
+        assert!(matches!(result.resolved_all(&failed), Err(Error::GroupAuthorization(_))));
     }
 }
