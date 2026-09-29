@@ -268,9 +268,9 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a per-element null topic without TopicPartition's own ctor validation
-        // firing. Rejected as ArgumentException (the Subscribe per-element precedent).
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a per-element null topic (the ctor stores a null topic too, as Java's does).
+        // Rejected as ArgumentException (the Subscribe per-element precedent).
         TopicPartition[] withNullTopic = { default };
 
         // ArgumentException is the base of ArgumentNullException, so ThrowsAsync<ArgumentException>

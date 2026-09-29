@@ -336,12 +336,20 @@ public sealed class PublicConsumerCommitCallbackTests
         using MockConsumer<byte[], byte[]> consumer = NewMock();
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => consumer.CommitAsync(
-            new Dictionary<TopicPartition, OffsetAndMetadata>
-            {
-                [new TopicPartition(Topic, -1)] = new OffsetAndMetadata(1),
-            },
-            callback));
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.CommitAsync(
+                new Dictionary<TopicPartition, OffsetAndMetadata>
+                {
+                    [new TopicPartition(Topic, -1)] = new OffsetAndMetadata(1),
+                },
+                callback));
+
+        // The consumer's own SnapshotCommitOffsets guard (M15/P13.2 D11), not the TopicPartition
+        // ctor — which stores a negative partition as Java's does — so the parameter named is
+        // the map, not the ctor's `partition`.
+        Assert.Equal("offsets", error.ParamName);
+        Assert.Equal(-1, error.ActualValue);
+        Assert.StartsWith("Partition must not be negative.", error.Message, StringComparison.Ordinal);
 
         // Rejected before the P/Invoke, so the callback was never registered and never fires.
         Assert.Empty(callback.Completions);

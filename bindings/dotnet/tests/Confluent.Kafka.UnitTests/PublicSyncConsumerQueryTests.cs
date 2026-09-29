@@ -416,8 +416,8 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullElementTopic_ThrowsArgument()
     {
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a null element topic without TopicPartition's own ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a null element topic (the ctor stores a null topic too, as Java's does).
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => consumer.Committed(new[] { default(TopicPartition) }));

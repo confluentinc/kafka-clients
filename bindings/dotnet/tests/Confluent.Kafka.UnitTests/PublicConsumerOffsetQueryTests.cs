@@ -297,8 +297,8 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a null element topic without TopicPartition's own ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a null element topic (the ctor stores a null topic too, as Java's does).
         await Assert.ThrowsAsync<ArgumentException>(
             () => consumer.Committed(new[] { default(TopicPartition) }));
     }

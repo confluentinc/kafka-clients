@@ -3350,8 +3350,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         NativePartitionOpSubmit submit)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §B5): the ABI does not validate them
-        // and panics/mismaps on violation (a negative partition is silently mapped to
-        // "unset"). A null collection is rejected; an EMPTY collection is valid (Java: NPE
+        // (a NULL topic is undefined behaviour — `read_topic_partitions` calls
+        // `CStr::from_ptr` on it — and a negative partition is passed straight to the core;
+        // the negative check is this binding's stricter-than-Java precondition, M15/P13.2
+        // D11). A null collection is rejected; an EMPTY collection is valid (Java: NPE
         // on null vs no-op / clear on empty), so we do NOT reject empty. SnapshotPartitions
         // is the shared validate-and-snapshot reused by the M5/P4 collection-input queries
         // (PLAN §3 — the validation is not copy-pasted).
@@ -3869,6 +3871,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// BEFORE any pin / P-Invoke, because the ABI does not validate preconditions and
     /// panics/mismaps on violation (CLAUDE.md §3).
     /// </summary>
+    /// <remarks>
+    /// Both element checks are this method's own, <b>not</b> a backstop for
+    /// <see cref="TopicPartition"/>'s constructor, which — like Java's
+    /// (<c>TopicPartition.java:32-35</c>) — stores a null topic and a negative partition as
+    /// given (M15/P13.2 G3-4). The null-topic check is the only thing between such a value and
+    /// undefined behaviour in the ABI (<c>read_topic_partitions</c> calls <c>CStr::from_ptr</c>
+    /// on every topic; M15/P13.2 D1). The negative-partition check is a stricter-than-Java
+    /// precondition — Java's <c>assign</c> accepts a negative partition — kept deliberately
+    /// (M15/P13.2 D11).
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>

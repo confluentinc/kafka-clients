@@ -179,6 +179,40 @@ public class PublicAdminMockSeedingTests
         Assert.Throws<ArgumentException>(() => admin.UpdateConsumerGroupOffsets(withNullTopic));
     }
 
+    /// <summary>
+    /// The same guard, reached through a <c>new TopicPartition(null!, 0)</c> — constructible
+    /// since M15/P13.2 G3-4, as in Java — with the exact message and parameter name. The seed
+    /// is rejected as a whole: a valid entry enumerated before the null one is not applied
+    /// either, which is the witness that nothing reached the core.
+    /// </summary>
+    [Fact]
+    public async Task SeedingRejectsAConstructedNullTopic_AndSeedsNothing()
+    {
+        const string Message = "The offsets map must not contain a topic partition with a null topic.";
+        using MockAdminClient admin = new MockAdminClient();
+        TopicPartition valid = new TopicPartition("seed-null-topic", 0);
+        Dictionary<TopicPartition, long> withNullTopic = new Dictionary<TopicPartition, long>
+        {
+            [valid] = 42,
+            [new TopicPartition(null!, 0)] = 1,
+        };
+
+        foreach (Action seed in new Action[]
+        {
+            () => admin.UpdateBeginningOffsets(withNullTopic),
+            () => admin.UpdateEndOffsets(withNullTopic),
+            () => admin.UpdateConsumerGroupOffsets(withNullTopic),
+        })
+        {
+            ArgumentException rejected = Assert.Throws<ArgumentException>(seed);
+            Assert.Equal("offsets", rejected.ParamName);
+            Assert.StartsWith(Message, rejected.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(Unseeded, await EarliestOffset(admin, valid));
+        Assert.Equal(Unseeded, await LatestOffset(admin, valid));
+    }
+
     [Fact]
     public void SeedingAfterDisposeThrowsObjectDisposed()
     {

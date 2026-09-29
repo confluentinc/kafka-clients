@@ -195,8 +195,8 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void Seek_NullTopic_ThrowsArgumentNull()
     {
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a null topic without the TopicPartition ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a null topic (the ctor stores a null topic too, as Java's does).
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<ArgumentNullException>(() => consumer.Seek(default, 0L));

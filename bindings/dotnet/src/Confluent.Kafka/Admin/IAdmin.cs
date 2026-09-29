@@ -1393,7 +1393,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <returns>The single awaitable Java publishes. See <see cref="AbortTransactionResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="spec"/> carries a <c>default(TopicPartition)</c>, whose topic is null.
+    /// <paramref name="spec"/> carries a topic partition whose topic is null (constructible, as
+    /// in Java, or a <c>default(TopicPartition)</c>) — a null topic cannot cross the C ABI.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.

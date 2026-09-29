@@ -175,8 +175,8 @@ public sealed class PublicConsumerCommitTests
     {
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a null element topic without TopicPartition's own ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a null element topic (the ctor stores a null topic too, as Java's does).
         // SnapshotCommitOffsets rejects it (the shipped offset-query precedent).
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {

@@ -330,10 +330,16 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     callback with the `-1` placeholder and returns a **failed future**. So fire the
     delivery callback and fault the returned `Task` with a **retriable** error; only
     the *precondition* throws (disposed producer, already-cancelled token) stay
-    synchronous. Reuse the existing failure-placeholder machinery — `TopicPartition`'s
-    ctor rejects a negative partition and the placeholder's is `-1`, so a hand-rolled
-    construction throws *inside* §A6 form C's no-throw swallow boundary and makes the
-    callback **silently absent** (the M14/P1 trap).
+    synchronous. Reuse the existing failure-placeholder machinery
+    (`DeliveryRegistration.Fire`) — it is the **single firing site** for both producer
+    flavors, where the placeholder (the record's explicit partition or `-1`, M14/P1
+    D2/D6), the exception coercion and the swallow-and-trace policy (D4) are defined
+    once, inside §A6 form C's one no-throw boundary. A hand-rolled second placeholder
+    re-derives that policy outside it and is exactly the "fixed in one flavor only"
+    divergence the single site exists to prevent. (The original M14/P1 trap — a
+    `TopicPartition` ctor that rejected the `-1` throwing *inside* the swallow boundary
+    and making the callback **silently absent** — no longer exists: since M15/P13.2 G3-4
+    that ctor stores a negative partition as Java's does. The rule does not depend on it.)
     ⚠ **A blocking admission needs no fair primitive for ORDERING, and is NOT fair
     against STARVATION.** `SemaphoreSlim`'s documented lack of waiter ordering cannot
     invert one caller's own sends under a blocking admission (that caller has at most
@@ -397,7 +403,8 @@ pump deadlock-free (the Sender runs on other worker threads).
     admission (it is not one — measured twice), or capping **one** container and
     calling the population bounded (it relocates, measured).
   - Throwing synchronously on the admission timeout instead of faulting the `Task` and
-    firing the delivery callback; or hand-rolling the `-1` placeholder.
+    firing the delivery callback; or hand-rolling the `-1` placeholder instead of routing
+    the failure through `DeliveryRegistration.Fire`.
   - A comment claiming the admission gate is **fair** — it is not; state the
     starvation deviation instead.
 

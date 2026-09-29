@@ -332,20 +332,23 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
 /// </list>
 /// </para>
 /// <para>
-/// <b>Why the sentinel is not passed through instead.</b> It is not expressible: the binding's
-/// <see cref="TopicPartition"/> — the value type <see cref="CallbackLog.Append"/> takes — rejects
-/// a negative partition with <see cref="System.ArgumentOutOfRangeException"/> by Java-parity
-/// design, so carrying <c>-1</c> would mean either widening that shared signature or fabricating
-/// an index the producer never assigned. A <c>-1</c> on the wire would also read as a partition
-/// to any cross-backend comparison, which is the opposite of informative.
+/// <b>Why the sentinel is not passed through instead.</b> Not because it is inexpressible —
+/// <see cref="TopicPartition"/> stores a negative partition as given, as Java's does
+/// (<c>TopicPartition.java:32-35</c>; Java's own producer builds
+/// <c>new TopicPartition(topic, RecordMetadata.UNKNOWN_PARTITION)</c> on exactly this path,
+/// <c>KafkaProducer.java:1620</c>) — but because of the <b>cross-backend log shape</b>. A
+/// <c>(topic, -1)</c> entry would read as a partition to any cross-backend comparison, where
+/// Python reports no partition at all for the same failure; it would name an index the
+/// producer never assigned. So the guard keeps the "no partition" case shaped exactly as
+/// Python shapes it.
 /// </para>
 /// <para>
-/// ⚠ <b>And the guard is load-bearing, not defensive.</b> Without it this method <em>throws</em>
-/// on every failed send whose record let the producer choose — and the binding <b>swallows</b> a
-/// throwing delivery callback (M14/P1 decision D4), so the entry would be silently <em>absent</em>
-/// rather than differently shaped. That is strictly worse than either shape and no managed
-/// assertion in this project would catch it; it was caught in this phase's self-review, after a
-/// first cut that constructed the <see cref="TopicPartition"/> unconditionally.
+/// (History: until M15/P13.2 G3-4 the binding's <see cref="TopicPartition"/> constructor
+/// rejected a negative partition, and this guard was <em>also</em> what kept this method from
+/// throwing on every failed send whose record let the producer choose — a throw the binding's
+/// delivery-callback swallow (M14/P1 decision D4) would have turned into a silently
+/// <em>absent</em> entry. That constructor no longer throws, so the guard is now purely about
+/// the shape.)
 /// </para>
 /// <para>
 /// The in-scope conformance test exercises only the success path, so no assertion distinguishes
@@ -379,10 +382,10 @@ internal sealed class LoggingDeliveryCallback : IDeliveryCallback
 
         // metadata is never null (M14/P1 D2/D6), so Python's `if metadata is not None` has no
         // branch here. What DOES need guarding is the placeholder's partition: it is -1 when the
-        // record let the producer choose, and -1 is a "no partition" sentinel that TopicPartition
-        // rejects (ArgumentOutOfRangeException). Constructing it unconditionally would throw, and
-        // the binding swallows a throwing delivery callback — so the entry would go MISSING on
-        // every such failure instead of merely being shaped differently. See the type remarks.
+        // record let the producer choose, and -1 is a "no partition" sentinel, not an index.
+        // TopicPartition would store it (as Java's does), but a (topic, -1) entry would read as
+        // a partition where Python logs none — so the guard keeps the cross-backend log shape.
+        // See the type remarks.
         if (metadata.Partition >= 0)
         {
             partitions = new List<TopicPartition>(1)

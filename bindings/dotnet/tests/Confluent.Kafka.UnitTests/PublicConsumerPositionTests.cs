@@ -155,8 +155,8 @@ public sealed class PublicConsumerPositionTests
     {
         using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
 
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way
-        // to present a null topic without TopicPartition's own ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways
+        // to present a null topic (the ctor stores a null topic too, as Java's does).
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => consumer.Position(default));
     }

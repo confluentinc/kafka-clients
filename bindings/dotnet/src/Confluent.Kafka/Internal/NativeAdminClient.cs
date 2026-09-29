@@ -1606,8 +1606,9 @@ internal sealed class NativeAdminClient : IDisposable
         int next = 0;
         foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
         {
-            // A `default(TopicPartition)` has a null Topic, and the header's "an entry
-            // with a NULL topic is skipped" would silently drop it (ffi §B5).
+            // A null topic (constructible, as in Java, or `default(TopicPartition)`) cannot
+            // cross the C ABI: the header's "an entry with a NULL topic is skipped" would
+            // silently drop it (ffi §B5, M15/P13.2 D1).
             if (entry.Key.Topic is null)
             {
                 throw new ArgumentException(
@@ -2799,8 +2800,11 @@ internal sealed class NativeAdminClient : IDisposable
         int next = 0;
         foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
         {
-            // A `default(TopicPartition)` has a null Topic, and the header's "an entry with
-            // a NULL topic is skipped" would silently drop it (ffi §B5).
+            // A null topic (constructible, as in Java, or `default(TopicPartition)`) cannot
+            // cross the C ABI: the header's "an entry with a NULL topic is skipped" would
+            // silently drop it (ffi §B5, M15/P13.2 D1). A negative partition is NOT guarded —
+            // the core fails that key itself (the real client with Java's own "The given
+            // partition index -1 is not valid.").
             if (entry.Key.Topic is null)
             {
                 throw new ArgumentException(
@@ -5340,8 +5344,9 @@ internal sealed class NativeAdminClient : IDisposable
         int next = 0;
         foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
         {
-            // A `default(TopicPartition)` has a null Topic, and the header's "an entry with
-            // a NULL topic is skipped" would silently drop it (ffi §B5).
+            // A null topic (constructible, as in Java, or `default(TopicPartition)`) cannot
+            // cross the C ABI: the header's "an entry with a NULL topic is skipped" would
+            // silently drop it (ffi §B5, M15/P13.2 D1).
             if (entry.Key.Topic is null)
             {
                 throw new ArgumentException(
@@ -5992,8 +5997,9 @@ internal sealed class NativeAdminClient : IDisposable
             List<TopicPartition> pairs = new List<TopicPartition>(selected.Count);
             foreach (TopicPartition partition in selected)
             {
-                // A `default(TopicPartition)` has a null Topic, which the ABI would read as
-                // an absent name rather than a request (ffi §B5).
+                // A null topic (constructible, as in Java, or `default(TopicPartition)`)
+                // cannot cross the C ABI, which would read it as an absent name rather than a
+                // request (ffi §B5, M15/P13.2 D1).
                 if (partition.Topic is null)
                 {
                     throw new ArgumentException(
@@ -6219,8 +6225,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     /// <remarks>
     /// De-duplication mirrors Java, whose parameter is a <c>Set</c>. The null-topic check is
-    /// mandatory: the header skips such an entry silently, which would leave the caller
-    /// believing a partition was queried.
+    /// mandatory: a null topic (constructible, as in Java, or <c>default(TopicPartition)</c>)
+    /// cannot cross the C ABI — the header skips such an entry silently, which would leave the
+    /// caller believing a partition was queried (M15/P13.2 D1). A negative partition is passed
+    /// through: the core (list reassignments) or the broker answers it.
     /// </remarks>
     private static List<TopicPartition> DistinctPartitions(
         IReadOnlyCollection<TopicPartition>? partitions, string parameterName)
@@ -6831,8 +6839,9 @@ internal sealed class NativeAdminClient : IDisposable
             int next = 0;
             foreach (KeyValuePair<TopicPartition, long> entry in offsets)
             {
-                // A `default(TopicPartition)` has a null Topic, which the core SKIPS —
-                // silently dropping the entry (ffi §B5), as DeleteRecords guards too.
+                // A null topic (constructible, as in Java, or `default(TopicPartition)`)
+                // cannot cross the C ABI: the core SKIPS it, silently dropping the entry
+                // (ffi §B5, M15/P13.2 D1), as DeleteRecords guards too.
                 if (entry.Key.Topic is null)
                 {
                     throw new ArgumentException(

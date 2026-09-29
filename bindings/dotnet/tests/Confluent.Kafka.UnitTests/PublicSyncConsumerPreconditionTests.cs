@@ -82,8 +82,8 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("seekToEnd")]
     public void PartitionOps_NullElementTopic_ThrowArgumentException(string op)
     {
-        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
-        // present a null element topic without the TopicPartition ctor validation firing.
+        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
+        // present a null element topic (the ctor stores a null topic too, as Java's does).
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
