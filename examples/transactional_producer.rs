@@ -77,7 +77,11 @@ async fn produce_in_transaction(producer: &KafkaProducer<String, String>) -> Res
     println!("Transaction begun.");
 
     for i in 0..NUM_RECORDS {
-        let record = ProducerRecord::with_key(TOPIC_NAME.to_string(), Some(i.to_string()), Some(i.to_string()));
+        let key = format!("key-{i}");
+        let value = format!("value-{i}");
+
+        println!("Producing record: key={key}, value={value}");
+        let record = ProducerRecord::with_key(TOPIC_NAME.to_string(), Some(key), Some(value));
         // The future is not awaited: `commit_transaction` fails if any send failed.
         producer.send(record).await?;
     }
