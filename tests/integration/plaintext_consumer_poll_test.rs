@@ -311,9 +311,17 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
 /// fields; Rust uses `AtomicUsize` because the listener may be invoked
 /// across rebalance events from the bg task into the user task via
 /// the §31 oneshot handshake.
+///
+/// `calls_to_assigned_non_empty` has no Java counterpart: it counts only the
+/// `on_partitions_assigned` invocations that carried at least one partition,
+/// so a test can tell a real (re)assignment apart from the empty callback a
+/// reconciliation against a not-yet-resolved topic id produces (see
+/// [`await_partition_assigned`]). Only [`TestConsumerReassignmentListener`]
+/// maintains it.
 #[derive(Clone)]
 struct RebalanceCounters {
     calls_to_assigned: Arc<AtomicUsize>,
+    calls_to_assigned_non_empty: Arc<AtomicUsize>,
     calls_to_revoked: Arc<AtomicUsize>,
 }
 
@@ -321,12 +329,17 @@ impl RebalanceCounters {
     fn new() -> Self {
         Self {
             calls_to_assigned: Arc::new(AtomicUsize::new(0)),
+            calls_to_assigned_non_empty: Arc::new(AtomicUsize::new(0)),
             calls_to_revoked: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn calls_to_assigned(&self) -> usize {
         self.calls_to_assigned.load(Ordering::SeqCst)
+    }
+
+    fn calls_to_assigned_non_empty(&self) -> usize {
+        self.calls_to_assigned_non_empty.load(Ordering::SeqCst)
     }
 
     fn calls_to_revoked(&self) -> usize {
@@ -354,8 +367,11 @@ impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
+        if !partitions.is_empty() {
+            self.counters.calls_to_assigned_non_empty.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -425,6 +441,21 @@ async fn await_partition_assigned(
             "Timed out waiting for {partition} to be assigned (current assignment: {assignment:?})"
         );
         let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+    }
+}
+
+/// Drives `poll(100ms)` until every partition in `partitions` is in the
+/// consumer's assignment — i.e. the FULL assignment has been applied on the
+/// application task, not merely the first (possibly empty) callback observed.
+/// See [`await_partition_assigned`] for why the first callback can be empty.
+async fn await_full_assignment(
+    consumer: &mut BytesConsumer,
+    partitions: &[TopicPartition],
+    deadline_duration: Duration,
+) {
+    let deadline = Instant::now() + deadline_duration;
+    for partition in partitions {
+        await_partition_assigned(consumer, partition, deadline.saturating_duration_since(Instant::now())).await;
     }
 }
 
@@ -732,12 +763,29 @@ async fn test_async_consumer_max_poll_interval_ms() {
         .await
         .expect("subscribe_with_topics_listener should succeed");
 
+    let all_partitions = [
+        TopicPartition::new(topic.clone(), 0),
+        TopicPartition::new(topic.clone(), 1),
+    ];
+
     // Rebalance to get the initial assignment.
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
-    assert_eq!(
-        counters.calls_to_assigned(),
-        1,
-        "callsToAssigned should be 1 after initial rebalance"
+    //
+    // Deliberate departure from Java's `awaitRebalance` + `assertEquals(1,
+    // callsToAssigned)`: the first `on_partitions_assigned` can be EMPTY when
+    // the coordinator's assignment names a topic id this consumer's metadata
+    // has not resolved yet (`AbstractMembershipManager.java:830-840`; see
+    // `await_partition_assigned`). Returning on that callback leaves the real
+    // assignment to be reconciled on the background task during the sleep
+    // below and applied only on the next `poll` — after the poll timer has
+    // expired and the member has left — which yields 3 assigned / 0 revoked
+    // depending on timing. So wait for the FULL assignment to be applied and
+    // take the count of partition-carrying callbacks as the baseline (1, or 2
+    // if the assignment was split across target epochs).
+    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
+    let assigned_baseline = counters.calls_to_assigned_non_empty();
+    assert!(
+        assigned_baseline >= 1,
+        "at least one partition-carrying on_partitions_assigned should have fired"
     );
     assert_eq!(
         counters.calls_to_revoked(),
@@ -751,11 +799,36 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // wall-clock to compensate for broker latency on testcontainers.
     tokio::time::sleep(Duration::from_secs(7)).await;
 
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(90)).await;
+    // Java: `awaitRebalance` then `assertEquals(2, callsToAssigned)` /
+    // `assertEquals(1, callsToRevoked)` — exactly one fence-and-rejoin.
+    // Counted over partition-carrying callbacks only: the rejoin reconcile
+    // runs against a `NONE` current assignment and, for the same
+    // unresolved-id / split-epoch reasons as above, may fire an extra EMPTY
+    // `on_partitions_assigned` that is not a second rebalance. Wait until the
+    // revocation has fired AND the full assignment is back via a new
+    // partition-carrying callback.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let assignment = consumer.assignment();
+        if counters.calls_to_revoked() >= 1
+            && counters.calls_to_assigned_non_empty() > assigned_baseline
+            && all_partitions.iter().all(|tp| assignment.contains(tp))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for fence-and-rejoin (revoked={}, non-empty assigned={}, \
+             baseline={assigned_baseline}, assignment={assignment:?})",
+            counters.calls_to_revoked(),
+            counters.calls_to_assigned_non_empty()
+        );
+        let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+    }
     assert_eq!(
-        counters.calls_to_assigned(),
-        2,
-        "callsToAssigned should be 2 after the second rebalance"
+        counters.calls_to_assigned_non_empty(),
+        assigned_baseline + 1,
+        "exactly one partition-carrying on_partitions_assigned should follow the fence"
     );
     assert_eq!(
         counters.calls_to_revoked(),
@@ -1157,8 +1230,26 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
         .expect("subscribe_with_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
+    //
+    // Deliberate departure from Java's `awaitRebalance`: the first
+    // `on_partitions_assigned` can be EMPTY when the coordinator's assignment
+    // names a topic id this consumer's metadata has not resolved yet
+    // (`AbstractMembershipManager.java:830-840`; see
+    // `await_partition_assigned`). Taking the baseline on that callback lets
+    // the real assignment land during the polls below and bump
+    // `callsToAssigned` although no rebalance happened. So wait for the FULL
+    // assignment to be applied before taking the baseline.
+    let all_partitions = [
+        TopicPartition::new(topic.clone(), 0),
+        TopicPartition::new(topic.clone(), 1),
+    ];
+    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
     let calls_to_assigned_after_first_rebalance = counters.calls_to_assigned();
+    assert_eq!(
+        counters.calls_to_revoked(),
+        0,
+        "callsToRevoked should be 0 after initial rebalance"
+    );
 
     // Java: `consumer.poll(Duration.ofMillis(2000))` once, then two
     // short polls of 500ms. The bg task runs continuously during the
@@ -1172,6 +1263,11 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
         counters.calls_to_assigned(),
         calls_to_assigned_after_first_rebalance,
         "callsToAssigned should not advance: no rebalance during long-but-respected poll"
+    );
+    assert_eq!(
+        counters.calls_to_revoked(),
+        0,
+        "callsToRevoked should not advance: no rebalance during long-but-respected poll"
     );
 
     consumer.close().await.expect("consumer close should succeed");
