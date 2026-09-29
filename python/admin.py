@@ -167,6 +167,13 @@ from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-o
 # they already reuse `Node`.
 from producer import KafkaError  # shared error type
 
+# The error an absent per-key result resolves with (see
+# `_keyed_replica_value_cb`): the code and message the native layer used to
+# synthesise for it before it reported the key as absent instead. -4 is
+# `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` (`_error_code.LOCAL_ILLEGAL_STATE`).
+_ABSENT_KEY_ERROR_CODE = -4
+_ABSENT_KEY_ERROR_MESSAGE = "the requested key was not present in the admin RPC's response"
+
 
 # --------------------------------------------------------------------------
 # Supporting value types (mirror the Java admin types).
@@ -2666,11 +2673,25 @@ class _AdminBase:
     def _keyed_replica_value_cb(self, futures, convert, loop=None):
         """Builds the `cb(topic, partition, broker_id, value, error)` native
         callback for `describe_replica_log_dirs` (Phase C), whose key is a
-        `TopicPartitionReplica`."""
+        `TopicPartitionReplica`.
+
+        A null `value` AND a null `error` is the native layer reporting the
+        replica ABSENT from the result (Java's ``values().get(replica) ==
+        null``; only the mock does it, for a replica of an unknown topic). The
+        replica's Future already exists, so it is resolved with an explicit
+        ``LocalIllegalState`` error rather than left pending."""
+        def resolve(fut, value, error):
+            if not value and not error:
+                if not (fut.cancelled() or fut.done()):
+                    fut.set_exception(KafkaError._from_parts(
+                        _ABSENT_KEY_ERROR_CODE, _ABSENT_KEY_ERROR_MESSAGE, 0, 0))
+                return
+            self._resolve_keyed_value(fut, value, error, convert)
+
         if loop is None:
             def cb(topic, partition, broker_id, value, error):
                 key = TopicPartitionReplica(topic, partition, broker_id)
-                self._resolve_keyed_value(futures[key], value, error, convert)
+                resolve(futures[key], value, error)
             return cb
 
         def cb(topic, partition, broker_id, value, error):
@@ -2678,8 +2699,7 @@ class _AdminBase:
             if loop.is_closed():
                 self._free_keyed_value(value, error, convert)
                 return
-            loop.call_soon_threadsafe(
-                self._resolve_keyed_value, futures[key], value, error, convert)
+            loop.call_soon_threadsafe(resolve, futures[key], value, error)
         return cb
 
     def _keyed_topic_partition_void_cb(self, futures, loop=None):
@@ -3854,10 +3874,9 @@ class Admin(_AdminBase):
         rather than a :class:`ReplicaLogDirInfo`: the mock itself silently
         omits such a replica from its own internal result map (mirroring
         Java's ``MockAdminClient``, which does the same:
-        ``if (topicMetadata != null)``), but the native per-key delivery layer
-        (``admin_async_per_key_op``) detects the missing key and resolves its
-        ``Future`` with an explicit error instead of leaving it pending
-        forever. Against a real broker this case does not arise the same
+        ``if (topicMetadata != null)``), the native layer reports that key as
+        absent, and this binding resolves its already-created ``Future`` with
+        an explicit error instead of leaving it pending forever. Against a real broker this case does not arise the same
         way: ``KafkaAdminClient`` seeds and completes a future for every
         requested replica, reporting an unknown topic as *present* with a
         null ``current_replica_log_dir`` instead of an error.
