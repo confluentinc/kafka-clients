@@ -47,6 +47,24 @@ namespace Confluent.Kafka;
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it.
 /// </para>
 /// <para>
+/// <b>Transactions (M17/P1).</b> The transaction members run against the core's mock, which
+/// follows Java's <c>MockProducer</c>: a send inside a transaction reaches
+/// <see cref="HistoryCount()"/> only when the transaction commits, and commit and abort flush
+/// first. Three Java transaction helpers are here as inherent members:
+/// <see cref="SetCommitTransactionError"/> / <see cref="ClearCommitTransactionError"/> (Java's
+/// public <c>commitTransactionException</c> field), <see cref="SentOffsets"/> (Java
+/// <c>sentOffsets()</c>) and <see cref="CommittedOffset"/> (a single-entry view of Java's
+/// <c>consumerGroupOffsetsHistory()</c>). The others are absent because the C ABI does not export
+/// them: <c>fenceProducer()</c>; <c>transactionInitialized()</c>, <c>transactionInFlight()</c>,
+/// <c>transactionCommitted()</c> and <c>transactionAborted()</c>; <c>commitCount()</c>;
+/// <c>flushed()</c>; the <c>initTransactionException</c>, <c>beginTransactionException</c>,
+/// <c>sendOffsetsToTransactionException</c> and <c>abortTransactionException</c> fields; the
+/// <c>history()</c> list and <c>uncommittedRecords()</c> (only <c>history()</c>'s count is
+/// exported, as <see cref="HistoryCount()"/>); and the full <c>consumerGroupOffsetsHistory()</c>
+/// list and <c>uncommittedOffsets()</c> (only a single-entry projection is exported, as
+/// <see cref="CommittedOffset"/>).
+/// </para>
+/// <para>
 /// <b>Delivery callbacks come for free, and that is Java-parity (M14/P1 decision D10).</b>
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> shares the
 /// real client's plumbing, and Java's own <c>MockProducer</c> keeps the per-record callbacks and
@@ -233,6 +251,28 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>
+    public Task InitTransactions(CancellationToken cancellationToken = default) =>
+        _native.InitTransactionsWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public void BeginTransaction() => _native.BeginTransaction();
+
+    /// <inheritdoc/>
+    public Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default) =>
+        _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitTransaction(CancellationToken cancellationToken = default) =>
+        _native.CommitTransactionWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task AbortTransaction(CancellationToken cancellationToken = default) =>
+        _native.AbortTransactionWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken);
 
@@ -275,8 +315,78 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// Clears the sent history and any pending completions (Java <c>MockProducer.clear()</c> /
     /// Python <c>clear()</c>).
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>On a manual (<c>autoComplete: false</c>) mock, complete or fail the pending sends
+    /// before calling this.</b> Clearing drops their completions, so those sends never resolve, as
+    /// in Java. Here that also holds up everything the producer resolves after them, in order: every
+    /// later send, every later <see cref="CommitTransaction"/> or <see cref="AbortTransaction"/>
+    /// (which waits for the earlier sends, residual R-a in the remarks on
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>), and <see cref="Dispose"/> /
+    /// <see cref="DisposeAsync"/>, which never return.
+    /// </remarks>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
+
+    /// <summary>
+    /// Makes every later <c>CommitTransaction</c> fail with <paramref name="code"/> and
+    /// <paramref name="message"/> until <see cref="ClearCommitTransactionError"/> is called (Java's
+    /// public <c>MockProducer.commitTransactionException</c> field, which stays set until it is
+    /// cleared). The failed commit leaves the transaction open, so it can still be aborted.
+    /// </summary>
+    /// <remarks>
+    /// <b>Setup only.</b> Call it between transaction members, never while one is running on the
+    /// same producer: the C ABI does not say whether an overlapping transaction member sees the new
+    /// value, and the binding adds no guard.
+    /// </remarks>
+    /// <param name="code">The Kafka error code: non-zero, and within the range of <see cref="short"/>.</param>
+    /// <param name="message">The error message, or <see langword="null"/> for the code's default message.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="code"/> is 0, or outside the range of <see cref="short"/>.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public void SetCommitTransactionError(int code, string? message = null) =>
+        _native.MockSetCommitTransactionError(code, message);
+
+    /// <summary>
+    /// Removes the error <see cref="SetCommitTransactionError"/> installed, so later commits behave
+    /// normally again (Java: setting <c>commitTransactionException</c> back to
+    /// <see langword="null"/>). Setup only, as <see cref="SetCommitTransactionError"/> is.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public void ClearCommitTransactionError() => _native.MockClearCommitTransactionError();
+
+    /// <summary>
+    /// Whether the current transaction has been given offsets by a
+    /// <c>SendOffsetsToTransaction</c> call with a non-empty map (Java
+    /// <c>MockProducer.sentOffsets()</c>). <c>BeginTransaction</c> and <see cref="Clear"/> reset it;
+    /// a commit does not. A <b>method</b>, not a property, like <see cref="HistoryCount()"/>: it calls into the
+    /// core and can throw.
+    /// </summary>
+    /// <returns><see langword="true"/> if offsets were sent since the last <c>BeginTransaction</c> or <see cref="Clear"/>.</returns>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public bool SentOffsets() => _native.MockSentOffsets();
+
+    /// <summary>
+    /// The offset that committed transactions sent for <paramref name="groupId"/> and
+    /// <paramref name="partition"/>, or <see langword="null"/> if none did — a single-entry view of
+    /// Java's <c>MockProducer.consumerGroupOffsetsHistory()</c>. When several committed transactions
+    /// sent one, the newest wins; offsets of an aborted or still-open transaction are not included.
+    /// <see cref="Clear"/> forgets every committed offset, as Java's <c>clear()</c> does.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="OffsetAndMetadata.LeaderEpoch"/> is <see langword="null"/> when the offset was
+    /// sent without one. The metadata is returned whole up to 1 MiB (1,048,576 bytes of UTF-8); a
+    /// longer one throws rather than being returned cut short. The C ABI hands the metadata over
+    /// NUL-terminated, so metadata containing a NUL character comes back ending before it. Setup
+    /// only, as <see cref="SetCommitTransactionError"/> is.
+    /// </remarks>
+    /// <param name="groupId">The consumer group id.</param>
+    /// <param name="partition">The topic-partition.</param>
+    /// <returns>The committed offset, or <see langword="null"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="partition"/>'s topic is null (a <c>default</c> <see cref="TopicPartition"/>).</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="InvalidOperationException">The metadata is longer than 1 MiB.</exception>
+    public OffsetAndMetadata? CommittedOffset(string groupId, TopicPartition partition) =>
+        _native.MockCommittedOffset(groupId, partition);
 
     /// <summary>
     /// <b>Internal test hook (M11/P3.1 §9), not public API.</b> Blocks until every <c>Send</c> made

@@ -60,6 +60,13 @@ namespace Confluent.Kafka;
 /// corrected here — see <see cref="IProducer{TKey, TValue}"/> for the full note.)
 /// </para>
 /// <para>
+/// <b>Idempotence and transactions are configured through the config map (M17/P1).</b> Java has
+/// no idempotence API, and neither does this type: <c>enable.idempotence</c> defaults to
+/// <c>true</c>, and <c>transactional.id</c>, which the transaction members need, requires it. The
+/// core validates the combination in the constructor and rejects an inconsistent one with a
+/// <see cref="KafkaException"/>.
+/// </para>
+/// <para>
 /// <b>Disposal.</b> <see cref="Close"/> is the explicit graceful close that <em>surfaces</em> a close
 /// failure; <see cref="Dispose"/> is the teardown that swallows it. Both are idempotent and gated by
 /// a single atomic closed flag. There is no <c>DisposeAsync</c> — this is the synchronous surface.
@@ -174,6 +181,24 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
+
+    /// <inheritdoc/>
+    public void InitTransactions() => _native.InitTransactions();
+
+    /// <inheritdoc/>
+    public void BeginTransaction() => _native.BeginTransaction();
+
+    /// <inheritdoc/>
+    public void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata) =>
+        _native.SendOffsetsToTransaction(offsets, groupMetadata);
+
+    /// <inheritdoc/>
+    public void CommitTransaction() => _native.CommitTransaction();
+
+    /// <inheritdoc/>
+    public void AbortTransaction() => _native.AbortTransaction();
 
     /// <inheritdoc/>
     public void Close() => _native.Close();

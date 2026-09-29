@@ -35,10 +35,8 @@ namespace Confluent.Kafka;
 /// <c>IProducer&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>. Each generic interface
 /// is flat and carries all its members — there is <b>no</b> <c>IProducerCommon</c> base (unlike the
 /// consumer's <c>IConsumerCommon</c>): <see cref="Flush"/> / <see cref="Close"/> /
-/// <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, so there is
-/// no sharing opportunity —
-/// the one identical member, <see cref="Metrics"/>, is simply declared on both (M11/P8
-/// decision D-6).
+/// <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, and the
+/// members whose signatures match are simply declared on both (M11/P8 decision D-6).
 /// </para>
 /// <para>
 /// <b>Blocking, direct sync C ABI (M11/P4).</b> Every operation calls the synchronous C ABI
@@ -67,6 +65,41 @@ namespace Confluent.Kafka;
 /// <b>additional</b> parameter — the overload still returns the <see cref="RecordMetadata"/>. See
 /// <see cref="IDeliveryCallback"/> and the §4 <b>delivery-callback divergence</b> for the thread,
 /// ordering, non-null-metadata and throw-policy contracts.
+/// </para>
+/// <para>
+/// <b>Transactions (M17/P1).</b> The five transaction members are Java's
+/// (<c>Producer.java:45-66</c>) and need <c>transactional.id</c> in the producer's configuration.
+/// Call <see cref="InitTransactions"/> once per producer, before any other transaction member; a
+/// call that failed with a timeout (<see cref="KafkaException.Code"/> 7,
+/// <see cref="KafkaException.IsRetriable"/>) may be called again (Java
+/// <c>KafkaProducer.java:635</c>). Then, for each transaction: <see cref="BeginTransaction"/>, the
+/// transaction's <c>Send</c>s and <see cref="SendOffsetsToTransaction"/> calls, and finally
+/// <see cref="CommitTransaction"/> or <see cref="AbortTransaction"/>. A synchronous <c>Send</c>
+/// returns only after the core has the record, so this surface buffers nothing that a later
+/// transaction member would have to account for.
+/// </para>
+/// <para>
+/// <b>Handling a transaction error.</b> Java's documented pattern
+/// (<c>KafkaProducer.java:209-216</c>) translates literally. When
+/// <c>ex.Code == 90 || ex.IsOutOfOrderSequenceError || ex.IsAuthorizationError</c> — Java's
+/// <c>ProducerFencedException</c>, <c>OutOfOrderSequenceException</c> and
+/// <c>AuthorizationException</c> — the producer cannot recover: close it. On any other
+/// <see cref="KafkaException"/>, abort the transaction; when
+/// <see cref="KafkaException.IsTransactionAbortableError"/> is <see langword="true"/>, abort and
+/// then retry the transaction (KIP-1050). The KIP-1050 variant, which tests
+/// <see cref="KafkaException.IsApplicationRecoverableError"/> in place of <c>Code == 90</c>, is a
+/// <b>superset</b> of Java's example: five more codes (22, 25, 47, 49 and 82) route to closing the
+/// producer. Code -2, the core's rejection of a transaction member that overlaps another one on
+/// the same producer, is never a reason to abort: the other call is still running.
+/// </para>
+/// <para>
+/// <b>Where <see cref="SendOffsetsToTransaction"/>'s checks differ from Java's.</b> The closed
+/// check is the binding's and runs before the core's checks, so a closed producer reports
+/// <see cref="ObjectDisposedException"/> where Java's <c>KafkaProducer</c> reports its
+/// generation or no-transaction error first (<c>KafkaProducer.java:732-737</c>). A null
+/// <c>groupMetadata</c> is an <see cref="ArgumentNullException"/> on the mock too, where Java's
+/// <c>MockProducer</c> throws <c>NullPointerException</c>; and a null <c>offsets</c> map is
+/// rejected before the core's checks, where Java reaches it only after its own.
 /// </para>
 /// <para>
 /// <b>No <see cref="System.Threading.CancellationToken"/> anywhere</b> (decision #4): the producer
@@ -212,8 +245,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <remarks>
     /// Declared identically on <see cref="IProducer{TKey, TValue}"/> and
     /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base: the producer has no
-    /// <c>IProducerCommon</c> (unlike the consumer's <c>IConsumerCommon</c>) and one shared member
-    /// does not justify introducing one (M11/P8 decision D-6, DoD §7). On a
+    /// <c>IProducerCommon</c> (unlike the consumer's <c>IConsumerCommon</c>; M11/P8 decision D-6,
+    /// DoD §7). On a
     /// <see cref="MockProducer{TKey, TValue}"/> the snapshot is <b>empty</b> (Java
     /// <c>MockProducer.metrics()</c> parity — its metric map is empty unless seeded, and the ABI
     /// exposes no seeding entry point).
@@ -221,6 +254,72 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
+
+    /// <summary>
+    /// Initializes the producer for transactions and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.initTransactions()</c>): the first transaction member to call, once per
+    /// producer. The remarks on <see cref="IProducer{TKey, TValue}"/> give the lifecycle.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure — for example a timeout (<see cref="KafkaException.Code"/> 7),
+    /// after which the call may be made again.
+    /// </exception>
+    void InitTransactions();
+
+    /// <summary>
+    /// Begins a transaction (Java <c>Producer.beginTransaction()</c>). A state change inside the
+    /// core that does not wait on the network, as in Java. The remarks on
+    /// <see cref="IProducer{TKey, TValue}"/> give the lifecycle.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a failure.</exception>
+    void BeginTransaction();
+
+    /// <summary>
+    /// Adds consumer-group offsets to the current transaction, so they are committed or aborted
+    /// with it, and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.sendOffsetsToTransaction(Map, ConsumerGroupMetadata)</c>). The map is copied
+    /// before the core is called, so changing it afterwards cannot change what is sent. An
+    /// empty map adds no offsets. The remarks on <see cref="IProducer{TKey, TValue}"/> give the
+    /// lifecycle.
+    /// </summary>
+    /// <param name="offsets">The offsets to add, keyed by topic-partition.</param>
+    /// <param name="groupMetadata">
+    /// The consumer group the offsets belong to — <see cref="IConsumerCommon.GroupMetadata"/> of the
+    /// consumer that read the records.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupMetadata"/> is null (checked first, as Java does), or
+    /// <paramref name="offsets"/> is null. The remarks on <see cref="IProducer{TKey, TValue}"/>
+    /// say where these checks differ from Java's.
+    /// </exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a failure.</exception>
+    void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata);
+
+    /// <summary>
+    /// Commits the current transaction and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.commitTransaction()</c>). The core flushes the transaction's records first. The
+    /// remarks on <see cref="IProducer{TKey, TValue}"/> give the lifecycle and how to handle a
+    /// failure.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a failure.</exception>
+    void CommitTransaction();
+
+    /// <summary>
+    /// Aborts the current transaction and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.abortTransaction()</c>): the transaction's records and offsets are discarded.
+    /// The remarks on <see cref="IProducer{TKey, TValue}"/> give the lifecycle.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a failure.</exception>
+    void AbortTransaction();
 
     /// <summary>
     /// Closes the producer gracefully, then releases its resources (Java <c>Producer.close()</c>).

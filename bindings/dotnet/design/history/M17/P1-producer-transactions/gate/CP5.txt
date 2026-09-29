@@ -1,0 +1,482 @@
+M17/P1 CP5 gate record: the public producer transaction surface, S3 (control half) and S8-S12
+===========================================================================================
+
+Recorded by dotnet-actor 84 on 2026-09-29. Times are the host clock (IST,
+UTC+05:30). Plan: design/history/M17/P1-producer-transactions/PLAN.md (the
+worktree copy amended at the CP4 review, sha-checked against
+.git/claude-m17p1-snapshots/cp4-plan/MANIFEST.sha256). The contract is the
+§4.3 CP5 row (:1372), D1-D11 and D13, §5.1, S3 and S8-S12 (:1593-1602,
+:1823-1910), the §5.3-5.4 translation tables (:1920-2025), §7.1 X1-X13
+(:2076-2088) and §6. This file is a short summary (§4.2). Raw logs are in the
+Actor's scratch directory; "cp5/" below means its cp5 folder. CP5 stages
+nothing.
+
+Base. HEAD was 8ccb0f8d (CP2) throughout (14:22:30, 14:39:34, 14:46:05). The
+index holds the Manager's CP3 staging (gate/CP3.txt, SendCompletionPump.cs,
+SendCompletionPumpBarrierTests.cs). It was found there and left alone, and
+it matches the cp3 manifest. The final gates (cp5/gates/gates.out,
+14:39:34-14:46:05) ran on the bytes listed below. A first gate run
+(gates-run1.out, 14:22:30) found the S11/S12 fixture race described in
+observation (a). The fix came after that run.
+
+Files (git diff --numstat HEAD; wc -l; sha256 of the final bytes, after
+the 84.21-84.26 fix at the end of this file)
+------------------------------------------------------------------------
+Production:
+- M  src/Confluent.Kafka/IProducer.cs            +105 / -6, 332 lines
+     b05237ed2bf6e69ac9116ac91d134ec5806e6ebaf067a72f55f3de28779ac801
+- M  src/Confluent.Kafka/IAsyncProducer.cs       +207 / -8, 471 lines
+     5c114107acdd7abc7247aace90993e70d6b9a1bf0e36e06a71d198931e89aa2a
+- M  src/Confluent.Kafka/KafkaProducer.cs        +25 / -0, 208 lines
+     caf3cde6bfe2e21ac3565cadb02a6f18381e2b76a02c6a09b38b6bfc8b46c3aa
+- M  src/Confluent.Kafka/AsyncKafkaProducer.cs   +31 / -1, 245 lines
+     aff4d7b575098f2d1da4e15062b7a19929c03e655d7fd0f7f4bfe334b7aa413e
+- M  src/Confluent.Kafka/MockProducer.cs         +97 / -0, 326 lines
+     3d334191dc2a5e89078ecf0941f94510597756a4e8151a97c35b03fc7adcc7c2
+- M  src/Confluent.Kafka/AsyncMockProducer.cs    +135 / -0 (CP4's 25 + CP5's
+     110), 428 lines
+     7eabc548793bcb0a661bb2bf1caa3c643cd8104e9a8adc10e2535f907897696b
+- M  src/Confluent.Kafka/IDeliveryCallback.cs    +4 / -0, 353 lines
+     a84048ca0a6880517ae285cdfda452842d55e61f4436fee4513d39245aa992ed
+     This file is outside §4.3's list; see observation (c).
+- M  src/Confluent.Kafka/KafkaException.cs       +20 / -0, 427 lines
+     baad223bf3e0710ed2dde7d714a9a72d6fbe5149b9aa52318eeb563908593685
+     Added for (d): X2's pointer paragraph on the five D6 predicates,
+     pointer only, crefs to the two interfaces. It is no longer frozen,
+     since CP2 is committed in 8ccb0f8d.
+Tests (all new, tests/Confluent.Kafka.UnitTests/; methods / cases):
+- ?? PublicProducerTransactionTests.cs            S8 async, 25 / 29, 606 lines
+     2b60fe5dce8d23b9252924d9d68c8be35fc36d3209a12967af71de9605f363c8
+- ?? PublicSyncProducerTransactionTests.cs        S8 sync, 19 / 19, 369 lines
+     f8952aef6e1339dc0185dd9fcacdb946bc7912fe2e55b05814d73c1fc748067c
+- ?? PublicProducerTransactionMockControlTests.cs S8 D8, 13 / 26, 462 lines
+     467f901fbfbbb10f094800e22a89b2f0dc72f63e8c4d9e094d2a225b4204ff1f
+- ?? PublicProducerTransactionErrorTests.cs       S9, 4 / 26, 264 lines
+     0c2e4d016b4f3685ba459144d0a9d446c5ccfe5d7c6c58a79af392cc72fc3092
+- ?? PublicProducerIdempotenceTests.cs            S10, 7 / 56, 397 lines
+     6ec49b78666d9c3b07e14c251b4f378ccf3f4bd2c5d20d58d8b5c1121440a5aa
+- ?? PublicProducerTransactionConcurrencyTests.cs S11, 2 / 2, 153 lines
+     e2e56cfdb66f47b169f9f63f78e63576a80b696f2a44f940b034c177c3524a3a
+- ?? PublicProducerTransactionTeardownTests.cs    S12, 2 / 2, 136 lines
+     9343c330e75faf7d9c6af9a6b4d8631e41ace00ef98dc554824dec101fc8009c
+- ?? PublicProducerSendOffsetsToTransactionTests.cs S3, 10 / 27, 402 lines
+     a2ff43094d7373fb27bb7bca7a439f6d70b129b7a7ca0f4f6572dceef0cdc044
+- ?? this file.
+No Rust changed (G1), and no other .cs changed (G7; git diff --stat HEAD).
+No frozen file changed (Freeze), apart from KafkaException.cs, which the
+Manager released for (d).
+Size against §10.1's CP5 row (:2296): production is 599 added and 15
+deleted against 550-750 (xmldoc about 485, code about 75, blank about 40).
+Tests are 2789 lines against 1,700-2,300 (xmldoc 426, comment 151, blank
+448, code 1764); see observation (e). (Before the fix: 590 / 3 and 2747.)
+
+What CP5 adds
+-------------
+- D1 surface. IProducer has InitTransactions, BeginTransaction,
+  SendOffsetsToTransaction(offsets, groupMetadata), CommitTransaction and
+  AbortTransaction. IAsyncProducer has the same five; four return Task and
+  take an optional CancellationToken, and BeginTransaction stays
+  synchronous (X7).
+- xmldoc at the §7.1 homes:
+  - X1-X8 on the interface members and remarks.
+  - X11 on the eight mock helpers.
+  - X12 on AsyncMockProducer.Clear().
+  - X13 in the KafkaProducer and AsyncKafkaProducer class remarks.
+  - The implementers use <inheritdoc/>, and other sites carry pointers
+    only (ffi §A6 round 5).
+  Watch items:
+  - X4 and X6 both carry D5 row 4's exception (84.14): a token that fires
+    during the barrier wait still completes successfully, without the
+    ordering guarantee.
+  - X5 names R-a, R-b and R-c with the meanings in
+    SendCompletionPump.EnqueueBarrier's xmldoc; the pump file is frozen and
+    unedited.
+  - D4's ordering is scoped to a running pump.
+  - X3 does not call sends inside a transaction unsupported, and the sync
+    interface gets the single "nothing is buffered" sentence.
+- The "Transactions remain deferred" sentences are deleted from
+  IAsyncProducer.cs:50 and AsyncKafkaProducer.cs:37 (§7.1 "Deleted, not
+  re-worded").
+- Forwarders. Each type has one line per member to its CP4 NativeProducer
+  worker. The KafkaProducer forwarders are at :186-201 and the
+  AsyncKafkaProducer ones at :213-233.
+- D8 helpers, public on both mocks:
+  - SetCommitTransactionError(int code, string? message = null)
+  - ClearCommitTransactionError()
+  - bool SentOffsets()
+  - OffsetAndMetadata? CommittedOffset(string groupId, TopicPartition
+    partition)
+
+Translation coverage (DoD #3; PLAN §5.3.1, §5.3.3 and §5.4)
+------------------------------------------------------------
+MockProducerTest, both mocks unless marked:
+- Illegal-state rows 134-244: sync and async.
+- 310, 348, 377: sync and async (B5 history projection).
+- 330 and 364: async only. Sync is N/A, because the sync surface has no
+  barrier (R-c); the plan's rows say the same.
+- 397, 438, 447, 464, 492, 529, 558, 583: MockControl, both mocks, through
+  one adapter (B6).
+- Closed rows 617-659: ObjectDisposedException. 638/645 pass an empty map
+  where Java passes null (Q24).
+- 666 and 680 (fenceProducer, B1) and commitCount (B3): N/A per the plan.
+KafkaProducerTest:
+- 222: partial. The idempotence default is covered, and the client.id tag
+  "producer-transactionalId" is read from Metrics(). The acks and retries
+  readbacks are N/A.
+- 238, 341, 413: every valid and invalid construction row.
+- 1329, 2054: S10.
+- 1944 (null metadata) and 1950 (-3): S3.
+- 2163: S8 sync, on KafkaProducer.
+- The broker-scripted rows the plan lists as core-owned: N/A.
+Python test_producer.py:
+- 922-982, 934, 944: S8.
+- 995 and 1011: S9, with the same codes, 120 and 7.
+- 1031-1202: MockControl.
+- 1246-1325 and 1348-1380: S8.
+- 1395 (5000 calls commit the last value, 4999): S3.
+- 1417-1480: S8 and S9 on the async mock. 1452 uses
+  MockConsumer("earliest").GroupMetadata().
+- 1056, 1526: N/A per the plan.
+- 1557, 1587: CP4's S6.
+Beyond the plan's rows, two tests pin the forwarders on the real flavours:
+the state machine before init (Begin/Commit/Abort/SendOffsets), and a
+pre-canceled token on the four Task members.
+
+Core values measured at CP5 (§5.1 item 2)
+-----------------------------------------
+Sources: cp5/probe-before-init.txt, s10-first.log, s1112-first.log and
+s3-first.log. Each first run passed with these values, and each matches the
+core source text.
+- Before init, real producer (txn "state-machine-txn"):
+  - begin: -4 "TransactionalId <id>: Invalid transition attempted from
+    state UNINITIALIZED to state IN_TRANSACTION".
+  - commit: the same text, with COMMITTING_TRANSACTION.
+  - abort: the same text, with ABORTING_TRANSACTION.
+  - Non-empty sendOffsets: -4 "Cannot send offsets if a transaction is not
+    in progress (currentState= UNINITIALIZED)".
+  - Empty sendOffsets: succeeds (D13).
+- D9 construction, Code -10:
+  - "Cannot set a transactional.id without also enabling idempotence."
+  - "Must set acks to all in order to use the idempotent producer.
+    Otherwise we cannot guarantee idempotence."
+  - "Must set retries to non-zero when using the idempotent producer."
+  - "To use the idempotent producer, max.in.flight.requests.per.connection
+    must be set to at most 5. Current value is 6." (KPT :436-437)
+  - KPT 341 invalid3 (retries=0 plus a transactional.id) gives the
+    transactional-id message.
+- Idempotence off: all five members give -4 "Cannot use transactional
+  methods without enabling transactions by setting the transactional.id
+  configuration property", including an empty sendOffsets.
+- Idempotent but not transactional: -4 "Transactional method invoked on a
+  non-transactional producer." for the four state members and a non-empty
+  sendOffsets. An empty sendOffsets succeeds.
+- Init timeout, KPT 1329 (max.block.ms 2000): Code 7, retriable, on both
+  calls. Message: "Timeout expired after 2000ms while awaiting
+  InitProducerId. InitTransactions timed out - did not complete coordinator
+  discovery or receive the InitProducerId response within max.block.ms."
+  S12 gives the same text with 3000ms.
+- KPT 2054: -4 "Cannot attempt operation `beginTransaction` because the
+  previous call to `initTransactions` timed out and must be retried".
+- D10: -2 "Transactional methods of KafkaProducer are not safe for
+  concurrent access."
+- KPT 1950, real flavours: -3 "Passed in group metadata GroupMetadata(groupId
+  = group, generationId = 2, memberId = , groupInstanceId = ) has
+  generationId > 0 but the member.id is unknown". The mocks accept the
+  same metadata; see observation (g).
+- D6 truth table (ten rows via ErrorNext, both mocks): every row matches
+  the plan's prediction. The literal close set is {29, 45, 53, 59, 90}.
+  KIP-1050 adds 47. The abort-and-retry set is {120}.
+- Commit hook:
+  - 120 with a null message: "The server encountered an error with the
+    transaction. The client can abort the transaction to continue using
+    this transactional ID."
+  - (7, "commit timed out"): retriable and not abortable.
+None of these contradicts a plan prediction, so there is no core finding.
+
+Mutation check (§5.1 item 7; RD13; not committed)
+-------------------------------------------------
+The harness is cp5/mut/run.py with muts.py, as at CP4. For each mutation
+it applied an exact-text replacement and ran dotnet build -c Release of the
+unit-test csproj. It then ran dotnet test -f net10.0 --no-build over the
+eight classes (185 selected in every log) and restored the file, checking
+its sha. Runs were 14:08:31-14:17:53, with F03 re-run at 14:47 on the fixed
+fixture. The result is 38 of 38 red. Every restore was sha-identical, and
+no mutation failed to build. Logs are in cp5/mut/<id>.log and the list is
+in summary.txt. Tag "no-summary" means the harness's count regex does not
+match normal verbosity; the count comes from each log's "Total tests: 185".
+
+Production mutations and the tests that turned red:
+KafkaProducer
+- PK1 Init -> Abort worker: 4 red (KPT 1329, 2054, and both sync S11/S12).
+- PK2 Begin -> Init: 2 red (the state-machine pin, 2054).
+- PK3 SendOffsets drops the offsets: 5 red (S3 and S10).
+- PK4 Commit -> Abort and PK5 Abort -> Commit: 1 red each (the
+  state-machine pin).
+AsyncKafkaProducer
+- PA1 Init drops the token: 2 red (pre-canceled; the S11 inline test).
+- PA2 Begin -> sync Init: 2 red.
+- PA3 SendOffsets drops the token: 2 red.
+- PA4 SendOffsets drops the offsets: 5 red.
+- PA5 Commit -> Abort and PA7 Abort -> Commit: 1 red each.
+- PA6 and PA8, Commit/Abort drop the token: 1 red each.
+MockProducer
+- PM1 Init -> Abort: 29 red. PM2 Begin -> Init: 26. PM3 SendOffsets drops
+  the offsets: 13. PM4 Commit -> Abort: 14. PM5 Abort -> Commit: 4.
+AsyncMockProducer
+- PN1 Init drops the token: 1 red. PN2 Begin -> sync Init: 30. PN3
+  SendOffsets drops the token: 2. PN4 SendOffsets drops the offsets: 14 (13 its own;
+  see below).
+  PN5 Commit -> Abort: 17. PN6 Commit drops the token: 1. PN7 Abort ->
+  Commit: 5. PN8 Abort drops the token: 1.
+Helpers
+- PH1 and PI1, SetCommitTransactionError drops the message: 3 and 5 red.
+- PH2 and PI2, Clear does nothing: 2 and 2.
+- PH3 and PI3, SentOffsets negated: 5 and 4.
+- PH4 and PI4, CommittedOffset reads partition 0: 6 and 7.
+Three reds were caused by the race, not by the mutation: the red lists for
+PH3, PI1 and PN4 include the S11 sync twin, which a mock mutation cannot
+reach. That is the race in observation (a). PH3 and PI1 each have 4 reds
+of their own, and PN4 has 13.
+
+Fixture mutations, run separately (ffi §A1):
+- F01 MockControl sync adapter reads partition 0: 5 red.
+- F02 S9 async fails the send with 48 instead of the row's code: 2 red.
+- F03 the D10 retry loop never recognises -2: 2 red (both sync S11/S12).
+  Re-run on the fixed fixture (restored 4e6cc7db203e): 2 red.
+- F04 S10's config parser ignores the settings: 6 red.
+The fixture's restart-on-own--2 branch was not mutation-checked at first.
+The in-suite race rate was 3 of the 38 harness runs pre-fix (plus 1 of the
+5 gate repeats), well above the probe's 1 in 60. It is checked in the
+84.21-84.26 fix below: 22 of 50 runs red.
+
+R10 and R9
+----------
+R10 (cp5/r10/r10.sh, r10.out, 14:29:27-14:34:18): PublicProducerTransaction
+ConcurrencyTests.CommitTransaction_WhileInitTransactionsIsInTheCore_IsRefused
+_Sync ran 50 times, each in its own test host, on net10.0 with --no-build.
+50 of 50 passed. S12's sync test, run the same way after the fix
+(cp5/r10t/s12.out, 14:34:18-14:37:25), also passed 50 of 50.
+R9 (net10.0 full suite):
+- CP0: 2317 tests, suite 14 s, whole command 16.5 s.
+- CP5 final (G4): 2625 tests, suite 15 s, whole command 16.88 s.
+- CP5 first run: suite 14 s, whole command 16.13 s.
+So 308 more tests take about 1 s more.
+
+Gates (cp5/gates/gates.sh: gates.out, g*.log)
+---------------------------------------------
+Stale sentence (14:39:38)
+- Control positive: git grep over HEAD, bindings/dotnet/{src,grpc-server}
+  finds 2 hits, IAsyncProducer.cs:50 and AsyncKafkaProducer.cs:37.
+- The brief's command, command grep -rn 'Transactions remain deferred'
+  bindings/dotnet/src bindings/dotnet/grpc-server, prints 2 hits. Both are
+  in grpc-server/bin/Release/net8.0/Confluent.Kafka.xml, a git-ignored
+  build output dated 2026-09-28 10:35:42, before CP5. The grpc-server
+  project is deliberately not in the sln, so no gate rebuilds it.
+- The same grep with --exclude-dir=bin --exclude-dir=obj exits 1, and
+  git grep --untracked over the worktree exits 1.
+- Before the first build, the obj/ and bin/ xml copies of the library also
+  held the sentence. G2's build regenerated them, and the three bin
+  copies checked below do not contain it.
+- See observation (b).
+Doc IDs (14:39:38)
+- 38 IDs: 10 interface members, 20 implementer members (<inheritdoc/>) and
+  8 mock helpers. The full list is in gates.out.
+- Command: command grep -qF '<member name="<id>">' on
+  src/Confluent.Kafka/bin/Release/<tfm>/Confluent.Kafka.xml.
+- netstandard2.0 38/38, net8.0 38/38, net10.0 38/38. A made-up control ID
+  (IProducer`2.FenceProducer) gives 0.
+G2 (14:39:34)
+- cargo build --features ffi --release: exit 0 ("in 0.24s").
+- dotnet build -c Release on the sln: exit 0, 0 Warning(s), 0 Error(s).
+- --no-incremental (14:39:35): the same, in 00:00:02.18. All six outputs
+  (3 library, 3 test TFMs including net462) were written 14:39:36-14:39:38.
+G3 (14:39:39): dotnet format <the sln> --verify-no-changes exits 0 with 0
+  bytes of output.
+G4 (14:39:54): dotnet test -c Release -f net10.0 <the sln> exits 0, Passed
+  2625 of 2625, using /usr/local/share/dotnet/dotnet with no DOTNET_
+  variable set. The first run (14:22:52) was also 2625 of 2625. The known
+  flake (ProducerSubmitHandleRefTests) did not fail in any run.
+G5 (14:40:11): the $HOME/.dotnet env run (dotnet test -c Release -f
+  net8.0) exits 0, 2625 of 2625, with DOTNET_ROLL_FORWARD unset. The first
+  run was also 2625 of 2625. net462 is built in G2 and not run. Totals go
+  from 2440 (CP4) to 2625, which is 29 + 19 + 26 + 26 + 54 + 2 + 2 + 27.
+Eight classes at normal verbosity (14:40:28)
+- net10.0 185/185 and net8.0 185/185, per class 29, 19, 26, 26, 54, 2, 2,
+  27, with 0 failed.
+- Repeated 10 times per runtime (14:40:55-14:45:22): 185/185 every run on
+  both.
+- The first gate run's 5 repeats had one red, rep-net10-5 (kept as
+  run1-rep-net10-5.log): S12 sync, Assert.NotNull at
+  TeardownTests.cs:75, after 58 ms. This is observation (a).
+Budget, DoD row 10 (14:45:22): 6/6 with exit 0; the six names are in
+  gates.out.
+G8 (14:45:24)
+- make -C bindings/dotnet test-soak-dotnet: exit 2. The net8.0 leg cannot
+  start under the default dotnet, the same as CP4 observation (c).
+- The whole target under the $HOME/.dotnet env: exit 0, 0/0 warnings and
+  errors twice, and 165/165 on both net8.0 and net10.0.
+- The net8.0 soak test under that env: 165/165.
+- The PerfV3 build: exit 0, 0/0.
+- The performance tests with FullyQualifiedName!~PerfV3SmokeTests: 25/25.
+G1 (14:46:04)
+- git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/ tests/: 0
+  bytes, and 0 untracked files there.
+- confluent_kafka.h sha256 is
+  e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111, the
+  CP0 value.
+G6: internal static extern count is 715. The CP5 production diff adds 0
+  extern or DllImport lines, and the eight test files contain none.
+G7
+- The marker grep over the diff's added lines exits 1. The control
+  positive (InitTransactions|SentOffsets) gives 16. The marker grep over
+  the eight files exits 1, and each has 'Apache License' once.
+- Sleeps: two, both sanctioned. S11's 50 ms retry step
+  (ConcurrencyTests.cs:137) is D10's own. S9's 2 ms DriveUntilResolved step
+  (ErrorTests.cs:215) is the sync worker poll, bounded by a Stopwatch.
+  There is no WaitAsync, Thread.Sleep or Task.Delay in production.
+- git diff --cached --name-only shows the Manager's three CP3 paths at the
+  start, after the first run and at the end. Nothing of CP5 is staged.
+- git status --short: the CP4 and CP5 paths (M and ??),
+  COMMENTS.DONE.84.md, the agent-memory folders and the user's own entries.
+  The user's entries are untouched.
+Freeze (14:46:05): shasum -a 256 -c on the cp2, cp3 and cp4-plan
+  manifests and on cp5/freeze-cp4.sha256. Every entry is OK and each
+  exits 0. COMMENTS.84.md is 0 bytes.
+
+Observations for the Manager
+----------------------------
+(a) Fixed during CP5, a real race in the D10 sync fixture.
+    - Cause: RetryUntilRefused's probe CommitTransaction() can itself hold
+      the core's control slot at the moment the worker's InitTransactions()
+      arrives. The worker is then refused with -2 and returns at once, and
+      the loop saw "worker finished" and returned null.
+    - Measured with a scratch probe (60 iterations, max.block.ms 1000,
+      output kept in cp5/r10/race-probe.txt; the probe's source,
+      tests/.../ZzProbeRace.cs, was deleted afterwards): 59 times
+      the probe was refused with -2; once the worker returned first with -2
+      and the same message.
+    - Fix, fixture only: RetryUntilRefused(Action call, Func<Task>
+      startWorker) restarts a worker whose own outcome is -2. That worker
+      never entered the core, and the rejection leaves the core state
+      unchanged. It returns (refused, worker).
+    - After the fix: R10 50/50, S12 sync 50/50, and 10 repeats x 2
+      runtimes green. No production change.
+(b) Decision: the stale-sentence command as written prints 2 hits from the
+    git-ignored grpc-server bin copy dated 2026-09-28. I did not rebuild
+    the user's grpc-server output (it is not in the sln and needs protoc).
+    The source scope, git grep, and the three library xml outputs are
+    clean. Options: accept, or rebuild the grpc-server at CP6, which
+    touches it for X14.
+(c) Decision: IDeliveryCallback.cs gets one 4-line pointer sentence to
+    X5's R-b (a delivery callback that blocks on commit or abort
+    deadlocks). This keeps its remarks from implying an ordering X5
+    excludes. It is outside §4.3's list. Accept, or move the text.
+(d) Resolved at the Manager's direction. X2's pointer is now on each of
+    the five predicates' remarks (IsTransactionAbortableError,
+    IsApplicationRecoverableError, IsInvalidConfigurationError,
+    IsAuthorizationError, IsOutOfOrderSequenceError). It reads "Handling
+    a transaction error: see the remarks on IProducer and IAsyncProducer",
+    with a cref to each, and restates no comparison.
+    Re-check (cp5/d2/gates-d2.out, 14:52:04-14:53:01):
+    - G2: cargo exit 0. The build and --no-incremental both give 0W/0E,
+      and all six outputs are fresh.
+    - G3: exit 0 with 0 bytes.
+    - G4 net10.0: 2625/2625. G5 net8.0: 2625/2625.
+    - Doc IDs: 38/38 in each of the three xml files. The pointer appears
+      5 times in each.
+    - Freeze: cp2 reports KafkaException.cs FAILED, which is expected: its
+      manifest sha (c86fba11...) is HEAD's blob. Every other entry in cp2,
+      cp3, freeze-cp4 and cp4-plan is OK.
+(e) Decision: test size is 2747 lines (2789 after the fix) against §10.1's 1,700-2,300.
+    Production is inside its range. The overrun is the both-flavours rule
+    (§5.1 item 1) applied through adapters, plus the two extra forwarder
+    pins.
+(f) Deviation: S3's snapshot is witnessed after return and at the submit
+    seam (SendOffsetsToTransactionWithCallback with a fake that mutates
+    the caller's dictionary and forwards to the real P/Invoke; 42 kept).
+    It is not witnessed "while held in a D3 drain", because the drain
+    forces the batch task at once and cannot be held without closing the
+    core.
+(g) KPT 1950: only the real core rejects generation > 0 with an empty
+    member.id (-3). Both mocks accept it, as Java's MockProducer does (it
+    does not validate the metadata). This is pinned as measured, and it
+    is not a core finding.
+(h) S12 sync proves "inside the core" with D10's retry loop, the only
+    sanctioned signal for a blocking call. It needs the capture-before-
+    Dispose of the SafeProducerHandle (reflection on _native), because
+    NativeProducer.Handle throws once closed.
+
+84.21-84.26 fix (two Critics' CP5 review; cp5/fix2126/)
+-------------------------------------------------------
+COMMENTS.DONE.84.md holds each item with its resolution; COMMENTS.84.md is
+0 bytes. No frozen file changed; PLAN.md was not edited (X11, §5.1
+principle 3 are the Manager's).
+Public xmldoc:
+- 84.21: the "one identical member" and "one shared member" quantifiers
+  are deleted, not re-counted (IProducer / IAsyncProducer class remarks
+  and Metrics() remarks).
+- 84.22: SentOffsets() and CommittedOffset on both mocks name Clear() as
+  the other reset (mock_producer.rs:734, :736; MockProducer.java:493).
+- 84.23: "One exception:" deleted at both X4 sites; the sentence stays.
+- Nits: n1 (X8 "generation or no-transaction error"), n2 (R-b without
+  the pump-thread claim), n3 (X6: after the argument and closed checks),
+  n5 (the sync summary: "copied before the core is called").
+Tests:
+- 84.24: S12 async polls handle.IsClosed (2 ms step, 30 s bound, first
+  observation). R24a, OperationCompletionSource.FreeGcHandle never calling
+  DangerousRelease: red, the async test, "the producer handle is still
+  open after Dispose and the completion". R24b, the Critic's
+  Thread.Sleep(20) before the release: green 2/2. Both restores
+  sha-identical (9476ee04bdeb).
+- 84.25: S11 sync worker and KPT 2054 assert Code 7 and the exact
+  message (5000 ms and 2000 ms forms). Measured: the three changed
+  classes passed 60/60 on their first run (fix2126/first.log). The
+  re-check over all eight files found one more signal-only capture, S12
+  sync's refused, now pinned to -2 and the D10 message. Every captured
+  KafkaException now asserts Code and Message; the remaining
+  Assert.Throws sites are ObjectDisposed / OperationCanceled /
+  ArgumentNull preconditions.
+- 84.26: the records above are corrected (three race reds: PH3, PI1,
+  PN4; PN4 13 of its own; the in-suite rate). The restart branch,
+  mutated to return (null, worker) (fix2126/restart/): the S11 sync twin
+  in 50 separate runs, 22 red and 28 green, every red "Assert.NotNull()
+  Failure: Value is null"; restored sha-identical (e2e56cfdb66f).
+- Nits: KPT 413 invalidProps1 now runs. Each invalid row carries a source
+  label as a theory parameter, so it no longer shares D9 row 5's case ID
+  (S10 54 -> 56 cases; no duplicate-ID skip in the logs). S12 wraps both
+  tests in try/finally with a bounded Dispose. The deleted probe file is
+  named (above).
+Gates (fix2126/gates/gates.sh, gates.out, 15:16:23-15:23:03):
+- G2: cargo exit 0; build and --no-incremental 0W/0E; six outputs fresh.
+- G3: exit 0, 0 bytes.
+- G4 net10.0: 2627/2627 (suite 20 s, whole command 21.90 s). G5 net8.0:
+  2627/2627. Totals 2625 -> 2627 (S10 +2).
+- Eight classes: 187/187 on each runtime (29, 19, 26, 26, 56, 2, 2, 27);
+  10 repeats per runtime: 187/187 every run.
+- Doc IDs 38/38 in each of the three xml files; the control ID 0.
+- Budget 6/6. G8 as before (make exit 2 under the default dotnet; exit 0
+  and 165/165 twice under the $HOME/.dotnet env; PerfV3 0/0; perf 25/25).
+- G1: 0 bytes, 0 untracked; header sha e8d39f09...d111.
+- G6: 715, none added. G7: markers exit 1, control 16. Sleeps: the two
+  above plus S12's 2 ms release-poll step (TeardownTests.cs:115, 84.24).
+- Index: the Manager's three CP3 paths, unchanged. HEAD 8ccb0f8d.
+- Freeze: cp2 reports KafkaException.cs FAILED (expected, (d)); every
+  other entry in cp2, cp3, freeze-cp4 and cp4-plan OK.
+Loops: S12 sync 50/50 (15:23:03-15:26:11); R10 50/50 (15:26:11-15:31:00).
+
+84.27-84.28 (CP5 close; cp5/fix28/out.txt, 15:40:11-15:40:35)
+------------------------------------------------------------
+- 84.27 (PLAN.md D8 row): fixed by the Manager; the Actor did not edit
+  the plan.
+- 84.28: the summary of S3's MutatingTheOffsetsAfterTheCallReturns test
+  now claims only what it asserts. The snapshot is taken by the time the
+  call returns, and mutations after that (on the async mock, before the
+  Task is awaited) do not change CommittedOffset. "So the call drains" is
+  gone, and no pending-Task claim is made. No !IsCompleted assertion was
+  added: the core completes on a spawned task, so it would race. The
+  summary is the only change (402 lines, as before).
+- G2 --no-incremental: exit 0, 0W/0E, six outputs fresh. G3: exit 0, 0
+  bytes. PublicProducerSendOffsetsToTransactionTests: 27/27 on net10.0
+  and 27/27 on net8.0 (count asserted). Index unchanged; HEAD 8ccb0f8d.
+- COMMENTS.84.md is 0 bytes; 84.27, 84.28 and the tests Critic's
+  no-items re-check are in COMMENTS.DONE.84.md.

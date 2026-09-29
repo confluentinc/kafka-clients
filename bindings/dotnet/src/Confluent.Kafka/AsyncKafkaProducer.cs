@@ -34,7 +34,8 @@ namespace Confluent.Kafka;
 /// <b>Send + async peripherals.</b> This producer implements the <see cref="IAsyncProducer{TKey, TValue}"/>
 /// surface — <c>Send</c> (the M11/P3 send path over the inline pull-pump, ffi §A7 Option C,
 /// with the M11/P5 typed serialize skin above it) plus the M11/P2 peripherals <see cref="Flush"/> /
-/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>. Transactions remain deferred.
+/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>, and the M17/P1 transaction
+/// members.
 /// </para>
 /// <para>
 /// <b>Serialize above the bytes core (M11/P5, CLAUDE.md §11).</b> <c>Send</c> serializes the
@@ -51,6 +52,13 @@ namespace Confluent.Kafka;
 /// Java's <c>send(record, Callback)</c>; the callback runs on the producer's send-completion pump
 /// thread — .NET's analogue of Java's background I/O thread — before the returned
 /// <see cref="Task{TResult}"/> is completed. See <see cref="IDeliveryCallback"/>.
+/// </para>
+/// <para>
+/// <b>Idempotence and transactions are configured through the config map (M17/P1).</b> Java has
+/// no idempotence API, and neither does this type: <c>enable.idempotence</c> defaults to
+/// <c>true</c>, and <c>transactional.id</c>, which the transaction members need, requires it. The
+/// core validates the combination in the constructor and rejects an inconsistent one with a
+/// <see cref="KafkaException"/>.
 /// </para>
 /// <para>
 /// <b>Disposal — thin forwarders over <see cref="NativeProducer"/> (ffi §A7; M11/P2.1).</b>
@@ -202,6 +210,28 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
+
+    /// <inheritdoc/>
+    public Task InitTransactions(CancellationToken cancellationToken = default) =>
+        _native.InitTransactionsWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public void BeginTransaction() => _native.BeginTransaction();
+
+    /// <inheritdoc/>
+    public Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default) =>
+        _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitTransaction(CancellationToken cancellationToken = default) =>
+        _native.CommitTransactionWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task AbortTransaction(CancellationToken cancellationToken = default) =>
+        _native.AbortTransactionWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>

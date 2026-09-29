@@ -94,6 +94,10 @@ namespace Confluent.Kafka;
 /// particular self-join does not arise, but the advice is unchanged.
 /// </para>
 /// <para>
+/// <b>Nor is blocking on <c>CommitTransaction</c> / <c>AbortTransaction</c> from inside it, on the
+/// async surface</b>: see residual R-b in the remarks on <see cref="IAsyncProducer{TKey, TValue}"/>.
+/// </para>
+/// <para>
 /// <b>Ordering — it runs BEFORE the send's result is observable (decision D3).</b> Java sets the
 /// future's value, fires the callbacks, and only then releases the future's waiters
 /// (<c>ProducerBatch.java:303-323</c> — <c>produceFuture.done()</c> is last). This binding

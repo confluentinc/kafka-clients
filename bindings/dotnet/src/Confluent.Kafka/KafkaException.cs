@@ -196,6 +196,10 @@ public class KafkaException : Exception
     /// property because the ABI's commit and send-offsets operations name it as the
     /// signal that the transaction must be aborted.
     /// </para>
+    /// <para>
+    /// Handling a transaction error: see the remarks on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>.
+    /// </para>
     /// </remarks>
     public bool IsTransactionAbortableError { get; }
 
@@ -218,6 +222,10 @@ public class KafkaException : Exception
     /// <c>ApiException</c> directly, so this nests in none of the other hierarchy
     /// predicates and none nests in it. It is wider than fencing: 90 is one of its
     /// codes, and the class remarks say how to recognize a fenced producer alone.
+    /// </para>
+    /// <para>
+    /// Handling a transaction error: see the remarks on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>.
     /// </para>
     /// </remarks>
     public bool IsApplicationRecoverableError { get; }
@@ -253,6 +261,10 @@ public class KafkaException : Exception
     /// so every error that answers <see langword="true"/> to
     /// <see cref="IsAuthorizationError"/> answers it here too, 29 and 53 among them.
     /// </para>
+    /// <para>
+    /// Handling a transaction error: see the remarks on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>.
+    /// </para>
     /// </remarks>
     public bool IsInvalidConfigurationError { get; }
 
@@ -276,6 +288,10 @@ public class KafkaException : Exception
     /// <c>AuthorizationException</c> extends <c>InvalidConfigurationException</c>, so
     /// every error that answers <see langword="true"/> here answers it there too.
     /// </para>
+    /// <para>
+    /// Handling a transaction error: see the remarks on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>.
+    /// </para>
     /// </remarks>
     public bool IsAuthorizationError { get; }
 
@@ -294,6 +310,10 @@ public class KafkaException : Exception
     /// <c>OutOfOrderSequenceException</c>, so 59 answers <see langword="true"/> here as
     /// 45 does. <c>OutOfOrderSequenceException</c> extends <c>ApiException</c>
     /// directly, so this nests in none of the other hierarchy predicates.
+    /// </para>
+    /// <para>
+    /// Handling a transaction error: see the remarks on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/>.
     /// </para>
     /// </remarks>
     public bool IsOutOfOrderSequenceError { get; }
