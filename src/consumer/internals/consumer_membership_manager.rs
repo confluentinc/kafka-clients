@@ -21,8 +21,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager`.
 
-#![allow(dead_code)]
-
 use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,13 +28,13 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::Errors;
-use crate::common::metrics::Time;
+use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
+use crate::common::utils::Time;
 
 use crate::common::{Error, TopicPartition, Uuid};
-use crate::consumer::ConsumerRebalanceListenerMethodName;
 use crate::consumer::GroupMembershipOperation;
+use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 #[cfg(test)]
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -63,6 +61,7 @@ use super::{AbstractMembershipManager, LocalAssignment};
 /// - `commit_request_manager: Option<Arc<CommitRequestManager>>` — used
 ///   by the auto-commit-before-rebalance step. Wrapping in `Option` so
 ///   constructor can wire it up later (and so tests can pass `None`).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager")]
 pub(crate) struct ConsumerMembershipManager {
     pub(crate) abstract_mm: AbstractMembershipManager,
     /// Java: `Optional<String> groupInstanceId`. If present this is a
@@ -235,7 +234,8 @@ impl ConsumerMembershipManager {
     /// `Option<Arc<ConsumerRebalanceMetricsManager>>` + a metrics `Time` clock
     /// (M5): `None` in tests that don't exercise rebalance metrics; the live
     /// consumer always supplies them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#ConsumerMembershipManager")]
     pub(crate) fn new(
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
@@ -311,16 +311,19 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `groupInstanceId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#groupInstanceId")]
     pub(crate) fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
 
     /// Java: `rackId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#rackId")]
     pub(crate) fn rack_id(&self) -> Option<&str> {
         self.rack_id.as_deref()
     }
 
     /// Java: `serverAssignor()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#serverAssignor")]
     pub(crate) fn server_assignor(&self) -> Option<&str> {
         self.server_assignor.as_deref()
     }
@@ -354,6 +357,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#joinGroupEpoch")]
     pub(crate) fn join_group_epoch(&self) -> i32 {
         ConsumerGroupHeartbeatRequest::JOIN_GROUP_MEMBER_EPOCH
     }
@@ -361,6 +365,7 @@ impl ConsumerMembershipManager {
     /// Java: `leaveGroupEpoch()`. For static members + `LEAVE_GROUP`
     /// operation: -1 (force fence). Otherwise: -1 for dynamic members,
     /// -2 for static members.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
     pub(crate) fn leave_group_epoch(&self) -> i32 {
         let is_static_member = self.group_instance_id.is_some();
         if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
@@ -389,6 +394,7 @@ impl ConsumerMembershipManager {
     ///
     /// Returns `Err(Error)` for unexpected errors in the response
     /// body — Java throws `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#onHeartbeatSuccess")]
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         let data = response.data();
         if data.error_code != Errors::None.code() {
@@ -991,7 +997,6 @@ impl ConsumerMembershipManager {
     /// The commit-result logging happens at the call site BEFORE this method
     /// (Java logs in the same `whenComplete`, on both branches, then runs the
     /// abort check + `revokeAndAssign` unconditionally — [`Self::log_commit_result`]).
-    #[allow(clippy::too_many_arguments)]
     async fn continue_after_commit(
         &self,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
@@ -1187,6 +1192,7 @@ impl ConsumerMembershipManager {
     /// the `notify_assignment_change` listeners. Any error is returned so the
     /// AEP can complete the `ApplyAssignmentEvent` handle exceptionally
     /// (mirroring Java's try/catch → `event.future().completeExceptionally(e)`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#applyAssignment")]
     pub(crate) fn apply_assignment(
         &self,
         assigned_partitions: &HashSet<TopicPartition>,
@@ -1544,7 +1550,6 @@ impl ConsumerMembershipManager {
     /// runs `on_partitions_assigned` if a listener exists, then completes
     /// the ack — resuming at [`Self::continue_after_assign`]. This
     /// guarantees `consumer.assignment()` changes only within `poll()`.
-    #[allow(clippy::too_many_arguments)]
     async fn continue_after_revoke(
         &self,
         revoke_result: Result<(), Error>,
@@ -1736,6 +1741,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `isLeavingGroup()` (override).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#isLeavingGroup")]
     pub(crate) fn is_leaving_group(&self) -> bool {
         let leave_op = self.leave_group_operation();
         if matches!(leave_op, GroupMembershipOperation::RemainInGroup) && self.group_instance_id.is_none() {
@@ -1763,6 +1769,7 @@ impl ConsumerMembershipManager {
     /// Translated as `pub(crate)` because the Java method is
     /// `protected`-on-subclass and the test module reaches into it via
     /// the §31 event channel.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalMemberLeavingGroup")]
     pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), Error> {
         // Snapshot the dropped partitions + epoch under a single short
         // lock; drop both guards before any .await.
@@ -2069,9 +2076,9 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -2150,7 +2157,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         (mgr, rx)
     }
@@ -2165,10 +2172,11 @@ mod tests {
         ConsumerMembershipManager,
         Arc<crate::common::metrics::Metrics>,
         Arc<ConsumerRebalanceMetricsManager>,
-        Arc<crate::common::metrics::MockTime>,
+        Arc<crate::common::utils::MockTime>,
     ) {
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::{Metrics, Time as MetricsTime};
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time as MetricsTime;
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let time = Arc::new(MockTime::new());
@@ -2206,7 +2214,7 @@ mod tests {
     #[test]
     fn transition_to_reconciling_and_back_records_rebalance_metrics() {
         use crate::common::Metric;
-        use crate::common::metrics::Time as MetricsTime;
+        use crate::common::utils::Time as MetricsTime;
 
         let (mgr, metrics, metrics_manager, time) = make_with_rebalance_metrics();
         let value =
@@ -2292,7 +2300,7 @@ mod tests {
             subs.clone(),
             "test-group",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2309,7 +2317,7 @@ mod tests {
             beh,
             true, // auto_commit_enabled
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         (mgr, rx)
     }
@@ -3031,9 +3039,9 @@ mod tests {
     // ===================================================================
 
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
     use crate::common::errors::InterruptError;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 

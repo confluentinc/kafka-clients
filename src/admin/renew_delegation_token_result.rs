@@ -24,19 +24,22 @@ use crate::common::KafkaFuture;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.RenewDelegationTokenResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult")]
 pub struct RenewDelegationTokenResult {
     expiry_timestamp: KafkaFuture<i64>,
 }
 
 impl RenewDelegationTokenResult {
     /// Creates a new result from the expiry-timestamp future.
-    pub fn new(expiry_timestamp: KafkaFuture<i64>) -> Self {
+    #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult#RenewDelegationTokenResult")]
+    pub(crate) fn new(expiry_timestamp: KafkaFuture<i64>) -> Self {
         Self { expiry_timestamp }
     }
 
     /// Returns a future which yields the new expiry timestamp.
     ///
     /// Mirrors `RenewDelegationTokenResult.expiryTimestamp()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult#expiryTimestamp")]
     pub fn expiry_timestamp(&self) -> &KafkaFuture<i64> {
         &self.expiry_timestamp
     }

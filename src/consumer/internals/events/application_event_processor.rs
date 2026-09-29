@@ -65,7 +65,7 @@
 //! Spawning is per-event (not per-record); the hot-path rule from
 //! CLAUDE.md §11 still applies inside `Fetcher` / `FetchCollector`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -73,6 +73,7 @@ use std::sync::{Arc, Mutex};
 use super::ApplicationEvent;
 use super::CompletableEventReaper;
 use super::EventProcessor;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
@@ -87,6 +88,7 @@ use crate::consumer::internals::{FetchPosition, SubscriptionState};
 /// The processor lives on the bg task. It is constructed once (the Java
 /// `supplier` factory boils down to a constructor here) and called from
 /// the bg-task `run_once` loop after each event drain.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor")]
 pub(crate) struct ApplicationEventProcessor {
     /// Shared `RequestManagers` container — Java holds it as a plain
     /// field on the bg-thread; Rust wraps in `Arc<Mutex<...>>` so the
@@ -113,6 +115,11 @@ pub(crate) struct ApplicationEventProcessor {
     /// `maybeUpdatePatternSubscription` (commit 5/N — the async-dispatch
     /// arm `AsyncPoll`).
     metadata_version_snapshot: i32,
+    /// The consumer's clock. Not a Java field: Java's request managers read
+    /// their own `time.milliseconds()`, while the Rust managers take the
+    /// current time as a `current_time_ms` / `now_ms` argument, so the
+    /// processor reads it here from the same clock and passes it in.
+    time: Arc<dyn Time>,
 }
 
 impl ApplicationEventProcessor {
@@ -125,11 +132,15 @@ impl ApplicationEventProcessor {
     /// deadline (mirroring Java's `Timer`-based `ConsumerUtils.getResult`
     /// wait that surfaces `TimeoutException` after the user-supplied
     /// timeout elapses).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#ApplicationEventProcessor"
+    )]
     pub(crate) fn new(
         request_managers: Arc<Mutex<RequestManagers>>,
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
+        time: Arc<dyn Time>,
     ) -> Self {
         let metadata_version_snapshot = metadata.update_version();
         Self {
@@ -138,10 +149,14 @@ impl ApplicationEventProcessor {
             subscriptions,
             application_event_reaper,
             metadata_version_snapshot,
+            time,
         }
     }
 
     /// Java: `int metadataVersionSnapshot()` — visible-for-testing.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#metadataVersionSnapshot"
+    )]
     pub(crate) fn metadata_version_snapshot(&self) -> i32 {
         self.metadata_version_snapshot
     }
@@ -600,7 +615,7 @@ impl ApplicationEventProcessor {
     /// future diagnostics (e.g. tracing the original Java event lifecycle).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
-        method_name: crate::consumer::ConsumerRebalanceListenerMethodName,
+        method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
         error: Option<Error>,
     ) {
         let _ = error;
@@ -633,6 +648,9 @@ impl ApplicationEventProcessor {
     /// Re-evaluates the subscribed regex only if (a) there IS a pattern
     /// subscription and (b) the metadata version has advanced since the
     /// last evaluation.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#maybeUpdatePatternSubscription"
+    )]
     fn maybe_update_pattern_subscription(&mut self) {
         let has_pattern = {
             let guard = self.lock_subscriptions();
@@ -653,6 +671,9 @@ impl ApplicationEventProcessor {
     /// list, updates the subscription, and notifies the membership
     /// manager (so the consumer joins the group with the new
     /// subscription on the next poll).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#updatePatternSubscription"
+    )]
     fn update_pattern_subscription(&mut self) {
         // Java: `cluster.topics().stream().filter(subscriptions::matchesSubscribedPattern).collect(...)`.
         let cluster = self.metadata.fetch();
@@ -760,7 +781,7 @@ impl ApplicationEventProcessor {
             };
             // Java: `event.markOffsetsReady()` happens after offsets are resolved.
             offsets_ready.complete(());
-            commit.commit_async_no_callback(resolved, current_time_ms_now())
+            commit.commit_async_no_callback(resolved, self.time.milliseconds())
         };
         // Spawn continuation — mirrors Java's `whenComplete(complete(event.future()))`.
         tokio::spawn(async move {
@@ -791,7 +812,7 @@ impl ApplicationEventProcessor {
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
     ) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let commit_rx = {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
@@ -852,7 +873,7 @@ impl ApplicationEventProcessor {
         partitions: HashSet<TopicPartition>,
     ) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let fetch_rx = {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
@@ -939,7 +960,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(CheckAndUpdatePositionsEvent)`.
     fn process_check_and_update_positions(&mut self, handle: super::CompletableEventHandle<()>) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let update_rx = {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
@@ -1091,7 +1112,7 @@ impl ApplicationEventProcessor {
         };
         match membership_arc {
             Some(mm) => {
-                let now_ms = current_time_ms_now();
+                let now_ms = self.time.milliseconds();
                 tokio::spawn(async move {
                     match mm.leave_group(now_ms).await {
                         Ok(()) => {
@@ -1131,7 +1152,7 @@ impl ApplicationEventProcessor {
         };
         match membership_arc {
             Some(mm) => {
-                let now_ms = current_time_ms_now();
+                let now_ms = self.time.milliseconds();
                 log::debug!(
                     "Signal the ConsumerMembershipManager to leave the consumer group since the consumer is closing"
                 );
@@ -1482,21 +1503,6 @@ impl ApplicationEventProcessor {
 // Helpers
 // ============================================================================
 
-/// Returns the current wall-clock time in milliseconds since the Unix epoch.
-///
-/// Java's `Time.milliseconds()` is mock-friendly; the Rust translation uses
-/// `std::time::SystemTime` directly. Tests that need to control time
-/// either inject a mock time source via the request manager's own clock or
-/// drive the processor's `current_time_ms` arg on events like
-/// `AssignmentChange` (which carries it explicitly per Java).
-fn current_time_ms_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
-}
-
 /// Java: `maybeCompleteAsyncPollEventExceptionally(event, t)`.
 ///
 /// Returns `true` when the error should be IGNORED (logged at trace level
@@ -1633,13 +1639,13 @@ mod tests {
     use crate::ApiVersions;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::{Error, IsolationLevel, TopicPartition};
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
-    use crate::consumer::ConsumerRebalanceListenerMethodName;
     use crate::consumer::SubscriptionPattern;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::CommitRequestManager;
     use crate::consumer::internals::ConsumerHeartbeatRequestManager;
     use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
     use crate::consumer::internals::CoordinatorRequestManager;
     use crate::consumer::internals::OffsetsRequestManager;
     use crate::consumer::internals::RequestManager;
@@ -1701,7 +1707,7 @@ mod tests {
                 Arc::clone(&subscriptions),
                 "test-group",
                 None,
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::new(crate::common::utils::SystemTime),
                 0,
             )))
         } else {
@@ -1722,6 +1728,7 @@ mod tests {
             Arc::clone(&subscriptions),
             Arc::clone(&metadata),
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -1774,6 +1781,7 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             Arc::clone(&reaper),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         Fixture { processor, request_managers, metadata, subscriptions, reaper }
@@ -1809,7 +1817,7 @@ mod tests {
             Arc::clone(&bg_handler),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         ConsumerHeartbeatRequestManager::new(0, config, hb_coordinator, subscriptions, mm, bg_handler)
     }
@@ -2720,6 +2728,7 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             reaper,
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let state = Arc::new(super::super::AsyncPollState::new());
@@ -3655,9 +3664,9 @@ mod tests {
     /// `cluster.topics()` Mockito stubs.
     fn publish_topic_metadata(metadata: &ConsumerMetadata, topic_name: &str) {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
         use crate::common::Node;
         use crate::common::Uuid;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
         let node = Node::new(1, "localhost".to_string(), 9092);

@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 #[cfg(test)]
 use crate::common::MetricName;
-use crate::common::metrics::internals::TimeUnit;
+use crate::common::metrics::TimeUnit;
 use crate::common::metrics::stats::{Avg, CumulativeCount, CumulativeSum, Max, Rate, WindowedCount};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
@@ -287,7 +287,7 @@ impl ConsumerRebalanceMetricsManager {
     /// as in Java, not called from the membership state machine — only the
     /// `ConsumerRebalanceMetricsManagerTest` cases exercise it. Kept (not
     /// `#[cfg(test)]`) to preserve the Java API.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn rebalance_started(&self) -> bool {
         self.last_rebalance_start_ms.load(Ordering::SeqCst) > self.last_rebalance_end_ms.load(Ordering::SeqCst)
     }
@@ -298,9 +298,10 @@ mod tests {
     use super::*;
     use crate::common::Metric;
     use crate::common::TopicPartition;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::{Metrics, Time};
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::common::metrics::Metrics;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     /// Build a manager over a `MockTime`-backed `Metrics` plus a fresh
     /// `SubscriptionState`. Mirrors the Java test's `@BeforeEach setUp`

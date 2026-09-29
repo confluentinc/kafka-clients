@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidReplicaAssignmentException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Replica assignment is invalid.
     ///
-    /// Corresponds to Java's `InvalidReplicaAssignmentException`, error code [`Errors::InvalidReplicaAssignment`].
+    /// Corresponds to Java's `InvalidReplicaAssignmentException`, error code `Errors::InvalidReplicaAssignment`.
     ///
     /// Java `extends` chain:
     ///    `InvalidReplicaAssignmentException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidReplicaAssignmentException")]
     InvalidReplicaAssignmentError,
     code: Errors::InvalidReplicaAssignment,
     extends: [

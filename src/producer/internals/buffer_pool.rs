@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! A pool of byte buffers kept under a given memory limit.
 //!
 //! This class is fairly specific to the needs of the producer. In particular it has the
@@ -45,14 +45,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::Error;
-use crate::common::metrics::internals::TimeUnit;
+use crate::common::metrics::TimeUnit;
 use crate::common::metrics::stats::Meter;
 use crate::common::metrics::{Metrics, Sensor};
-
-/// A provider of the current POSIX time in milliseconds. The Rust analog of
-/// Java's `Time.milliseconds()`, used as the timestamp when recording the
-/// wait-time sensor (`SenderMetrics` holds the same shape).
-type TimeProvider = Arc<dyn Fn() -> i64 + Send + Sync>;
+use crate::common::utils::Time;
 
 /// Mutable state protected by the lock.
 struct PoolInner {
@@ -94,6 +90,7 @@ enum WakeResult {
 ///
 /// Provides bounded memory allocation with backpressure and buffer recycling
 /// for the most common buffer size (the "poolable size").
+#[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool")]
 pub struct BufferPool {
     /// The lock-protected inner state.
     inner: Mutex<PoolInner>,
@@ -103,8 +100,8 @@ pub struct BufferPool {
     poolable_size: usize,
     /// Whether the pool has been closed.
     closed: AtomicBool,
-    /// Provider of the current POSIX time in milliseconds (Java's `Time time`).
-    time_provider: TimeProvider,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Sensor tracking the time an appender waits for space allocation
     /// (Java's `Sensor waitTime`, `WAIT_TIME_SENSOR_NAME`).
     wait_time_sensor: Arc<Sensor>,
@@ -130,13 +127,14 @@ impl BufferPool {
     /// * `memory` - The maximum amount of memory that this buffer pool can allocate
     /// * `poolable_size` - The buffer size to cache in the free list rather than deallocating
     /// * `metrics` - Instance of `Metrics`
-    /// * `time_provider` - Provider of the current POSIX time in milliseconds
+    /// * `time` - Time instance
     /// * `metric_grp_name` - Logical group name for metrics
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#BufferPool")]
     pub fn new(
         memory: i64,
         poolable_size: usize,
         metrics: Arc<Metrics>,
-        time_provider: TimeProvider,
+        time: Arc<dyn Time>,
         metric_grp_name: &str,
     ) -> Self {
         assert!(memory > 0, "Buffer pool memory must be positive");
@@ -199,7 +197,7 @@ impl BufferPool {
             total_memory: memory,
             poolable_size,
             closed: AtomicBool::new(false),
-            time_provider,
+            time,
             wait_time_sensor,
             buffer_exhausted_sensor,
             #[cfg(test)]
@@ -208,22 +206,16 @@ impl BufferPool {
     }
 
     /// Test-only convenience constructor that supplies a fresh reporter-less
-    /// [`Metrics`] registry and a system-clock time provider, mirroring Java's
+    /// [`Metrics`] registry and the system clock, mirroring Java's
     /// `BufferPoolTest` passing `new Metrics()`. Java has no metrics-less
     /// production constructor.
     #[cfg(test)]
     pub(crate) fn new_for_test(memory: i64, poolable_size: usize) -> Self {
-        let time_provider: TimeProvider = Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        });
         Self::new(
             memory,
             poolable_size,
             Arc::new(Metrics::new()),
-            time_provider,
+            Arc::new(crate::common::utils::SystemTime),
             "producer-metrics",
         )
     }
@@ -256,6 +248,7 @@ impl BufferPool {
     /// becomes available.
     ///
     /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#allocate")]
     pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
         if size as i64 > self.total_memory {
             return Err(Error::local_illegal_argument(format!(
@@ -367,12 +360,13 @@ impl BufferPool {
 
             // Wait for notification (no lock held here). This is the await the
             // caller may be cancelled at, which is what `WaitGuard` exists for.
-            // The wait duration is measured in nanoseconds with a monotonic
-            // clock, the analog of Java's `time.nanoseconds()` bracketing
-            // `moreMemory.await(...)`.
-            let start_wait = std::time::Instant::now();
+            // The wait duration is measured with `time.nanoseconds()`
+            // bracketing `moreMemory.await(...)`, as in Java. The deadline
+            // itself stays on the tokio clock, which drives the timeout.
+            let start_wait_ns = self.time.nanoseconds();
             let timed_out = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
-            let time_ns = start_wait.elapsed().as_nanos() as i64;
+            let end_wait_ns = self.time.nanoseconds();
+            let time_ns = (end_wait_ns - start_wait_ns).max(0);
 
             // Java records the wait time in a `finally` — even when the wait
             // ends in timeout/close/error (`BufferPool.java:150-154`). If
@@ -443,7 +437,7 @@ impl BufferPool {
                     // elapsed, before throwing `BufferExhaustedException`
                     // (`BufferPool.java:160`). Recorded outside the pool lock
                     // (value/timestamp are independent of pool state).
-                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, (self.time_provider)());
+                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, self.time.milliseconds());
                     return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
@@ -469,21 +463,23 @@ impl BufferPool {
     /// infallible, so this always returns `Ok` in production; the `Result`
     /// return type is the faithful translation of the throwing contract, and
     /// tests inject a failure through `fail_record_wait_time`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#recordWaitTime")]
     fn record_wait_time(&self, time_ns: i64) -> Result<(), Error> {
         #[cfg(test)]
         if self.fail_record_wait_time.load(Ordering::Relaxed) {
             return Err(Error::with_message(
-                crate::common::Errors::UnknownServerError,
+                crate::common::protocol::Errors::UnknownServerError,
                 "Injected recordWaitTime failure",
             ));
         }
         self.wait_time_sensor
-            .record_value_time_ms(time_ns as f64, (self.time_provider)());
+            .record_value_time_ms(time_ns as f64, self.time.milliseconds());
         Ok(())
     }
 
     /// Attempt to ensure we have at least the requested number of bytes of memory for
     /// allocation by deallocating pooled buffers (if needed).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#freeUp")]
     fn free_up(inner: &mut PoolInner, size: i64) {
         while !inner.free.is_empty() && inner.non_pooled_available_memory < size {
             let buf = inner.free.pop_back().unwrap();
@@ -514,6 +510,7 @@ impl BufferPool {
     /// * `size` - The size of the buffer to mark as deallocated, note that this may be smaller
     ///   than `buffer.capacity()` since the buffer may re-allocate itself during in-place
     ///   compression
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#deallocate")]
     pub fn deallocate_with_size(&self, buffer: Vec<u8>, size: usize) {
         let mut inner = self.inner.lock().unwrap();
         if size == self.poolable_size && size == buffer.capacity() {
@@ -528,40 +525,47 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool using its full capacity as the size.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#deallocate")]
     pub fn deallocate(&self, buffer: Vec<u8>) {
         let size = buffer.capacity();
         self.deallocate_with_size(buffer, size);
     }
 
     /// The total free memory both unallocated and in the free list.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#availableMemory")]
     pub fn available_memory(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
         inner.non_pooled_available_memory + inner.free.len() as i64 * self.poolable_size as i64
     }
 
     /// Get the unallocated memory (not in the free list or in use).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#unallocatedMemory")]
     pub fn unallocated_memory(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
         inner.non_pooled_available_memory
     }
 
     /// The number of tasks blocked waiting on memory.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#queued")]
     pub fn queued(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.waiters.len()
     }
 
     /// The buffer size that will be retained in the free list after use.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#poolableSize")]
     pub fn poolable_size(&self) -> usize {
         self.poolable_size
     }
 
     /// The total memory managed by this pool.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#totalMemory")]
     pub fn total_memory(&self) -> i64 {
         self.total_memory
     }
 
     /// The number of buffers in the free list.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#freeSize")]
     pub fn free_size(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.free.len()
@@ -569,6 +573,7 @@ impl BufferPool {
 
     /// Closes the buffer pool. Memory will be prevented from being allocated, but may be
     /// deallocated. All allocations awaiting available memory will be notified to abort.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#close")]
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         let inner = self.inner.lock().unwrap();
@@ -598,6 +603,7 @@ mod tests {
     ///
     /// Test the simple non-blocking allocation paths.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testSimple")]
     async fn test_simple() {
         let total_memory: i64 = 64 * 1024;
         let size: usize = 1024;
@@ -649,6 +655,7 @@ mod tests {
     ///
     /// Test that we cannot try to allocate more memory than we have in the whole pool.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testCantAllocateMoreMemoryThanWeHave")]
     async fn test_cant_allocate_more_memory_than_we_have() {
         let pool = BufferPool::new_for_test(1024, 512);
         let buffer = pool.allocate(1024, 10).await.unwrap();
@@ -667,6 +674,7 @@ mod tests {
     ///
     /// Test that delayed allocation blocks.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testDelayedAllocation")]
     async fn test_delayed_allocation() {
         let pool = Arc::new(BufferPool::new_for_test(5 * 1024, 1024));
         let buffer = pool.allocate(1024, 10000).await.unwrap();
@@ -721,6 +729,7 @@ mod tests {
     /// Verify that a failed allocation attempt due to not enough memory finishes soon
     /// after the maxBlockTimeMs.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testBlockTimeout")]
     async fn test_block_timeout() {
         let max_block_ms: i64 = 10;
         let pool = BufferPool::new_for_test(2, 1);
@@ -750,6 +759,9 @@ mod tests {
     /// Test if the waiter that is waiting on availability of more memory is cleaned up
     /// when a timeout occurs.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testCleanupMemoryAvailabilityWaiterOnBlockTimeout"
+    )]
     async fn test_cleanup_memory_availability_waiter_on_block_timeout() {
         let pool = BufferPool::new_for_test(2, 1);
         let _buffer = pool.allocate(1, 10).await.unwrap();
@@ -765,6 +777,7 @@ mod tests {
     ///
     /// This test creates lots of tasks that hammer on the pool.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testStressfulSituation")]
     async fn test_stressful_situation() {
         let num_tasks = 10;
         let iterations = 50000;
@@ -810,6 +823,7 @@ mod tests {
     /// with a separate pool using large values and the `free_size` + `unallocated_memory`
     /// methods.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testLargeAvailableMemory")]
     async fn test_large_available_memory() {
         let memory: i64 = 20_000_000_000;
         let poolable_size: usize = 2_000_000_000;
@@ -858,6 +872,9 @@ mod tests {
     /// Mockito spy to make `recordWaitTime` throw `OutOfMemoryError`; the Rust
     /// analog injects the failure through the `fail_record_wait_time` test seam.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testCleanupMemoryAvailabilityOnMetricsException"
+    )]
     async fn test_cleanup_memory_availability_on_metrics_error() {
         let pool = BufferPool::new_for_test(2, 1);
         pool.fail_record_wait_time.store(true, Ordering::Relaxed);
@@ -888,8 +905,13 @@ mod tests {
     #[tokio::test]
     async fn test_wait_and_exhausted_metrics_recorded() {
         let metrics = Arc::new(Metrics::new());
-        let time_provider: TimeProvider = Arc::new(|| 0);
-        let pool = BufferPool::new(2, 1, Arc::clone(&metrics), time_provider, "producer-metrics");
+        let pool = BufferPool::new(
+            2,
+            1,
+            Arc::clone(&metrics),
+            Arc::new(crate::common::utils::SystemTime),
+            "producer-metrics",
+        );
 
         // The four metric names are registered in the group.
         for name in [
@@ -942,6 +964,7 @@ mod tests {
 
     /// Translated from `BufferPoolTest.testCloseAllocations`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testCloseAllocations")]
     async fn test_close_allocations() {
         let pool = Arc::new(BufferPool::new_for_test(10, 1));
         let buffer = pool.allocate(1, 10).await.unwrap();
@@ -965,6 +988,7 @@ mod tests {
 
     /// Translated from `BufferPoolTest.testCloseNotifyWaiters`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPoolTest#testCloseNotifyWaiters")]
     async fn test_close_notify_waiters() {
         let num_workers = 2;
         let pool = Arc::new(BufferPool::new_for_test(1, 1));

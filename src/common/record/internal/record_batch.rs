@@ -26,6 +26,7 @@ use crate::common::header::RecordHeader;
 /// Constants for record batch magic values and sentinel values.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.RecordBatch` interface constants.
+#[doc(alias = "org.apache.kafka.common.record.internal.RecordBatch")]
 pub struct RecordBatch;
 
 impl RecordBatch {

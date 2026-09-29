@@ -15,6 +15,7 @@
 //! Producer types (org.apache.kafka.clients.producer)
 
 mod callback;
+mod dyn_producer;
 pub(crate) mod internals;
 mod kafka_producer;
 #[cfg(test)]
@@ -24,7 +25,7 @@ mod partitioner;
 // The `Producer` interface lives in its own `producer.rs` file per CLAUDE.md's
 // "one Java class per file" rule, nested under the `producer` module that
 // mirrors the `org.apache.kafka.clients.producer` package.
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod producer;
 mod producer_buffer_exhausted_error;
 mod producer_config;
@@ -33,6 +34,7 @@ mod record_metadata;
 mod round_robin_partitioner;
 
 pub use callback::Callback;
+pub use dyn_producer::DynProducer;
 pub use kafka_producer::KafkaProducer;
 #[cfg(test)]
 pub(crate) use mock_partitioner::MockPartitioner;

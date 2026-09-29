@@ -23,17 +23,20 @@ use crate::common::acl::AclBinding;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeAclsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult")]
 pub struct DescribeAclsResult {
     future: KafkaFuture<Vec<AclBinding>>,
 }
 
 impl DescribeAclsResult {
     /// Creates a new result from the described-ACLs future.
-    pub fn new(future: KafkaFuture<Vec<AclBinding>>) -> Self {
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult#DescribeAclsResult")]
+    pub(crate) fn new(future: KafkaFuture<Vec<AclBinding>>) -> Self {
         Self { future }
     }
 
     /// Return a future containing the ACLs requested.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult#values")]
     pub fn values(&self) -> &KafkaFuture<Vec<AclBinding>> {
         &self.future
     }

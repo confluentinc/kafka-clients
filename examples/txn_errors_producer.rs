@@ -55,12 +55,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
+
 use txn_common::report;
 use txn_common::send_expect_failure;
 use txn_common::send_value_printed;
 use txn_common::transactional_producer;
 use txn_common::transactional_producer_with;
+use txn_common::variant;
 
 /// Topic the API-misuse case aims at; nothing may ever land on it.
 const MISUSE_TOPIC: &str = "txn-errors-misuse";
@@ -229,16 +231,16 @@ async fn ceiling_case(bootstrap: &str) -> Result<bool, String> {
             let text = error.to_string();
             // `UnknownServerError` is how this crate spells Java's bare
             // `KafkaException`, which has no wire code of its own.
-            let shape_ok = error.error() == Errors::UnknownServerError && text.starts_with(PREFIX);
+            let shape_ok = matches!(error, Error::UnknownServer(_)) && text.starts_with(PREFIX);
             report(
                 shape_ok,
                 label,
                 if shape_ok {
-                    format!("{:?}: {}", error.error(), first_line(&text))
+                    format!("{}: {}", variant(&error), first_line(&text))
                 } else {
                     format!(
-                        "expected UnknownServerError whose message starts {PREFIX:?}, got {:?}: {}",
-                        error.error(),
+                        "expected UnknownServerError whose message starts {PREFIX:?}, got {}: {}",
+                        variant(&error),
                         first_line(&text)
                     )
                 },
@@ -265,7 +267,7 @@ async fn timeout_case(bootstrap: &str) -> Result<bool, String> {
     let commit = producer.commit_transaction().await;
     let ok = expect_error(
         "commit_transaction after the coordinator timed the transaction out",
-        commit.err().map(|e| format!("{:?}: {e}", e.error())),
+        commit.err().map(|e| format!("{}: {e}", variant(&e))),
     );
     drop(producer);
     Ok(ok)
@@ -290,10 +292,11 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
     let mut ok = true;
     let giant = "x".repeat(1_500_000);
     // The error **code** is what pins the end-to-end path, not the surface.
-    // `Errors::MessageTooLarge` can only come from a broker response: the client cap
-    // is raised to 5 MB above so this record is accepted locally, and a local
-    // rejection would be `Error::RecordTooLarge`, which carries no wire code and
-    // whose `error()` therefore degrades to `UnknownServerError`. A broker that never
+    // A broker `MESSAGE_TOO_LARGE` response surfaces as `Error::RecordTooLarge`, and so
+    // does a local `ensure_valid_record_size` rejection — the same class, as in Java — so
+    // the two are told apart by the local rejection's message ("The message is N bytes
+    // when serialized …"). The client cap is raised to 5 MB above so this record is
+    // accepted locally. A broker that never
     // answered gives a `Timeout`. So without this assertion, dropping the
     // `max.request.size` override would leave the case green while the record never
     // left the client.
@@ -305,16 +308,19 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
     // rejection takes that same route (`kafka_producer.rs`'s `handle_api_error`
     // returns `Ok(failed future)`), in Java as much as here. An earlier version of
     // this comment claimed otherwise; it was wrong.
+    const LOCAL_TOO_LARGE_PREFIX: &str = "The message is ";
     let poison_label = "the 1.5 MB record was rejected by the broker";
     match send_expect_failure(&producer, POISON_TOPIC, &giant)
         .await
         .and_then(|failure| failure.expect_via_future("the 1.5 MB record"))
     {
-        Ok(error) if error.error() == Errors::MessageTooLarge => {
+        Ok(error)
+            if matches!(error, Error::RecordTooLarge(_)) && !error.to_string().starts_with(LOCAL_TOO_LARGE_PREFIX) =>
+        {
             ok &= report(
                 true,
                 poison_label,
-                format!("{:?}: {}", error.error(), first_line(&error.to_string())),
+                format!("{}: {}", variant(&error), first_line(&error.to_string())),
             );
         },
         Ok(error) => {
@@ -322,9 +328,9 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
                 false,
                 poison_label,
                 format!(
-                    "expected MessageTooLarge from a broker response, got {:?}: {} \
-                     (UnknownServerError here means max.request.size rejected it locally)",
-                    error.error(),
+                    "expected RecordTooLarge from a broker response, got {}: {} \
+                     (a message starting {LOCAL_TOO_LARGE_PREFIX:?} means max.request.size rejected it locally)",
+                    variant(&error),
                     first_line(&error.to_string())
                 ),
             );

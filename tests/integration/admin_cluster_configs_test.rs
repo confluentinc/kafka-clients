@@ -16,7 +16,7 @@
 //! 4.2.0 broker.
 //!
 //! Mirrors the describeCluster / describeConfigs / incrementalAlterConfigs /
-//! listConfigResources / listClientMetricsResources scenarios in Java's
+//! listConfigResources scenarios in Java's
 //! `KafkaAdminClientIntegrationTest`, exercising the real network engine end to
 //! end rather than the `MockClient` unit-test harness.
 //!
@@ -38,7 +38,7 @@ use confluent_kafka::admin::{
     DescribeConfigsOptions, ListConfigResourcesOptions, OpType,
 };
 use confluent_kafka::common::acl::AclOperation;
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 
 use crate::common::admin_backend::{AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -304,7 +304,7 @@ async fn describe_configs_topic_returns_defaults<F: AdminBackendFactory>(ctx: &m
     // `TestUtils.createTopicWithAdmin`.
     create_topic(&admin, &topic, 1, 1).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
     let config = config_of(&admin, &resource).await;
 
     // A topic should report standard default configs.
@@ -339,7 +339,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
     // `TestUtils.createTopicWithAdmin`.
     create_topic(&admin, &topic, 1, 1).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
 
     // SET retention.ms to a custom value.
     alter(
@@ -431,7 +431,7 @@ async fn describe_configs_broker_returns_broker_configs<F: AdminBackendFactory>(
     // Discover a broker id from describeCluster.
     let broker_id = first_broker_id(&admin).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Broker, broker_id.to_string());
+    let resource = ConfigResource::new(config_resource::Type::Broker, broker_id.to_string());
     let config = config_of(&admin, &resource).await;
 
     // A broker reports many configs; a couple of universal ones must exist.
@@ -473,7 +473,7 @@ async fn describe_configs_reports_synonyms_and_documentation<F: AdminBackendFact
     let backend = factory.name();
 
     let broker_id = first_broker_id(&admin).await;
-    let resource = ConfigResource::new(ConfigResourceType::Broker, broker_id.to_string());
+    let resource = ConfigResource::new(config_resource::Type::Broker, broker_id.to_string());
     let described = admin
         .describe_configs(
             std::slice::from_ref(&resource),
@@ -548,13 +548,13 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         .unwrap_or_else(|e| panic!("{backend} backend: list config resources: {e}"));
 
     assert!(
-        resources.iter().any(|r| r.resource_type() == ConfigResourceType::Broker),
+        resources.iter().any(|r| r.resource_type() == config_resource::Type::Broker),
         "{backend} backend: expected at least one BROKER config resource"
     );
     assert!(
         resources
             .iter()
-            .any(|r| r.resource_type() == ConfigResourceType::Topic && r.name() == topic),
+            .any(|r| r.resource_type() == config_resource::Type::Topic && r.name() == topic),
         "{backend} backend: expected the created topic among the TOPIC config resources"
     );
 
@@ -562,7 +562,10 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
     // effect of the `resource_types` argument, and a wire field that is
     // otherwise never exercised with a non-empty value.
     let topics_only = admin
-        .list_config_resources(&HashSet::from([ConfigResourceType::Topic]), ListConfigResourcesOptions::new())
+        .list_config_resources(
+            &HashSet::from([config_resource::Type::Topic]),
+            ListConfigResourcesOptions::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: list TOPIC config resources: {e}"));
     assert!(
@@ -570,98 +573,12 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         "{backend} backend: the created topic should be in the TOPIC-only listing"
     );
     assert!(
-        topics_only.iter().all(|r| r.resource_type() == ConfigResourceType::Topic),
+        topics_only.iter().all(|r| r.resource_type() == config_resource::Type::Topic),
         "{backend} backend: a TOPIC-only listing must contain only TOPIC resources, got {:?}",
         topics_only.iter().map(|r| r.resource_type()).collect::<HashSet<_>>()
     );
 
     delete_and_close(&admin, &[topic]).await;
-    ctx.cleanup().await;
-}
-
-/// End-to-end check of the deprecated `listClientMetricsResources` RPC. Seeds a
-/// KIP-714 client-metrics subscription with `incrementalAlterConfigs` on a
-/// `CLIENT_METRICS` config resource, then asserts it shows up in the listing.
-/// Mirrors the intent of Java's `KafkaAdminClientIntegrationTest` client-metrics
-/// coverage.
-async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    #[allow(deprecated)]
-    use confluent_kafka::admin::ListClientMetricsResourcesOptions;
-
-    let admin = admin_for(factory, ctx).await;
-    let backend = factory.name();
-
-    // A client-metrics subscription is a CLIENT_METRICS config resource; create
-    // one by setting its subscription configs (KIP-714). `interval.ms` is the
-    // push interval; `metrics` scopes which client metrics are collected.
-    let subscription = ctx.topic("admin_client_metrics_sub");
-    let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, subscription.clone());
-    alter(
-        &admin,
-        &resource,
-        vec![
-            AlterConfigOp::new(
-                ConfigEntry::new("interval.ms".to_string(), Some("60000".to_string())),
-                OpType::Set,
-            ),
-            AlterConfigOp::new(ConfigEntry::new("metrics".to_string(), Some(String::new())), OpType::Set),
-        ],
-        "create client-metrics subscription",
-    )
-    .await;
-
-    // The new subscription becomes visible to the listing asynchronously.
-    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
-        #[allow(deprecated)]
-        let listings = admin
-            .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
-            .await
-            .map_err(|e| format!("list client metrics resources: {e}"))?;
-        if listings.iter().any(|l| l.name() == subscription) {
-            Ok(())
-        } else {
-            Err(format!(
-                "{backend} backend: expected the created subscription {subscription:?} in {listings:?}"
-            ))
-        }
-    })
-    .await;
-
-    // The same subscription is listable through the non-deprecated route, which
-    // is what Java says `listClientMetricsResources` was replaced by. Both must
-    // agree, on every backend.
-    let via_config_resources = admin
-        .list_config_resources(
-            &HashSet::from([ConfigResourceType::ClientMetrics]),
-            ListConfigResourcesOptions::new(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: list CLIENT_METRICS config resources: {e}"));
-    assert!(
-        via_config_resources.iter().any(|r| r.name() == subscription),
-        "{backend} backend: listConfigResources(CLIENT_METRICS) must report the same subscription as the \
-         deprecated listClientMetricsResources, got {via_config_resources:?}"
-    );
-
-    // Delete the subscription so the broker is left clean. Unlike the alters
-    // above this is not asserted: the original tolerated a failure here too,
-    // since a leftover subscription cannot fail a later scenario.
-    let mut delete_configs = HashMap::new();
-    delete_configs.insert(
-        resource,
-        vec![AlterConfigOp::new(
-            ConfigEntry::new("interval.ms".to_string(), None),
-            OpType::Delete,
-        )],
-    );
-    let _ = admin
-        .incremental_alter_configs(&delete_configs, AlterConfigsOptions::new())
-        .await;
-
-    admin
-        .close(Some(Duration::from_secs(5)))
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
 }
 
@@ -688,8 +605,4 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_list_config_resources_lists_resources,
     list_config_resources_lists_resources
-);
-multilanguage_admin_test!(
-    test_list_client_metrics_resources_lists_subscription,
-    list_client_metrics_resources_lists_subscription
 );

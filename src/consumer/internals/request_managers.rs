@@ -35,7 +35,7 @@
 //! bool` field — checking-and-setting a single flag is the entire
 //! contract, and the helper class is overkill here.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::sync::Arc;
 
@@ -51,6 +51,7 @@ use super::TopicMetadataRequestManager;
 /// Container holding all consumer request managers. The bg task
 /// iterates over its [`Self::entries`] to poll each manager in
 /// deterministic registration order.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers")]
 pub(crate) struct RequestManagers {
     /// The coordinator manager — `Some` when a group is configured,
     /// `None` for the (currently out-of-scope) group-less assignor
@@ -133,6 +134,7 @@ impl RequestManagers {
     /// by phase), not the Java FFI order. The **`entries()` order** is
     /// what matters per `consumer-threading.md` §10 — see
     /// [`Self::entries`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#RequestManagers")]
     pub(crate) fn new(
         coordinator: Option<Arc<CoordinatorRequestManager>>,
         topic_metadata: Option<TopicMetadataRequestManager>,
@@ -161,6 +163,7 @@ impl RequestManagers {
     /// concrete slots are all `None`; managers iterate in
     /// supplied-vec order from `entries()`.
     #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#RequestManagers")]
     pub(crate) fn with_dyn_managers(dyn_managers: Vec<Box<dyn RequestManager>>) -> Self {
         Self {
             coordinator: None,
@@ -204,6 +207,7 @@ impl RequestManagers {
     /// destructure so each `Option` is borrowed independently.
     ///
     /// [nomicon-borrow-splitting]: https://doc.rust-lang.org/nomicon/borrow-splitting.html
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#entries")]
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
@@ -288,6 +292,7 @@ impl RequestManagers {
     /// Java: `close()`. Java additionally invokes `closeQuietly` on
     /// every manager that implements `Closeable`; in Rust no manager
     /// implements an explicit close trait at this point.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
             log::debug!("RequestManagers was already closed");
@@ -326,7 +331,7 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::memory::BufferSupplier;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::FetchBuffer;
     use crate::consumer::internals::FetchConfig;
@@ -362,7 +367,7 @@ mod tests {
             subs,
             "g",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ))
     }
@@ -386,6 +391,7 @@ mod tests {
             subs,
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,

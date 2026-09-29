@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecordOptionsBuilder, MockConsumer, OffsetAndMetadata, SubscriptionPattern,
+    CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecordOptionsBuilder, MockConsumer,
+    OffsetAndMetadata, SubscriptionPattern,
 };
 
 /// Compile-time check that [`MockConsumer<K, V>`] is object-safe and can be
@@ -35,8 +35,7 @@ use confluent_kafka::consumer::{
 /// a `Self: Sized` bound would fail this file at compile time.
 #[test]
 fn mock_consumer_is_consumer_trait_object() {
-    let _: Box<dyn Consumer<String, String>> =
-        Box::new(MockConsumer::<String, String>::new(AutoOffsetResetStrategy::EARLIEST));
+    let _: Box<dyn Consumer<String, String>> = Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
 }
 
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
@@ -65,8 +64,9 @@ fn build_null_record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord
 
 /// Translated from `MockConsumerTest.testSimpleMock`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testSimpleMock")]
 async fn test_simple_mock() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
 
     consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
     assert_eq!(0, consumer.poll(std::time::Duration::ZERO).await.unwrap().count());
@@ -117,8 +117,9 @@ async fn test_simple_mock() {
 
 /// Translated from `MockConsumerTest.testConsumerRecordsIsEmptyWhenReturningNoRecords`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testConsumerRecordsIsEmptyWhenReturningNoRecords")]
 async fn test_consumer_records_is_empty_when_returning_no_records() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     let partition = TopicPartition::new("test".to_string(), 0);
 
     consumer.assign(vec![partition.clone()]).await.unwrap();
@@ -137,8 +138,9 @@ async fn test_consumer_records_is_empty_when_returning_no_records() {
 
 /// Translated from `MockConsumerTest.shouldNotClearRecordsForPausedPartitions`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#shouldNotClearRecordsForPausedPartitions")]
 async fn should_not_clear_records_for_paused_partitions() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     let partition0 = TopicPartition::new("test".to_string(), 0);
     let test_partition_list = vec![partition0.clone()];
 
@@ -169,8 +171,9 @@ async fn should_not_clear_records_for_paused_partitions() {
 
 /// Translated from `MockConsumerTest.endOffsetsShouldBeIdempotent`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#endOffsetsShouldBeIdempotent")]
 async fn end_offsets_should_be_idempotent() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     let partition = TopicPartition::new("test".to_string(), 0);
 
     let mut end_offsets = HashMap::new();
@@ -195,9 +198,9 @@ async fn end_offsets_should_be_idempotent() {
 
 /// Translated from `MockConsumerTest.testDurationBasedOffsetReset`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testDurationBasedOffsetReset")]
 async fn test_duration_based_offset_reset() {
-    let strategy = AutoOffsetResetStrategy::from_string("by_duration:PT1H").unwrap();
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(strategy);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("by_duration:PT1H").unwrap();
 
     consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
     consumer
@@ -257,8 +260,9 @@ impl ConsumerRebalanceListener for RecorderListener {
 
 /// Translated from `MockConsumerTest.testRebalanceListener`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testRebalanceListener")]
 async fn test_rebalance_listener() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
 
     let revoked = Arc::new(Mutex::new(Vec::<TopicPartition>::new()));
     let assigned = Arc::new(Mutex::new(Vec::<TopicPartition>::new()));
@@ -333,7 +337,7 @@ async fn test_rebalance_listener() {
 /// error — DO translate.
 #[tokio::test]
 async fn test_re2j_pattern_subscription() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
 
     // Empty pattern → IllegalArgumentException (Java line 194).
     let err = consumer.subscribe_with_pattern(SubscriptionPattern::new("")).await.unwrap_err();
@@ -350,8 +354,9 @@ async fn test_re2j_pattern_subscription() {
 
 /// Translated from `MockConsumerTest.shouldReturnMaxPollRecords`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#shouldReturnMaxPollRecords")]
 async fn should_return_max_poll_records() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     let partition = TopicPartition::new("test".to_string(), 0);
 
     consumer.assign(vec![partition.clone()]).await.unwrap();
@@ -381,33 +386,19 @@ async fn should_return_max_poll_records() {
     assert!(records.is_empty());
 }
 
-/// The three `close` forms Java declares (`Consumer.java:277,283,288`) are one
-/// overload group, so CLAUDE.md §2 gives the no-arg form the plain name and
-/// suffixes the other two with their parameter names. This asserts the split
-/// preserves `MockConsumer`'s observable behaviour: all three set `closed()`.
-///
-/// `close(Duration)` is checked separately rather than by forwarding, because
-/// Java's `MockConsumer.close(Duration)` (`MockConsumer.java:578-582`) sets the
-/// flag *directly* — unlike `AsyncKafkaConsumer.close(Duration)`
-/// (`AsyncKafkaConsumer.java:1543-1545`), which forwards to
-/// `close(CloseOptions.timeout(timeout))`.
+/// Java declares three `close` forms (`Consumer.java:277,283,288`). The
+/// deprecated `close(Duration)` is not translated (CLAUDE.md §3); CLAUDE.md §2
+/// gives the no-arg form the plain name and suffixes `close(CloseOptions)` with
+/// its parameter name. This asserts both preserve `MockConsumer`'s observable
+/// behaviour: each sets `closed()`.
 #[tokio::test]
-async fn close_overloads_all_mark_the_consumer_closed() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+async fn close_overloads_mark_the_consumer_closed() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed(), "fresh mock is open");
     consumer.close().await.expect("close");
     assert!(consumer.closed(), "close() closes");
 
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
-    assert!(!consumer.closed());
-    #[allow(deprecated)]
-    consumer
-        .close_with_timeout(std::time::Duration::from_secs(1))
-        .await
-        .expect("close_with_timeout");
-    assert!(consumer.closed(), "close_with_timeout(..) closes");
-
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed());
     consumer
         .close_with_options(CloseOptions::new_timeout(std::time::Duration::from_secs(1)))
@@ -423,7 +414,7 @@ async fn close_overloads_all_mark_the_consumer_closed() {
 /// preserving, and the `reason` really is ignored as Java ignores it.
 #[tokio::test]
 async fn enforce_rebalance_overloads_both_set_the_pending_flag() {
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.should_rebalance(), "fresh mock has no pending rebalance");
 
     consumer.enforce_rebalance().await.expect("enforce_rebalance");

@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that maintains a simple average over its samples.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Avg")]
 pub struct Avg {
     inner: SampledStat,
 }
@@ -42,6 +43,7 @@ impl SampledStatKind for AvgKind {
 
 impl Avg {
     /// Create an `Avg`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Avg#Avg")]
     pub fn new() -> Self {
         Self { inner: SampledStat::new(0.0, Box::new(AvgKind)) }
     }

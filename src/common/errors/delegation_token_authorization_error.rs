@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.DelegationTokenAuthorizationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Delegation Token authorization failed.
     ///
-    /// Corresponds to Java's `DelegationTokenAuthorizationException`, error code [`Errors::DelegationTokenAuthorizationFailed`].
+    /// Corresponds to Java's `DelegationTokenAuthorizationException`, error code `Errors::DelegationTokenAuthorizationFailed`.
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenAuthorizationException` -> `AuthorizationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenAuthorizationException")]
     DelegationTokenAuthorizationError,
     code: Errors::DelegationTokenAuthorizationFailed,
     extends: [

@@ -30,10 +30,10 @@ use super::ListenerName;
 use super::PlaintextTransportLayer;
 use super::SslTransportLayer;
 
-use crate::common::config::SaslConfig;
-use crate::common::security::SaslClientAuthenticator;
-use crate::common::security::SecurityProtocol;
-use crate::common::security::SslFactory;
+use crate::common::config::SaslConfigs;
+use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::authenticator::SaslClientAuthenticator;
+use crate::common::security::ssl::SslFactory;
 use crate::common::utils::LogContext;
 
 use std::io;
@@ -60,15 +60,16 @@ impl std::fmt::Debug for SaslChannelBuilder {
     }
 }
 
+#[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder")]
 pub struct SaslChannelBuilder {
     /// The security protocol (SASL_PLAINTEXT or SASL_SSL).
     security_protocol: SecurityProtocol,
     /// SASL configuration (mechanism, credentials).
-    sasl_config: SaslConfig,
+    sasl_config: SaslConfigs,
     /// SSL factory for SASL_SSL connections.
     ssl_factory: Option<SslFactory>,
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
     /// The Kafka client ID for request headers.
     client_id: String,
@@ -94,9 +95,10 @@ impl SaslChannelBuilder {
     /// - The security protocol is not `SASL_PLAINTEXT` or `SASL_SSL`
     /// - Username or password is missing in the SASL config
     /// - `SASL_SSL` is requested but no `ssl_factory` is provided
+    #[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder#SaslChannelBuilder")]
     pub fn new(
         security_protocol: SecurityProtocol,
-        sasl_config: SaslConfig,
+        sasl_config: SaslConfigs,
         ssl_factory: Option<SslFactory>,
         listener_name: Option<ListenerName>,
         client_id: &str,
@@ -193,7 +195,7 @@ impl ChannelBuilder for SaslChannelBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::config::SslConfig;
+    use crate::common::config::SslConfigs;
     use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test 1: Build channel with SASL_PLAINTEXT creates a channel that is not ready.
@@ -204,11 +206,11 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
@@ -238,13 +240,13 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
+        let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslSsl,
             sasl_config,
@@ -269,10 +271,10 @@ mod tests {
     #[test]
     fn test_missing_credentials_error() {
         // Missing username
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
@@ -286,10 +288,10 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("username"));
 
         // Missing password
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
@@ -306,11 +308,11 @@ mod tests {
     /// Test 4: Invalid security protocol should return an error.
     #[test]
     fn test_invalid_security_protocol() {
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::Plaintext,

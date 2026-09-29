@@ -26,8 +26,8 @@ use crate::AddOffsetsToTxnRequestData;
 use crate::AddOffsetsToTxnResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
+use super::AbstractRequest;
 use super::AddOffsetsToTxnResponse;
-use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 
@@ -35,6 +35,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AddOffsetsToTxnRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest")]
 pub struct AddOffsetsToTxnRequest {
     data: AddOffsetsToTxnRequestData,
     version: i16,
@@ -42,11 +43,13 @@ pub struct AddOffsetsToTxnRequest {
 
 impl AddOffsetsToTxnRequest {
     /// Creates a new `AddOffsetsToTxnRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#AddOffsetsToTxnRequest")]
     pub fn new(data: AddOffsetsToTxnRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#data")]
     pub fn data(&self) -> &AddOffsetsToTxnRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AddOffsetsToTxnRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `AddOffsetsToTxnRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AddOffsetsToTxnResponseData::new();
         response.set_error_code(error.code()).set_throttle_time_ms(throttle_time_ms);
@@ -80,6 +84,7 @@ impl AddOffsetsToTxnRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AddOffsetsToTxnRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -96,15 +101,17 @@ impl std::fmt::Display for AddOffsetsToTxnRequest {
 ///
 /// Corresponds to `AddOffsetsToTxnRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct AddOffsetsToTxnRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest$Builder")]
+pub struct Builder {
     data: AddOffsetsToTxnRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AddOffsetsToTxnRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest$Builder#Builder")]
     pub fn new(data: AddOffsetsToTxnRequestData) -> Self {
         Self {
             data,
@@ -121,7 +128,7 @@ impl AddOffsetsToTxnRequestBuilder {
     }
 }
 
-impl RequestBuilder for AddOffsetsToTxnRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ADD_OFFSETS_TO_TXN
     }
@@ -134,9 +141,9 @@ impl RequestBuilder for AddOffsetsToTxnRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Java's `Builder.build(short)` performs no validation for this request.
-        Ok(ConcreteRequest::AddOffsetsToTxn(AddOffsetsToTxnRequest::new(
+        Ok(AbstractRequest::AddOffsetsToTxn(AddOffsetsToTxnRequest::new(
             self.data.clone(),
             version,
         )))
@@ -158,10 +165,10 @@ mod tests {
 
     #[test]
     fn test_build_preserves_all_fields() {
-        let mut builder = AddOffsetsToTxnRequestBuilder::new(data());
+        let mut builder = Builder::new(data());
         let built = builder.build().expect("build at latest version");
         match built {
-            ConcreteRequest::AddOffsetsToTxn(request) => {
+            AbstractRequest::AddOffsetsToTxn(request) => {
                 assert_eq!(request.data().transactional_id, "txn-1");
                 assert_eq!(request.data().producer_id, 42);
                 assert_eq!(request.data().producer_epoch, 7);
@@ -187,7 +194,7 @@ mod tests {
     #[test]
     fn test_serialization_round_trip_all_versions() {
         for version in ApiKeys::ADD_OFFSETS_TO_TXN.oldest_version()..=ApiKeys::ADD_OFFSETS_TO_TXN.latest_version() {
-            let mut builder = AddOffsetsToTxnRequestBuilder::new(data());
+            let mut builder = Builder::new(data());
             let mut built = builder.build_version(version).expect("build");
             let mut buffer = built.serialize().expect("serialize");
             buffer.flip();
@@ -203,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_api_key_and_version() {
-        let builder = AddOffsetsToTxnRequestBuilder::new(data());
+        let builder = Builder::new(data());
         assert_eq!(builder.api_key(), &ApiKeys::ADD_OFFSETS_TO_TXN);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::ADD_OFFSETS_TO_TXN.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::ADD_OFFSETS_TO_TXN.latest_version());

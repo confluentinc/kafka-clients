@@ -863,7 +863,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn emit_interval(
     jsonl: &mut File,
     idx: u64,
@@ -894,7 +894,7 @@ fn emit_interval(
     jsonl.flush()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn write_summary(
     jsonl: &mut File,
     run_dir: &Path,

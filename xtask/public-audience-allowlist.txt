@@ -1,0 +1,62 @@
+# Items `cargo xtask lint-custom`'s `check-public-audience` lets be public although
+# the three audience rules (CLAUDE.md §2) would not, or although they carry no
+# Java marker to check.
+#
+# One entry per line: `<key>  # <reason>`; the reason is required. A key is a
+# Rust path (`crate::<module>::<Name>`, the file module dropped or not), a Java
+# class (`org.apache.kafka.<pkg>.<Class>`) or a C symbol prefix
+# (`kafka_<pkg>_<Class>`); `*` matches any run of characters. An entry that no
+# longer lets anything through is reported as stale.
+
+# --- Java classes outside `@InterfaceAudience.Public` that are public anyway ---
+
+crate::admin::MockAdminClient  # Java ships it in the clients test jar for users to test against, as MockProducer / MockConsumer are public
+org.apache.kafka.clients.admin.MockAdminClient  # the C binding of the test-jar MockAdminClient above
+crate::common::header::internals::RecordHeader  # the only `Header` implementation; users build one to attach headers to a ProducerRecord, as Java users do despite the internals package
+crate::common::header::internals::RecordHeaders  # the only `Headers` implementation, returned by ConsumerRecord / ProducerRecord `headers()`
+crate::consumer::*ConsumerHandle  # Rust-only: a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer
+
+# --- Rust-only items with no Java class ---
+
+crate::common::Error  # the crate's flat base error type (CLAUDE.md §12.3)
+crate::common::Local*Error  # Rust translations of java.lang / java.util runtime exceptions (CLAUDE.md §2)
+crate::common::errors::record_deserialization_error::DeserializationErrorOrigin  # Rust enum for RecordDeserializationException.DeserializationExceptionOrigin, public through that error's accessor
+crate::common::metric::MetricValue  # the value `Metric::metric_value` returns, replacing Java's `Object`
+crate::common::metrics::gauge::ClosureGauge  # a Gauge from a closure, standing in for a Java lambda
+crate::common::metrics::measurable::ClosureMeasurable  # a Measurable from a closure, standing in for a Java lambda
+crate::common::metrics::stats::sampled_stat::SampledStatKind  # selects the SampledStat subclass, which Rust models as one struct
+crate::common::quota::client_quota_filter_component::ClientQuotaMatch  # the match kind Java encodes as nullable Optional fields of ClientQuotaFilterComponent
+crate::consumer::consumer_partition_assignor::DEFAULT_GENERATION  # Java's Subscription.DEFAULT_GENERATION, lifted out as Rust has no nested-class constants
+crate::admin::list_consumer_group_offsets_result::GroupOffsets  # the per-group map type of ListConsumerGroupOffsetsResult, a Java `Map<TopicPartition, OffsetAndMetadata>`
+crate::producer::DynProducer  # the dyn-compatible companion of the `Producer` trait (CLAUDE.md §3)
+crate::common::metrics::TimeUnit  # translates the JDK's java.util.concurrent.TimeUnit, outside Kafka's audience rules; the public MetricConfig::set_time_window, Rate and Meter take it
+
+# --- `*Options` / `*OptionsBuilder` for a Java overload set (CLAUDE.md §2) ---
+
+crate::admin::config_entry::ConfigEntryOptions*  # ConfigEntry's constructor overloads
+crate::common::metrics::metrics::SensorOptions*  # Metrics.sensor overloads
+crate::consumer::consumer_partition_assignor::SubscriptionOptions*  # Subscription constructor overloads
+crate::consumer::consumer_record::ConsumerRecordOptions*  # ConsumerRecord constructor overloads
+crate::producer::mock_producer::MockProducerOptions*  # MockProducer constructor overloads
+crate::producer::producer_record::ProducerRecordOptions*  # ProducerRecord constructor overloads
+
+# --- C-only handles: a Java collection, `Properties` or `String` crossing FFI ---
+
+kafka_admin_AdminClientProperties  # the `Properties` passed to the admin client constructor
+kafka_consumer_ConsumerProperties  # the `Properties` passed to the consumer constructor
+kafka_producer_ProducerProperties  # the `Properties` passed to the producer constructor
+kafka_admin_LogDirDescriptionMap  # a Java `Map<String, LogDirDescription>`
+kafka_admin_OffsetAndMetadataMap  # a Java `Map<TopicPartition, OffsetAndMetadata>`
+kafka_consumer_OffsetMap  # a Java `Map<TopicPartition, OffsetAndMetadata>`
+kafka_consumer_OffsetAndTimestampMap  # a Java `Map<TopicPartition, OffsetAndTimestamp>`
+kafka_consumer_LongOffsetMap  # a Java `Map<TopicPartition, Long>`
+kafka_common_PartitionInfoList  # a Java `List<PartitionInfo>`
+kafka_common_TopicPartitionInfoMap  # a Java `Map<String, List<PartitionInfo>>`
+kafka_common_TopicPartitionList  # a Java `Collection<TopicPartition>`
+kafka_consumer_StringList  # a Java `Collection<String>`
+kafka_consumer_string_destroy  # frees a Java `String` returned to C
+kafka_consumer_MetricMap  # a Java `Map<MetricName, Metric>`
+kafka_producer_MetricMap  # a Java `Map<MetricName, Metric>`
+kafka_consumer_ConsumerHandle  # the C side of the Rust-only ConsumerHandle above
+kafka_common_Error  # the handle over `common::Error` (CLAUDE.md §4)
+kafka_common_ErrorCode  # the C enum of error codes a `kafka_common_Error_t` classifies by

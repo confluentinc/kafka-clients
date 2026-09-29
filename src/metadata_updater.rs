@@ -31,11 +31,14 @@ use crate::common::Error;
 /// Corresponds to `org.apache.kafka.clients.MetadataUpdater`.
 ///
 /// This is an internal trait. It is NOT thread-safe.
+#[doc(alias = "org.apache.kafka.clients.MetadataUpdater")]
 pub trait MetadataUpdater: Send {
     /// Gets the current cluster info without blocking.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#fetchNodes")]
     fn fetch_nodes(&self) -> Vec<Node>;
 
     /// Returns `true` if an update to the cluster metadata info is due.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#isUpdateDue")]
     fn is_update_due(&self, now: i64) -> bool;
 
     /// Starts a cluster metadata update if needed and possible.
@@ -46,6 +49,7 @@ pub trait MetadataUpdater: Send {
     /// If the implementation relies on `NetworkClient` to send requests,
     /// `handle_successful_response` will be invoked after the metadata response
     /// is received.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#maybeUpdate")]
     fn maybe_update(&mut self, now: i64) -> i64;
 
     /// Handle a server disconnect.
@@ -53,9 +57,11 @@ pub trait MetadataUpdater: Send {
     /// This provides a mechanism for the `MetadataUpdater` implementation to use
     /// the `NetworkClient` instance for its own requests with special handling for
     /// disconnections of such requests.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#handleServerDisconnect")]
     fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<Error>);
 
     /// Handle a metadata request failure.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#handleFailedRequest")]
     fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<Error>);
 
     /// Handle responses for metadata requests.
@@ -63,6 +69,7 @@ pub trait MetadataUpdater: Send {
     /// This provides a mechanism for the `MetadataUpdater` implementation to use
     /// the `NetworkClient` instance for its own requests with special handling for
     /// completed receives of such requests.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#handleSuccessfulResponse")]
     fn handle_successful_response(
         &mut self,
         request_header: &RequestHeader,
@@ -72,13 +79,16 @@ pub trait MetadataUpdater: Send {
 
     /// Returns `true` if metadata couldn't be fetched for `rebootstrap_trigger_ms`
     /// or if server requested rebootstrap.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#needsRebootstrap")]
     fn needs_rebootstrap(&self, _now: i64, _rebootstrap_trigger_ms: i64) -> bool {
         false
     }
 
     /// Performs rebootstrap, replacing the existing cluster with the bootstrap cluster.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#rebootstrap")]
     fn rebootstrap(&mut self, _now: i64) {}
 
     /// Close this updater.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#close")]
     fn close(&mut self);
 }

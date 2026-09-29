@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionalIdAuthorizationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Transactional Id authorization failed.
     ///
-    /// Corresponds to Java's `TransactionalIdAuthorizationException`, error code [`Errors::TransactionalIdAuthorizationFailed`].
+    /// Corresponds to Java's `TransactionalIdAuthorizationException`, error code `Errors::TransactionalIdAuthorizationFailed`.
     ///
     /// Java `extends` chain:
     ///    `TransactionalIdAuthorizationException` -> `AuthorizationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionalIdAuthorizationException")]
     TransactionalIdAuthorizationError,
     code: Errors::TransactionalIdAuthorizationFailed,
     extends: [

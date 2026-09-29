@@ -39,32 +39,26 @@ use confluent_kafka::admin::{
     DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
     DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
-    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
-    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
-    UserScramCredentialsDescription,
-};
-#[allow(deprecated)]
-use confluent_kafka::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
+    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FinalizedVersionRange, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
+    ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions,
+    UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaMatch,
 };
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
-use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
     ClassicGroupState, ElectionType, Error, GroupState, GroupType, Node, TopicPartition, TopicPartitionInfo,
     TopicPartitionReplica, Uuid,
@@ -75,8 +69,8 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView, Listings,
-    Outcomes, ReplicaLogDirInfoView,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
+    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -313,22 +307,22 @@ impl MultilanguageAdmin {
         ))
     }
 
-    /// Rebuilds a [`FilterResults`], preserving each matched ACL's own error.
+    /// Rebuilds a [`FilterResultsView`], preserving each matched ACL's own error.
     ///
-    /// Both halves of a [`FilterResult`] are independent optionals rather than a
+    /// Both halves of a [`FilterResultView`] are independent optionals rather than a
     /// `oneof` (the enclosing per-filter future already resolved), so both are
     /// carried through unchanged; a backend that set neither or both is visible to
     /// the scenario rather than normalised here.
-    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResults, Error> {
+    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResultsView, Error> {
         let mut values = Vec::with_capacity(results.values.len());
         for deleted in results.values {
             let binding = match deleted.binding {
                 Some(binding) => Some(self.acl_binding(binding)?),
                 None => None,
             };
-            values.push(FilterResult::new(binding, deleted.exception.map(kafka_error_from_proto)));
+            values.push(FilterResultView { binding, error: deleted.exception.map(kafka_error_from_proto) });
         }
-        Ok(FilterResults::new(values))
+        Ok(FilterResultsView { values })
     }
 
     /// Rebuilds a [`ClientQuotaEntity`], preserving each nullable entity name.
@@ -474,7 +468,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds a [`ConfigResource`] from the wire's `Type.id()` code.
     ///
-    /// `ConfigResourceType::for_id` maps an unrecognized id to `Unknown` rather
+    /// `config_resource::Type::for_id` maps an unrecognized id to `Unknown` rather
     /// than failing, so an id that does not even fit Java's `byte` is rejected
     /// here instead of silently truncating into a valid-looking type.
     fn config_resource(&self, resource: proto::ConfigResource) -> Result<ConfigResource, Error> {
@@ -484,7 +478,7 @@ impl MultilanguageAdmin {
                 resource.resource_type
             ))
         })?;
-        Ok(ConfigResource::new(ConfigResourceType::for_id(id), resource.name))
+        Ok(ConfigResource::new(config_resource::Type::for_id(id), resource.name))
     }
 
     /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
@@ -593,61 +587,6 @@ impl MultilanguageAdmin {
         Ok(rebuilt)
     }
 
-    /// Rebuilds a [`ConsumerGroupListing`]. Unlike [`Self::group_listing`],
-    /// `is_simple_consumer_group` is a real constructor argument here, so it is
-    /// carried rather than checked; the deprecated `state` is the derived one and
-    /// is checked instead (see [`Self::check_derived_state`]).
-    #[allow(deprecated)]
-    fn consumer_group_listing(&self, listing: proto::ConsumerGroupListing) -> Result<ConsumerGroupListing, Error> {
-        let group_state = match &listing.group_state {
-            Some(name) => Some(self.group_state(name, "ConsumerGroupListing.group_state")?),
-            None => None,
-        };
-        let group_type = match &listing.group_type {
-            Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
-            None => None,
-        };
-        let rebuilt = ConsumerGroupListing::with_group_state_group_type(
-            listing.group_id.clone(),
-            group_state,
-            group_type,
-            listing.is_simple_consumer_group,
-        );
-        self.check_derived_state(
-            &listing.group_id,
-            "ConsumerGroupListing",
-            listing.state.as_deref(),
-            rebuilt.state().map(|s| s.name()),
-        )?;
-        Ok(rebuilt)
-    }
-
-    /// Checks the wire's deprecated `state` against the value Java derives from
-    /// `groupState()`.
-    ///
-    /// Java defines `state() == ConsumerGroupState.parse(groupState().toString())`
-    /// (`ConsumerGroupDescription.java`, mirrored in
-    /// `src/admin/consumer_group_description.rs`), so the Rust constructors take
-    /// only `group_state` and re-derive `state`. Both bindings nonetheless expose
-    /// both, and without this check a backend that dropped or transposed `state`
-    /// would be invisible: the reconstructed object would derive the right value
-    /// from `group_state` and every scenario assertion would pass.
-    fn check_derived_state(
-        &self,
-        group_id: &str,
-        what: &str,
-        reported: Option<&str>,
-        derived: Option<&str>,
-    ) -> Result<(), Error> {
-        if reported != derived {
-            return Err(self.protocol_error(format!(
-                "{what} for {group_id:?} reported the deprecated state {reported:?}, but Java derives {derived:?} \
-                 from its group state"
-            )));
-        }
-        Ok(())
-    }
-
     /// Rebuilds a [`MemberAssignment`].
     fn member_assignment(&self, assignment: proto::MemberAssignment) -> MemberAssignment {
         MemberAssignment::new(
@@ -698,8 +637,8 @@ impl MultilanguageAdmin {
     ) -> Result<ConsumerGroupDescription, Error> {
         let group_type = self.group_type(&description.group_type, "ConsumerGroupDescription.group_type")?;
         let group_state = self.group_state(&description.group_state, "ConsumerGroupDescription.group_state")?;
-        let rebuilt = ConsumerGroupDescription::new(
-            description.group_id.clone(),
+        Ok(ConsumerGroupDescription::new(
+            description.group_id,
             description.is_simple_consumer_group,
             self.member_descriptions(description.members)?,
             description.partition_assignor,
@@ -709,14 +648,7 @@ impl MultilanguageAdmin {
             description.authorized_operations.map(|ops| acl_operations_from_proto(&ops)),
             description.group_epoch,
             description.target_assignment_epoch,
-        );
-        self.check_derived_state(
-            &description.group_id,
-            "ConsumerGroupDescription",
-            Some(description.state.as_str()),
-            Some(rebuilt.state().name()),
-        )?;
-        Ok(rebuilt)
+        ))
     }
 
     /// Rebuilds a [`ClassicGroupDescription`].
@@ -858,10 +790,10 @@ impl MultilanguageAdmin {
         Ok(TransactionListing::new(listing.transactional_id, listing.producer_id, state))
     }
 
-    /// Rebuilds a [`ProducerIdAndEpoch`], narrowing the epoch to Java's `short`.
-    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<ProducerIdAndEpoch, Error> {
+    /// Rebuilds a [`FencedProducer`], narrowing the epoch to Java's `short`.
+    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<FencedProducer, Error> {
         let epoch = self.short(value.epoch, "ProducerIdAndEpoch.epoch")?;
-        Ok(ProducerIdAndEpoch::new(value.producer_id, epoch))
+        Ok(FencedProducer::new(value.producer_id, epoch))
     }
 
     /// Parses a canonical (base64) topic id, the form both bindings expose.
@@ -1152,7 +1084,7 @@ fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
 /// an explicit discriminant rather than an emptiness test — the C entry points
 /// take an `all_partitions` flag (`read_optional_partition_set` returns without
 /// reading the arrays when it is set), `admin.py` computes `partitions is None`
-/// into its own column, and `ElectLeadersRequestBuilder::build` calls
+/// into its own column, and `elect_leaders_request::Builder::build` calls
 /// `set_topic_partitions(None)` versus `Some(vec)`. `NewPartitions.new_assignments`
 /// and `UserScramCredentialUpsertion`'s salt now follow the same rule
 /// (`has_assignments` / `has_salts`); both previously collapsed absent into empty
@@ -1177,6 +1109,11 @@ fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
         OffsetSpec::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
         OffsetSpec::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
         OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
+        // `OffsetSpec` is `#[non_exhaustive]`, so this external crate needs a
+        // wildcard arm. `admin_service.proto`'s `OffsetSpec.Kind` has a fixed
+        // variant set, so a spec added upstream cannot be encoded — failing
+        // here beats sending a wrong kind to the C and Python servers.
+        _ => panic!("offset_spec_to_proto has no proto::offset_spec::Kind for {spec:?}"),
     };
     proto::OffsetSpec { kind: kind as i32, timestamp }
 }
@@ -1245,6 +1182,8 @@ fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> pr
         ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
         ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
         ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),
+        // See the wildcard arm in `offset_spec_to_proto`.
+        other => panic!("quota_filter_component_to_proto has no proto::ClientQuotaMatchKind for {other:?}"),
     };
     proto::ClientQuotaFilterComponent {
         entity_type: component.entity_type().to_string(),
@@ -1315,6 +1254,8 @@ fn scram_alteration_to_proto(alteration: &UserScramCredentialAlteration) -> prot
                 salt: Some(upsertion.salt().to_vec()),
             }
         },
+        // See the wildcard arm in `offset_spec_to_proto`.
+        other => panic!("scram_alteration_to_proto has no proto encoding for {other:?}"),
     }
 }
 
@@ -1612,7 +1553,7 @@ impl AdminBackend for MultilanguageAdmin {
 
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error> {
         let request = proto::ListConfigResourcesRequest {
@@ -1629,26 +1570,6 @@ impl AdminBackend for MultilanguageAdmin {
             .into_iter()
             .map(|resource| self.config_resource(resource))
             .collect()
-    }
-
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
-        let request =
-            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout_ms() };
-        let response = self
-            .call(|mut c| async move { c.list_client_metrics_resources(request).await })
-            .await?;
-        if let Some(err) = response.error {
-            return Err(kafka_error_from_proto(err));
-        }
-        Ok(response
-            .resources
-            .into_iter()
-            .map(|resource| ClientMetricsResourceListing::new(resource.name))
-            .collect())
     }
 
     async fn describe_log_dirs(
@@ -1894,34 +1815,6 @@ impl AdminBackend for MultilanguageAdmin {
                 .valid
                 .into_iter()
                 .map(|listing| self.group_listing(listing))
-                .collect::<Result<Vec<_>, _>>()?,
-            errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
-        })
-    }
-
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error> {
-        let request = proto::ListConsumerGroupsRequest {
-            admin_id: self.admin_id,
-            // Java's deprecated `inStates(Set<ConsumerGroupState>)` is defined as
-            // `inGroupStates` over `GroupState.parse` of the same names, so the
-            // single `group_states` field serves both spellings.
-            group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
-            types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout_ms(),
-        };
-        let response = self.call(|mut c| async move { c.list_consumer_groups(request).await }).await?;
-        if let Some(err) = response.error {
-            return Err(kafka_error_from_proto(err));
-        }
-        Ok(Listings {
-            valid: response
-                .valid
-                .into_iter()
-                .map(|listing| self.consumer_group_listing(listing))
                 .collect::<Result<Vec<_>, _>>()?,
             errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
         })
@@ -2177,7 +2070,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error> {
         let request = proto::DeleteAclsRequest {
             admin_id: self.admin_id,
             filters: filters.iter().map(acl_binding_filter_to_proto).collect(),
@@ -2520,7 +2413,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
+    ) -> Result<Outcomes<String, FencedProducer>, Error> {
         let request = proto::FenceProducersRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),

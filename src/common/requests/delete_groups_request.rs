@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.DeleteGroupsRequest`.
 //!
 //! Wraps the auto-generated [`DeleteGroupsRequestData`] and exposes a
-//! [`DeleteGroupsRequestBuilder`] used by the admin client's
+//! [`Builder`] used by the admin client's
 //! `deleteConsumerGroups` path.
 
 use std::io;
@@ -29,12 +29,13 @@ use crate::delete_groups_response_data::DeletableGroupResult;
 
 use super::ConcreteResponse;
 use super::DeleteGroupsResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// A `DeleteGroups` request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteGroupsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest")]
 pub struct DeleteGroupsRequest {
     data: DeleteGroupsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl DeleteGroupsRequest {
     /// Creates a new `DeleteGroupsRequest` from data and version.
     ///
     /// Mirrors Java's constructor `DeleteGroupsRequest(DeleteGroupsRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#DeleteGroupsRequest")]
     pub fn new(data: DeleteGroupsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#data")]
     pub fn data(&self) -> &DeleteGroupsRequestData {
         &self.data
     }
@@ -72,6 +75,7 @@ impl DeleteGroupsRequest {
     /// `DeleteGroupsRequest.getErrorResponse(int, Throwable)`: one
     /// `DeletableGroupResult` per requested group all carrying the same error
     /// code.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let results: Vec<DeletableGroupResult> = self
             .data
@@ -95,6 +99,7 @@ impl DeleteGroupsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteGroupsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -111,14 +116,16 @@ impl std::fmt::Display for DeleteGroupsRequest {
 ///
 /// Corresponds to `DeleteGroupsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct DeleteGroupsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest$Builder")]
+pub struct Builder {
     data: DeleteGroupsRequestData,
 }
 
-impl DeleteGroupsRequestBuilder {
+impl Builder {
     /// Creates a builder over the given request data.
     ///
     /// Mirrors Java's `DeleteGroupsRequest.Builder(DeleteGroupsRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest$Builder#Builder")]
     pub fn new(data: DeleteGroupsRequestData) -> Self {
         Self { data }
     }
@@ -129,7 +136,7 @@ impl DeleteGroupsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DeleteGroupsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DELETE_GROUPS
     }
@@ -142,7 +149,7 @@ impl RequestBuilder for DeleteGroupsRequestBuilder {
         ApiKeys::DELETE_GROUPS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version() || version > self.latest_allowed_version() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -153,7 +160,7 @@ impl RequestBuilder for DeleteGroupsRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::DeleteGroups(DeleteGroupsRequest::new(
+        Ok(AbstractRequest::DeleteGroups(DeleteGroupsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -170,10 +177,10 @@ mod tests {
     fn build_version_carries_data() {
         let mut data = DeleteGroupsRequestData::new();
         data.set_groups_names(vec!["g".to_string()]);
-        let mut builder = DeleteGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let version = ApiKeys::DELETE_GROUPS.latest_version();
         match builder.build_version(version).unwrap() {
-            ConcreteRequest::DeleteGroups(r) => {
+            AbstractRequest::DeleteGroups(r) => {
                 assert_eq!(r.version(), version);
                 assert_eq!(r.data().groups_names, vec!["g".to_string()]);
             },
@@ -186,7 +193,7 @@ mod tests {
     fn build_version_out_of_range_returns_err() {
         let mut data = DeleteGroupsRequestData::new();
         data.set_groups_names(vec!["g".to_string()]);
-        let mut builder = DeleteGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let too_new = ApiKeys::DELETE_GROUPS.latest_version() + 1;
         assert!(builder.build_version(too_new).is_err());
     }
@@ -199,7 +206,7 @@ mod tests {
     fn serialize_known_byte_vector_v0() {
         let mut data = DeleteGroupsRequestData::new();
         data.set_groups_names(vec!["g".to_string()]);
-        let mut builder = DeleteGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(0).unwrap();
         let expected: &[u8] = &[
             0x00, 0x00, 0x00, 0x01, // groups_names len 1
@@ -217,7 +224,7 @@ mod tests {
     fn serialize_known_byte_vector_v2_flexible() {
         let mut data = DeleteGroupsRequestData::new();
         data.set_groups_names(vec!["g".to_string()]);
-        let mut builder = DeleteGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(2).unwrap();
         let expected: &[u8] = &[
             0x02, // groups_names compact array len 1 (=n+1)

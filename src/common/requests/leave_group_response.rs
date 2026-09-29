@@ -39,6 +39,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.LeaveGroupResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse")]
 pub struct LeaveGroupResponse {
     data: LeaveGroupResponseData,
 }
@@ -47,6 +48,7 @@ impl LeaveGroupResponse {
     /// Creates a new `LeaveGroupResponse` from the underlying data.
     ///
     /// Mirrors Java's constructor `LeaveGroupResponse(LeaveGroupResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#LeaveGroupResponse")]
     pub fn new(data: LeaveGroupResponseData) -> Self {
         Self { data }
     }
@@ -57,6 +59,7 @@ impl LeaveGroupResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#data")]
     pub fn data(&self) -> &LeaveGroupResponseData {
         &self.data
     }
@@ -67,16 +70,19 @@ impl LeaveGroupResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the per-member responses.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#memberResponses")]
     pub fn member_responses(&self) -> &[MemberResponse] {
         &self.data.members
     }
@@ -84,6 +90,7 @@ impl LeaveGroupResponse {
     /// Returns the top-level error code as an [`Errors`].
     ///
     /// Mirrors Java's `LeaveGroupResponse.topLevelError()`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#topLevelError")]
     pub fn top_level_error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -92,10 +99,12 @@ impl LeaveGroupResponse {
     /// first non-`NONE` member-level error, otherwise `NONE`.
     ///
     /// Mirrors Java's `LeaveGroupResponse.error()`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#getError")]
     pub fn error(&self) -> Errors {
         Self::get_error(self.top_level_error(), &self.data.members)
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#getError")]
     fn get_error(top_level_error: Errors, member_responses: &[MemberResponse]) -> Errors {
         if top_level_error != Errors::None {
             top_level_error
@@ -112,6 +121,7 @@ impl LeaveGroupResponse {
 
     /// Returns the error counts aggregated across the top-level and member-level
     /// errors. Mirrors Java's `errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -127,12 +137,14 @@ impl LeaveGroupResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = LeaveGroupResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (version 2+).
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 2
     }
@@ -216,7 +228,7 @@ mod tests {
             0x00, 0x01, 0x69, // group_instance_id "i"
             0x00, 0x19, // error_code 25
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 3).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);
@@ -250,7 +262,7 @@ mod tests {
             0x00, // member tagged fields
             0x00, // top-level tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 5).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);

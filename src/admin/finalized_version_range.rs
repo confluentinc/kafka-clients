@@ -23,6 +23,7 @@ use crate::common::Error;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FinalizedVersionRange`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange")]
 pub struct FinalizedVersionRange {
     min_version_level: i16,
     max_version_level: i16,
@@ -36,6 +37,7 @@ impl FinalizedVersionRange {
     /// Returns [`Error::local_illegal_argument`] (mirroring Java's
     /// `IllegalArgumentException`) unless `min_version_level >= 0`,
     /// `max_version_level >= 0`, and `max_version_level >= min_version_level`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange#FinalizedVersionRange")]
     pub fn new(min_version_level: i16, max_version_level: i16) -> Result<Self, Error> {
         if min_version_level < 0 || max_version_level < 0 || max_version_level < min_version_level {
             return Err(Error::local_illegal_argument(format!(
@@ -47,11 +49,13 @@ impl FinalizedVersionRange {
     }
 
     /// Returns the minimum version level value.
+    #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange#minVersionLevel")]
     pub fn min_version_level(&self) -> i16 {
         self.min_version_level
     }
 
     /// Returns the maximum version level value.
+    #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange#maxVersionLevel")]
     pub fn max_version_level(&self) -> i16 {
         self.max_version_level
     }

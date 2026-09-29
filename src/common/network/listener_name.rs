@@ -26,6 +26,7 @@ const CONFIG_STATIC_PREFIX: &str = "listener.name";
 /// In Java, `ListenerName` is used in conjunction with `SecurityProtocol` to configure
 /// per-listener settings such as SSL keystores and SASL mechanisms.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.network.ListenerName")]
 pub struct ListenerName {
     value: String,
 }
@@ -36,6 +37,7 @@ impl ListenerName {
     /// # Panics
     ///
     /// Panics if `value` is empty, matching Java's `Objects.requireNonNull`.
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#ListenerName")]
     pub fn new(value: &str) -> Self {
         assert!(!value.is_empty(), "value should not be empty");
         Self { value: value.to_string() }
@@ -47,6 +49,7 @@ impl ListenerName {
     ///
     /// Returns an error if the value is blank (empty or whitespace only),
     /// matching Java's `ConfigException`.
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#normalised")]
     pub fn normalised(value: &str) -> Result<Self, String> {
         if value.trim().is_empty() {
             return Err("The provided listener name is null or empty string".to_string());
@@ -55,6 +58,7 @@ impl ListenerName {
     }
 
     /// Returns the listener name value.
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#value")]
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -62,6 +66,7 @@ impl ListenerName {
     /// Returns the configuration prefix for this listener.
     ///
     /// Format: `listener.name.<value>.`
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#configPrefix")]
     pub fn config_prefix(&self) -> String {
         format!("{CONFIG_STATIC_PREFIX}.{}.", self.value.to_lowercase())
     }
@@ -69,6 +74,7 @@ impl ListenerName {
     /// Returns the SASL mechanism configuration prefix for this listener.
     ///
     /// Format: `listener.name.<value>.<mechanism>.`
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#saslMechanismConfigPrefix")]
     pub fn sasl_mechanism_config_prefix(&self, sasl_mechanism: &str) -> String {
         format!("{}{}", self.config_prefix(), Self::sasl_mechanism_prefix(sasl_mechanism))
     }
@@ -76,6 +82,7 @@ impl ListenerName {
     /// Returns the SASL mechanism prefix.
     ///
     /// Format: `<mechanism>.`
+    #[doc(alias = "org.apache.kafka.common.network.ListenerName#saslMechanismPrefix")]
     pub fn sasl_mechanism_prefix(sasl_mechanism: &str) -> String {
         format!("{}.", sasl_mechanism.to_lowercase())
     }

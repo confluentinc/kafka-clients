@@ -45,6 +45,7 @@ use super::{ApplicationEvent, ApplicationEventEnvelope};
 /// [`ApplicationEventHandler::add`] to enqueue an event; the matching
 /// `UnboundedReceiver` lives on the consumer background task (handed in
 /// at construction by Phase 10).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler")]
 pub(crate) struct ApplicationEventHandler {
     sender: mpsc::UnboundedSender<ApplicationEventEnvelope>,
     /// Wakes the background task as soon as an event is enqueued.
@@ -77,6 +78,7 @@ impl ApplicationEventHandler {
     /// Constructor. Takes the **sender** half of the unbounded channel —
     /// the background task constructed in Phase 10 owns the receiver — and
     /// the shared [`Notify`] used to wake that task on each `add()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler#ApplicationEventHandler")]
     pub(crate) fn new(sender: mpsc::UnboundedSender<ApplicationEventEnvelope>, event_notify: Arc<Notify>) -> Self {
         Self { sender, event_notify, async_consumer_metrics: None, queue_size: None }
     }
@@ -99,6 +101,7 @@ impl ApplicationEventHandler {
     /// Returns `Err(Error::local_illegal_state(...))` if the receiver
     /// (background task) has already been dropped — equivalent to Java's
     /// `IllegalStateException` thrown by a closed queue.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler#add")]
     pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), Error> {
         let envelope = ApplicationEventEnvelope { event, enqueued_ms: now_ms };
         // Java records the updated queue size (`size() + 1`) BEFORE adding to
@@ -157,6 +160,7 @@ impl ApplicationEventHandler {
     /// If the receiver is dropped before completion (only possible if
     /// the bg task panicked / shut down without completing the event),
     /// returns `Error::local_illegal_state(...)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler#addAndGet")]
     pub(crate) async fn add_and_get<T: Send + 'static>(
         &self,
         event: ApplicationEvent,

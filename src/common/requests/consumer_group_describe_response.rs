@@ -28,12 +28,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ConsumerGroupDescribeResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse")]
 pub struct ConsumerGroupDescribeResponse {
     data: ConsumerGroupDescribeResponseData,
 }
 
 impl ConsumerGroupDescribeResponse {
     /// Creates a new `ConsumerGroupDescribeResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#ConsumerGroupDescribeResponse")]
     pub fn new(data: ConsumerGroupDescribeResponseData) -> Self {
         Self { data }
     }
@@ -44,6 +46,7 @@ impl ConsumerGroupDescribeResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#data")]
     pub fn data(&self) -> &ConsumerGroupDescribeResponseData {
         &self.data
     }
@@ -54,11 +57,13 @@ impl ConsumerGroupDescribeResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -74,6 +79,7 @@ impl ConsumerGroupDescribeResponse {
     /// Returns error counts by [`Errors`], aggregated per described group.
     ///
     /// Mirrors `ConsumerGroupDescribeResponse.errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for group in &self.data.groups {
@@ -88,6 +94,7 @@ impl ConsumerGroupDescribeResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ConsumerGroupDescribeResponseData::read(readable, version)?;
         Ok(Self::new(data))

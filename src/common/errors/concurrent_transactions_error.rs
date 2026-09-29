@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.ConcurrentTransactionsException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The producer attempted to update a transaction while another concurrent
     /// operation on the same transaction was ongoing.
     ///
-    /// Corresponds to Java's `ConcurrentTransactionsException`, error code [`Errors::ConcurrentTransactions`].
+    /// Corresponds to Java's `ConcurrentTransactionsException`, error code `Errors::ConcurrentTransactions`.
     ///
     /// Java `extends` chain:
     ///    `ConcurrentTransactionsException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ConcurrentTransactionsException")]
     ConcurrentTransactionsError,
     code: Errors::ConcurrentTransactions,
     extends: [

@@ -23,6 +23,8 @@ use crate::common::Error;
 /// Isolation level used to control which records are visible to a consumer
 /// when reading from a topic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.IsolationLevel")]
 pub enum IsolationLevel {
     /// Read records including those from in-flight (uncommitted) transactions.
     ReadUncommitted,
@@ -35,6 +37,7 @@ impl IsolationLevel {
     /// Returns the wire-protocol id used to encode this isolation level.
     ///
     /// Translated from Java's `byte id()`.
+    #[doc(alias = "org.apache.kafka.common.IsolationLevel#id")]
     pub fn id(&self) -> u8 {
         match self {
             Self::ReadUncommitted => 0,
@@ -47,6 +50,7 @@ impl IsolationLevel {
     /// Translated from Java's `forId(byte id)`. Returns
     /// [`Error::LocalIllegalArgument`] for unknown ids; the Java implementation
     /// throws `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.IsolationLevel#forId")]
     pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::ReadUncommitted),

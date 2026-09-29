@@ -87,7 +87,7 @@
 //! rather than the branch: "rare" was asserted about a *client* behaviour
 //! without checking what the client actually does.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
@@ -96,7 +96,6 @@ use log::{debug, error};
 use rustc_hash::FxHashSet;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
@@ -105,6 +104,7 @@ use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
 use crate::common::header::RecordHeaders;
 use crate::common::memory::BufferSupplier;
+use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::{
@@ -170,6 +170,7 @@ struct BatchMetadata {
 ///
 /// Corresponds to
 /// `org.apache.kafka.clients.consumer.internals.CompletedFetch`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch")]
 pub(crate) struct CompletedFetch {
     /// The partition this batch belongs to.
     pub(crate) partition: TopicPartition,
@@ -293,6 +294,7 @@ impl CompletedFetch {
     ///   TopicPartition, PartitionData, FetchMetricsAggregator, Long)` —
     /// minus the logger (we use the `log` crate). Phase M3 plumbs the
     /// `FetchMetricsAggregator` (dropped by Phase 7a).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#CompletedFetch")]
     pub(crate) fn with_full(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
@@ -328,6 +330,7 @@ impl CompletedFetch {
 
     /// Lightweight constructor used by tests / [`FetchBuffer`] when the
     /// subscription state and buffer supplier are not yet wired.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#CompletedFetch")]
     pub(crate) fn new(partition: TopicPartition, partition_data: PartitionData) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
         let topic_arc: Arc<str> = Arc::from(partition.topic());
@@ -354,6 +357,7 @@ impl CompletedFetch {
     }
 
     /// Returns the offset the next fetch round should start at.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#nextFetchOffset")]
     pub(crate) fn next_fetch_offset(&self) -> i64 {
         self.next_fetch_offset
     }
@@ -370,28 +374,33 @@ impl CompletedFetch {
     }
 
     /// Returns the most recent partition-leader epoch observed in a batch.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#lastEpoch")]
     pub(crate) fn last_epoch(&self) -> Option<i32> {
         self.last_epoch
     }
 
     /// Returns whether this fetch has been initialized (i.e. the cursor
     /// has been positioned at the first batch).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isInitialized")]
     pub(crate) fn is_initialized(&self) -> bool {
         self.initialized
     }
 
     /// Marks this fetch as initialized. Called by Phase 7b's
     /// `FetchCollector` after position validation.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#setInitialized")]
     pub(crate) fn set_initialized(&mut self) {
         self.initialized = true;
     }
 
     /// Returns whether the fetch has been fully consumed (or drained).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isConsumed")]
     pub(crate) fn is_consumed(&self) -> bool {
         self.is_consumed
     }
 
     /// Drops iteration state and marks the fetch consumed. Idempotent.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#drain")]
     pub(crate) fn drain(&mut self) {
         if self.is_consumed {
             return;
@@ -464,6 +473,7 @@ impl CompletedFetch {
     /// (Java's `corruptLastRecord` re-raise path), or a fresh
     /// deserialization error if a record fails to decode and no records
     /// were successfully decoded in this call.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#fetchRecords")]
     pub(crate) fn fetch_records<K, V>(
         &mut self,
         config: &FetchConfig,
@@ -1030,6 +1040,7 @@ impl CompletedFetch {
     /// recoverable error — the same treatment [`Self::peek_current_record`] gives a
     /// malformed data record. Java throws `InvalidRecordException` from
     /// `ControlRecordType.parse`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#containsAbortMarker")]
     fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, Error> {
         if !batch.is_control_batch {
             return Ok(false);
@@ -1232,6 +1243,7 @@ impl CompletedFetch {
 
     /// Drains aborted-transaction entries up to and including `offset`,
     /// recording their producer IDs in `aborted_producer_ids`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#consumeAbortedTransactionsUpTo")]
     fn consume_aborted_transactions_up_to(&mut self, offset: i64) {
         while let Some(top) = self.aborted_transactions.peek() {
             if top.0.first_offset <= offset {
@@ -1283,7 +1295,7 @@ impl From<DeserializationOrigin> for DeserializationErrorOrigin {
 ///
 /// The message itself carries no "Cause: ..." suffix; the cause is a separate
 /// field reachable through [`Error::source`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn wrap_deserialization_error(
     origin: DeserializationOrigin,
     partition: &TopicPartition,
@@ -1318,6 +1330,7 @@ fn wrap_deserialization_error(
     ))
 }
 
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeLeaderEpoch")]
 fn maybe_leader_epoch(epoch: i32) -> Option<i32> {
     if epoch == NO_PARTITION_LEADER_EPOCH {
         None
@@ -1355,7 +1368,7 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, SimpleRecord};
     use crate::common::serialization::Deserializer;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::FetchMetricsManager;
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};
@@ -1450,7 +1463,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1474,7 +1487,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1493,7 +1506,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::gzip(),
+            Compression::gzip().build(),
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1658,6 +1671,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testSimple`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testSimple")]
     fn test_simple() {
         let fetch_offset = 5;
         let starting_offset = 10;
@@ -1730,7 +1744,7 @@ mod tests {
     /// order, with correct key/value — must be unchanged.
     #[test]
     fn test_multi_batch_ordering_and_offsets() {
-        for compression in [Compression::none(), Compression::gzip()] {
+        for compression in [Compression::none().build(), Compression::gzip().build()] {
             let base_offset = 50;
             let batch_count = 4;
             let records_per_batch = 3;
@@ -1776,7 +1790,7 @@ mod tests {
         let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             base_offset,
         );
@@ -1796,7 +1810,6 @@ mod tests {
     /// and producer id, holding `count` `value-{offset}` records. The CRC is
     /// recomputed after the producer state is written by the builder, so the
     /// batch is valid under `check.crcs=true`.
-    #[allow(clippy::too_many_arguments)]
     fn batch_full(
         base_offset: i64,
         count: i32,
@@ -1808,7 +1821,7 @@ mod tests {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(512)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::none())
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(base_offset)
                 .set_log_append_time(-1)
@@ -2087,6 +2100,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testNegativeFetchCount`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testNegativeFetchCount")]
     fn test_negative_fetch_count() {
         let bytes = new_records(0, 10, 0);
         let mut cf = new_completed_fetch(0, bytes);
@@ -2101,6 +2115,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testNoRecordsInFetch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testNoRecordsInFetch")]
     fn test_no_records_in_fetch() {
         let mut partition_data = PartitionData::new();
         partition_data.set_partition_index(0);
@@ -2209,7 +2224,7 @@ mod tests {
         let Error::RecordDeserialization(rde) = &err else {
             panic!("expected Error::RecordDeserialization, got: {err:?}");
         };
-        assert_eq!(Some(DeserializationErrorOrigin::Key), rde.origin());
+        assert_eq!(DeserializationErrorOrigin::Key, rde.origin());
         assert_eq!(&TopicPartition::new("test", 0), rde.topic_partition());
         assert_eq!(1, rde.offset());
         // Timestamp type is a batch-level property, so it matches the record

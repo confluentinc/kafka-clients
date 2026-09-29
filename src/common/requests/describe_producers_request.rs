@@ -23,12 +23,13 @@ use crate::DescribeProducersResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_producers_response_data::{PartitionResponse, TopicResponse};
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeProducersResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeProducersResponse, RequestBuilder};
 
 /// A DescribeProducers request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeProducersRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest")]
 pub struct DescribeProducersRequest {
     data: DescribeProducersRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeProducersRequest {
 
 impl DescribeProducersRequest {
     /// Creates a new `DescribeProducersRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#DescribeProducersRequest")]
     pub fn new(data: DescribeProducersRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#data")]
     pub fn data(&self) -> &DescribeProducersRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl DescribeProducersRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeProducersRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeProducersResponseData::new();
         let mut topics = Vec::new();
@@ -89,6 +93,7 @@ impl DescribeProducersRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeProducersRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -105,18 +110,20 @@ impl std::fmt::Display for DescribeProducersRequest {
 ///
 /// Corresponds to `DescribeProducersRequest.Builder`.
 #[derive(Debug, Clone)]
-pub struct DescribeProducersRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest$Builder")]
+pub struct Builder {
     data: DescribeProducersRequestData,
 }
 
-impl DescribeProducersRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest$Builder#Builder")]
     pub fn new(data: DescribeProducersRequestData) -> Self {
         Self { data }
     }
 }
 
-impl RequestBuilder for DescribeProducersRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_PRODUCERS
     }
@@ -129,8 +136,8 @@ impl RequestBuilder for DescribeProducersRequestBuilder {
         ApiKeys::DESCRIBE_PRODUCERS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeProducers(DescribeProducersRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeProducers(DescribeProducersRequest::new(
             self.data.clone(),
             version,
         )))
@@ -169,10 +176,10 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = DescribeProducersRequestData::new();
         data.set_topics(vec![topic("foo", vec![0, 3])]);
-        let mut builder = DescribeProducersRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeProducersRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "foo");
@@ -190,7 +197,7 @@ mod tests {
     fn serialize_known_byte_vector_v0() {
         let mut data = DescribeProducersRequestData::new();
         data.set_topics(vec![topic("foo", vec![0])]);
-        let mut builder = DescribeProducersRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

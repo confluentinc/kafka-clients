@@ -40,6 +40,7 @@ use crate::common::Error;
 /// `consumer-threading.md` §28) — so the interface survives only as this unit
 /// struct, exactly as Java calls the statics through the interface name rather
 /// than through an implementor.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEvent")]
 pub(crate) struct CompletableEvent;
 
 impl CompletableEvent {
@@ -56,6 +57,7 @@ impl CompletableEvent {
     /// Translate Java's
     /// `CompletableEvent.calculateDeadlineMs(currentTimeMs, timeoutMs)` —
     /// saturating addition guarding against `i64::MAX` overflow.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEvent#calculateDeadlineMs")]
     pub(crate) fn calculate_deadline_ms(current_time_ms: i64, timeout_ms: i64) -> i64 {
         current_time_ms.saturating_add(timeout_ms)
     }

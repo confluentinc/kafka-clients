@@ -24,12 +24,14 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListOffsetsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult")]
 pub struct ListOffsetsResult {
     futures: HashMap<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>,
 }
 
 impl ListOffsetsResult {
     /// Creates a result from the per-partition futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult")]
     pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>) -> Self {
         Self { futures }
     }
@@ -43,6 +45,7 @@ impl ListOffsetsResult {
     ///
     /// Returns an error (invalid argument) if the offset for `partition` was not
     /// attempted, mirroring Java's `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<ListOffsetsResultInfo>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
             Error::local_illegal_argument(format!("List Offsets for partition \"{partition}\" was not attempted"))
@@ -53,6 +56,7 @@ impl ListOffsetsResult {
     /// partitions have been successfully retrieved.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartition, ListOffsetsResultInfo>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
@@ -62,6 +66,7 @@ impl ListOffsetsResult {
 ///
 /// Corresponds to `ListOffsetsResult.ListOffsetsResultInfo`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo")]
 pub struct ListOffsetsResultInfo {
     offset: i64,
     timestamp: i64,
@@ -70,21 +75,25 @@ pub struct ListOffsetsResultInfo {
 
 impl ListOffsetsResultInfo {
     /// Creates a new result info.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#ListOffsetsResultInfo")]
     pub fn new(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Self {
         Self { offset, timestamp, leader_epoch }
     }
 
     /// The offset.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// The timestamp associated with the offset.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The leader epoch associated with the offset, if known.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
     }

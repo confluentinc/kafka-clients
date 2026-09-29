@@ -149,7 +149,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
@@ -249,8 +249,8 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(bootstrap),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("Failed to build test producer")
 }
@@ -1480,7 +1480,7 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
-    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+    AdminClient::create(config).expect("admin client")
 }
 
 /// (a no-op record is just appended).

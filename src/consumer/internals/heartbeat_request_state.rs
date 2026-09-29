@@ -18,8 +18,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.HeartbeatRequestState`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 use super::RequestState;
@@ -34,6 +32,7 @@ use super::RequestState;
 /// Java models the relationship via `extends`. Rust's translation rule
 /// (Phase 7a precedent for `AbstractFetch`) is to compose the base type as
 /// a `pub(crate)` field and forward only the methods we use.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState")]
 pub(crate) struct HeartbeatRequestState {
     /// Composed [`RequestState`] for exponential-backoff bookkeeping.
     request_state: RequestState,
@@ -57,6 +56,7 @@ impl HeartbeatRequestState {
     /// starting time explicitly as `current_time_ms`.
     ///
     /// Java: `HeartbeatRequestState(LogContext, Time, long, long, long, double)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#HeartbeatRequestState")]
     pub(crate) fn new(
         current_time_ms: i64,
         heartbeat_interval_ms: i64,
@@ -84,6 +84,7 @@ impl HeartbeatRequestState {
     /// Returns the current heartbeat interval (ms).
     ///
     /// Java: `heartbeatIntervalMs()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#heartbeatIntervalMs")]
     pub(crate) fn heartbeat_interval_ms(&self) -> i64 {
         self.heartbeat_interval_ms
     }
@@ -92,12 +93,14 @@ impl HeartbeatRequestState {
     /// the last observed time.
     ///
     /// Java: `resetTimer()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#resetTimer")]
     pub(crate) fn reset_timer(&mut self) {
         self.timer_expires_at_ms = self.timer_last_update_ms + self.heartbeat_interval_ms;
     }
 
     /// Updates the timer's internal "now" reference to the supplied
     /// `current_time_ms`. Mirrors Java's `Timer::update(now)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#update")]
     fn update(&mut self, current_time_ms: i64) {
         self.timer_last_update_ms = current_time_ms;
     }
@@ -117,6 +120,7 @@ impl HeartbeatRequestState {
     /// If the timer is already expired, returns the remaining backoff.
     ///
     /// Java: `timeToNextHeartbeatMs(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#timeToNextHeartbeatMs")]
     pub(crate) fn time_to_next_heartbeat_ms(&self, current_time_ms: i64) -> i64 {
         if self.timer_is_expired(current_time_ms) {
             return self.request_state.remaining_backoff_ms(current_time_ms);
@@ -129,6 +133,7 @@ impl HeartbeatRequestState {
     /// to the inner [`RequestState`] for backoff bookkeeping.
     ///
     /// Java: overridden `onFailedAttempt(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#onFailedAttempt")]
     pub(crate) fn on_failed_attempt(&mut self, current_time_ms: i64) {
         // heartbeatTimer.reset(0) → timer expires immediately at last update.
         self.timer_expires_at_ms = self.timer_last_update_ms;
@@ -139,6 +144,7 @@ impl HeartbeatRequestState {
     /// request is already in flight and the backoff timer has elapsed.
     ///
     /// Java: overridden `canSendRequest(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#canSendRequest")]
     pub(crate) fn can_send_request(&mut self, current_time_ms: i64) -> bool {
         self.update(current_time_ms);
         self.timer_is_expired(current_time_ms) && self.request_state.can_send_request(current_time_ms)
@@ -158,6 +164,7 @@ impl HeartbeatRequestState {
     /// explicitly so the timer baseline matches Java's self-update.
     ///
     /// Java: `updateHeartbeatIntervalMs(long heartbeatIntervalMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#updateHeartbeatIntervalMs")]
     pub(crate) fn update_heartbeat_interval_ms(&mut self, current_time_ms: i64, heartbeat_interval_ms: i64) {
         if self.heartbeat_interval_ms == heartbeat_interval_ms {
             return;
@@ -225,6 +232,9 @@ mod tests {
     /// Translated from
     /// `HeartbeatRequestStateTest#testCanSendRequestAndTimeToNextHeartbeatMs`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestStateTest#testCanSendRequestAndTimeToNextHeartbeatMs"
+    )]
     fn test_can_send_request_and_time_to_next_heartbeat_ms() {
         let mut now = 0i64;
         let mut state = make_state(now);
@@ -247,6 +257,7 @@ mod tests {
 
     /// Translated from `HeartbeatRequestStateTest#testResetTimer`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestStateTest#testResetTimer")]
     fn test_reset_timer() {
         let mut now = 0i64;
         let mut state = make_state(now);
@@ -266,6 +277,9 @@ mod tests {
     /// so the deadline becomes `1100 + 2000 = 3100`, and
     /// `timeToNextHeartbeatMs(1100) == 2000`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestStateTest#testUpdateHeartbeatIntervalMs"
+    )]
     fn test_update_heartbeat_interval_ms() {
         let mut now = 0i64;
         let mut state = make_state(now);
@@ -283,6 +297,9 @@ mod tests {
     /// Translated from
     /// `HeartbeatRequestStateTest#testUpdateHeartbeatIntervalMsWithSameInterval`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestStateTest#testUpdateHeartbeatIntervalMsWithSameInterval"
+    )]
     fn test_update_heartbeat_interval_ms_with_same_interval() {
         let mut now = 0i64;
         let mut state = make_state(now);
@@ -296,6 +313,7 @@ mod tests {
 
     /// Translated from `HeartbeatRequestStateTest#testOnFailedAttempt`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestStateTest#testOnFailedAttempt")]
     fn test_on_failed_attempt() {
         let mut now = 0i64;
         let mut state = make_state(now);

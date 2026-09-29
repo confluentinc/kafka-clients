@@ -264,6 +264,12 @@ Wire wrappers go in `src/common/requests/`.
 `MockAdminClient`), with in-memory state and immediately-resolved
 `KafkaFuture`s.
 
+Java ships it in the clients *test* jar, without `@InterfaceAudience.Public`,
+so by the audience rules it would be crate-private. It stays public, together
+with its C and Python bindings, through an entry in
+`xtask/public-audience-allowlist.txt`: the crate has no separate test artifact,
+so the allow-list stands in for Java's test jar.
+
 **The governing principle: mirror Java's `MockAdminClient` method-for-method.**
 Whether a Rust mock method gets a real in-memory implementation or an
 "unsupported" error is decided **solely by what the Java `MockAdminClient`

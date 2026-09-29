@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotControllerException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This is not the correct controller for this cluster.
     ///
-    /// Corresponds to Java's `NotControllerException`, error code [`Errors::NotController`].
+    /// Corresponds to Java's `NotControllerException`, error code `Errors::NotController`.
     ///
     /// Java `extends` chain:
     ///    `NotControllerException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotControllerException")]
     NotControllerError,
     code: Errors::NotController,
     extends: [

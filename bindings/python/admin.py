@@ -69,16 +69,13 @@ dict whose values are either the result object or a :class:`KafkaError`:
   ``{group_id: None | KafkaError}`` and ``remove_members_from_consumer_group``
   -> ``{group_instance_id: None | KafkaError}`` (all per-key
   ``KafkaFuture<Void>``, so ``None`` means success)
-* ``list_groups`` -> ``([GroupListing], [KafkaError])`` and
-  ``list_consumer_groups`` -> ``([ConsumerGroupListing], [KafkaError])`` —
-  Java splits one future into ``valid()`` and an *unkeyed* ``errors()``
-  collection, so these are two independent lists, not a dict and not parallel
-  arrays
+* ``list_groups`` -> ``([GroupListing], [KafkaError])`` — Java splits one
+  future into ``valid()`` and an *unkeyed* ``errors()`` collection, so these
+  are two independent lists, not a dict and not parallel arrays
 * ``describe_cluster`` -> a single :class:`ClusterDescription` (Java's result is
   four independent futures, not a map, so a failure raises)
-* ``list_config_resources`` -> ``[ConfigResource]``, and
-  ``list_client_metrics_resources`` -> ``[ClientMetricsResourceListing]``
-  (single futures in Java, so a failure raises)
+* ``list_config_resources`` -> ``[ConfigResource]`` (a single future in Java,
+  so a failure raises)
 
 A per-key failure therefore does **not** raise; iterate the dict and check for
 ``KafkaError`` values. Only a whole-call failure raises.
@@ -580,18 +577,6 @@ class ListOffsetsResultInfo:
                 f"timestamp={self.timestamp}, leader_epoch={self.leader_epoch})")
 
 
-class ClientMetricsResourceListing:
-    """A client-metrics resource (Java ``ClientMetricsResourceListing``)."""
-
-    __slots__ = ("name",)
-
-    def __init__(self, name):
-        self.name = name
-
-    def __repr__(self):
-        return f"ClientMetricsResourceListing(name={self.name!r})"
-
-
 class ClusterDescription:
     """The cluster, as ``describe_cluster`` reports it.
 
@@ -743,39 +728,6 @@ class GroupListing:
                 f"group_state={self.group_state!r})")
 
 
-class ConsumerGroupListing:
-    """A consumer group as ``list_consumer_groups`` reports it (Java
-    ``ConsumerGroupListing``, deprecated since 4.1 in favour of
-    :class:`GroupListing`).
-
-    ``state`` is Java's deprecated ``state()``, i.e. ``group_state`` mapped
-    through ``ConsumerGroupState.parse``; both are ``None`` for an empty
-    ``Optional``.
-    """
-
-    __slots__ = ("group_id", "is_simple_consumer_group", "group_state", "state",
-                 "group_type")
-
-    def __init__(self, group_id, is_simple_consumer_group, group_state, state, group_type):
-        self.group_id = group_id
-        self.is_simple_consumer_group = is_simple_consumer_group
-        self.group_state = group_state
-        self.state = state
-        self.group_type = group_type
-
-    def __eq__(self, other):
-        return (isinstance(other, ConsumerGroupListing)
-                and self.group_id == other.group_id
-                and self.is_simple_consumer_group == other.is_simple_consumer_group
-                and self.group_state == other.group_state
-                and self.state == other.state
-                and self.group_type == other.group_type)
-
-    def __repr__(self):
-        return (f"ConsumerGroupListing(group_id={self.group_id!r}, "
-                f"group_state={self.group_state!r}, group_type={self.group_type!r})")
-
-
 class MemberAssignment:
     """The partitions assigned to one group member (Java
     ``MemberAssignment``). ``topic_partitions`` is a list of
@@ -828,8 +780,8 @@ class MemberDescription:
 class ConsumerGroupDescription:
     """A described consumer group (Java ``ConsumerGroupDescription``).
 
-    ``group_type``, ``state`` and ``group_state`` are the Java enums'
-    ``toString()`` names; ``state`` is Java's deprecated ``state()``.
+    ``group_type`` and ``group_state`` are the Java enums' ``toString()``
+    names.
     ``coordinator`` is a :class:`Node` or ``None``, ``authorized_operations``
     holds ``AclOperation`` wire codes and is ``None`` -- not empty -- when the
     broker did not report them at all (the case unless the request asked for
@@ -838,18 +790,17 @@ class ConsumerGroupDescription:
     """
 
     __slots__ = ("group_id", "is_simple_consumer_group", "members", "partition_assignor",
-                 "group_type", "state", "group_state", "coordinator",
+                 "group_type", "group_state", "coordinator",
                  "authorized_operations", "group_epoch", "target_assignment_epoch")
 
     def __init__(self, group_id, is_simple_consumer_group, members, partition_assignor,
-                 group_type, state, group_state, coordinator, authorized_operations,
+                 group_type, group_state, coordinator, authorized_operations,
                  group_epoch, target_assignment_epoch):
         self.group_id = group_id
         self.is_simple_consumer_group = is_simple_consumer_group
         self.members = members
         self.partition_assignor = partition_assignor
         self.group_type = group_type
-        self.state = state
         self.group_state = group_state
         self.coordinator = coordinator
         self.authorized_operations = authorized_operations
@@ -1914,11 +1865,6 @@ def _to_config_resources(raw):
     return [ConfigResource(resource_type, name) for resource_type, name in raw]
 
 
-def _to_client_metrics_resources(raw):
-    """[name] -> [ClientMetricsResourceListing]"""
-    return [ClientMetricsResourceListing(name) for name in raw]
-
-
 def _to_log_dir_description(raw):
     """(error, total_bytes, usable_bytes, [replica]) -> LogDirDescription"""
     error, total_bytes, usable_bytes, replicas = raw
@@ -2007,11 +1953,11 @@ def _to_member_description(raw):
 def _to_consumer_group_description(raw):
     if raw is None:
         return None
-    (group_id, is_simple, members, partition_assignor, group_type, state, group_state,
+    (group_id, is_simple, members, partition_assignor, group_type, group_state,
      coordinator, authorized_operations, group_epoch, target_assignment_epoch) = raw
     return ConsumerGroupDescription(
         group_id, bool(is_simple), [_to_member_description(m) for m in members],
-        partition_assignor, group_type, state, group_state, _to_node(coordinator),
+        partition_assignor, group_type, group_state, _to_node(coordinator),
         None if authorized_operations is None else list(authorized_operations),
         group_epoch, target_assignment_epoch)
 
@@ -2036,14 +1982,6 @@ def _to_list_groups(raw):
     """
     valid, errors = raw
     return ([GroupListing(*row) for row in valid],
-            [_to_error(e) for e in errors])
-
-
-def _to_list_consumer_groups(raw):
-    """([listing_tuple], [error_tuple])
-    -> ([ConsumerGroupListing], [KafkaError])"""
-    valid, errors = raw
-    return ([ConsumerGroupListing(*row) for row in valid],
             [_to_error(e) for e in errors])
 
 
@@ -2498,13 +2436,6 @@ class _AdminBase:
                 self._resolve_value(drain, _to_config_resources),
                 self._free_value(drain))
 
-    def _list_client_metrics_resources_spec(self, timeout):
-        ms = _ms(timeout)
-        drain = _lib.ListClientMetricsResourcesResult_drain
-        return (lambda cb: _lib.Admin_list_client_metrics_resources_async(self._h, ms, cb),
-                self._resolve_value(drain, _to_client_metrics_resources),
-                self._free_value(drain))
-
     def _describe_log_dirs_spec(self, brokers, timeout):
         ids = [int(b) for b in brokers]
         ms = _ms(timeout)
@@ -2615,16 +2546,6 @@ class _AdminBase:
         return (lambda cb: _lib.Admin_list_groups_async(
                     self._h, states, protocols, kinds, ms, cb),
                 self._resolve_value(drain, _to_list_groups),
-                self._free_value(drain))
-
-    def _list_consumer_groups_spec(self, group_states, types, timeout):
-        states = [] if group_states is None else [str(s) for s in group_states]
-        kinds = [] if types is None else [str(t) for t in types]
-        ms = _ms(timeout)
-        drain = _lib.ListConsumerGroupsResult_drain
-        return (lambda cb: _lib.Admin_list_consumer_groups_async(
-                    self._h, states, kinds, ms, cb),
-                self._resolve_value(drain, _to_list_consumer_groups),
                 self._free_value(drain))
 
     def _describe_consumer_groups_spec(self, group_ids, timeout,
@@ -3279,17 +3200,6 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._list_config_resources_spec(resource_types, timeout))
 
-    def list_client_metrics_resources(self, timeout=None):
-        """List the cluster's client-metrics resources. Returns
-        ``[ClientMetricsResourceListing]``.
-
-        Deprecated in Java since 4.1 in favour of
-        ``list_config_resources([ConfigResourceType.CLIENT_METRICS])``; exposed
-        for parity.
-        """
-        self._check_closed()
-        return self._run_sync(*self._list_client_metrics_resources_spec(timeout))
-
     def describe_log_dirs(self, brokers, timeout=None):
         """Query the log directories of ``brokers``. Returns
         ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``."""
@@ -3377,21 +3287,6 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._list_groups_spec(
             group_states, protocol_types, types, timeout))
-
-    def list_consumer_groups(self, group_states=None, types=None, timeout=None):
-        """List the consumer groups in the cluster. Returns
-        ``([ConsumerGroupListing], [KafkaError])``.
-
-        **Deprecated in Java since 4.1** in favour of :meth:`list_groups`,
-        which covers every group type; mirrored here because it is still part
-        of the Java ``Admin`` surface.
-
-        Java's deprecated ``inStates(Set<ConsumerGroupState>)`` is defined as
-        ``inGroupStates`` over ``GroupState.parse`` of the same names, so
-        ``group_states`` accepts either spelling.
-        """
-        self._check_closed()
-        return self._run_sync(*self._list_consumer_groups_spec(group_states, types, timeout))
 
     def describe_consumer_groups(self, group_ids, timeout=None,
                                  include_authorized_operations=False):
@@ -3821,10 +3716,6 @@ class AsyncAdmin(_AdminBase):
         return await self._run_async(*self._list_config_resources_spec(
             resource_types, timeout))
 
-    async def list_client_metrics_resources(self, timeout=None):
-        self._check_closed()
-        return await self._run_async(*self._list_client_metrics_resources_spec(timeout))
-
     async def describe_log_dirs(self, brokers, timeout=None):
         self._check_closed()
         return await self._run_async(*self._describe_log_dirs_spec(brokers, timeout))
@@ -3869,12 +3760,6 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(*self._list_groups_spec(
             group_states, protocol_types, types, timeout))
-
-    async def list_consumer_groups(self, group_states=None, types=None, timeout=None):
-        """See :meth:`Admin.list_consumer_groups` (deprecated in Java since 4.1)."""
-        self._check_closed()
-        return await self._run_async(*self._list_consumer_groups_spec(
-            group_states, types, timeout))
 
     async def describe_consumer_groups(self, group_ids, timeout=None,
                                        include_authorized_operations=False):

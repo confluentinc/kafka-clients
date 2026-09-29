@@ -27,6 +27,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidOffsetException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidOffsetException")]
     InvalidOffsetError,
     extends: [
         is_kafka_error,

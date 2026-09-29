@@ -77,9 +77,12 @@ async fn run() -> Result<(), String> {
         ("max.block.ms".to_string(), "2000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("config: {e}"))?;
-    let producer: KafkaProducer<String, String> =
-        KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("build: {e}"))?;
+    let producer: KafkaProducer<String, String> = KafkaProducer::new(
+        config,
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
+    )
+    .map_err(|e| format!("build: {e}"))?;
 
     // Warm-up: enqueue-only — the outer await caches metadata and opens the
     // connection; the record itself lingers (one pooled buffer of the budget).

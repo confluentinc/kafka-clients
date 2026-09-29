@@ -22,18 +22,18 @@
 //! `SimpleBuilder`, and follower-only methods are intentionally not
 //! translated.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
 use crate::FetchRequestData;
-use crate::common::ApiKeys;
 use crate::common::IsolationLevel;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchMetadata;
 use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 
@@ -41,25 +41,28 @@ use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 ///
 /// Corresponds to `FetchRequest.PartitionData` in Java.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData")]
 pub struct PartitionData {
     /// Topic ID (may be the zero UUID for versions that don't support it).
-    pub topic_id: Uuid,
+    pub(crate) topic_id: Uuid,
     /// Offset at which to start fetching.
-    pub fetch_offset: i64,
+    pub(crate) fetch_offset: i64,
     /// Earliest offset the broker should keep. -1 disables.
-    pub log_start_offset: i64,
+    pub(crate) log_start_offset: i64,
     /// Maximum bytes to return for this partition.
-    pub max_bytes: i32,
+    pub(crate) max_bytes: i32,
     /// Current leader epoch known to the client, or `None` if unknown.
-    pub current_leader_epoch: Option<i32>,
+    pub(crate) current_leader_epoch: Option<i32>,
     /// Last leader epoch the client read from, or `None` if unknown.
-    pub last_fetched_epoch: Option<i32>,
+    pub(crate) last_fetched_epoch: Option<i32>,
 }
 
 impl PartitionData {
     /// Constructs a partition entry without a `last_fetched_epoch`.
     ///
     /// Translates the 5-arg Java constructor.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData#PartitionData")]
     pub fn new(
         topic_id: Uuid,
         fetch_offset: i64,
@@ -80,6 +83,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData#PartitionData")]
     pub fn with_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
@@ -97,6 +101,48 @@ impl PartitionData {
             last_fetched_epoch,
         }
     }
+
+    /// Topic ID (may be the zero UUID for versions that don't support it).
+    ///
+    /// Java's public `PartitionData.topicId`.
+    pub fn topic_id(&self) -> Uuid {
+        self.topic_id
+    }
+
+    /// Offset at which to start fetching.
+    ///
+    /// Java's public `PartitionData.fetchOffset`.
+    pub fn fetch_offset(&self) -> i64 {
+        self.fetch_offset
+    }
+
+    /// Earliest offset the broker should keep.
+    ///
+    /// Java's public `PartitionData.logStartOffset`.
+    pub fn log_start_offset(&self) -> i64 {
+        self.log_start_offset
+    }
+
+    /// Maximum bytes to fetch for this partition.
+    ///
+    /// Java's public `PartitionData.maxBytes`.
+    pub fn max_bytes(&self) -> i32 {
+        self.max_bytes
+    }
+
+    /// Current leader epoch known to the client, or `None` if unknown.
+    ///
+    /// Java's public `PartitionData.currentLeaderEpoch`.
+    pub fn current_leader_epoch(&self) -> Option<i32> {
+        self.current_leader_epoch
+    }
+
+    /// Last leader epoch the client read from, or `None` if unknown.
+    ///
+    /// Java's public `PartitionData.lastFetchedEpoch`.
+    pub fn last_fetched_epoch(&self) -> Option<i32> {
+        self.last_fetched_epoch
+    }
 }
 
 /// A FETCH RPC, wrapping the auto-generated [`FetchRequestData`] plus the
@@ -104,6 +150,7 @@ impl PartitionData {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FetchRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest")]
 pub struct FetchRequest {
     data: FetchRequestData,
     version: i16,
@@ -156,6 +203,7 @@ impl FetchRequest {
     }
 
     /// Returns true if the broker id is non-negative.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isValidBrokerId")]
     pub fn is_valid_broker_id(broker_id: i32) -> bool {
         broker_id >= 0
     }
@@ -164,6 +212,7 @@ impl FetchRequest {
     /// follower or future-local replica).
     ///
     /// Mirrors Java's `FetchRequest.isConsumer(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isConsumer")]
     pub fn is_consumer(replica_id: i32) -> bool {
         const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
         replica_id < 0 && replica_id != FUTURE_LOCAL_REPLICA_ID
@@ -172,6 +221,7 @@ impl FetchRequest {
     /// Returns a human-readable description of a replica id.
     ///
     /// Mirrors Java's `FetchRequest.describeReplicaId(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#describeReplicaId")]
     pub fn describe_replica_id(replica_id: i32) -> String {
         const ORDINARY_CONSUMER_ID: i32 = -1;
         const DEBUGGING_CONSUMER_ID: i32 = -2;
@@ -217,18 +267,21 @@ impl FetchRequest {
         out
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#optionalEpoch")]
     fn optional_epoch(raw: i32) -> Option<i32> {
         if raw < 0 { None } else { Some(raw) }
     }
 
     /// Constructs a `FetchRequest` from data + version. The fetch-session
     /// metadata is derived from `data.session_id()` / `data.session_epoch()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#FetchRequest")]
     pub fn new(data: FetchRequestData, version: i16) -> Self {
         let metadata = FetchMetadata::new(data.session_id, data.session_epoch);
         Self { data, version, metadata }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#data")]
     pub fn data(&self) -> &FetchRequestData {
         &self.data
     }
@@ -250,16 +303,19 @@ impl FetchRequest {
 
     /// Returns the maximum wait time the server should hold the response
     /// (`max.wait.ms` parity).
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#maxWait")]
     pub fn max_wait(&self) -> i32 {
         self.data.max_wait_ms
     }
 
     /// Returns the minimum number of bytes the server should return.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#minBytes")]
     pub fn min_bytes(&self) -> i32 {
         self.data.min_bytes
     }
 
     /// Returns the maximum number of bytes the server should return.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#maxBytes")]
     pub fn max_bytes(&self) -> i32 {
         self.data.max_bytes
     }
@@ -267,6 +323,7 @@ impl FetchRequest {
     /// Returns the replica id of this fetch request.
     ///
     /// On v15+, the `replicaId` lives inside `replica_state`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#replicaId")]
     pub fn replica_id(&self) -> i32 {
         if self.version < 15 {
             self.data.replica_id
@@ -276,6 +333,7 @@ impl FetchRequest {
     }
 
     /// Returns whether this request comes from a broker follower.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isFromFollower")]
     pub fn is_from_follower(&self) -> bool {
         self.replica_id() >= 0
     }
@@ -285,17 +343,20 @@ impl FetchRequest {
     /// # Errors
     ///
     /// Returns an error if the encoded isolation level is unknown.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isolationLevel")]
     pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 
     /// Returns the fetch session metadata derived from `session_id` and
     /// `session_epoch`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#metadata")]
     pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
 
     /// Returns the rack id carried in the request.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#rackId")]
     pub fn rack_id(&self) -> &str {
         &self.data.rack_id
     }
@@ -311,10 +372,11 @@ impl FetchRequest {
     /// (the per-partition status is already absent on the wire). If a
     /// caller ever needs to construct error responses for v<13 wire,
     /// translate the per-partition walk at that point.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#getErrorResponse")]
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
-        error: &crate::common::Errors,
+        error: &crate::common::protocol::Errors,
     ) -> crate::common::requests::ConcreteResponse {
         let mut data = crate::FetchResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -336,7 +398,8 @@ impl std::fmt::Display for FetchRequest {
 /// translated; `forReplica` and `SimpleBuilder` are out of scope per
 /// `consumer-threading.md` §20.
 #[derive(Debug, Clone)]
-pub struct FetchRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder")]
+pub struct Builder {
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
     replica_id: i32,
@@ -355,10 +418,11 @@ pub struct FetchRequestBuilder {
     replaced: Vec<TopicIdPartition>,
 }
 
-impl FetchRequestBuilder {
+impl Builder {
     /// Creates a builder configured for a consumer fetch.
     ///
     /// Translates `FetchRequest.Builder.forConsumer(maxVersion, maxWait, minBytes, fetchData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#forConsumer")]
     pub fn for_consumer(
         max_version: i16,
         max_wait: i32,
@@ -389,6 +453,7 @@ impl FetchRequestBuilder {
     }
 
     /// Returns the current metadata. Visible for testing.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#metadata")]
     pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
@@ -406,11 +471,13 @@ impl FetchRequestBuilder {
     }
 
     /// Returns a reference to the fetch-data map.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#fetchData")]
     pub fn fetch_data(&self) -> &IndexMap<TopicPartition, PartitionData> {
         &self.to_fetch
     }
 
     /// Sets the per-request response cap.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#setMaxBytes")]
     pub fn set_max_bytes(mut self, max_bytes: i32) -> Self {
         self.max_bytes = max_bytes;
         self
@@ -419,6 +486,7 @@ impl FetchRequestBuilder {
     /// Returns the removed-partitions list.
     ///
     /// Translates `FetchRequest.Builder.removed()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#removed")]
     pub fn removed(&self) -> &[TopicIdPartition] {
         &self.removed
     }
@@ -432,6 +500,7 @@ impl FetchRequestBuilder {
     /// Returns the replaced-partitions list.
     ///
     /// Translates `FetchRequest.Builder.replaced()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#replaced")]
     pub fn replaced(&self) -> &[TopicIdPartition] {
         &self.replaced
     }
@@ -453,6 +522,7 @@ impl FetchRequestBuilder {
     }
 
     /// Builds the request at the latest allowed version.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#build")]
     pub fn build(&self) -> FetchRequest {
         self.build_version(self.latest_allowed_version)
     }
@@ -540,7 +610,7 @@ impl FetchRequestBuilder {
     }
 }
 
-impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
+impl crate::common::requests::RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::FETCH
     }
@@ -553,10 +623,10 @@ impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> std::io::Result<crate::common::requests::ConcreteRequest> {
-        Ok(crate::common::requests::ConcreteRequest::Fetch(
-            FetchRequestBuilder::build_version(self, version),
-        ))
+    fn build_version(&mut self, version: i16) -> std::io::Result<crate::common::requests::AbstractRequest> {
+        Ok(crate::common::requests::AbstractRequest::Fetch(Builder::build_version(
+            self, version,
+        )))
     }
 }
 
@@ -574,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_for_consumer_defaults() {
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new());
         assert_eq!(builder.replica_id, FetchRequest::CONSUMER_REPLICA_ID);
         assert_eq!(builder.max_wait, 500);
         assert_eq!(builder.min_bytes, 1);
@@ -590,7 +660,7 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(topic_id, 100));
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, data);
+        let builder = Builder::for_consumer(15, 500, 1, data);
         let req = builder.build_version(15);
         // v15 stores replica id in replica_state.
         assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
@@ -605,7 +675,7 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(topic_id, 100));
-        let builder = FetchRequestBuilder::for_consumer(12, 500, 1, data);
+        let builder = Builder::for_consumer(12, 500, 1, data);
         let req = builder.build_version(12);
         assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
         assert_eq!(12, req.version());
@@ -620,7 +690,7 @@ mod tests {
         data.insert(tp("a", 1), pd(id_a, 0));
         data.insert(tp("b", 0), pd(id_b, 0));
         data.insert(tp("a", 2), pd(id_a, 0));
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, data);
+        let builder = Builder::for_consumer(15, 500, 1, data);
         let req = builder.build();
         // Three groups: a[0,1], b[0], a[2].
         assert_eq!(3, req.data().topics.len());
@@ -637,9 +707,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(id, 0));
-        let req = FetchRequestBuilder::for_consumer(12, 500, 1, data)
-            .set_max_bytes(123_456)
-            .build_version(2);
+        let req = Builder::for_consumer(12, 500, 1, data).set_max_bytes(123_456).build_version(2);
         assert_eq!(FetchRequest::DEFAULT_RESPONSE_MAX_BYTES, req.max_bytes());
     }
 
@@ -648,9 +716,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(id, 0));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data)
-            .set_max_bytes(123_456)
-            .build_version(3);
+        let req = Builder::for_consumer(15, 500, 1, data).set_max_bytes(123_456).build_version(3);
         assert_eq!(123_456, req.max_bytes());
     }
 
@@ -659,7 +725,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
         let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
         let req = builder.build_version(12);
@@ -674,7 +740,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
         let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
         let req = builder.build_version(13);
@@ -685,7 +751,7 @@ mod tests {
     #[test]
     fn test_removed_and_replaced_round_trip() {
         let id = Uuid::random_uuid();
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new());
         // Java's Builder defaults both to `Collections.emptyList()`.
         assert!(builder.removed().is_empty());
         assert!(builder.replaced().is_empty());
@@ -699,16 +765,15 @@ mod tests {
 
     #[test]
     fn test_isolation_level_round_trip() {
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .set_isolation_level(IsolationLevel::ReadCommitted);
+        let builder =
+            Builder::for_consumer(15, 500, 1, IndexMap::new()).set_isolation_level(IsolationLevel::ReadCommitted);
         let req = builder.build_version(15);
         assert_eq!(IsolationLevel::ReadCommitted, req.isolation_level().unwrap());
     }
 
     #[test]
     fn test_metadata_round_trip() {
-        let builder =
-            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
         let req = builder.build_version(15);
         assert_eq!(FetchMetadata::new(42, 7), req.metadata());
     }
@@ -736,7 +801,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("orig", 0), pd(id, 100));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data).build_version(15);
+        let req = Builder::for_consumer(15, 500, 1, data).build_version(15);
 
         let mut topic_names = HashMap::new();
         topic_names.insert(id, "resolved".to_string());
@@ -754,7 +819,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("name-in-data", 0), pd(id, 100));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data).build_version(12);
+        let req = Builder::for_consumer(15, 500, 1, data).build_version(12);
 
         let resolved = FetchRequest::fetch_data_from(&req, &HashMap::new());
         let (tip, _) = resolved.iter().next().unwrap();

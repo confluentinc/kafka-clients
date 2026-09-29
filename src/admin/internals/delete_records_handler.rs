@@ -23,9 +23,9 @@ use std::sync::Arc;
 use crate::DeleteRecordsRequestData;
 use crate::admin::DeletedRecords;
 use crate::admin::RecordsToDelete;
-use crate::common::Errors;
 use crate::common::errors::ApiError;
-use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, RequestBuilder, delete_records_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsTopic};
@@ -40,6 +40,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `DeleteRecordsHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`DeletedRecords`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler")]
 pub(crate) struct DeleteRecordsHandler {
     records_to_delete: HashMap<TopicPartition, RecordsToDelete>,
     log_context: LogContext,
@@ -49,6 +50,7 @@ pub(crate) struct DeleteRecordsHandler {
 
 impl DeleteRecordsHandler {
     /// Creates a handler for the given per-partition deletion offsets.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#DeleteRecordsHandler")]
     pub(crate) fn new(
         records_to_delete: HashMap<TopicPartition, RecordsToDelete>,
         log_context: LogContext,
@@ -62,6 +64,7 @@ impl DeleteRecordsHandler {
     /// resolved.
     ///
     /// Mirrors `DeleteRecordsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -72,6 +75,7 @@ impl DeleteRecordsHandler {
     /// Builds a single batched `DeleteRecords` request for the given keys.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _broker_id: i32,
@@ -103,6 +107,7 @@ impl DeleteRecordsHandler {
     /// (left out of the result to retry) or failed (fatal).
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,
@@ -147,7 +152,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
     fn build_request(&self, broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(broker_id, keys);
         vec![RequestAndKeys {
-            request: Box::new(DeleteRecordsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(delete_records_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }
@@ -218,7 +223,7 @@ mod tests {
     use super::*;
     use crate::DeleteRecordsResponseData;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{DeleteRecordsResponse, MetadataResponse};
     use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
     use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
@@ -236,7 +241,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::with_before_offset(10)))
+            .map(|k| (k, RecordsToDelete::before_offset_with_offset(10)))
             .collect()
     }
 

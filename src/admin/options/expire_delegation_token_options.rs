@@ -22,6 +22,7 @@
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.ExpireDelegationTokenOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenOptions")]
 pub struct ExpireDelegationTokenOptions {
     expiry_time_period_ms: i64,
     timeout_ms: Option<i32>,

@@ -29,6 +29,7 @@ use crate::common::TopicPartition;
 /// `synchronized`; the Rust port uses a `std::sync::Mutex` (short, non-awaiting
 /// critical sections).
 #[derive(Debug, Default)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderCache")]
 pub(crate) struct PartitionLeaderCache {
     cache: Mutex<HashMap<TopicPartition, i32>>,
 }
@@ -43,6 +44,7 @@ impl PartitionLeaderCache {
     /// cache.
     ///
     /// Mirrors `get`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderCache#get")]
     pub(crate) fn get<'a, I>(&self, keys: I) -> HashMap<TopicPartition, i32>
     where
         I: IntoIterator<Item = &'a TopicPartition>,
@@ -60,6 +62,7 @@ impl PartitionLeaderCache {
     /// Inserts (or overwrites) the given mappings.
     ///
     /// Mirrors `put`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderCache#put")]
     pub(crate) fn put(&self, values: &HashMap<TopicPartition, i32>) {
         let mut cache = self.cache.lock().unwrap();
         for (key, broker_id) in values {
@@ -70,6 +73,7 @@ impl PartitionLeaderCache {
     /// Removes the given keys from the cache.
     ///
     /// Mirrors `remove`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderCache#remove")]
     pub(crate) fn remove<'a, I>(&self, keys: I)
     where
         I: IntoIterator<Item = &'a TopicPartition>,

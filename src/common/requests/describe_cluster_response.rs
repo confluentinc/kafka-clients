@@ -29,12 +29,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeClusterResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse")]
 pub struct DescribeClusterResponse {
     data: DescribeClusterResponseData,
 }
 
 impl DescribeClusterResponse {
     /// Creates a new `DescribeClusterResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#DescribeClusterResponse")]
     pub fn new(data: DescribeClusterResponseData) -> Self {
         Self { data }
     }
@@ -45,6 +47,7 @@ impl DescribeClusterResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#data")]
     pub fn data(&self) -> &DescribeClusterResponseData {
         &self.data
     }
@@ -55,11 +58,13 @@ impl DescribeClusterResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -67,6 +72,7 @@ impl DescribeClusterResponse {
     /// Returns a map from broker id to [`Node`].
     ///
     /// Corresponds to `DescribeClusterResponse.nodes`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#nodes")]
     pub fn nodes(&self) -> HashMap<i32, Node> {
         self.data
             .brokers
@@ -81,6 +87,7 @@ impl DescribeClusterResponse {
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
@@ -91,6 +98,7 @@ impl DescribeClusterResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeClusterResponseData::read(readable, version)?;
         Ok(Self::new(data))

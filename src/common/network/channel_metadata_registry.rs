@@ -25,24 +25,30 @@ use super::ClientInformation;
 /// A registry for collecting channel metadata such as cipher and client information.
 ///
 /// Translated from the Java `ChannelMetadataRegistry` interface.
+#[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry")]
 pub trait ChannelMetadataRegistry: Send + Sync {
     /// Register information about the SSL cipher we are using.
     /// Re-registering the information will overwrite the previous one.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry#registerCipherInformation")]
     fn register_cipher_information(&mut self, cipher_information: CipherInformation);
 
     /// Get the currently registered cipher information.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry#cipherInformation")]
     fn cipher_information(&self) -> Option<&CipherInformation>;
 
     /// Register information about the client we are using.
     /// Depending on the clients, the ApiVersionsRequest could be received
     /// multiple times or not at all. Re-registering the information will
     /// overwrite the previous one.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry#registerClientInformation")]
     fn register_client_information(&mut self, client_information: ClientInformation);
 
     /// Get the currently registered client information.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry#clientInformation")]
     fn client_information(&self) -> Option<&ClientInformation>;
 
     /// Unregister everything that has been registered and close the registry.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelMetadataRegistry#close")]
     fn close(&mut self);
 }
 

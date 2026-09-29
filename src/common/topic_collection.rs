@@ -25,6 +25,8 @@ use crate::common::Uuid;
 /// subclasses; in Rust the closed set of subclasses is an enum, so callers
 /// `match` on the variant instead of using `instanceof`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.TopicCollection")]
 pub enum TopicCollection {
     /// A collection of topics defined by their topic ID
     /// (`TopicCollection.TopicIdCollection`).
@@ -38,6 +40,7 @@ impl TopicCollection {
     /// Returns a collection of topics defined by topic ID.
     ///
     /// Translated from `TopicCollection.ofTopicIds`.
+    #[doc(alias = "org.apache.kafka.common.TopicCollection#ofTopicIds")]
     pub fn of_topic_ids(topics: Vec<Uuid>) -> TopicCollection {
         TopicCollection::TopicIds(topics)
     }
@@ -45,6 +48,7 @@ impl TopicCollection {
     /// Returns a collection of topics defined by topic name.
     ///
     /// Translated from `TopicCollection.ofTopicNames`.
+    #[doc(alias = "org.apache.kafka.common.TopicCollection#ofTopicNames")]
     pub fn of_topic_names(topics: Vec<String>) -> TopicCollection {
         TopicCollection::TopicNames(topics)
     }

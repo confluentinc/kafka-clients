@@ -24,12 +24,14 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ElectLeadersResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult")]
 pub struct ElectLeadersResult {
     election_future: KafkaFuture<HashMap<TopicPartition, Option<Error>>>,
 }
 
 impl ElectLeadersResult {
     /// Creates a result wrapping the election future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#ElectLeadersResult")]
     pub(crate) fn new(election_future: KafkaFuture<HashMap<TopicPartition, Option<Error>>>) -> Self {
         Self { election_future }
     }
@@ -40,6 +42,7 @@ impl ElectLeadersResult {
     /// will be `Some(error)`.
     ///
     /// Mirrors `partitions()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#partitions")]
     pub fn partitions(&self) -> KafkaFuture<HashMap<TopicPartition, Option<Error>>> {
         self.election_future.clone()
     }
@@ -47,6 +50,7 @@ impl ElectLeadersResult {
     /// Return a future which succeeds if all the topic elections succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.election_future
             .then_apply_try(|topic_partitions| match topic_partitions.into_values().flatten().next() {
@@ -59,8 +63,8 @@ impl ElectLeadersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn all_succeeds_when_no_partition_has_error() {
