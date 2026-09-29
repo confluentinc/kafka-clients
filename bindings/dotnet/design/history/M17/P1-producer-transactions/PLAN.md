@@ -37,6 +37,16 @@
 > §7's count of the list stale, so the count is deleted; a deletion carries no
 > marker.
 
+> **Amended at the CP2 review (2026-09-29).** Corrections and additions, each
+> marked in place except the deletion. D6 called `FromBorrowedHandle` the only
+> classified construction site. `gate/CP2.txt`'s compiler probe finds admin
+> results that also build one, and Critic finding 84.10 finds another, which the
+> probe cannot see because it rethrew through a public ctor. So the claim is
+> deleted, and a new D6 bullet says how each of those results answers the five
+> predicates. §6's DoD row 11 now gives its reason instead of an absence claim,
+> and §5.2's sweep cites the core test set to the line where it ends. D15's
+> file-forward list gains items 14-21, from the observations of the CP2 hand-off.
+
 **Requirement (verbatim):** "Make sure we implement all the public producer
 transaction and idempotency apis for .NET."
 
@@ -577,12 +587,26 @@ wait, not the operation" and carry the -2 retry caveat.
 
 How they are populated:
 
-- **Classified construction.** `FromBorrowedHandle` (`KafkaException.cs:197-209`,
-  the only classified construction site) reads them eagerly through five new
-  P/Invokes, alongside `Code` / `Message` / `IsRetriable`, and passes them to a new
-  internal ctor.
+- **Classified construction.** `FromBorrowedHandle` (`KafkaException.cs:197-209`)
+  reads them eagerly through five new P/Invokes, alongside `Code` / `Message` /
+  `IsRetriable`, and passes them to a new internal ctor.
 - **Existing internal ctor.** The 3-arg internal ctor (`:101`) chains to it with
   all five false.
+- **Rebuilt failures** (⚠ added at the CP2 review, from observation (b) of
+  `gate/CP2.txt` and Critic finding 84.10). Each admin result below throws a new
+  exception built from a failure it holds:
+  - `AlterConsumerGroupOffsetsResult.All()` passes on the five answers of the
+    failure it rebuilds. Java throws the typed `error.exception(message)` there
+    (`AlterConsumerGroupOffsetsResult.java:76-77`), which keeps the failure's
+    class.
+  - `RemoveMembersFromConsumerGroupResult.All()` leaves all five false. Java wraps
+    the failure in a bare `KafkaException` there
+    (`RemoveMembersFromConsumerGroupResult.java:59-60`). Its `IsRetriable`
+    pass-through is file-forward item 14.
+  - `TopicMetadataAndConfig`'s accessors pass on the five answers of the failure
+    they hold, with that failure as `InnerException`, which the new internal ctor
+    takes as an optional last parameter. Java rethrows the held failure itself
+    there (`CreateTopicsResult.java:151-154`).
 - **Public ctors** (`:64`, `:74`, `:89`) leave all five false, as they already
   leave `Code == 0` and `IsRetriable == false`.
 
@@ -1112,6 +1136,83 @@ round-5 rule: delete a stale claim, do not re-word it. The grep gate is in §4 C
     blocks whose null clauses mention `callback`, gives the same eight. Both ran on
     header SHA-256 `e8d39f09…d111`, which this phase does not change. A grep for
     one phrase is how 84.8 missed "reported via `callback`".
+14. `RemoveMembersFromConsumerGroupResult.All()`'s removeAll branch
+    (`Admin/RemoveMembersFromConsumerGroupResult.cs:99-105`) passes the member
+    error's `IsRetriable` into the exception it throws, where Java throws a bare
+    `KafkaException` (`RemoveMembersFromConsumerGroupResult.java:59-60`), which is
+    not a `RetriableException`. Java also passes the member error as that
+    exception's cause (`:60`), which the .NET rebuild drops. The branch's own
+    comment says the core leaves that map empty in removeAll mode, so the branch
+    can only find success. Pre-existing; recorded at the CP2 review (D6's rebuild
+    bullet).
+15. Core, for `kafka-critic` (recorded at the CP2 review, observation (a) of
+    `gate/CP2.txt`). `AsyncKafkaConsumer::group_metadata()` returns the stub
+    `ConsumerGroupMetadata::new(group)`
+    (`src/consumer/async_kafka_consumer.rs:2798-2799`) until the first heartbeat
+    response with a member epoch fills its cache (`:2781-2788`), so a configured
+    `group.instance.id` reads back as absent before the join. Java builds the
+    pre-join metadata with it (`AsyncKafkaConsumer.java:447` -> `:734-739` ->
+    `:754` -> `:761-768`) and asserts it (`AsyncKafkaConsumerTest.java:1386`). The
+    core's `group_metadata_with_instance_id` (`:7405-7426`) says in its doc that it
+    asserts the propagation (`:7402-7404`); it asserts the config instead
+    (`:7425`).
+16. A stale type name in the binding (recorded at the CP2 review, observation
+    (c)). The ABI's error type is `kafka_common_Error_t`. `kafka_common_KafkaError`
+    is on no line of the header, on 29 lines under `bindings/dotnet/src` and 14
+    under `bindings/dotnet/tests` (the same at 76629aea and in the CP2 worktree),
+    and on 5 lines of `ffi-marshalling.md`, 1 of `bindings/dotnet/CLAUDE.md` and 1
+    of `bindings/CLAUDE.md` (line counts, measured at the CP2 review). One rename,
+    for a later .NET phase.
+17. Core doc, for `kafka-critic` (recorded at the CP2 review, observation (e)).
+    `Error::is_invalid_configuration_error`'s list of the configuration errors
+    proper (`src/common/error.rs:1797-1801`) leaves out `Errors::InvalidRecord`
+    (87). Java's `InvalidRecordException` extends `InvalidConfigurationException`
+    (`InvalidRecordException.java:21`), the core answers true for 87 (CP2's
+    both-directions sweep), and the core's own test set includes it
+    (`errors.rs:1961`).
+18. A .NET comment (recorded at the CP2 review, observation (g)).
+    `Interop/ConsumerUnsubscribeSeekGroupMetadataTests.cs:175` cites
+    `async_kafka_consumer.rs:1639` for the pre-join stub. `:1639` is in the doc
+    comment of a test-visible constructor; the stub is at `:2798-2799`.
+19. Core, for `kafka-critic` (recorded at the CP2 review, observation (h)). Some
+    core constructors build a bare `Error::KafkaError` for a code other than
+    `Errors::None`, which `src/common/kafka_error.rs:188-190` says no longer
+    happens ("`Error::KafkaError` is now only reached for `Errors::None`"):
+    - `Error::unsupported_version` (`src/common/error.rs:1482-1485`), reached at
+      `src/ffi/consumer.rs:438`. The binding reads code 35 with all six predicates
+      false (measured at CP2), where Java's `UnsupportedVersionException` extends
+      `InvalidConfigurationException` (`UnsupportedVersionException.java:31`).
+    - `Error::record_batch_too_large` (`:1534-1539`, documented "Corresponds to
+      Java's `RecordBatchTooLargeException`") stores `Errors::MessageTooLarge` (10),
+      whose Java class `RecordTooLargeException` extends `ApiException`
+      (`RecordTooLargeException.java:26`). Java's `RecordBatchTooLargeException` is
+      code 18 and extends `InvalidConfigurationException`
+      (`RecordBatchTooLargeException.java:22`). It is called at
+      `src/producer/internals/producer_batch.rs:551` (read, not measured).
+    - `Error::invalid_group_id` (`:1350-1352`). None of the six predicates the
+      binding reads differs from Java for it; `is_api_error`, which the binding
+      does not read, does: Java's `InvalidGroupIdException` extends `ApiException`
+      (`InvalidGroupIdException.java:19`), and a bare `Error::KafkaError` answers
+      false to it (`kafka_error.rs:190-191`).
+20. Admin Java cites (recorded at the CP2 review, observation (i) of
+    `gate/CP2.txt`). Lines CP2 did not change in
+    `Admin/AlterConsumerGroupOffsetsResult.cs` and
+    `PublicAdminAlterConsumerGroupOffsetsTests.cs` cite Java lines that do not
+    match the Java checkout at ccacf8a; `gate/CP2.txt` tabulates them. The gitlink
+    commit 26b251a4 is not in the local object store, so whether they matched it
+    cannot be checked here. One member doc mixes the two: CP2 re-based `All()`'s
+    throw cite to `:76-77` at ccacf8a and left its `:58-71` and `:61-64` beside it
+    (`Admin/AlterConsumerGroupOffsetsResult.cs:118`, `:125`). For a later admin
+    phase.
+21. Admin hygiene (recorded at the CP2 review, observations (j) and (l)).
+    `Admin/AlterConsumerGroupOffsetsResult.cs:46-47` names
+    `AdminCallbacks.AlterConsumerGroupOffsetsOptionalError` as the reader that
+    carries each partition's error, yet CP2's reader probe (retype the readers,
+    build the library) finds no library caller of it or of the RemoveMembers and
+    DeleteConsumerGroupOffsets readers; production maps each error through
+    `CompletePerKeyFanIn` and `FromHandle` (`AdminCallbacks.cs:2551`). Separately,
+    an existing list test in `PublicAdminAlterConsumerGroupOffsetsTests.cs` depends
+    on `Dictionary` enumeration order, which .NET documents as undefined.
 
 **Recommendation.** As Rule (Q12, Q19, Q20, Q21, Q27).
 
@@ -1497,7 +1598,8 @@ All paths below are relative to `bindings/dotnet/tests/Confluent.Kafka.UnitTests
   `extends` chain: TransactionAbortable {120}; ApplicationRecoverable {22, 25, 47, 49,
   82, 90}; Authorization {29, 30, 31, 53, 65}; OutOfOrderSequence {45, 59};
   InvalidConfiguration = the Authorization set plus the core test's other members
-  (`errors.rs:1957-1981`). The expected sets are written in the test from the Java
+  (`errors.rs:1957-1980`; ⚠ corrected at the CP2 review, from `:1981`). The
+  expected sets are written in the test from the Java
   sources with that citation, not generated from the core, and a disagreement is a
   core finding routed to `kafka-critic` (as for the ten rows). The ten-row table stays
   as the readable contract; the sweep is what catches a swapped or mis-bound
@@ -1908,7 +2010,7 @@ where the Critic finds the evidence.
 | 8 | No TODO / FIXME | G7's marker grep over the code paths prints nothing at every commit. | gate records |
 | 9 | `make verify` | Root `make verify` (`Makefile:434`) is Rust + C + Python + `check-bindings`; it does not reach .NET, and G1 proves the phase changes nothing it builds (G11 re-runs its format and lint legs as a no-op proof after the CP7 `Makefile` edit). The .NET leg is `make verify-dotnet` (`Makefile:449-451`: unit, integration, perf), which runs as written only on CI's Linux amd64 job, after the user pushes (Q25); locally its pieces are G2-G5, G8 and G10. | CI; G1, G11 |
 | 10 | Hot-path allocation audit | Control operations are per transaction, not per record, but D3 / D4 sit beside the send path, so it is audited. (a) `Send` is unchanged: no new branch or field on the send path. (b) The pump's per-group loop gains one `IsBarrier` read — a field load, no allocation. (c) One barrier object plus its `TaskCompletionSource<bool>` per async commit or abort — per transaction. (d) The five predicate reads are non-allocating `bool` P/Invokes that run only when a core error is materialized as a `KafkaException` — the failure path. The existing budgets stay green **unchanged**: `PublicProducerSendAllocationBudgetTests.cs:58` and `PublicSyncProducerSendAllocationBudgetTests.cs:58` (512 B per send), `PublicProducerDeliveryCallbackAllocationBudgetTests.cs:85` (512 B, plain path). No budget is widened. | G4 |
-| 11 | Consumer trait surface | N/A (no consumer file changes). Its spirit, applied: the sync members call the sync ABI — no managed `block_on` / `Task.Run` façade — and the async members return the `Task` of `SubmitVoidOperation`. S1 pins the declarations' shapes (sync `SafeProducerHandle` forms, async callback forms) and that `begin_transaction_async` is not bound; S6 pins that each async member submits exactly once through its async symbol; that each sync member calls its sync symbol directly is a review item (there is no sync seam to count through). | S1, S6, Critic 84 |
+| 11 | Consumer trait surface | N/A: item 11 applies when translating consumer files, and its four checks are of Rust code (the `Consumer<K, V>` dispatch trait, the per-record traits, no `block_on` sync façade, and the `Send` bound); this phase changes no Rust (G1). (⚠ Corrected at the CP2 review: the cell said "no consumer file changes", and CP2 changes `ConsumerGroupMetadata.cs` and its marshal.) Its spirit, applied: the sync members call the sync ABI — no managed `block_on` / `Task.Run` façade — and the async members return the `Task` of `SubmitVoidOperation`. S1 pins the declarations' shapes (sync `SafeProducerHandle` forms, async callback forms) and that `begin_transaction_async` is not bound; S6 pins that each async member submits exactly once through its async symbol; that each sync member calls its sync symbol directly is a review item (there is no sync seam to count through). | S1, S6, Critic 84 |
 | 12 | Test-fixture fidelity | Each seam substitutes exactly one thing and is reached through production's own entry points: the settings seam feeds production's `EnsureAccumulator`; the submit seam defaults to the real P/Invoke, which the public path passes; the grow helper is production's helper with the native call as a delegate; the barrier tests drive the production pump. Each seam test has a mutation check recorded in the gate log (§5.1 principles 5 and 7). | S4-S7 mutation records |
 
 ---
