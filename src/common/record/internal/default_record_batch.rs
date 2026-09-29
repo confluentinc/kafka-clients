@@ -38,8 +38,10 @@
 //! Corresponds to Java's `org.apache.kafka.common.record.DefaultRecordBatch`.
 
 use std::io;
+use std::io::Read;
 
 use crate::common::InvalidRecordError;
+use crate::common::compress;
 use crate::common::compress::Compression;
 use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
@@ -61,6 +63,31 @@ pub struct DefaultRecordBatch {
 }
 
 impl DefaultRecordBatch {
+    /// The most bytes one record batch may decompress to (APPSEC-7665 D4).
+    ///
+    /// Java has no such bound: it decompresses a batch record by record as the
+    /// consumer iterates (`DefaultRecordBatch.java:279-297`), so a zip bomb costs it
+    /// time, not memory. This client decompresses a batch once, into the buffer its
+    /// records borrow from (`consumer-threading.md` §27), so without a bound a small
+    /// compressed batch could demand gigabytes.
+    ///
+    /// A stored batch decompresses to its compressed size — at most the broker's
+    /// `message.max.bytes`, by default 1 MiB + 12 bytes
+    /// (`ServerLogConfigs.MAX_MESSAGE_BYTES_DEFAULT`, `ServerLogConfigs.java:177`) —
+    /// times its compression ratio, and the ratio has no bound in principle.
+    /// Reaching 1 GiB on a default broker takes a ratio of roughly 1000:1, which
+    /// realistic data does not produce. A broker with a raised `message.max.bytes`
+    /// serving highly compressible topics could reach it, and there a Java consumer
+    /// streams the batch while this client fails it. That is the case for promoting
+    /// this constant to a configuration key, which is to be done only if a user hits
+    /// it.
+    pub const MAX_DECOMPRESSED_BATCH_BYTES: usize = 1 << 30;
+
+    /// The most bytes one `read` asks a decompressor for while a batch is
+    /// decompressed, and so the furthest the output buffer can grow past
+    /// [`MAX_DECOMPRESSED_BATCH_BYTES`](Self::MAX_DECOMPRESSED_BATCH_BYTES) (or a lower limit) before the limit is seen.
+    pub(crate) const DECOMPRESSION_READ_CHUNK_BYTES: usize = 16 * 1024;
+
     // Attribute masks
     const COMPRESSION_CODEC_MASK: u8 = 0x07;
 
@@ -128,6 +155,76 @@ impl DefaultRecordBatch {
         }
     }
 
+    /// Reads `reader` to its end into one buffer that never grows past `max_bytes`
+    /// by more than one read (D4).
+    ///
+    /// Replaces `read_to_end`, whose doubling has no ceiling. The capacity starts at
+    /// `size_hint` (the compressed size) and doubles, but is clamped to
+    /// `max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES`, and each `read` is offered at
+    /// most one chunk, so no capacity above that ceiling is ever requested; the
+    /// first byte past `max_bytes` is an error. Every reservation is
+    /// `try_reserve_exact`, so an allocation the process cannot satisfy is an error
+    /// rather than an abort, and each byte of spare capacity is zeroed once.
+    fn read_decompressed<R: Read>(reader: &mut R, size_hint: usize, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let ceiling = max_bytes.saturating_add(Self::DECOMPRESSION_READ_CHUNK_BYTES);
+        let mut decompressed: Vec<u8> = Vec::new();
+        // `decompressed[..filled]` is output; `decompressed[filled..]` is zeroed
+        // space not yet read into.
+        let mut filled = 0;
+        loop {
+            if filled == decompressed.len() {
+                if decompressed.len() == decompressed.capacity() {
+                    // `filled <= max_bytes < ceiling`, so the target is always past
+                    // the current length.
+                    let target = decompressed.capacity().saturating_mul(2).max(size_hint).max(1).min(ceiling);
+                    decompressed
+                        .try_reserve_exact(target - decompressed.len())
+                        .map_err(io::Error::other)?;
+                }
+                let zeroed = decompressed.capacity().min(filled + Self::DECOMPRESSION_READ_CHUNK_BYTES);
+                decompressed.resize(zeroed, 0);
+            }
+            match reader.read(&mut decompressed[filled..]) {
+                Ok(0) => break,
+                Ok(read) => {
+                    filled += read;
+                    if filled > max_bytes {
+                        return Err(compress::decompressed_size_limit_error(max_bytes));
+                    }
+                },
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
+                Err(e) => return Err(e),
+            }
+        }
+        decompressed.truncate(filled);
+        Ok(decompressed)
+    }
+
+    /// A decompression failure, in the message the batch reader has always used.
+    fn decompression_error(e: io::Error) -> InvalidRecordError {
+        InvalidRecordError::new(format!("Failed to decompress record stream: {e}"))
+    }
+
+    /// Java's `ensureValid()` size-check error (`DefaultRecordBatch.java:152-154`),
+    /// for a batch whose size — `LOG_OVERHEAD` plus its length field — is below
+    /// the v2 header.
+    fn batch_size_below_overhead_error(size_in_bytes: i64) -> InvalidRecordError {
+        InvalidRecordError::new(format!(
+            "Record batch is corrupt (the size {size_in_bytes} is smaller than the minimum allowed overhead {})",
+            RecordBatch::RECORD_BATCH_OVERHEAD
+        ))
+    }
+
+    /// The error Java's `RecordIterator` constructor throws for a negative record
+    /// count (`DefaultRecordBatch.java:584-587`), before a single record is read.
+    ///
+    /// Shared by [`DefaultRecordBatch::iter_records`] and the consumer's receive
+    /// path, which iterates a batch through its own cursor instead of a
+    /// `RecordIterator` but must reject the count at the same point.
+    pub(crate) fn invalid_record_count_error(num_records: i32, magic: i8) -> InvalidRecordError {
+        InvalidRecordError::new(format!("Found invalid record count {num_records} in magic v{magic} batch"))
+    }
+
     fn read_i64(buf: &[u8], offset: usize) -> i64 {
         i64::from_be_bytes(buf[offset..offset + 8].try_into().unwrap())
     }
@@ -162,7 +259,13 @@ impl DefaultRecordBatch {
 
     /// Create a new `DefaultRecordBatch` wrapping the given buffer.
     ///
-    /// The buffer must contain a complete record batch starting at index 0.
+    /// The buffer must contain exactly one complete v2 record batch starting at
+    /// index 0 — at least [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes, which
+    /// [`as_ref`](Self::as_ref)'s header accessors rely on. The only production
+    /// source is `BatchIterator` (in `memory_records.rs`),
+    /// which copies batches that
+    /// [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
+    /// has already validated; the rest are this client's own builders.
     pub fn new(buffer: Vec<u8>) -> Self {
         Self { buffer }
     }
@@ -179,6 +282,10 @@ impl DefaultRecordBatch {
     /// lets the consumer receive path parse a batch header straight out of a
     /// `&[u8]` slice without a per-batch `to_vec` (see `consumer-threading.md`
     /// §27).
+    ///
+    /// Built directly rather than through the checked
+    /// [`DefaultRecordBatchRef::new`]: an owned batch's buffer already satisfies
+    /// the view's invariant (see [`new`](Self::new)).
     pub fn as_ref(&self) -> DefaultRecordBatchRef<'_> {
         DefaultRecordBatchRef { buffer: &self.buffer }
     }
@@ -407,29 +514,33 @@ impl DefaultRecordBatch {
     /// §27, this allocation happens once per compressed batch — never per
     /// record.
     ///
-    /// Returns an error if the batch is corrupt or decompression fails.
-    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
-        self.as_ref().decompress_records()
+    /// Returns an error if the batch is corrupt, decompression fails, or the
+    /// records decompress to more than `max_bytes`.
+    pub fn decompress_records(&self, max_bytes: usize) -> Result<Vec<u8>, InvalidRecordError> {
+        self.as_ref().decompress_records(max_bytes)
     }
 
     /// Iterate over the records in this batch.
     ///
     /// For uncompressed batches, reads records directly from the buffer.
-    /// For compressed batches, decompresses all records into memory first.
+    /// For compressed batches, decompresses all records into memory first, at
+    /// most [`MAX_DECOMPRESSED_BATCH_BYTES`](DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES) of them (D4).
     ///
     /// Returns an error if the batch is corrupt.
     pub fn iter_records(&self) -> Result<Vec<DefaultRecord>, InvalidRecordError> {
+        self.iter_records_with_limit(DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES)
+    }
+
+    /// [`iter_records`](Self::iter_records) with the decompression limit as a
+    /// parameter, so a test can drive it down to a few bytes.
+    fn iter_records_with_limit(&self, max_decompressed_bytes: usize) -> Result<Vec<DefaultRecord>, InvalidRecordError> {
         let num_records = self.count();
         if num_records == 0 {
             return Ok(Vec::new());
         }
 
         if num_records < 0 {
-            return Err(InvalidRecordError::new(format!(
-                "Found invalid record count {} in magic v{} batch",
-                num_records,
-                self.magic()
-            )));
+            return Err(DefaultRecordBatch::invalid_record_count_error(num_records, self.magic()));
         }
 
         let log_append_time = if self.timestamp_type() == TimestampType::LogAppendTime {
@@ -442,10 +553,17 @@ impl DefaultRecordBatch {
         let base_timestamp = self.base_timestamp();
         let base_sequence = self.base_sequence();
 
+        // Java sizes the list by the declared count (`new ArrayList<>(count())`,
+        // `DefaultRecordBatch.java:332`), which a header can set to `i32::MAX`.
+        // Every record takes at least one byte, so the batch's own record bytes
+        // bound the count of an uncompressed batch; for a compressed one they are
+        // only a starting capacity, and the list grows past it as records decode.
+        let records_data = &self.buffer[RecordBatch::RECORDS_OFFSET..];
+        let capacity_hint = (num_records as usize).min(records_data.len());
+
         if !self.is_compressed() {
             // Read records directly from the buffer
-            let records_data = &self.buffer[RecordBatch::RECORDS_OFFSET..];
-            let mut records = Vec::with_capacity(num_records as usize);
+            let mut records = Vec::with_capacity(capacity_hint);
             let mut pos = 0;
 
             for _ in 0..num_records {
@@ -473,22 +591,42 @@ impl DefaultRecordBatch {
             Ok(records)
         } else {
             // Decompress and read records from the stream
-            let records_data = &self.buffer[RecordBatch::RECORDS_OFFSET..];
             let compression = Compression::of(self.compression_type());
+            // D4: the stream may yield `max_decompressed_bytes`; `take` stops it
+            // one byte later, so a batch that decompresses to more is visible as
+            // an exhausted limit rather than read to its end. `take` enforces the
+            // limit for every codec alike, so the limit is not also handed to
+            // the reader: a snappy reader that refused a block itself would
+            // surface here as a failed record read, indistinguishable from any
+            // other. Its blocks stay bounded by what their bytes can encode, and
+            // an owned batch is one this client built or already validated.
             let mut reader = compression
                 .wrap_for_input(records_data, self.magic())
-                .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
+                .map_err(DefaultRecordBatch::decompression_error)?
+                .take((max_decompressed_bytes as u64).saturating_add(1));
+            let limit_exceeded = || {
+                DefaultRecordBatch::decompression_error(compress::decompressed_size_limit_error(max_decompressed_bytes))
+            };
 
-            let mut records = Vec::with_capacity(num_records as usize);
+            let mut records = Vec::with_capacity(capacity_hint);
             for _ in 0..num_records {
-                let record = DefaultRecord::read_from_stream(
+                let record = match DefaultRecord::read_from_stream(
                     &mut reader,
                     base_offset,
                     base_timestamp,
                     base_sequence,
                     log_append_time,
-                )?;
+                ) {
+                    Ok(record) => record,
+                    // The stream was cut at the limit: report the limit, not the
+                    // record it cut short.
+                    Err(_) if reader.limit() == 0 => return Err(limit_exceeded()),
+                    Err(e) => return Err(e),
+                };
                 records.push(record);
+            }
+            if reader.limit() == 0 {
+                return Err(limit_exceeded());
             }
 
             // Check that no data remains
@@ -748,20 +886,43 @@ impl DefaultRecordBatch {
 /// [`DefaultRecordBatch`]'s own accessors delegate here to avoid duplicating
 /// the wire-format offset constants.
 ///
-/// The slice must begin at the batch's `BASE_OFFSET` and extend at least to the
-/// end of the batch (`size_in_bytes()` bytes); the cursor that constructs it
-/// already knows the batch boundary from the length field.
+/// The slice holds exactly one batch: it begins at the batch's `BASE_OFFSET`
+/// and ends at the batch's last byte, the shape of Java's
+/// `batchSlice.limit(batchSize)` (`ByteBufferLogInputStream.java:51`). The CRC
+/// and the records section are bounded by the slice, as Java bounds them by
+/// `buffer.limit()` (`DefaultRecordBatch.java:273-277`, `:399-401`), so they
+/// never reach into a following batch. The slice is also at least
+/// [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes long, which
+/// [`new`](Self::new) checks, so every fixed-offset header accessor is in
+/// bounds. [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
+/// is what sizes the slice from a header it has validated.
 #[derive(Clone, Copy, Debug)]
 pub struct DefaultRecordBatchRef<'a> {
     buffer: &'a [u8],
 }
 
 impl<'a> DefaultRecordBatchRef<'a> {
-    /// Wraps a slice that begins at a batch header. The slice may extend past
-    /// the end of this batch (e.g. into following batches); size-bounded reads
-    /// use [`Self::size_in_bytes`].
-    pub fn new(buffer: &'a [u8]) -> Self {
-        Self { buffer }
+    /// Wraps a slice holding exactly one v2 record batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns Java's `ensureValid()` size-check error
+    /// (`DefaultRecordBatch.java:152-154`) when the slice is shorter than
+    /// [`RecordBatch::RECORD_BATCH_OVERHEAD`]. For a slice holding exactly one
+    /// batch its length is the batch's size, so the message is the one Java
+    /// prints. Java builds such a batch anyway and fails at the first header
+    /// read past its end (an `IndexOutOfBoundsException`); in Rust that read
+    /// would be a slice panic, so the view is refused instead.
+    pub fn new(buffer: &'a [u8]) -> Result<Self, InvalidRecordError> {
+        if buffer.len() < RecordBatch::RECORD_BATCH_OVERHEAD {
+            return Err(DefaultRecordBatch::batch_size_below_overhead_error(buffer.len() as i64));
+        }
+        Ok(Self { buffer })
+    }
+
+    /// The batch's bytes: exactly one batch, from its `BASE_OFFSET` to its last byte.
+    pub fn buffer(&self) -> &'a [u8] {
+        self.buffer
     }
 
     /// Returns the magic byte of this batch.
@@ -856,8 +1017,25 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
+    ///
+    /// Java's `sizeInBytes()` (`DefaultRecordBatch.java:222-225`) reads the
+    /// header's length field. A view sized by `ByteBufferLogInputStream` carries
+    /// a length of at least 49 (a 61-byte header less `LOG_OVERHEAD`), and an
+    /// owned [`DefaultRecordBatch`] holds a buffer this client built or already
+    /// validated, so the field is never negative. The conversion is checked
+    /// anyway: a corrupt length reads as 0 — which every size check treats as too
+    /// small — instead of wrapping to a size near `usize::MAX`.
     pub fn size_in_bytes(&self) -> usize {
-        AbstractRecords::LOG_OVERHEAD + DefaultRecordBatch::read_i32(self.buffer, RecordBatch::LENGTH_OFFSET) as usize
+        usize::try_from(self.declared_size_in_bytes()).unwrap_or(0)
+    }
+
+    /// Java's `sizeInBytes()` arithmetic (`LOG_OVERHEAD + length`) widened to
+    /// `i64`, so a corrupt length can neither overflow nor wrap.
+    /// [`ensure_valid`](Self::ensure_valid) and [`is_valid`](Self::is_valid)
+    /// compare this signed value, as Java compares its `int`.
+    fn declared_size_in_bytes(&self) -> i64 {
+        AbstractRecords::LOG_OVERHEAD as i64
+            + i64::from(DefaultRecordBatch::read_i32(self.buffer, RecordBatch::LENGTH_OFFSET))
     }
 
     /// Returns the number of records declared in the batch header.
@@ -886,25 +1064,26 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// Compute the CRC32C over the attributes through the end of the batch.
+    ///
+    /// Java's `computeChecksum()` covers `ATTRIBUTES_OFFSET` to `buffer.limit()`
+    /// (`DefaultRecordBatch.java:399-401`); the slice ends where the batch does.
     fn compute_checksum(&self) -> u32 {
-        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..self.size_in_bytes()])
+        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..])
     }
 
     /// Returns whether the CRC matches the computed value.
     pub fn is_valid(&self) -> bool {
-        self.size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD && self.checksum() == self.compute_checksum()
+        self.declared_size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD as i64
+            && self.checksum() == self.compute_checksum()
     }
 
     /// Validate the record batch, returning an error if corrupt.
     ///
     /// Corresponds to Java's `ensureValid()`.
     pub fn ensure_valid(&self) -> Result<(), InvalidRecordError> {
-        if self.size_in_bytes() < RecordBatch::RECORD_BATCH_OVERHEAD {
-            return Err(InvalidRecordError::new(format!(
-                "Record batch is corrupt (the size {} is smaller than the minimum allowed overhead {})",
-                self.size_in_bytes(),
-                RecordBatch::RECORD_BATCH_OVERHEAD
-            )));
+        let size_in_bytes = self.declared_size_in_bytes();
+        if size_in_bytes < RecordBatch::RECORD_BATCH_OVERHEAD as i64 {
+            return Err(DefaultRecordBatch::batch_size_below_overhead_error(size_in_bytes));
         }
 
         if !self.is_valid() {
@@ -934,10 +1113,13 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// The raw, possibly-compressed records section of this batch (the bytes
-    /// after the batch header), borrowed from the underlying buffer and bounded
-    /// to this batch's declared size.
+    /// after the batch header), borrowed from the underlying buffer.
+    ///
+    /// Java positions a duplicate of the batch buffer at `RECORDS_OFFSET` and
+    /// reads to its limit (`DefaultRecordBatch.java:273-277`, `:299-301`); the
+    /// slice ends where the batch does.
     pub fn records_section(&self) -> &'a [u8] {
-        &self.buffer[RecordBatch::RECORDS_OFFSET..self.size_in_bytes()]
+        &self.buffer[RecordBatch::RECORDS_OFFSET..]
     }
 
     /// Decompress this batch's records section into a fresh owned buffer.
@@ -948,17 +1130,22 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// §27, this allocation happens once per compressed batch — never per
     /// record.
     ///
-    /// Returns an error if the batch is corrupt or decompression fails.
-    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
+    /// At most `max_bytes` are decompressed (D4): the buffer's capacity never
+    /// exceeds `max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES`, and the first byte
+    /// past `max_bytes` fails the batch — see [`read_decompressed`](DefaultRecordBatch::read_decompressed). The consumer
+    /// passes `FetchConfig::max_decompressed_batch_bytes`, which is
+    /// [`MAX_DECOMPRESSED_BATCH_BYTES`](DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES) outside tests.
+    ///
+    /// Returns an error if the batch is corrupt, decompression fails, or the
+    /// records decompress to more than `max_bytes`.
+    pub fn decompress_records(&self, max_bytes: usize) -> Result<Vec<u8>, InvalidRecordError> {
         let records_data = self.records_section();
         let compression = Compression::of(self.compression_type());
         let mut reader = compression
-            .wrap_for_input(records_data, self.magic())
-            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
-        let mut decompressed = Vec::new();
-        io::Read::read_to_end(&mut reader, &mut decompressed)
-            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
-        Ok(decompressed)
+            .wrap_for_input_with_limit(records_data, self.magic(), max_bytes)
+            .map_err(DefaultRecordBatch::decompression_error)?;
+        DefaultRecordBatch::read_decompressed(&mut reader, records_data.len(), max_bytes)
+            .map_err(DefaultRecordBatch::decompression_error)
     }
 }
 
@@ -1420,8 +1607,8 @@ mod tests {
     fn test_invalid_record_count_too_many_non_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::None, 5);
-        let result = batch.iter_records();
-        assert!(result.is_err());
+        let err = batch.iter_records().expect_err("5 declared, 3 present");
+        assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleNonCompressedV2`.
@@ -1438,8 +1625,8 @@ mod tests {
     fn test_invalid_record_count_too_many_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 5);
-        let result = batch.iter_records();
-        assert!(result.is_err());
+        let err = batch.iter_records().expect_err("5 declared, 3 present");
+        assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleCompressedV2`.
@@ -1645,4 +1832,139 @@ mod tests {
     // and testZstdJniForSkipKeyValueIterator are skipped because they test internal
     // Java-specific iterator types (StreamRecordIterator, RecordIterator) and
     // BufferSupplier, which are not applicable to the Rust implementation.
+
+    // ── APPSEC-7665 D4: bounded decompression, bounded record lists ─────────
+
+    const COMPRESSED_TYPES: [CompressionType; 4] = [
+        CompressionType::Gzip,
+        CompressionType::Snappy,
+        CompressionType::Lz4,
+        CompressionType::Zstd,
+    ];
+
+    /// One batch of 20 small records under `compression_type`.
+    fn compressed_batch(compression_type: CompressionType) -> DefaultRecordBatch {
+        let records: Vec<SimpleRecord> = (0..20)
+            .map(|i| {
+                SimpleRecord::with_timestamp_key_value(
+                    i,
+                    Some(format!("key-{i}").into_bytes()),
+                    Some(format!("value-{i}").into_bytes()),
+                )
+            })
+            .collect();
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::of(compression_type),
+            TimestampType::CreateTime,
+            &records,
+        );
+        DefaultRecordBatch::with_slice(records.buffer())
+    }
+
+    /// A reader that never ends, as a decompression bomb does not.
+    struct Endless;
+    impl io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            buf.fill(0);
+            Ok(buf.len())
+        }
+    }
+
+    /// The growth policy on its own: an endless stream is cut at the limit,
+    /// and no allocation larger than the limit plus one read chunk is ever
+    /// requested — `read_to_end` would have doubled without a ceiling.
+    #[test]
+    fn test_read_decompressed_never_grows_past_the_limit_and_a_chunk() {
+        for (size_hint, max_bytes) in [(0, 1000), (10, 1000), (100_000, 1000), (64, 200_000)] {
+            let (err, max_allocation) = {
+                let _guard = crate::AllocTrackingGuard::new();
+                let err = DefaultRecordBatch::read_decompressed(&mut Endless, size_hint, max_bytes)
+                    .expect_err("an endless stream");
+                (err, crate::AllocTrackingGuard::max_allocation())
+            };
+            assert_eq!(
+                format!("decompressed size exceeds the limit of {max_bytes} bytes per record batch"),
+                err.to_string()
+            );
+            assert!(
+                max_allocation <= max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES,
+                "hint {size_hint}, limit {max_bytes}: allocated {max_allocation} bytes"
+            );
+        }
+    }
+
+    /// Every codec: a batch decompresses at exactly its size and fails one byte
+    /// under it, with the message naming the limit, and the returned buffer's
+    /// capacity stays within the limit plus one read chunk.
+    #[test]
+    fn test_decompress_records_is_bounded_for_every_codec() {
+        for compression_type in COMPRESSED_TYPES {
+            let batch = compressed_batch(compression_type);
+            let size = batch.decompress_records(usize::MAX).expect("an intact batch").len();
+
+            let decompressed = batch.decompress_records(size).expect("exactly at the limit");
+            assert_eq!(size, decompressed.len(), "{compression_type:?}");
+            assert!(
+                decompressed.capacity() <= size + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES,
+                "{compression_type:?}: capacity {} for {size} bytes",
+                decompressed.capacity()
+            );
+
+            let err = batch.decompress_records(size - 1).expect_err("one byte over the limit");
+            assert_eq!(
+                format!(
+                    "Failed to decompress record stream: decompressed size exceeds the limit of {} bytes per record \
+                     batch",
+                    size - 1
+                ),
+                err.message(),
+                "{compression_type:?}"
+            );
+        }
+    }
+
+    /// The owned path (`iter_records`) applies the same limit through `take`.
+    #[test]
+    fn test_iter_records_decompression_is_bounded_for_every_codec() {
+        for compression_type in COMPRESSED_TYPES {
+            let batch = compressed_batch(compression_type);
+            let size = batch.decompress_records(usize::MAX).expect("an intact batch").len();
+
+            assert_eq!(20, batch.iter_records_with_limit(size).expect("exactly at the limit").len());
+            let err = batch.iter_records_with_limit(size - 1).expect_err("one byte over the limit");
+            assert_eq!(
+                format!(
+                    "Failed to decompress record stream: decompressed size exceeds the limit of {} bytes per record \
+                     batch",
+                    size - 1
+                ),
+                err.message(),
+                "{compression_type:?}"
+            );
+        }
+    }
+
+    /// A declared count of `i32::MAX` no longer sizes the record list
+    /// (`Vec::with_capacity(count)` would abort on capacity overflow): the batch
+    /// fails with Java's premature-EOF text once its real records run out — the
+    /// uncompressed iterator's (`DefaultRecordBatch.java:307-308`), and for every
+    /// codec `StreamRecordIterator.readNext`'s (`:636-644`).
+    #[test]
+    fn test_iter_records_with_i32_max_record_count_errors_instead_of_aborting() {
+        let uncompressed = records_with_invalid_record_count(1_700_000_000_000, CompressionType::None, i32::MAX);
+        let err = uncompressed.iter_records().expect_err("3 records, not i32::MAX");
+        assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
+
+        for compression_type in COMPRESSED_TYPES {
+            let compressed = records_with_invalid_record_count(1_700_000_000_000, compression_type, i32::MAX);
+            let err = compressed.iter_records().expect_err("3 records, not i32::MAX");
+            assert_eq!(
+                "Incorrect declared batch size, premature EOF reached",
+                err.message(),
+                "{compression_type:?}"
+            );
+        }
+    }
 }
