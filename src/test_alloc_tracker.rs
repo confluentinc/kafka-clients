@@ -23,7 +23,7 @@
 //!
 //! Used by the §27 per-record allocation-budget regression test
 //! (`consumer-threading.md` §27, "Tests required") to assert that the
-//! receive path stays zero-copy, and by the APPSEC-7665 decode tests to assert
+//! receive path stays zero-copy, and by the decode-hardening tests to assert
 //! that a length read off the wire does not size an allocation
 //! ([`AllocTrackingGuard::max_allocation`]).
 

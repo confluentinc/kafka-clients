@@ -1166,7 +1166,7 @@ impl CompletedFetch {
                 };
                 let batch_bytes = &unread[..batch_size];
 
-                // D7 (APPSEC-7665): message formats v0 and v1 are refused by their
+                // D7: message formats v0 and v1 are refused by their
                 // magic before anything reads the header as a v2 one. In bounds:
                 // `next_batch_size` returns a size only once the magic byte is present.
                 let magic = batch_bytes[RecordBatch::MAGIC_OFFSET] as i8;
@@ -1178,7 +1178,7 @@ impl CompletedFetch {
                     ));
                 }
 
-                // D2 (APPSEC-7665): the size half of Java's `ensureValid()`
+                // D2: the size half of Java's `ensureValid()`
                 // (`DefaultRecordBatch.java:152-154`), reported the way
                 // `maybeEnsureValid` reports it (`CompletedFetch.java:153-162`) but run
                 // unconditionally, where Java runs it only under `check.crcs`. Without
@@ -1223,7 +1223,7 @@ impl CompletedFetch {
                 let source = if batch.try_is_compressed()? {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
-                    // D4 (APPSEC-7665): bounded by `max_decompressed_batch_bytes`; the
+                    // D4: bounded by `max_decompressed_batch_bytes`; the
                     // limit fails the batch like any other decompression failure.
                     let decompressed = batch
                         .decompress_records(config.max_decompressed_batch_bytes)
@@ -1275,7 +1275,7 @@ impl CompletedFetch {
                 }
             }
 
-            // D3 (APPSEC-7665): Java's `RecordIterator` constructor rejects a
+            // D3: Java's `RecordIterator` constructor rejects a
             // negative record count (`DefaultRecordBatch.java:584-587`) when
             // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:221`),
             // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
@@ -2582,7 +2582,7 @@ mod tests {
         assert_eq!(3, value_calls.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    // ── APPSEC-7665 / NONJAVACLI-4520: every batch header is validated ──────
+    // ── Decode hardening: every batch header is validated ───────────────────
     //
     // Java walks a fetch with `ByteBufferLogInputStream.nextBatch()`, which runs
     // `nextBatchSize()` on every batch and hands each out limited to its declared
@@ -2967,7 +2967,7 @@ mod tests {
         }
     }
 
-    // ── APPSEC-7665 D4: a compressed batch's decompression is bounded ───────
+    // ── D4: a compressed batch's decompression is bounded ───────────────────
 
     /// D4 through the cursor for every codec: with `max_decompressed_batch_bytes`
     /// lowered to the batch's decompressed size its records come back, and one

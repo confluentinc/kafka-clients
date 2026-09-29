@@ -54,7 +54,7 @@ const MAX_SNAPPY_EXPANSION_NUMERATOR: u64 = 64;
 const MAX_SNAPPY_EXPANSION_DENOMINATOR: u64 = 3;
 
 /// The error a decompressing read returns once its output would pass
-/// `max_bytes` (APPSEC-7665 D4).
+/// `max_bytes` (D4).
 ///
 /// Shared by [`XerialSnappyReader`], which knows from a block's header that the
 /// block would pass the limit, and the record batch reader
@@ -139,7 +139,7 @@ impl<W: Write> Write for XerialSnappyWriter<W> {
 ///
 /// Each block carries two lengths read off the wire — its compressed length in
 /// the framing and its decompressed length in the snappy header — and neither
-/// sizes an allocation on trust (APPSEC-7665 D4). The compressed block grows
+/// sizes an allocation on trust (D4). The compressed block grows
 /// with the bytes actually present, and the decompressed length is checked
 /// against both what the block's bytes can encode and the stream's remaining
 /// budget before its buffer is allocated, fallibly. snappy-java, which Java's
@@ -430,7 +430,7 @@ impl Compression {
     }
 
     /// Like [`wrap_for_input`](Self::wrap_for_input), for a stream that may
-    /// decompress to at most `max_decompressed_bytes` (APPSEC-7665 D4).
+    /// decompress to at most `max_decompressed_bytes` (D4).
     ///
     /// A Rust-only addition: Java decompresses a batch record by record and
     /// needs no bound. Only the xerial snappy reader consumes the limit, because
@@ -683,7 +683,7 @@ mod tests {
         }
     }
 
-    // ── APPSEC-7665 D4: xerial block lengths do not size allocations ────────
+    // ── D4: xerial block lengths do not size allocations ────────────────────
 
     /// The xerial framing of one snappy block: the header, then `block` behind a
     /// declared compressed length of `compressed_len`.

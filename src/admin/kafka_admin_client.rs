@@ -344,7 +344,7 @@ impl KafkaAdminClient {
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
         // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
-        // APPSEC-7665 D5: a real receive cap, where Java's `Selector` has none
+        // D5: a real receive cap, where Java's `Selector` has none
         // (`Selector.java:229`).
         let selector = Selector::with_log_context(
             NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE,

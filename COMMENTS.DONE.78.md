@@ -1,9 +1,9 @@
-# Critic 78 — resolved (APPSEC-7665 / NONJAVACLI-4520 decode hardening)
+# Critic 78 — resolved (decode hardening)
 
-Review of `f00b57df` (plan §2.1), `1ebbed96` (§2.2) and `7e171207` (§2.3);
-spec `design/current/appsec-7665-4520-decode-hardening.md`. One finding and four
-notes. The Manager decided to act on all four notes; each is recorded below with
-how it was handled (Actor 78, round 2).
+Review of `f00b57df` (plan §2.1), `1ebbed96` (§2.2) and `7e171207` (§2.3)
+against the decode-hardening plan. One finding and four notes. The Manager
+decided to act on all four notes; each is recorded below with how it was
+handled (Actor 78, round 2).
 
 ## Issue: The control-batch D3 test passes without the control-batch D3 check
 - **File**: `src/consumer/internals/completed_fetch.rs` (`test_negative_record_count_in_a_control_batch_is_invalid`, :2789; check under test at :1042-1048)
@@ -70,7 +70,7 @@ wrappers' texts exactly (`test_malformed_record_is_reported_by_the_cause_message
 the `Display` form put back. The wrapper structure and error class are
 unchanged; plan §6 item 3 records that Java propagates the
 `InvalidRecordException` unwrapped at these sites (a pre-existing structural
-deviation outside this ticket) and why the headers wrap has no test (its only
+deviation outside this change) and why the headers wrap has no test (its only
 trigger, a header key that is not UTF-8, is itself a pre-existing divergence:
 Java decodes it with replacement characters).
 
@@ -108,8 +108,8 @@ lists the texts on this path that still differ from Java's (all pre-existing).
 
 ### Note 2 — the SASL client receive was still unlimited
 
-Handled in `fix(security): cap the SASL client receive (APPSEC-7665 /
-NONJAVACLI-4520)`, new behaviour rather than a fixup. `receive_response_or_token`
+Handled in `fix(security): cap the SASL client receive`, new behaviour rather
+than a fixup. `receive_response_or_token`
 now builds `NetworkReceive::with_max_size(SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE,
 ..)`, a `pub(crate)` constant of 524288 documented against Java's own policy for
 the same exchange, `BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE`

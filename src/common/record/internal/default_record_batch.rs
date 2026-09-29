@@ -63,7 +63,7 @@ pub struct DefaultRecordBatch {
 }
 
 impl DefaultRecordBatch {
-    /// The most bytes one record batch may decompress to (APPSEC-7665 D4).
+    /// The most bytes one record batch may decompress to (D4).
     ///
     /// Java has no such bound: it decompresses a batch record by record as the
     /// consumer iterates (`DefaultRecordBatch.java:279-297`), so a zip bomb costs it
@@ -1833,7 +1833,7 @@ mod tests {
     // Java-specific iterator types (StreamRecordIterator, RecordIterator) and
     // BufferSupplier, which are not applicable to the Rust implementation.
 
-    // ── APPSEC-7665 D4: bounded decompression, bounded record lists ─────────
+    // ── D4: bounded decompression, bounded record lists ─────────────────────
 
     const COMPRESSED_TYPES: [CompressionType; 4] = [
         CompressionType::Gzip,

@@ -1405,7 +1405,7 @@ fn format_partitions_for_display(partitions: &[TopicPartition]) -> String {
     out
 }
 
-/// The consumer's cap on one network receive (APPSEC-7665 D5):
+/// The consumer's cap on one network receive (D5):
 /// `fetch.max.bytes` plus [`NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE`], saturating at
 /// `i32::MAX`.
 ///
@@ -1919,7 +1919,7 @@ where
             log_context.clone(),
         )
         .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
-        // APPSEC-7665 D5: a real receive cap, where Java's `Selector` has none
+        // D5: a real receive cap, where Java's `Selector` has none
         // (`Selector.java:229`) — `fetch.max.bytes` plus headroom, see
         // `max_receive_size`.
         let selector = Selector::with_log_context(
@@ -6192,7 +6192,7 @@ mod tests {
 
     use super::*;
 
-    /// APPSEC-7665 D5: the consumer's receive cap is `fetch.max.bytes` plus a
+    /// D5: the consumer's receive cap is `fetch.max.bytes` plus a
     /// broker's default `socket.request.max.bytes`, saturating at `i32::MAX`.
     #[test]
     fn test_max_receive_size_adds_headroom_to_fetch_max_bytes() {

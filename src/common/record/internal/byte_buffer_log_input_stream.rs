@@ -180,7 +180,7 @@ impl<'a> ByteBufferLogInputStream<'a> {
     }
 
     /// The error for a batch in message format v0 or v1, which this client does not
-    /// read (APPSEC-7665 D7).
+    /// read (D7).
     ///
     /// Java reads such a batch as an `AbstractLegacyRecordBatch`. This client
     /// implements only message format v2 — Kafka 4.0 removed v0 and v1 (KIP-724), so

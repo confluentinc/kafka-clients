@@ -70,7 +70,7 @@ impl NetworkReceive {
 
     /// The most bytes this client's producer and admin client accept in one
     /// receive, and the headroom the consumer adds to `fetch.max.bytes`
-    /// (APPSEC-7665 D5).
+    /// (D5).
     ///
     /// Java's clients receive with no limit: `ClientUtils.createNetworkClient`
     /// (`ClientUtils.java:198`) builds its `Selector` with a constructor that passes
@@ -962,7 +962,7 @@ mod tests {
         assert!(buffer.is_none());
     }
 
-    /// APPSEC-7665 D5: the production cap is a broker's default
+    /// D5: the production cap is a broker's default
     /// `socket.request.max.bytes`, and a receive declaring one byte more is
     /// refused with Java's `InvalidReceiveException` text before any payload
     /// buffer exists — on the async path and on the `try_read` drain path.

@@ -50,7 +50,7 @@ pub(crate) struct FetchConfig {
     /// `isolation.level`.
     pub isolation_level: IsolationLevel,
     /// The most bytes one compressed record batch may decompress to
-    /// (APPSEC-7665 D4).
+    /// (D4).
     ///
     /// A Rust-only field, not a configuration key: Java decompresses a batch
     /// record by record (`DefaultRecordBatch.java:279-297`) and needs no bound,
@@ -168,7 +168,7 @@ mod tests {
         assert!(cfg.check_crcs);
         assert_eq!("", cfg.client_rack_id);
         assert_eq!(IsolationLevel::ReadUncommitted, cfg.isolation_level);
-        // Rust-only (APPSEC-7665 D4): no Java counterpart, defaulted by the constructor.
+        // Rust-only (D4): no Java counterpart, defaulted by the constructor.
         assert_eq!(
             DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES,
             cfg.max_decompressed_batch_bytes

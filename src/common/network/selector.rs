@@ -354,7 +354,7 @@ impl Selector {
     ///
     /// The production clients no longer use it: the producer, the consumer and
     /// the admin client pass a real cap to [`with_log_context`](Self::with_log_context)
-    /// (APPSEC-7665 D5). It remains for tests.
+    /// (D5). It remains for tests.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::new(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder)
     }

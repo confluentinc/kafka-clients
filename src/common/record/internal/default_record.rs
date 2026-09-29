@@ -1363,7 +1363,7 @@ mod tests {
         assert!(record.ensure_valid().is_ok());
     }
 
-    /// APPSEC-7665 D4: a declared body size is not trusted to size the read
+    /// D4: a declared body size is not trusted to size the read
     /// buffer (Java allocates it up front, `DefaultRecord.java:286`). A record
     /// declaring `i32::MAX` bytes over a three-byte body allocates for the three
     /// bytes, then fails with Java's end-of-payload message.

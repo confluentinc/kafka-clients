@@ -165,7 +165,7 @@ impl SaslClientAuthenticator {
         Self::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
 
     /// The most bytes one receive may declare while the client authenticates over
-    /// SASL (APPSEC-7665 / NONJAVACLI-4520).
+    /// SASL.
     ///
     /// Java's client reads these responses with no limit — `new NetworkReceive(node)`
     /// is `UNLIMITED` (`SaslClientAuthenticator.java:475`, `:570`) — so before
@@ -383,7 +383,7 @@ impl SaslClientAuthenticator {
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<Vec<u8>>> {
         if self.net_in_buffer.is_none() {
-            // Java: `new NetworkReceive(node)`, unlimited; capped here (APPSEC-7665).
+            // Java: `new NetworkReceive(node)`, unlimited; capped here.
             self.net_in_buffer = Some(NetworkReceive::with_max_size_source(
                 SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE,
                 &self.node,
@@ -1410,7 +1410,7 @@ mod tests {
         assert!(is_authentication_error(&err));
     }
 
-    /// APPSEC-7665: a receive during SASL authentication is capped at
+    /// A receive during SASL authentication is capped at
     /// `SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE`, Java's broker-side default for
     /// the same exchange (Java's client has no limit here). One byte over is
     /// refused with Java's `InvalidReceiveException` text before a payload buffer
