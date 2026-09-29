@@ -58,8 +58,9 @@
 //!
 //! # Callback thread
 //!
-//! Every `_async` entry point fires its callback **exactly once per key** (for
-//! the topic-family RPCs above) **or exactly once for the whole batch** (every
+//! Every `_async` entry point fires its callback **exactly once per distinct
+//! key** (for the per-key RPCs above; a key named twice in one request is one
+//! key, as in Java's result maps) **or exactly once for the whole batch** (every
 //! other RPC), but not always on the same thread:
 //!
 //! - Normally, on the handle's **dispatcher thread**, after the relevant
@@ -72,8 +73,8 @@
 //!   passed to `kafka_admin_AdminClient_incremental_alter_configs_async`). This
 //!   is plain bad input, not only a programming error, so a caller must not
 //!   assume the entry point has returned by the time the callback runs. For a
-//!   per-key RPC this fan-out fires the callback once per requested key, all
-//!   with the same error — the caller already created one `Future`/`Promise`
+//!   per-key RPC this fan-out fires the callback once per distinct requested
+//!   key, all with the same error — the caller already created one `Future`/`Promise`
 //!   per key and expects every one of them to resolve.
 //! - On a **tokio worker thread**, if the dispatcher's completion queue can no
 //!   longer be reached when the result arrives. Handle destruction does not
@@ -1056,45 +1057,12 @@ where
 /// `KafkaFuture<T>` per key (`admin-client.md` §5), and a caller may observe a
 /// fast or already-resolved key without waiting on a slow or failed one.
 ///
-/// `submit` runs on the **calling** thread (inside the runtime context,
-/// exactly as Java's `Admin.createTopics(...)` enqueues its request on the
-/// caller's thread and returns immediately) and returns the RPC's per-key
-/// futures paired with the same key representation exposed to C — already
-/// stringified topic ids, etc. A `Vec` rather than a `HashMap`: entry order
-/// carries no meaning here (each key is delivered independently), a `Vec`
-/// just avoids requiring `K: Hash + Eq`.
-///
-/// On success, each entry's future gets its own [`KafkaFuture::when_complete`]
-/// registration — no join, no aggregate future, no waiting on other keys.
-/// `complete` runs once per key, **as that key resolves**, routed through the
-/// completion-dispatch queue exactly like every other async op (never invoked
-/// directly from inside `when_complete`'s own eager callback, which can run on
-/// the admin background task while admin-internal locks are held).
-///
-/// If `admin` is null or `submit` fails outright (the whole RPC could not be
-/// submitted — e.g. an unparseable base64 topic id), `complete` fires once
-/// **per key in `keys`**, synchronously on the calling thread, all with the
-/// same error. This keeps the "exactly one callback per key" contract total:
-/// the Python (or other C caller) binding already created one
-/// `Future`/`Promise` per key, from its own input, before making this call,
-/// and expects every one of them to resolve exactly once — a submission
-/// failure must not leave any of them pending forever.
-///
-/// The same total guarantee also covers a **partial** gap: if `submit`
-/// succeeds but its `entries` omits a key that was present in `keys` —
-/// `MockAdminClient::describe_replica_log_dirs` does this for a replica of a
-/// topic it doesn't know, mirroring Java's own mock's `continue`-before-
-/// creating-a-future guard — that key gets an explicit synthetic error,
-/// fired synchronously on the calling thread before the real entries are
-/// registered. Without this, such a key's future/Promise (already created by
-/// the caller from `keys`, per the contract above) would never receive a
-/// callback at all and stay pending forever: Java's own mock can get away
-/// with the omission because a Java caller sees the key simply absent from
-/// the returned `Map` (`results.get(key) == null`, detectable immediately) —
-/// there is no Java `Future` object to hang. This wrapper's "one
-/// `Future`/`Promise` created per key before the call returns" design has no
-/// equivalent escape hatch, so it must close the gap itself rather than
-/// reproduce Java's map-level omission as a hang.
+/// Thin wrapper over [`admin_async_per_key_outcome_op`] for the RPCs whose
+/// result has a future for every requested key: a key the RPC's result omits
+/// cannot happen in Java there, so if the core ever omits one it gets an
+/// explicit `LOCAL_ILLEGAL_STATE` error ("the requested key was not present in
+/// the admin RPC's response") rather than a callback that never fires
+/// (CLAUDE.md §5: an explicit error beats a hang).
 ///
 /// # Safety
 ///
@@ -1111,10 +1079,88 @@ unsafe fn admin_async_per_key_op<K, T, S, C>(
     S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
     C: Fn(K, Result<T, Error>, *mut c_void) + Send + Sync + 'static,
 {
+    unsafe {
+        admin_async_per_key_outcome_op(admin, user_data, keys, submit, move |key, outcome, ud| {
+            let outcome = outcome.unwrap_or_else(|| {
+                Err(Error::local_illegal_state(
+                    "the requested key was not present in the admin RPC's response",
+                ))
+            });
+            complete(key, outcome, ud)
+        })
+    };
+}
+
+/// The general form of [`admin_async_per_key_op`]: `complete` receives
+/// `Some(outcome)` for a key the RPC's result holds a future for, and `None`
+/// for a requested key the result **omits** — which Java callers see as the key
+/// simply absent from the result map (`values().get(key) == null`). Only an RPC
+/// whose Java result can omit a requested key uses this form directly:
+/// `MockAdminClient.describeReplicaLogDirs` skips a replica of an unknown topic
+/// (`continue` before creating its future). Every other per-key RPC goes
+/// through [`admin_async_per_key_op`].
+///
+/// `submit` runs on the **calling** thread (inside the runtime context,
+/// exactly as Java's `Admin.createTopics(...)` enqueues its request on the
+/// caller's thread and returns immediately) and returns the RPC's per-key
+/// futures paired with the same key representation exposed to C — already
+/// stringified topic ids, etc. A `Vec` rather than a `HashMap`: entry order
+/// carries no meaning here (each key is delivered independently), a `Vec`
+/// just avoids requiring `K: Hash + Eq`.
+///
+/// **Keys are de-duplicated, first occurrence wins.** Java's per-key results
+/// are maps keyed by the request's key, so a key named twice in one request
+/// has one entry and one future (for `createTopics` the first spec wins, as
+/// `KafkaAdminClient.createTopics` skips a topic already in its `futures` map;
+/// for `alterClientQuotas` the map simply collapses). So `complete` runs
+/// **once per distinct key** in `keys`, never once per occurrence — a repeated
+/// key no longer gets a second, synthetic callback. `entries` is de-duplicated
+/// the same way, so one key never gets two registrations. Some callers already
+/// pass distinct keys; de-duplicating again is a no-op for them. A binding that
+/// counts callbacks (e.g. to balance reference counts) must count distinct
+/// keys.
+///
+/// On success, each entry's future gets its own [`KafkaFuture::when_complete`]
+/// registration — no join, no aggregate future, no waiting on other keys.
+/// `complete` runs once per key, **as that key resolves**, routed through the
+/// completion-dispatch queue exactly like every other async op (never invoked
+/// directly from inside `when_complete`'s own eager callback, which can run on
+/// the admin background task while admin-internal locks are held).
+///
+/// If `admin` is null or `submit` fails outright (the whole RPC could not be
+/// submitted — e.g. an unparseable base64 topic id), `complete` fires once
+/// **per distinct key in `keys`**, synchronously on the calling thread, all
+/// with the same error. This keeps the "exactly one callback per key" contract
+/// total: the binding already created one `Future`/`Promise` per key, from its
+/// own input, before making this call, and expects every one of them to
+/// resolve exactly once — a submission failure must not leave any of them
+/// pending forever.
+///
+/// A distinct key present in `keys` but absent from `entries` gets
+/// `complete(key, None, ..)`, synchronously on the calling thread before the
+/// real entries are registered, so its `Future`/`Promise` still resolves
+/// exactly once instead of staying pending forever.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_async_per_key_outcome_op<K, T, S, C>(
+    admin: *const kafka_admin_AdminClient_t,
+    user_data: *mut c_void,
+    keys: Vec<K>,
+    submit: S,
+    complete: C,
+) where
+    K: PartialEq + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
+    C: Fn(K, Option<Result<T, Error>>, *mut c_void) + Send + Sync + 'static,
+{
+    let keys = distinct_by(keys, |k| k);
     if admin.is_null() {
         let err = Error::local_illegal_argument("admin handle must not be null");
         for key in keys {
-            complete(key, Err(err.clone()), user_data);
+            complete(key, Some(Err(err.clone())), user_data);
         }
         return;
     }
@@ -1127,42 +1173,23 @@ unsafe fn admin_async_per_key_op<K, T, S, C>(
     // no reason to make that distinction load-bearing here.
     let _guard = h.runtime.enter();
     let entries = match submit(h.admin()) {
-        Ok(entries) => entries,
+        Ok(entries) => distinct_by(entries, |(k, _)| k),
         Err(e) => {
             // The whole RPC could not be submitted: every requested key fails
             // with the same error, inline on the calling thread — mirroring
             // `admin_async_future_op`'s single-callback failure path, just
             // fanned out over every key instead of firing once.
             for key in keys {
-                complete(key, Err(e.clone()), user_data);
+                complete(key, Some(Err(e.clone())), user_data);
             }
             return;
         },
     };
-    // Any key present in `keys` but absent from `entries` can never receive a
-    // callback from the loop below (there is no future for it), so its
-    // caller-side Future/Promise would otherwise stay pending forever — see
-    // the doc comment above. `claimed` tracks which `entries` positions have
-    // already been matched to a `keys` occurrence (rather than removing from
-    // `entries`, which is still needed intact for the registration loop
-    // below): a key can legitimately repeat in `keys` (callers don't always
-    // dedupe, e.g. `describe_log_dirs`'s raw broker-id list), and each
-    // occurrence must independently either claim its own matching entry or be
-    // reported missing — a second occurrence of an already-claimed key must
-    // NOT silently count as present, or it would get no callback at all
-    // (`entries` has only the one real future for it).
-    let mut claimed = vec![false; entries.len()];
+    // Both sides are distinct now, so a key is either matched by exactly one
+    // entry or absent from `entries` altogether.
     for key in keys {
-        let found = entries.iter().enumerate().position(|(i, (k, _))| !claimed[i] && *k == key);
-        match found {
-            Some(i) => claimed[i] = true,
-            None => complete(
-                key,
-                Err(Error::local_illegal_state(
-                    "the requested key was not present in the admin RPC's response",
-                )),
-                user_data,
-            ),
+        if !entries.iter().any(|(k, _)| *k == key) {
+            complete(key, None, user_data);
         }
     }
     let complete = Arc::new(complete);
@@ -1177,10 +1204,23 @@ unsafe fn admin_async_per_key_op<K, T, S, C>(
         future.when_complete(move |result| {
             let result = result.clone();
             let ud = ud;
-            let job: CompletionJob = Box::new(move || complete(key, result, ud.into_ptr()));
+            let job: CompletionJob = Box::new(move || complete(key, Some(result), ud.into_ptr()));
             enqueue_or_run_inline(&tx, job);
         });
     }
+}
+
+/// Keeps the first occurrence of each distinct key (by `key_of`), preserving
+/// order. Admin requests are small, so the quadratic scan is cheaper than
+/// demanding `Hash` from every key type.
+fn distinct_by<E, K: PartialEq>(items: Vec<E>, key_of: impl Fn(&E) -> &K) -> Vec<E> {
+    let mut distinct: Vec<E> = Vec::with_capacity(items.len());
+    for item in items {
+        if !distinct.iter().any(|kept| key_of(kept) == key_of(&item)) {
+            distinct.push(item);
+        }
+    }
+    distinct
 }
 
 // ---------------------------------------------------------------------------
@@ -4648,8 +4688,9 @@ pub type kafka_admin_AdminClient_create_topics_callback_t = unsafe extern "C" fn
 /// Unlike the synchronous entry point, the callback fires **once per topic, as
 /// that topic's future resolves**, not once for the whole batch — a fast or
 /// already-resolved topic is not held up by a slow or failing one. It is
-/// called exactly `count` times (once per requested topic, minus NULL entries
-/// in `topics`), but not always on the same thread. Per key, it normally runs
+/// called once per distinct requested topic name (NULL entries in `topics` are
+/// skipped; a name given twice is one key, and — as in Java's `createTopics` —
+/// its first spec wins), but not always on the same thread. Per key, it normally runs
 /// on the handle's dispatcher thread. It runs **synchronously on the calling
 /// thread, before this function returns, for every key**, when the RPC cannot
 /// be submitted at all (a NULL `admin` handle). And it runs on a **tokio
@@ -4809,11 +4850,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 ///
 /// Unlike the synchronous entry point, the callback fires **once per topic, as
 /// that topic's future resolves**, not once for the whole batch. It is called
-/// exactly `count` times (minus NULL entries in `names`), but not always on
-/// the same thread. Per key, it normally runs on the handle's dispatcher
-/// thread. It runs **synchronously on the calling thread, before this function
-/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
-/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// once per distinct name in `names` (NULL entries are skipped; a repeated name
+/// is one key, as in Java's result map), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the
 /// dispatcher's completion queue can no longer be reached when a given
 /// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
@@ -4935,7 +4977,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// call fails and every key — the raw strings as passed in, not the parsed
 /// ids — gets that same error (mirroring Java's `Uuid.fromString`, which would
 /// throw before any `KafkaFuture` could be created). Otherwise it is called
-/// exactly `count` times, but not always on the same thread. Per key, it
+/// once per distinct id (a repeated id is one key, as in Java's result map),
+/// but not always on the same thread. Per key, it
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns, for every key**, when the
 /// RPC cannot be submitted at all (a NULL `admin` handle, or the parse failure
@@ -5217,11 +5260,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 ///
 /// Unlike the synchronous entry point, the callback fires **once per topic, as
 /// that topic's future resolves**, not once for the whole batch. It is called
-/// exactly `count` times (minus NULL entries in `names`), but not always on
-/// the same thread. Per key, it normally runs on the handle's dispatcher
-/// thread. It runs **synchronously on the calling thread, before this function
-/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
-/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// once per distinct name in `names` (NULL entries are skipped; a repeated name
+/// is one key, as in Java's result map), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the
 /// dispatcher's completion queue can no longer be reached when a given
 /// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
@@ -5350,8 +5394,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// that topic's future resolves**, not once for the whole batch. If any
 /// `topic_ids` entry is NULL or fails to parse as a base64 `Uuid`, the whole
 /// call fails and every key — the raw strings as passed in, not the parsed
-/// ids — gets that same error. Otherwise it is called exactly `count` times,
-/// but not always on the same thread. Per key, it normally runs on the
+/// ids — gets that same error. Otherwise it is called once per distinct id (a
+/// repeated id is one key, as in Java's result map), but not always on the
+/// same thread. Per key, it normally runs on the
 /// handle's dispatcher thread. It runs **synchronously on the calling thread,
 /// before this function returns, for every key**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle, or the parse failure above). And
@@ -7410,17 +7455,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     // clamps a negative `count` to zero). Each string is borrowed only for the copy made
     // before this function returns.
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
-    // Deduplicated to DISTINCT resources (first-occurrence order): Java's
-    // `describeConfigs` result map is keyed by `ConfigResource`
-    // (`Map<ConfigResource, KafkaFuture<Config>>`), so two occurrences of the
-    // same resource collapse to ONE outcome future — the shape
-    // `submit_describe_configs_entries` returns (via `describe_configs().values()`,
-    // itself a `HashMap`). If `keys` kept one raw entry per input row instead,
-    // the second occurrence of a repeated resource would find no unclaimed entry
-    // and `admin_async_per_key_op` would fire its synthetic "not present" error,
-    // which — racing ahead of the real per-resource outcome — would win the
-    // caller's (per-resource) Future and hand back a spurious error. The C incref
-    // count must match: it is the distinct-resource count too
+    // Distinct resources (first-occurrence order): Java's `describeConfigs`
+    // result map is keyed by `ConfigResource`, so a repeated resource is one
+    // key. `admin_async_per_key_op` de-duplicates as well; doing it here keeps
+    // the key list in step with the C incref count
     // (`count_distinct_config_resources`, shared with the Configs alter family).
     let keys = {
         let mut seen = std::collections::HashSet::new();
@@ -8420,16 +8458,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
 /// Unlike the synchronous entry point, the callback fires **once per broker,
 /// as that broker's future resolves**, not once for the whole batch — a fast
 /// or already-resolved broker is not held up by a slow or failing one. It is
-/// called exactly `count` times (once per requested broker id), but not
-/// always on the same thread. Per key, it normally runs on the handle's
-/// dispatcher thread. It runs **synchronously on the calling thread, before
-/// this function returns, for every key**, when the RPC cannot be submitted
-/// at all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
-/// the dispatcher's completion queue can no longer be reached when a given
-/// broker's result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks for different keys are not
+/// called once per distinct requested broker id (a repeated id is one key, as
+/// in Java's result map), but not always on the same thread. Per key, it
+/// normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when a given broker's result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for different keys are not
 /// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
@@ -8462,15 +8500,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     // empty, and copies the ids into an owned `Vec<i32>` before the asynchronous work is
     // submitted, so nothing borrowed from C outlives this call.
     let broker_ids = unsafe { read_i32s(brokers, count) };
-    // Deduplicated to DISTINCT broker ids (first-occurrence order): Java's
-    // `describeLogDirs` result map is keyed by broker id
-    // (`Map<Integer, KafkaFuture<..>>`), so a repeated broker id collapses to
-    // ONE outcome future — the shape `submit_describe_log_dirs_entries` returns
-    // (via `descriptions()`, a `HashMap`). A raw `keys` with duplicates would
-    // make the second occurrence find no unclaimed entry and fire
-    // `admin_async_per_key_op`'s synthetic "not present" error, racing ahead of
-    // and winning the caller's real per-broker outcome. The C incref count must
-    // match: distinct broker ids (`count_distinct_i32s`).
+    // Distinct broker ids (first-occurrence order): Java's `describeLogDirs`
+    // result map is keyed by broker id, so a repeated id is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_i32s`).
     let keys = {
         let mut seen = std::collections::HashSet::new();
         broker_ids.iter().copied().filter(|b| seen.insert(*b)).collect::<Vec<_>>()
@@ -20342,7 +20375,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 /// Unlike the synchronous entry point, the callback fires **once per binding,
 /// as that binding's future resolves**, not once for the whole batch — a fast
 /// or already-resolved binding is not held up by a slow or failing one. It is
-/// called exactly `count` times, but not always on the same thread. Per key,
+/// called once per distinct binding (a repeated binding is one key, as in
+/// Java's result map), but not always on the same thread. Per key,
 /// it normally runs on the handle's dispatcher thread. It runs **synchronously
 /// on the calling thread, before this function returns, for every key**, when
 /// the RPC cannot be submitted at all (a NULL `admin` handle, a NULL resource
@@ -20784,7 +20818,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 /// Unlike the synchronous entry point, the callback fires **once per filter,
 /// as that filter's future resolves**, not once for the whole batch — a fast
 /// or already-resolved filter is not held up by a slow or failing one. It is
-/// called exactly `count` times, but not always on the same thread. Per key,
+/// called once per distinct filter (a repeated filter is one key, as in Java's
+/// result map), but not always on the same thread. Per key,
 /// it normally runs on the handle's dispatcher thread. It runs **synchronously
 /// on the calling thread, before this function returns, for every key**, when
 /// the RPC cannot be submitted at all (a NULL `admin` handle). And it runs on
@@ -20848,14 +20883,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
             count,
         )
     };
-    // Deduplicated to DISTINCT filters (first-occurrence order): the Rust core's
-    // `delete_acls` dedups its result map via `Entry::Vacant` (Java keys
-    // `deleteAcls` on the `AclBindingFilter`), so two equal filters collapse to
-    // ONE outcome future — the shape `submit_delete_acls_entries` returns. A raw
-    // `keys` with duplicates would make the second occurrence find no unclaimed
-    // entry and fire `admin_async_per_key_op`'s synthetic "not present" error,
-    // racing ahead of and winning the caller's real per-filter outcome. The C
-    // incref count must match: distinct filters (`count_distinct_acls`).
+    // Distinct filters (first-occurrence order): the Rust core's `delete_acls`
+    // dedups its result map via `Entry::Vacant` (Java keys `deleteAcls` on the
+    // `AclBindingFilter`), so a repeated filter is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_acls`).
     // `AclBindingFilter` compares NULL (match-any) distinct from an empty string.
     let keys = {
         let mut seen = std::collections::HashSet::new();
@@ -23132,18 +23164,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     // still gets its own callback via `admin_async_per_key_op`'s fan-out even
     // when that parse fails.
     //
-    // Deduplicated to DISTINCT users (first-occurrence order): Java's
-    // `alterUserScramCredentials` result map is keyed by user
-    // (`KafkaAdminClient.java`'s per-user `futures.put(user, ..)`), so two
-    // alterations naming the same user collapse to ONE outcome future — the
-    // shape `submit_alter_user_scram_credentials_entries` returns. If `keys`
-    // kept one raw entry per row instead, the second occurrence of a repeated
-    // user would find no unclaimed entry and `admin_async_per_key_op` would
-    // fire its synthetic "not present" error, which — racing ahead of the real
-    // per-user outcome — would win the caller's (per-user) Future and hand back
-    // a spurious error. The C incref count must match: it is the distinct-user
-    // count too (`count_distinct_scram_users`, mirroring the Configs family's
-    // `count_distinct_config_resources`).
+    // Distinct users (first-occurrence order): Java's `alterUserScramCredentials`
+    // result map is keyed by user (`KafkaAdminClient.java`'s per-user
+    // `futures.put(user, ..)`), so a repeated user is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_scram_users`).
     let keys = {
         let mut seen = std::collections::HashSet::new();
         unsafe { read_scram_user_keys(users, count) }
@@ -27719,15 +27744,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     // negative `count` to zero and copies every string into `requested`, so the spawned
     // task never touches the C arrays.
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
-    // Deduplicated to DISTINCT partitions (first-occurrence order): Java's
-    // `describeProducers` result map is keyed by `TopicPartition`
-    // (`Map<TopicPartition, KafkaFuture<..>>`), so a repeated partition collapses
-    // to ONE outcome future — the shape `submit_describe_producers_entries`
-    // returns. A raw `keys` with duplicates would make the second occurrence find
-    // no unclaimed entry and fire `admin_async_per_key_op`'s synthetic "not
-    // present" error, racing ahead of and winning the caller's real per-partition
-    // outcome. The Python binding pre-dedups its `(topic, partition)` rows so the
-    // C incref count matches this distinct count.
+    // Distinct partitions (first-occurrence order): Java's `describeProducers`
+    // result map is keyed by `TopicPartition`, so a repeated partition is one
+    // key. `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its rows so its C incref count matches.
     let keys = {
         let mut seen = std::collections::HashSet::new();
         requested
@@ -27917,12 +27937,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     // entries, clamps a negative `count` to zero and copies every string into `ids`, so the
     // spawned task never touches the C array.
     let ids = unsafe { read_strings(transactional_ids, count) };
-    // Deduplicated to DISTINCT ids (first-occurrence order): Java's
-    // `describeTransactions` result map is keyed by the transactional id, so a
-    // repeated id collapses to ONE outcome future. A raw `keys` with duplicates
-    // would make the second occurrence fire `admin_async_per_key_op`'s synthetic
-    // "not present" error, racing ahead of the real outcome. The Python binding
-    // pre-dedups its id list so the C incref count matches this distinct count.
+    // Distinct ids (first-occurrence order): Java's `describeTransactions`
+    // result map is keyed by the transactional id, so a repeated id is one key.
+    // `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its id list so its C incref count matches.
     let keys = {
         let mut seen = std::collections::HashSet::new();
         ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
@@ -28401,13 +28419,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     // entries, clamps a negative `count` to zero and copies every string into `ids`, so the
     // spawned task never touches the C array.
     let ids = unsafe { read_strings(transactional_ids, count) };
-    // Deduplicated to DISTINCT ids (first-occurrence order): Java's
-    // `fenceProducers` result keys the per-producer futures by the transactional
-    // id, so a repeated id collapses to ONE outcome future. A raw `keys` with
-    // duplicates would make the second occurrence fire `admin_async_per_key_op`'s
-    // synthetic "not present" error, racing ahead of the real outcome. The Python
-    // binding pre-dedups its id list so the C incref count matches this distinct
-    // count.
+    // Distinct ids (first-occurrence order): Java's `fenceProducers` result keys
+    // the per-producer futures by the transactional id, so a repeated id is one
+    // key. `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its id list so its C incref count matches.
     let keys = {
         let mut seen = std::collections::HashSet::new();
         ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
@@ -34089,44 +34104,104 @@ mod tests {
         unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
+    /// A key requested twice is one key, as in Java's per-key result maps: the
+    /// callback fires once with the real outcome, never a second time with the
+    /// synthetic "not present" error. Duplicate `entries` register once too.
     #[test]
-    fn admin_async_per_key_op_handles_a_repeated_key_where_only_one_occurrence_has_an_entry() {
-        // `keys` requests "dup" twice but `entries` only has one future for
-        // it: the second occurrence must be reported missing rather than
-        // silently treated as satisfied by the first occurrence's entry (which
-        // would leave it with no callback at all, since `entries` only fires
-        // once for "dup").
+    fn admin_async_per_key_op_fires_once_per_distinct_key() {
         let dup: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         dup.complete(1);
-        let entries = vec![("dup".to_string(), dup.future())];
+        let other: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        other.complete(2);
+        let entries = vec![
+            ("dup".to_string(), dup.future()),
+            ("other".to_string(), other.future()),
+            ("dup".to_string(), dup.future()),
+        ];
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
 
-        let (tx, rx) = std::sync::mpsc::channel::<Result<i32, Error>>();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
         unsafe {
             admin_async_per_key_op(
                 admin,
                 std::ptr::null_mut(),
-                vec!["dup".to_string(), "dup".to_string()],
+                vec!["dup".to_string(), "other".to_string(), "dup".to_string()],
                 move |_a: &dyn Admin| Ok(entries),
-                move |_key: String, result: Result<i32, Error>, _ud: *mut c_void| {
-                    tx.send(result).unwrap();
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
                 },
             );
         }
 
-        let mut oks = 0;
-        let mut errs = 0;
+        let mut seen = HashMap::new();
         for _ in 0..2 {
-            match rx.recv_timeout(Duration::from_secs(5)).expect("both occurrences must fire") {
-                Ok(_) => oks += 1,
-                Err(_) => errs += 1,
-            }
+            let (key, result) = rx.recv_timeout(Duration::from_secs(5)).expect("each distinct key fires");
+            assert!(seen.insert(key, result).is_none(), "a key fired twice");
         }
-        assert_eq!(oks, 1, "exactly one occurrence claims the real entry");
-        assert_eq!(errs, 1, "the other occurrence has no entry left to claim");
+        assert_eq!(seen["dup"].as_ref().unwrap(), &1);
+        assert_eq!(seen["other"].as_ref().unwrap(), &2);
+        // No third callback: the repeated "dup" is not reported missing.
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
 
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// A submission failure fans out once per distinct key, not per occurrence.
+    #[test]
+    fn admin_async_per_key_op_fans_a_submission_failure_out_once_per_distinct_key() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["a".to_string(), "a".to_string(), "b".to_string()],
+                move |_a: &dyn Admin| -> Result<Vec<(String, KafkaFuture<i32>)>, Error> {
+                    Err(Error::local_illegal_argument("bad input"))
+                },
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    assert_eq!(result.unwrap_err().message(), "bad input");
+                    tx.send(key).unwrap();
+                },
+            );
+        }
+        // The failure path runs inline, so every callback has fired already.
+        let fired: Vec<String> = rx.try_iter().collect();
+        assert_eq!(fired, vec!["a".to_string(), "b".to_string()]);
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// The outcome form reports a key the result omits as `None` — Java's key
+    /// absent from the result map — instead of a synthetic error.
+    #[test]
+    fn admin_async_per_key_outcome_op_reports_an_omitted_key_as_absent() {
+        let present: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        present.complete(7);
+        let entries = vec![("present".to_string(), present.future())];
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<Result<i32, Error>>)>();
+        unsafe {
+            admin_async_per_key_outcome_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["present".to_string(), "missing".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: String, outcome: Option<Result<i32, Error>>, _ud: *mut c_void| {
+                    tx.send((key, outcome)).unwrap();
+                },
+            );
+        }
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, outcome) = rx.recv_timeout(Duration::from_secs(5)).expect("both keys fire");
+            seen.insert(key, outcome);
+        }
+        assert_eq!(seen["present"].as_ref().unwrap().as_ref().unwrap(), &7);
+        assert!(seen["missing"].is_none(), "an omitted key is absent, not an error");
         unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 

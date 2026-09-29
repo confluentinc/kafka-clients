@@ -537,6 +537,38 @@ static void test_mock_admin_create_topics_async_partial_failure(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* A topic named twice is ONE key: one callback, never a second, synthetic
+ * "not present" error. Which outcome it carries is the RPC's own: Java's
+ * MockAdminClient.createTopics creates the topic from the first spec, then
+ * `put`s the second spec's TopicExistsException future over the first in its
+ * result map (MockAdminClient.java:382-386), and the Rust mock mirrors that. */
+static void test_mock_admin_create_topics_async_duplicate_name_fires_once(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+    kafka_admin_NewTopic_t *first = kafka_admin_NewTopic_new("existing", 3, 1);
+    kafka_admin_NewTopic_t *second = kafka_admin_NewTopic_new("existing", 5, 1);
+    const kafka_admin_NewTopic_t *topics[2] = {first, second};
+
+    create_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_create_topics_async(admin, topics, 2, -1, false, false,
+                                                on_create, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    /* Give a (wrong) second callback the chance to arrive before asserting. */
+    struct timespec ts = {0, 100000000}; /* 100ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+    TEST_ASSERT_TRUE(r.had_error_for_existing);
+    TEST_ASSERT_EQUAL_INT32(TOPIC_ALREADY_EXISTS_CODE, r.error_code_for_existing);
+
+    kafka_admin_NewTopic_destroy(first);
+    kafka_admin_NewTopic_destroy(second);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 /* A NULL handle fans the same error out over every requested key, one
  * callback per key - the same cardinality as a successful submission, so a
  * caller that already built one Future per key still gets each one resolved. */
@@ -7169,6 +7201,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_new_topic_null_handling);
     RUN_TEST(test_mock_admin_create_topics_async_partial_failure);
     RUN_TEST(test_mock_admin_create_topics_async_null_handle);
+    RUN_TEST(test_mock_admin_create_topics_async_duplicate_name_fires_once);
     RUN_TEST(test_mock_admin_list_topics_sync);
     RUN_TEST(test_mock_admin_list_topics_async);
     RUN_TEST(test_mock_admin_list_topics_call_error);
