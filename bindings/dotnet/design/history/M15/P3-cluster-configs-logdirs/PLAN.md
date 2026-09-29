@@ -1844,6 +1844,18 @@ gated is to remain idle.
 
 ## 15 · Mode-B gap list (consolidated) — DEFERRED, none closed in P3
 
+> **Status update (2026-09-30): both gaps have since closed, each in Mode A.** The core
+> gained the missing ABI capability each time, so neither closure needed a binding-side
+> Mode-B change.
+>
+> - **Gap 1** closed in M15/P11, after `4fea817a` exported `kafka_admin_LogDirDescription_is_cordoned`.
+> - **Gap 2** closed in M15/P13.2 CP1 (finding F1, `2070667f`), after the core's NULL-config-name
+>   sentinel row landed in `762db8e9`. A zero-op resource is now sent as that row,
+>   `CompleteKeysWithNoRequest` is gone, and the A/B divergence test went red as designed. It was
+>   inverted to `PublicAdminConfigsTests.IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne`.
+>
+> The entries below are kept as the record of the P3 decision.
+
 ✅ **MAINTAINER RULING 2026-09-09: P3 is strictly Mode A. Every gap requiring
 Mode B is LISTED and deferred — none is closed in this phase.**
 

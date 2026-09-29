@@ -501,6 +501,11 @@ Final (CP4), in addition:
 7. Full `dotnet test -f net10.0` **and** `-f net8.0`, Debug, `Failed: 0`, `Test Run Aborted` = 0, totals reported (baseline **2345/2345** on both TFMs at `7e550b95`).
 8. grpc-server builds; `dotnet format` clean.
 9. **Docker**: `docker info` first. If up, stage a **fresh** linux/amd64 `.so` (prove freshness — P13.1 lesson), rebuild the .NET gRPC image, and run the existing admin `__grpc_dotnet` families this phase touches as a regression — `admin_cluster_configs_test` (8), `admin_acls_test` (6), `admin_quotas_test` (4), `admin_scram_test` (3), `admin_topics_test` (10), `admin_partitions_records_test` (8), `admin_elections_reassignments_offsets_test` (9) — 48 scenarios. CP4 changes no consumer/producer marshalling code (their guards stay), so the consumer/producer suites are optional regression only (`Translate.Tp()` is shared by every servicer). Report `N passed; 0 failed` per filter. No existing scenario exercises the new edge cases (grep), and adding scenarios is cross-binding harness work (D9). If Docker is down: **CI-pending**, flagged.
+   > **Close-out correction (2026-09-30).** The per-family counts above are off by one in every family. `--list` shows 7 / 5 / 3 / 2 / 9 / 7 / 8, so the total is **41, not 48**, with the same arm count on `__rust`, `__grpc_python` and `__grpc_dotnet`. The run on `5cc92f66` passed 41/41.
+   >
+   > The optional regressions were also run, and passed. The other admin families' `__grpc_dotnet` arms passed 38/38. The non-admin sync `__grpc_dotnet` arms passed 34/34; the three `producer_transactions_test` arms were excluded, because they fail with a known `Unimplemented`.
+   >
+   > §3.1's "`PLAN-M15-admin-client.md` §15" is also wrong. That section lives in `design/history/M15/P3-cluster-configs-logdirs/PLAN.md`, and it was annotated there.
 10. Critic 85 clean on CP4.
 
 ---
