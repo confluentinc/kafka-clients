@@ -1209,7 +1209,8 @@ struct NewTopicBuilder {
     num_partitions: Option<i32>,
     replication_factor: Option<i16>,
     replicas_assignments: BTreeMap<i32, Vec<i32>>,
-    configs: BTreeMap<String, String>,
+    /// `None` is Java's null config value.
+    configs: BTreeMap<String, Option<String>>,
 }
 
 impl NewTopicBuilder {
@@ -1291,23 +1292,30 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 }
 
 /// Sets a topic-level configuration entry (Java's `NewTopic.configs(Map)`,
-/// applied one key at a time). No-op if any parameter is null.
+/// applied one key at a time; a repeated key replaces the earlier value, as
+/// `Map.put` does). No-op if `topic` or `key` is null.
+///
+/// A NULL `value` is Java's null map value: the entry is kept and sent to the
+/// broker with a null value (`NewTopic.convertToCreatableTopic` copies it into
+/// `CreatableTopicConfig.value`, which is nullable), which is distinct from the
+/// empty string `""`.
 ///
 /// # Safety
 ///
-/// `topic` must be a valid handle; `key` and `value` valid C strings.
+/// `topic` must be a valid handle; `key` a valid C string; `value` NULL or a
+/// valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     topic: *mut kafka_admin_NewTopic_t,
     key: *const c_char,
     value: *const c_char,
 ) {
-    if topic.is_null() || key.is_null() || value.is_null() {
+    if topic.is_null() || key.is_null() {
         return;
     }
     let builder = unsafe { new_topic_mut(topic) };
     let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
-    let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
+    let v = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string());
     builder.configs.insert(k, v);
 }
 
@@ -23546,6 +23554,24 @@ mod tests {
             }
             kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
             kafka_admin_DescribeClassicGroupsResult_destroy(classic_result);
+        }
+    }
+
+    /// A NULL `value` is Java's null config value: kept, and distinct from "".
+    #[test]
+    fn new_topic_put_config_keeps_a_null_value() {
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"t".as_ptr(), 1, 1);
+            kafka_admin_NewTopic_put_config(topic, c"retention.ms".as_ptr(), std::ptr::null());
+            kafka_admin_NewTopic_put_config(topic, c"cleanup.policy".as_ptr(), c"".as_ptr());
+            let built = new_topic_ref(topic).build();
+            let configs = built.configs().expect("configs were set");
+            assert_eq!(configs.get("retention.ms"), Some(&None));
+            assert_eq!(configs.get("cleanup.policy"), Some(&Some(String::new())));
+            let creatable = built.convert_to_creatable_topic();
+            let retention = creatable.configs.iter().find(|c| c.name == "retention.ms").unwrap();
+            assert_eq!(retention.value, None);
+            kafka_admin_NewTopic_destroy(topic);
         }
     }
 
