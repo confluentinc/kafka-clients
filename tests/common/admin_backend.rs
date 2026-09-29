@@ -33,15 +33,15 @@ use confluent_kafka::admin::{
     DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, KafkaAdminClient,
-    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
-    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
-    OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResults, FinalizedVersionRange,
+    GroupListing, GroupOffsets, KafkaAdminClient, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment,
+    RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, SupportedVersionRange,
+    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
+    TransactionListing, UpdateFeaturesOptions, UserScramCredentialAlteration,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -519,23 +519,23 @@ pub trait AdminBackend {
         options: AlterClientQuotasOptions,
     ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error>;
 
-    /// Describe each user's SCRAM credentials, keyed by user name. An empty
-    /// `users` requests every user, which is Java's no-argument overload.
+    /// Describe each user's SCRAM credentials. An empty `users` requests every
+    /// user, which is Java's no-argument overload.
     ///
-    /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
-    /// response data and exposes three views (`all()` / `users()` /
-    /// `description(user)`); this is the per-user shape that subsumes all three,
-    /// identical to what `src/ffi/admin.rs`'s
-    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
-    /// returns, so all four backends answer with the same key set.
+    /// Returns the crate's core `DescribeUserScramCredentialsResult`, which
+    /// exposes Java's three views (`all()` / `users()` / `description(user)`)
+    /// with their distinct RESOURCE_NOT_FOUND semantics — the RustNative backend
+    /// hands back the real result, and the gRPC backends reconstruct an
+    /// equivalent one from the raw per-user rows carried over the wire, so all
+    /// four backends answer the same on every view.
     ///
-    /// The broker never returns the salted password or the salt, so the value
-    /// carries only the mechanism and iteration count per credential.
+    /// The broker never returns the salted password or the salt, so a
+    /// description carries only the mechanism and iteration count per credential.
     async fn describe_user_scram_credentials(
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error>;
+    ) -> Result<DescribeUserScramCredentialsResult, Error>;
 
     /// Apply each SCRAM credential upsertion / deletion. Per-user void, one
     /// future per key.
@@ -1562,40 +1562,10 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
-        let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
-        // Java's three views composed into the per-user shape, exactly as
-        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
-        // all four backends answer with the same key set and the same errors.
-        //
-        //   - `all()` succeeds only when every user's error code is NONE or
-        //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
-        //     set and no row carries an error;
-        //   - when it fails, `users()` still lists every user whose error is not
-        //     RESOURCE_NOT_FOUND — necessarily including the one that failed
-        //     `all()` — and `description(user)` yields that user's own error.
-        //     The users omitted at that point are exactly the ones Java's `all()`
-        //     also declines to report.
-        //   - if the response future itself failed, all three fail with the same
-        //     error and it becomes the whole-call `Err`; and if the composition
-        //     yields no rows at all, the `all()` error is returned rather than
-        //     dropped (the empty-key-set trap).
-        let all_error = match result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
-        let mut outcomes = HashMap::with_capacity(listed.len());
-        for user in listed {
-            let outcome = result.description(&user).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-            outcomes.insert(user, outcome);
-        }
-        if outcomes.is_empty() {
-            return Err(all_error);
-        }
-        Ok(outcomes)
+    ) -> Result<DescribeUserScramCredentialsResult, Error> {
+        // The native backend hands back the real result object; the caller reads
+        // whichever of the three Java views it needs.
+        Ok(self.admin.describe_user_scram_credentials_with_users_options(users, options))
     }
 
     async fn alter_user_scram_credentials(
