@@ -33,8 +33,9 @@ pub struct ClientUtils;
 impl ClientUtils {
     /// Resolves a hostname using the given resolver and filters preferred addresses.
     ///
-    /// Returns a list containing the first address and subsequent addresses of the same
-    /// type (IPv4 or IPv6) as the first address.
+    /// Returns the resolved addresses of a single family: the IPv4 addresses if
+    /// any, otherwise the IPv6 ones (see [`Self::filter_preferred_addresses`]
+    /// for why IPv4 is preferred rather than the first-listed family).
     ///
     /// # Errors
     /// Returns an `io::Error` if the hostname cannot be resolved.
@@ -45,17 +46,54 @@ impl ClientUtils {
         Ok(result)
     }
 
-    /// Return a list containing the first address and subsequent addresses
-    /// that are the same type (IPv4 or IPv6) as the first address.
+    /// Return the addresses of a single family (all IPv4 or all IPv6) out of
+    /// `all_addresses`, preserving their order: the IPv4 addresses if there
+    /// are any, otherwise the IPv6 addresses.
     ///
-    /// The outcome is that all returned addresses are either IPv4 or IPv6.
+    /// Translated from `ClientUtils.filterPreferredAddresses`, with one
+    /// deliberate deviation in how the family is chosen.
+    ///
+    /// # Deviation: IPv4 is preferred when both families are present
+    ///
+    /// Java returns "the first address in `allAddresses` and subsequent
+    /// addresses that are a subtype of the first address" — whichever family
+    /// the resolver lists first wins. That source has no family preference of
+    /// its own; in practice Java clients connect over IPv4 because the JVM's
+    /// `InetAddress` resolution orders IPv4 first by default (the
+    /// `java.net.preferIPv6Addresses` system property defaults to `false`).
+    /// That is JVM behaviour, not Kafka code, and Rust has no equivalent:
+    /// `tokio::net::lookup_host` returns the raw `getaddrinfo` order, and on
+    /// macOS `getaddrinfo("localhost")` can list `::1` before `127.0.0.1`.
+    ///
+    /// Translated literally, the client then connected to `::1` only. That
+    /// broke the common local setup of a broker in an IPv4-only Docker
+    /// network advertising `localhost` (e.g. `confluent local kafka start`):
+    /// the Java client works there, the Rust client could not connect. To give
+    /// Rust users the behaviour Java users get by default, the IPv4 subset is
+    /// chosen whenever the list contains any IPv4 address, independent of
+    /// input order. A host that resolves only to IPv6 is unaffected.
+    ///
+    /// **Regression (dual-stack host, IPv4 unreachable).** When a name has
+    /// both A and AAAA records, the IPv6 addresses are discarded here, and
+    /// `ClusterConnectionStates` round-robins only the IPv4 ones, so IPv6 is
+    /// **never** attempted, even when the IPv4 path is unreachable (for
+    /// example an IPv6-only subnet or pod network with IPv4 firewalled). If
+    /// `getaddrinfo` listed the AAAA record first, which RFC 6724 ordering
+    /// typically does when IPv4 is unroutable, the previous Rust behaviour
+    /// connected over IPv6. That topology is now strictly worse and cannot
+    /// connect at all. A default-configured JVM behaves the same way, but a
+    /// Java user can recover with `-Djava.net.preferIPv6Addresses=true`.
+    /// This crate has **no equivalent override**.
+    ///
+    /// Java offers no Kafka-level knob for this (only the JVM property), so
+    /// none is added here.
     fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
-        if all_addresses.is_empty() {
-            return Vec::new();
-        }
-        let first = all_addresses[0];
-        let is_ipv4 = first.is_ipv4();
-        all_addresses.iter().filter(|addr| addr.is_ipv4() == is_ipv4).copied().collect()
+        let prefer_ipv4 = all_addresses.iter().any(IpAddr::is_ipv4);
+        all_addresses
+            .iter()
+            .filter(|addr| addr.is_ipv4() == prefer_ipv4)
+            .copied()
+            .collect()
     }
 
     /// Parse and validate a list of bootstrap server URLs into socket addresses.
@@ -293,34 +331,80 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    /// Translated from `ClientUtilsTest.testFilterPreferredAddresses`.
+    ///
+    /// The IPv4-first half matches Java. For the IPv6-first input Java returns
+    /// `[::1]` (first family wins); this translation returns the IPv4 subset —
+    /// the documented IPv4-preference deviation on `filter_preferred_addresses`.
     #[test]
-    fn test_filter_preferred_addresses_ipv4_first() {
-        let addrs = vec![
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        ];
-        let filtered = ClientUtils::filter_preferred_addresses(&addrs);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|a| a.is_ipv4()));
+    fn test_filter_preferred_addresses() {
+        let ipv4: IpAddr = "192.0.0.1".parse().unwrap();
+        let ipv6: IpAddr = "::1".parse().unwrap();
+
+        let result = ClientUtils::filter_preferred_addresses(&[ipv4, ipv6, ipv4]);
+        assert!(result.contains(&ipv4));
+        assert!(!result.contains(&ipv6));
+        assert_eq!(2, result.len());
+
+        let result = ClientUtils::filter_preferred_addresses(&[ipv6, ipv4, ipv4]);
+        assert!(result.contains(&ipv4));
+        assert!(!result.contains(&ipv6));
+        assert_eq!(2, result.len());
     }
 
+    /// Regression test for a broker advertising `localhost` from an IPv4-only
+    /// Docker network, with `localhost` resolving to both `::1` and
+    /// `127.0.0.1`: IPv4 must be chosen whatever order the resolver returns.
     #[test]
-    fn test_filter_preferred_addresses_ipv6_first() {
-        let addrs = vec![
+    fn test_filter_preferred_addresses_prefers_ipv4_regardless_of_order() {
+        let v4_loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let v4_other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v6_loopback = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let v6_other = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+
+        let cases: [(&[IpAddr], &[IpAddr]); 6] = [
+            (&[v6_loopback, v4_loopback], &[v4_loopback]),
+            (&[v4_loopback, v6_loopback], &[v4_loopback]),
+            (&[v6_loopback, v6_other, v4_loopback], &[v4_loopback]),
+            (&[v6_loopback, v4_other, v6_other, v4_loopback], &[v4_other, v4_loopback]),
+            (&[v4_loopback, v6_loopback, v4_other], &[v4_loopback, v4_other]),
+            (&[v6_other, v6_loopback, v4_other, v4_loopback], &[v4_other, v4_loopback]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(ClientUtils::filter_preferred_addresses(input), expected, "input {input:?}");
+        }
+    }
+
+    /// Without any IPv4 address the IPv6 addresses are all kept, in order.
+    #[test]
+    fn test_filter_preferred_addresses_ipv6_only() {
+        let addrs = [
             IpAddr::V6(Ipv6Addr::LOCALHOST),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 2)),
         ];
-        let filtered = ClientUtils::filter_preferred_addresses(&addrs);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|a| a.is_ipv6()));
+        assert_eq!(ClientUtils::filter_preferred_addresses(&addrs), addrs);
     }
 
     #[test]
     fn test_filter_preferred_addresses_empty() {
         let filtered = ClientUtils::filter_preferred_addresses(&[]);
         assert!(filtered.is_empty());
+    }
+
+    /// End to end through `resolve`: a resolver returning `::1` first still
+    /// yields only `127.0.0.1` for the connection attempts.
+    #[tokio::test]
+    async fn test_resolve_prefers_ipv4_when_ipv6_listed_first() {
+        struct Ipv6FirstLocalhost;
+        impl HostResolver for Ipv6FirstLocalhost {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                Ok(vec![IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)])
+            }
+        }
+        assert_eq!(
+            ClientUtils::resolve("localhost", &Ipv6FirstLocalhost).await.unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+        );
     }
 
     /// `ClientUtilsTest.checkWithoutLookup`.
