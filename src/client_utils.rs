@@ -54,7 +54,7 @@ impl ClientUtils {
     /// Translated from `ClientUtils.filterPreferredAddresses`, with a
     /// deliberate deviation (DoD #7): this orders instead of filtering, and
     /// the preferred family is always IPv4 rather than the first-listed one.
-    /// It is renamed because it no longer filters.
+    /// The Java name is kept for traceability even though nothing is filtered.
     ///
     /// # Deviation: IPv4 first, IPv6 kept as a fallback
     ///
