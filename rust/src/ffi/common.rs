@@ -1402,6 +1402,36 @@ pub unsafe extern "C" fn kafka_common_Error_clone(error: *const kafka_common_Err
     box_error(unsafe { error_ref(error) }.error.clone())
 }
 
+/// Returns the error that caused this one, or null when there is none —
+/// Java's `Throwable.getCause()`.
+///
+/// The Rust core keeps a cause wherever Java passes one to the exception's
+/// constructor, for example `KafkaException("Failed to create new
+/// KafkaAdminClient", exc)`, `KafkaException("Failed to find brokers to send
+/// ListGroups", throwable)`, the `removeMembersFromConsumerGroup` remove-all
+/// wrap, and a `TimeoutException` that records the last error seen before the
+/// deadline. Walking the chain means calling this again on the returned
+/// handle, until it returns null.
+///
+/// # Ownership
+///
+/// The returned handle is **owned** by the caller, the same as
+/// [`kafka_common_Error_clone`]: it is an independent copy of the cause
+/// (variant, code, message, payload and its own cause chain), not a view into
+/// `error`. Free it with [`kafka_common_Error_destroy`]. It stays valid after
+/// `error` is destroyed, and destroying it leaves `error` untouched.
+///
+/// # Safety
+///
+/// `error` must be a valid, non-null error handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_cause(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    match unsafe { error_ref(error) }.error.source() {
+        Some(cause) => box_error(cause.clone()),
+        None => std::ptr::null_mut(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
@@ -4445,6 +4475,99 @@ mod tests {
             // The copy outlives the original.
             assert_eq!(CStr::from_ptr(kafka_common_Error_message(copy)).to_str(), Ok("outer"));
             kafka_common_Error_destroy(copy);
+        }
+    }
+
+    /// Walks a handle's cause chain through `kafka_common_Error_cause`,
+    /// returning `(code, message)` per link, freeing every owned cause handle.
+    unsafe fn cause_chain(error: *const kafka_common_Error_t) -> Vec<(kafka_common_ErrorCode_t, String)> {
+        let mut chain = Vec::new();
+        let mut current = unsafe { kafka_common_Error_cause(error) };
+        while !current.is_null() {
+            unsafe {
+                chain.push((
+                    kafka_common_Error_code(current),
+                    CStr::from_ptr(kafka_common_Error_message(current))
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                ));
+                let next = kafka_common_Error_cause(current);
+                kafka_common_Error_destroy(current);
+                current = next;
+            }
+        }
+        chain
+    }
+
+    /// An error built without a cause — Java's null `getCause()` — returns null.
+    #[test]
+    fn error_cause_is_null_without_a_cause() {
+        let error = box_error(Error::kafka_message("no cause"));
+        unsafe {
+            assert!(kafka_common_Error_cause(error).is_null());
+            kafka_common_Error_destroy(error);
+        }
+    }
+
+    /// Each wrap the admin client builds with a Java cause — a bare
+    /// `KafkaException(message, cause)` for client creation, the ListGroups
+    /// broker lookup and the remove-all member error, and a
+    /// `TimeoutException(message, cause)` for a call's deadline — hands the
+    /// cause back through `kafka_common_Error_cause`, as an owned handle that
+    /// outlives its parent.
+    #[test]
+    fn error_cause_returns_each_admin_wrap_cause() {
+        use crate::common::errors::TimeoutError;
+        let cases = [
+            Error::kafka_message_source(
+                "Failed to create new KafkaAdminClient",
+                Error::local_illegal_argument("bad bootstrap"),
+            ),
+            Error::kafka_message_source(
+                "Failed to find brokers to send ListGroups",
+                Error::new(Errors::BrokerNotAvailable),
+            ),
+            Error::kafka_message_source(
+                "Encounter error when trying to remove: removeAll()",
+                Error::new(Errors::UnknownMemberId),
+            ),
+            Error::Timeout(TimeoutError::with_source(
+                "Call(callName=listNodes) timed out at 5 after 1 attempt(s)",
+                Error::new(Errors::NetworkError),
+            )),
+        ];
+        for wrapped in cases {
+            let expected_cause = wrapped.source().expect("each case has a cause").clone();
+            let parent = box_error(wrapped);
+            unsafe {
+                let cause = kafka_common_Error_cause(parent);
+                assert!(!cause.is_null());
+                // Owned: still valid after the parent is destroyed.
+                kafka_common_Error_destroy(parent);
+                assert_eq!(kafka_common_Error_code(cause), error_code_of(&expected_cause));
+                assert_eq!(
+                    CStr::from_ptr(kafka_common_Error_message(cause)).to_str(),
+                    Ok(expected_cause.message())
+                );
+                kafka_common_Error_destroy(cause);
+            }
+        }
+    }
+
+    /// A two-level chain is walked link by link, ending in null.
+    #[test]
+    fn error_cause_walks_a_nested_chain() {
+        let error = box_error(Error::kafka_message_source(
+            "outer",
+            Error::kafka_message_source("middle", Error::group_authorization("g")),
+        ));
+        unsafe {
+            let chain = cause_chain(error);
+            assert_eq!(chain.len(), 2);
+            assert_eq!(chain[0].1, "middle");
+            assert_eq!(chain[1].1, "Not authorized to access group: g");
+            kafka_common_Error_destroy(error);
         }
     }
 }
