@@ -713,11 +713,25 @@ async fn test_async_consumer_max_poll_interval_ms() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_max_poll_interval_ms");
 
-    // Provision the topic via produce (the test does not need records
-    // to be consumed — only assignment).
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    // Create the topic EMPTY through the admin client, exactly as Java's
+    // `@BeforeEach` does: `cluster.createTopic(topic, 2, (short) BROKER_COUNT)`.
+    // `create_topic` does not return until the partition metadata has
+    // propagated to every broker.
+    //
+    // This test must NOT use `ensure_topic_with_2_partitions`: provisioning
+    // by producing returns as soon as the produce is acked, while the group
+    // coordinator's metadata image (and the consumer's own metadata) may
+    // still lack the new topic. The first reconciliation then resolves an
+    // empty or partial target and fires `on_partitions_assigned` anyway —
+    // neither Java (`AsyncKafkaConsumer.process(PartitionsAssignedEvent)`)
+    // nor Rust has an empty guard — and the corrected assignment fires it a
+    // second time within the same `poll()`, so `awaitRebalance` returns with
+    // `calls_to_assigned == 2` instead of 1. Java never races that because
+    // the admin create commits before anything subscribes. See also
+    // `test_async_consumer_max_poll_interval_ms_delay_in_assignment`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    create_topic(admin.as_ref(), &topic, 2, 3).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 
     // Java's test uses max.poll.interval.ms=1000 (sleeps 3s). The
     // Rust translation runs against a 3-broker testcontainers cluster
