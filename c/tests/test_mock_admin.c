@@ -296,6 +296,18 @@ static void test_mock_admin_create_topics_sync(void) {
     TEST_ASSERT_NULL(kafka_admin_TopicMetadataAndConfig_config_name(mc, 1));
     TEST_ASSERT_NULL(kafka_admin_TopicMetadataAndConfig_config_name(mc, -1));
     TEST_ASSERT_FALSE(kafka_admin_TopicMetadataAndConfig_config_is_sensitive(mc, 7));
+    /* The same entries as full ConfigEntry handles (Java's config()). The mock
+     * builds them with Java's `new ConfigEntry(name, value)`, so source and type
+     * are both UNKNOWN (the real client's type is null instead). */
+    const kafka_admin_Config_t *config = kafka_admin_TopicMetadataAndConfig_config(mc);
+    TEST_ASSERT_NOT_NULL(config);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_Config_entry_count(config));
+    const kafka_admin_ConfigEntry_t *entry = kafka_admin_Config_find_entry(config, "cleanup.policy");
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_STRING("compact", kafka_admin_ConfigEntry_value(entry));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", kafka_admin_ConfigEntry_source(entry));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", kafka_admin_ConfigEntry_type(entry));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ConfigEntry_synonym_count(entry));
 
     /* Out-of-range result index is null, not a crash. */
     TEST_ASSERT_NULL(kafka_admin_CreateTopicsResult_get_key(result, 1));
