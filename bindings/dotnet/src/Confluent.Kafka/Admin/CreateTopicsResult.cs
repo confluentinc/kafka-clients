@@ -46,7 +46,6 @@ namespace Confluent.Kafka.Admin;
 public sealed class CreateTopicsResult
 {
     private readonly IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> _values;
-    private readonly IReadOnlyDictionary<string, Task> _erasedValues;
 
     /// <summary>
     /// Wraps one awaitable per topic — Java's
@@ -60,7 +59,9 @@ public sealed class CreateTopicsResult
     /// subclass but override nothing; fabricating a result — the Java use case — needs only
     /// the constructor. <see cref="DeleteRecordsResult"/> is the precedent. The parameter's
     /// type is the one the typed accessors read, and the dictionary is held by reference,
-    /// as Java holds its map.
+    /// as Java holds its map (<c>CreateTopicsResult.java:35-37</c>). Every view reads it
+    /// when called, <see cref="Values"/> included, so a change the caller makes to it
+    /// later is visible through all of them.
     /// </remarks>
     /// <param name="futures">One awaitable per topic, keyed by topic name.</param>
     /// <exception cref="ArgumentNullException">
@@ -70,23 +71,6 @@ public sealed class CreateTopicsResult
     public CreateTopicsResult(IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> futures)
     {
         _values = futures ?? throw new ArgumentNullException(nameof(futures));
-
-        // Java's `values()` publishes `Map<String, KafkaFuture<Void>>` — the metadata is
-        // deliberately erased and the private map is never handed out. Restore that:
-        // this view is the ONLY thing `Values` exposes, and the metadata is reachable
-        // solely through the four typed accessors below.
-        //
-        // The erasure is a reference upcast: each entry here is the SAME Task instance as
-        // the typed map's, so the view adds no per-key allocation and introduces no second
-        // Task whose fault could go unobserved.
-        Dictionary<string, Task> erased =
-            new Dictionary<string, Task>(futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in futures)
-        {
-            erased.Add(entry.Key, entry.Value);
-        }
-
-        _erasedValues = erased;
     }
 
     /// <summary>
@@ -99,15 +83,62 @@ public sealed class CreateTopicsResult
     /// Awaiting one of these tells you <b>whether that topic was created</b> and nothing
     /// more: it completes on success and faults with that topic's own
     /// <see cref="KafkaException"/> on failure. That is Java's contract exactly —
-    /// <c>CreateTopicsResult.java:43-48</c> derives this view from its private
+    /// <c>CreateTopicsResult.java:43-46</c> derives this view from its private
     /// <c>Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt;</c> with
     /// <c>thenApply(v -&gt; null)</c>, so a Java caller never receives the metadata from
     /// <c>values()</c> either. Read the metadata through <see cref="Config"/>,
     /// <see cref="TopicId"/>, <see cref="NumPartitions"/> or
     /// <see cref="ReplicationFactor"/>.
     /// </para>
+    /// <para>
+    /// <b>Each access returns a fresh snapshot of the live map, as in Java.</b> Java's
+    /// <c>values()</c> keeps no view: it collects a new map from the stored
+    /// <c>futures</c> map on every call (<c>:43-46</c>). This property does the same with
+    /// the dictionary the constructor was given, so its membership follows the caller's
+    /// map. An entry added, replaced or removed after construction shows in the next
+    /// access, as it does in <see cref="All"/> and the four typed accessors, and a snapshot
+    /// already taken keeps the entries it was taken with. Read it once into a local when
+    /// you need it more than once.
+    /// </para>
+    /// <para>
+    /// <b>The snapshot is keyed ordinally, whatever comparer the caller's map uses.</b>
+    /// In the JDK, Java's <c>Collectors.toMap</c> collects into a <c>HashMap</c>, which
+    /// looks keys up with <c>String.equals</c>, and <see cref="StringComparer.Ordinal"/> is
+    /// the .NET counterpart. The typed accessors look the topic up in the caller's map
+    /// instead, as Java's accessors call <c>futures.get(topic)</c> (<c>:66</c>,
+    /// <c>:79</c>, <c>:92</c>, <c>:105</c>). So a caller map with a non-ordinal comparer,
+    /// such as <see cref="StringComparer.OrdinalIgnoreCase"/>, splits the two: for a topic
+    /// stored as <c>"t"</c>, <c>Values["T"]</c> misses while <c>NumPartitions("T")</c>
+    /// finds it. A Java caller gets the same split from a case-insensitive map, so it is
+    /// Java's behavior, not a defect.
+    /// </para>
     /// </remarks>
-    public IReadOnlyDictionary<string, Task> Values => _erasedValues;
+    public IReadOnlyDictionary<string, Task> Values
+    {
+        get
+        {
+            // Rebuilt on every access, from the map the caller handed in — not cached at
+            // construction, which would freeze membership while All() and the accessors
+            // go on reading the live map.
+            //
+            // The erasure is a reference upcast: each entry is the SAME Task instance as the
+            // caller's map holds, so no second Task is created whose fault could go
+            // unobserved. The metadata stays reachable only through the typed accessors.
+            //
+            // `Add` throws on two ordinally equal keys, which only a caller comparer that
+            // tells ordinally equal strings apart (reference equality, say) can produce.
+            // Java's `Collectors.toMap` also throws on that input, with
+            // IllegalStateException rather than ArgumentException.
+            Dictionary<string, Task> erased =
+                new Dictionary<string, Task>(_values.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in _values)
+            {
+                erased.Add(entry.Key, entry.Value);
+            }
+
+            return erased;
+        }
+    }
 
     /// <summary>
     /// Completes when <b>every</b> topic has been created, and faults with the first

@@ -171,6 +171,127 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     /// <summary>
+    /// The caller's map is read live by <b>every</b> view (85.4). Java's <c>values()</c>,
+    /// <c>all()</c> and the four accessors all read the stored <c>futures</c> map when they
+    /// are called (<c>CreateTopicsResult.java:43-46</c>, <c>:51-53</c>, <c>:66</c>), so an
+    /// entry the caller adds or replaces after construction shows up in all of them at
+    /// once. <see cref="CreateTopicsResult.Values"/>, <see cref="CreateTopicsResult.All"/>
+    /// and <see cref="CreateTopicsResult.NumPartitions"/> must agree after each mutation.
+    /// </summary>
+    [Fact]
+    public async Task CreateTopicsResult_CallerMapMutatedAfterConstruction_AllViewsAgree()
+    {
+        Dictionary<string, Task<TopicMetadataAndConfig>> map = new Dictionary<string, Task<TopicMetadataAndConfig>>();
+        CreateTopicsResult result = new CreateTopicsResult(map);
+        Assert.Empty(result.Values);
+
+        // Added after construction, still pending: every view sees the same pending entry.
+        TaskCompletionSource<TopicMetadataAndConfig> pending =
+            new TaskCompletionSource<TopicMetadataAndConfig>(TaskCreationOptions.RunContinuationsAsynchronously);
+        map["t"] = pending.Task;
+
+        KeyValuePair<string, Task> added = Assert.Single(result.Values);
+        Assert.Equal("t", added.Key);
+        Assert.Same(pending.Task, added.Value);
+        Task all = result.All();
+        Task<int> partitions = result.NumPartitions("t");
+        Assert.False(all.IsCompleted);
+        Assert.False(partitions.IsCompleted);
+
+        pending.SetResult(Metadata(3));
+        await TestTimeout.Run(() => all, s_deadline);
+        Assert.Equal(3, await TestTimeout.Run(() => partitions, s_deadline));
+
+        // Replaced after construction: every view moves to the replacement together.
+        Task<TopicMetadataAndConfig> replacement = Task.FromResult(Metadata(5));
+        map["t"] = replacement;
+
+        Assert.Same(replacement, Assert.Single(result.Values).Value);
+        Assert.Equal(5, await TestTimeout.Run(() => result.NumPartitions("t"), s_deadline));
+        await TestTimeout.Run(() => result.All(), s_deadline);
+
+        // A failing entry added later faults Values' entry, All() and the accessor alike.
+        KafkaException fault = new KafkaException("fabricated late failure");
+        TaskCompletionSource<TopicMetadataAndConfig> failed =
+            new TaskCompletionSource<TopicMetadataAndConfig>(TaskCreationOptions.RunContinuationsAsynchronously);
+        failed.SetException(fault);
+        map["late"] = failed.Task;
+
+        Assert.Equal(new[] { "late", "t" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values["late"], s_deadline)));
+        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.All(), s_deadline)));
+        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.NumPartitions("late"), s_deadline)));
+    }
+
+    /// <summary>
+    /// Each access of <see cref="CreateTopicsResult.Values"/> is a fresh snapshot of the
+    /// caller's map as it is at that moment — Java's <c>values()</c> collects a new map on
+    /// every call (<c>CreateTopicsResult.java:43-46</c>). So an earlier snapshot keeps the
+    /// membership it was taken with, and a later one picks up both additions and removals.
+    /// </summary>
+    [Fact]
+    public void CreateTopicsResult_Values_EachAccessReflectsTheMapAtThatMoment()
+    {
+        Task<TopicMetadataAndConfig> a = Task.FromResult(Metadata(1));
+        Task<TopicMetadataAndConfig> b = Task.FromResult(Metadata(2));
+        Dictionary<string, Task<TopicMetadataAndConfig>> map =
+            new Dictionary<string, Task<TopicMetadataAndConfig>> { ["a"] = a };
+        CreateTopicsResult result = new CreateTopicsResult(map);
+
+        IReadOnlyDictionary<string, Task> first = result.Values;
+        map["b"] = b;
+        IReadOnlyDictionary<string, Task> second = result.Values;
+        map.Remove("a");
+        IReadOnlyDictionary<string, Task> third = result.Values;
+
+        Assert.Same(a, Assert.Single(first).Value);
+        Assert.False(first.ContainsKey("b"));
+
+        Assert.Equal(2, second.Count);
+        Assert.Same(a, second["a"]);
+        Assert.Same(b, second["b"]);
+
+        Assert.Same(b, Assert.Single(third).Value);
+        Assert.False(third.ContainsKey("a"));
+    }
+
+    /// <summary>
+    /// A caller map with a non-ordinal comparer gets the split Java has. Java's
+    /// <c>values()</c> collects into a new map with <c>Collectors.toMap</c> (a
+    /// <c>HashMap</c>, so lookup is by <c>String.equals</c>), while each typed accessor
+    /// calls <c>futures.get(topic)</c> on the caller's map (<c>CreateTopicsResult.java:92</c>).
+    /// So with a case-insensitive map, <see cref="CreateTopicsResult.Values"/> misses
+    /// <c>"T"</c> for a topic stored as <c>"t"</c>, while
+    /// <see cref="CreateTopicsResult.NumPartitions"/> finds it.
+    /// </summary>
+    [Fact]
+    public async Task CreateTopicsResult_CaseInsensitiveCallerMap_SplitsAsJavaDoes()
+    {
+        Task<TopicMetadataAndConfig> created = Task.FromResult(Metadata(3));
+        Dictionary<string, Task<TopicMetadataAndConfig>> map =
+            new Dictionary<string, Task<TopicMetadataAndConfig>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["t"] = created,
+            };
+        Assert.True(map.ContainsKey("T"));
+
+        CreateTopicsResult result = new CreateTopicsResult(map);
+
+        // Values: ordinal, like Java's HashMap — the stored spelling hits, the other misses.
+        KeyValuePair<string, Task> entry = Assert.Single(result.Values);
+        Assert.Equal("t", entry.Key);
+        Assert.Same(created, entry.Value);
+        Assert.False(result.Values.ContainsKey("T"));
+
+        // The typed accessors: the caller's map, like Java's futures.get(topic).
+        Assert.Equal(3, await TestTimeout.Run(() => result.NumPartitions("T"), s_deadline));
+        Assert.Equal(3, await TestTimeout.Run(() => result.NumPartitions("t"), s_deadline));
+    }
+
+    /// <summary>
     /// A fabricated by-id <see cref="DeleteTopicsResult"/>: the map is held by reference,
     /// the by-name view is null, and <see cref="DeleteTopicsResult.All"/> faults with the
     /// supplied failure. A by-name one completes.
@@ -243,6 +364,9 @@ public sealed class PublicAdminTopicResultConstructionTests
         Assert.Same(description, allById[topicId]);
         Assert.True(allById.ContainsKey(new Uuid(7L, 9L)));
     }
+
+    private static TopicMetadataAndConfig Metadata(int numPartitions) =>
+        new TopicMetadataAndConfig(Uuid.Zero, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
 
     private static void AssertOnlyConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
     {
