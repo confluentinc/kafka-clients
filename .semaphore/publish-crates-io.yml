@@ -1,0 +1,45 @@
+version: v1.0
+name: publish-crates-io
+# Manual promotion target from semaphore.yml. Run it on a master branch build to
+# publish the confluent-kafka-rust version in Cargo.toml; any other build is
+# refused. Verify and publish run on separate single-use VMs, so no build-time
+# code (build scripts, proc macros) runs on the VM where the crates.io token is
+# loaded.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      # PR builds report the PR's target branch in SEMAPHORE_GIT_BRANCH, so the
+      # ref type check is what excludes them.
+      - |
+        if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
+          echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
+          exit 1
+        fi
+
+blocks:
+  - name: "Verify package"
+    dependencies: []
+    task:
+      jobs:
+        - name: "cargo package"
+          commands:
+            - ./.semaphore/dependencies.sh
+            - cargo package -p confluent-kafka-rust --locked
+
+  - name: "Publish to crates.io"
+    dependencies: ["Verify package"]
+    task:
+      jobs:
+        - name: "cargo publish"
+          commands:
+            - sudo apt install -y rustup
+            - cargo package -p confluent-kafka-rust --locked --list
+            - . vault-get-secret --secret-key=CARGO_REGISTRY_TOKEN crates/confluent-kafka-rust
+            # Verified in the previous block; --no-verify keeps build-time code
+            # off this VM while the token is in the environment.
+            - cargo publish -p confluent-kafka-rust --locked --no-verify
