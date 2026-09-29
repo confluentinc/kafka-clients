@@ -20,6 +20,14 @@ global_job_config:
           echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
           exit 1
         fi
+      # Promotions can be clicked on any past master build, and a crates.io
+      # version can never be replaced, so only the current tip may publish.
+      - |
+        git fetch --quiet origin master
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
+          echo "Refusing to publish: $(git rev-parse HEAD) is not the current tip of master ($(git rev-parse FETCH_HEAD)); promote the latest master build" >&2
+          exit 1
+        fi
 
 blocks:
   - name: "Verify package"
@@ -28,8 +36,13 @@ blocks:
       jobs:
         - name: "cargo package"
           commands:
-            - ./.semaphore/dependencies.sh
+            # Not dependencies.sh: it initializes the kafka submodule, which the
+            # publish block doesn't, and both blocks must package the same tree.
+            - sudo apt install -y cmake rustup
             - cargo package -p confluent-kafka-rust --locked
+            # crates.io rejects these at upload; cargo package only warns or doesn't check.
+            - cargo metadata --no-deps --format-version 1 | jq -e '.packages[] | select(.name == "confluent-kafka-rust") | (.description != null) and (.license != null or .license_file != null)'
+            - test "$(stat -c%s target/package/confluent-kafka-rust-*.crate)" -le 10485760
 
   - name: "Publish to crates.io"
     dependencies: ["Verify package"]
