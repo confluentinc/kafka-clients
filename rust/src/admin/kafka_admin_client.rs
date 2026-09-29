@@ -83,7 +83,7 @@ use crate::alter_replica_log_dirs_request_data::{AlterReplicaLogDir, AlterReplic
 use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, ScramCredentialUpsertion};
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, config_resource};
-use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
+use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
@@ -580,7 +580,7 @@ impl KafkaAdminClient {
             client,
             metadata_manager.clone(),
             admin_rx,
-            retry_backoff,
+            retry_backoff.clone(),
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
@@ -599,6 +599,7 @@ impl KafkaAdminClient {
                 shutdown: Arc::clone(&shutdown),
                 metadata_manager: metadata_manager.clone(),
                 max_retries: config.retries(),
+                retry_backoff,
                 time: Arc::clone(&time),
                 log_context: log_context.clone(),
             },
@@ -917,6 +918,10 @@ struct CallSender {
     /// The `retries` config: `AdminClientRunnable`'s `maxRetries`, read by
     /// `enqueue`'s first check.
     max_retries: i32,
+    /// The client's retry backoff, which `call.fail` advances when `call`
+    /// rejects a call for a `bootstrap.controllers` client (the value appears in
+    /// the timeout message).
+    retry_backoff: ExponentialBackoff,
     /// `KafkaAdminClient.time`, which `enqueue` reads for `handleTimeoutFailure`.
     time: Arc<dyn Time>,
     log_context: LogContext,
@@ -931,47 +936,18 @@ impl CallSender {
     /// exited.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#call")]
     fn call(&self, call: Call) {
-        // Java's `call` rejects a call here only once `close()` set a hard-shutdown
-        // time (`KafkaAdminClient.java:1706-1709`). `closing` alone is not that
-        // signal: the I/O task also sets it when it exits on its own (a permanent
-        // bootstrap failure, or a panic caught in `run`). Such a call reaches
-        // Java's `enqueue`, where the bootstrap failure or the closed channel
-        // ("The AdminClient thread has exited.") answers it, below.
-        if self
-            .shutdown
-            .hard_shutdown_deadline_ms
-            .load(std::sync::atomic::Ordering::Acquire)
-            != KafkaAdminClient::NO_HARD_SHUTDOWN
-        {
-            let mut call = call;
-            // `new IllegalStateException("Cannot accept new calls when AdminClient
-            // is closing.")` (`KafkaAdminClient.java:1709`) — Java's text verbatim
-            // (finding 247a).
-            call.handle_failure(&Error::local_illegal_state(
-                "Cannot accept new calls when AdminClient is closing.",
-            ));
+        // `call`'s two rejections (`KafkaAdminClient.java:1706-1713`): once
+        // `close()` has set a hard-shutdown time, and an endpoint a
+        // `bootstrap.controllers` client cannot serve. The I/O task applies the
+        // same gate to the follow-ups a response hook returns.
+        let Some(call) = self.shutdown.admit_new_call(
+            self.metadata_manager.using_bootstrap_controllers(),
+            &self.retry_backoff,
+            self.time.milliseconds(),
+            call,
+        ) else {
             return;
-        }
-        // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
-        // incompatible with a `bootstrap.controllers` client (KIP-919).
-        if self.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers() {
-            let mut call = call;
-            // `new UnsupportedEndpointTypeException("This Admin API is not yet
-            // supported when communicating directly with the controller quorum.")`
-            // (`KafkaAdminClient.java:1711-1713`). Spelling it
-            // `Error::unsupported_version` gave it code 35, which
-            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
-            // retry instead of failing the call (finding 247b).
-            //
-            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
-            // non-retriable, non-`UnsupportedVersionException` error on a call that
-            // has not yet passed its deadline is `handleFailure(throwable)`
-            // (`KafkaAdminClient.java:1002-1008`) — what is invoked here.
-            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
-                "This Admin API is not yet supported when communicating directly with the controller quorum.",
-            )));
-            return;
-        }
+        };
         // Java's `enqueue` begins with the retry budget
         // (`KafkaAdminClient.java:1669-1674`). A call reaches it already tried
         // when the `AdminApiDriver` re-issues a request spec, which carries its
@@ -1019,6 +995,7 @@ impl CallSender {
             metadata_manager: AdminMetadataManager::new(100, 300_000, false, LogContext::empty()),
             // `AdminClientConfig`'s `retries` default, `Integer.MAX_VALUE`.
             max_retries: i32::MAX,
+            retry_backoff: ExponentialBackoff::new(100, RETRY_BACKOFF_EXP_BASE, 1000, 0.0).expect("a valid backoff"),
             time: Arc::new(SystemTime),
             log_context: LogContext::empty(),
         }
@@ -7086,7 +7063,7 @@ mod tests {
     async fn a_call_submitted_after_the_io_task_exits_fails_with_a_timeout() {
         let (admin, runnable, _time, _nodes) = env();
         // Dropping the runnable drops the receiving end of the call channel, which
-        // is what `submit`'s `SendError` arm observes.
+        // is what `CallSender::call`'s `SendError` arm observes.
         drop(runnable);
 
         let result = admin.list_topics_with_options(ListTopicsOptions::new());
@@ -14069,6 +14046,71 @@ mod tests {
         );
     }
 
+    /// A retry backoff with no jitter, so a test can assert `nextAllowedTryMs`.
+    fn test_retry_backoff() -> ExponentialBackoff {
+        ExponentialBackoff::new(100, RETRY_BACKOFF_EXP_BASE, 1000, 0.0).expect("a valid backoff")
+    }
+
+    /// `AdminClientRunnable.call` hands a call that a `bootstrap.controllers`
+    /// client cannot serve to `call.fail(now, ..)` (`KafkaAdminClient.java:1710-1713`).
+    /// `fail` counts the try and advances `nextAllowedTryMs` (`:989`), then fails
+    /// with `handleTimeoutFailure` when the deadline has already passed (`:996-999`)
+    /// and with `handleFailure` otherwise (`:1001-1008`); a `closing` runnable fails
+    /// it at once (`:975-978`).
+    #[test]
+    fn a_call_rejected_for_bootstrap_controllers_goes_through_call_fail() {
+        fn rejected(deadline_ms: i64, captured: &Arc<Mutex<Option<Error>>>) -> Call {
+            let captured = Arc::clone(captured);
+            Call::new(
+                "listTopics",
+                deadline_ms,
+                NodeProvider::LeastLoaded,
+                Box::new(|_timeout_ms| unreachable!("a rejected call is never sent")),
+                Box::new(|_response, _now, _cur_node| HandleResult::Done),
+                Box::new(move |error| *captured.lock().unwrap() = Some(error.clone())),
+                Box::new(|| false),
+            )
+        }
+        let endpoint_message =
+            "This Admin API is not yet supported when communicating directly with the controller quorum.";
+        let backoff = test_retry_backoff();
+        let now = 1_000;
+        let shutdown = ShutdownSignal::new();
+
+        // Deadline already passed (Java's `timeoutMs <= 0`): a TimeoutException
+        // caused by the rejection.
+        let captured = Arc::new(Mutex::new(None));
+        assert!(shutdown.admit_new_call(true, &backoff, now, rejected(now, &captured)).is_none());
+        let error = captured.lock().unwrap().take().expect("the call failed");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(
+            error.message(),
+            "Call(callName=listTopics, deadlineMs=1000, tries=1, nextAllowedTryMs=1100) timed out at 1000 after 1 \
+             attempt(s)"
+        );
+        let cause = error.source().expect("the rejection is the cause");
+        assert!(matches!(cause, Error::UnsupportedEndpointType(_)), "got {cause:?}");
+        assert_eq!(cause.message(), endpoint_message);
+
+        // Deadline still ahead: the rejection itself.
+        let captured = Arc::new(Mutex::new(None));
+        assert!(
+            shutdown
+                .admit_new_call(true, &backoff, now, rejected(now + 1, &captured))
+                .is_none()
+        );
+        let error = captured.lock().unwrap().take().expect("the call failed");
+        assert!(matches!(error, Error::UnsupportedEndpointType(_)), "got {error:?}");
+        assert_eq!(error.message(), endpoint_message);
+
+        // A closing runnable skips the deadline check.
+        shutdown.closing.store(true, Ordering::Release);
+        let captured = Arc::new(Mutex::new(None));
+        assert!(shutdown.admit_new_call(true, &backoff, now, rejected(now, &captured)).is_none());
+        let error = captured.lock().unwrap().take().expect("the call failed");
+        assert!(matches!(error, Error::UnsupportedEndpointType(_)), "got {error:?}");
+    }
+
     // --- shutdown ------------------------------------------------------------
 
     /// Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which
@@ -14544,6 +14586,252 @@ mod tests {
             .get()
             .await
             .expect("all() of a completed createTopics must succeed");
+    }
+
+    /// Steps `runnable` until exactly one `InitProducerId` request is in flight
+    /// and returns the number queued, so a `fenceProducers` test can act while
+    /// the driver holds the next key's fulfillment back.
+    async fn pump_until_one_init_producer_id_in_flight(runnable: &mut AdminClientRunnable<MockClient>) -> usize {
+        let count = |runnable: &mut AdminClientRunnable<MockClient>| {
+            runnable
+                .client_mut()
+                .requests()
+                .iter()
+                .filter(|r| *r.api_key() == crate::common::protocol::ApiKeys::INIT_PRODUCER_ID)
+                .count()
+        };
+        for _ in 0..40 {
+            if count(runnable) >= 1 {
+                break;
+            }
+            runnable.run_once().await;
+        }
+        // A few more iterations: the driver must NOT issue the second key's
+        // request while the first is outstanding (`AdminApiDriver.java:381-383`).
+        for _ in 0..5 {
+            runnable.run_once().await;
+        }
+        count(runnable)
+    }
+
+    /// Every key of a driver RPC resolves on `close()`, even
+    /// one whose fulfillment request had not been issued yet.
+    ///
+    /// The driver issues at most one fulfillment request per broker at a time
+    /// (`AdminApiDriver.java:381-383`), so with one broker `b`'s `InitProducerId`
+    /// is only created once `a`'s completes or fails. `close(0)` makes the I/O
+    /// task exit with `a`'s call in flight; the `finally` fails it, and its
+    /// failure hook asks the driver for the next request. Java routes that
+    /// through `runnable.call(..)` (`KafkaAdminClient.java:5281`), which rejects
+    /// it once the shutdown deadline is set (`:1707-1709`), so `b` fails with
+    /// "Cannot accept new calls when AdminClient is closing." Rust used to send
+    /// it straight into the submission channel after the final drain; the
+    /// runnable was then dropped with it inside and `b` never resolved.
+    #[tokio::test]
+    async fn close_resolves_a_driver_key_whose_fulfillment_was_not_yet_issued() {
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        let coordinator = &nodes[0];
+        // One batched lookup maps both transactional ids to the only broker.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("a", coordinator), ("b", coordinator)]));
+
+        let result =
+            admin.fence_producers_with_options(&["a".to_string(), "b".to_string()], FenceProducersOptions::new());
+        assert_eq!(
+            pump_until_one_init_producer_id_in_flight(&mut runnable).await,
+            1,
+            "exactly one key's InitProducerId must be in flight; the other's is held back"
+        );
+
+        // `close(Duration.ZERO)`: no task was spawned, so this only publishes the
+        // closing gate and a hard deadline of `now`. The loop then exits at once
+        // with the in-flight call still outstanding.
+        admin.close_with_timeout(Duration::ZERO).await;
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must exit once the hard deadline has passed");
+        // Dropping the runnable drops anything still queued in its channel, as
+        // the end of the I/O task does in production.
+        drop(runnable);
+
+        let a = result.producer_id("a").expect("a is a requested key");
+        let b = result.producer_id("b").expect("b is a requested key");
+        assert!(
+            a.is_done() && b.is_done(),
+            "every key must resolve on close(), including the one whose fulfillment was not yet \
+             issued (a: {}, b: {})",
+            a.is_done(),
+            b.is_done()
+        );
+
+        // Which key the driver issued first follows its map order, so identify
+        // the two outcomes by their errors rather than by name.
+        let mut messages = vec![
+            a.get().await.expect_err("close(0) aborts the fence").to_string(),
+            b.get().await.expect_err("close(0) aborts the fence").to_string(),
+        ];
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec![
+                "LocalIllegalStateError: Cannot accept new calls when AdminClient is closing.".to_string(),
+                "TimeoutError: The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)"
+                    .to_string(),
+            ],
+            "the in-flight key times out with the exiting task; the unissued one is rejected by the \
+             closing gate with Java's IllegalStateException text"
+        );
+    }
+
+    /// A driver RPC issued after `close()` fails with Java's
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")` (`KafkaAdminClient.java:1707-1709`, reached through
+    /// `invokeDriver` → `maybeSendRequests` → `runnable.call`), exactly like a
+    /// plain call. It used to bypass the gate: with the I/O task gone the
+    /// channel send failed and the key got a retriable
+    /// `TimeoutException("The AdminClient thread has exited.")` instead.
+    #[tokio::test]
+    async fn a_driver_rpc_issued_after_close_fails_with_the_closing_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        admin.close_with_timeout(Duration::ZERO).await;
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("with no work the I/O task exits as soon as close() is called");
+        drop(runnable);
+
+        let result = admin.fence_producers_with_options(&["a".to_string()], FenceProducersOptions::new());
+        let future = result.producer_id("a").expect("a is a requested key");
+        assert!(future.is_done(), "a call rejected by the closing gate resolves at once");
+        let error = future.get().await.expect_err("a call issued after close() must fail");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        assert!(
+            !error.is_retriable_error(),
+            "Java's IllegalStateException is not retriable, unlike the TimeoutException it replaced: {error:?}"
+        );
+    }
+
+    /// A follow-up call issued during the I/O task's
+    /// shutdown tail resolves instead of hanging, even when the loop ended
+    /// without `close()` having set the closing gate.
+    ///
+    /// Java's `finally` starts with `closing = true` (`KafkaAdminClient.java:1551`),
+    /// so `enqueue` rejects anything submitted from then on with
+    /// `TimeoutException("The AdminClient thread has exited.")` (`:1679-1695`).
+    /// Here the loop ends in a panic, so only that flag can stop the follow-up
+    /// the driver issues when the `finally` fails the in-flight key: without it
+    /// the call was queued after the final drain and dropped with the runnable.
+    #[tokio::test]
+    async fn a_follow_up_issued_in_the_shutdown_tail_after_a_panic_resolves() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[]);
+        let coordinator = &nodes[0];
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("a", coordinator), ("b", coordinator)]));
+        let result =
+            admin.fence_producers_with_options(&["a".to_string(), "b".to_string()], FenceProducersOptions::new());
+        assert_eq!(pump_until_one_init_producer_id_in_flight(&mut runnable).await, 1);
+
+        // End the loop with a panic (see `a_panicking_io_task_still_runs_its_finally`):
+        // an already-expired call whose failure hook panics once.
+        let now = time.milliseconds();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_fired = Arc::clone(&fired);
+        admin.submit(Call::new(
+            "panicOnPurpose",
+            now - 1,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| unreachable!("the call expires before it is ever sent")),
+            Box::new(|_response, _now, _cur_node| HandleResult::Done),
+            Box::new(move |_error| {
+                if !hook_fired.swap(true, Ordering::AcqRel) {
+                    panic!("injected panic inside the I/O loop");
+                }
+            }),
+            Box::new(|| false),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must reach its finally after a panic");
+        assert!(fired.load(Ordering::Acquire), "the injected panic must actually have fired");
+        assert_eq!(
+            admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),
+            KafkaAdminClient::NO_HARD_SHUTDOWN,
+            "precondition: close() was never called, so the closing gate is not set"
+        );
+        drop(runnable);
+
+        let a = result.producer_id("a").expect("a is a requested key");
+        let b = result.producer_id("b").expect("b is a requested key");
+        assert!(a.is_done() && b.is_done(), "every key must resolve after the task exits");
+        // The two keys reach the text by different paths, and the exact messages
+        // tell them apart: the in-flight key is failed by `fail_all_remaining`
+        // (with the call rendered after it), while the follow-up is rejected by
+        // the closed channel (bare, as Java's `enqueue` builds it). A follow-up
+        // that was queued and failed by a later drain would carry the suffix.
+        let mut messages = Vec::new();
+        for future in [a, b] {
+            let error = future.get().await.expect_err("the task exited before the fence finished");
+            assert!(error.is_timeout_error(), "got {error:?}");
+            messages.push(error.message().to_string());
+        }
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec![
+                "The AdminClient thread has exited.".to_string(),
+                "The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)".to_string(),
+            ]
+        );
+    }
+
+    /// Regression for COMMENTS.66.md Issue 2: a quota-retry follow-up passes the
+    /// same `runnable.call` gate as every other new call.
+    ///
+    /// Java resubmits the throttled topics with `runnable.call(call, now)`
+    /// (`KafkaAdminClient.java:1988`), which rejects the retry once `close()` has
+    /// set the hard-shutdown deadline (`:1707-1709`). The retry's
+    /// `handleFailure` leaves a non-timeout cause alone
+    /// (`maybeCompleteQuotaExceededException`), so the topic fails with
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")`. Rust used to push the retry straight into `pending_calls`,
+    /// where it kept the loop alive and was sent again during `close()`.
+    #[tokio::test]
+    async fn a_quota_retry_during_close_is_rejected_by_the_closing_gate() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                "topic1",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new().set_retry_on_quota_violation(true),
+        );
+        pump_until_request_queued(&mut runnable).await;
+
+        // `close(30s)` with the createTopics request in flight. No task was
+        // spawned, so this only publishes the deadline and the closing flag.
+        admin.close_with_timeout(Duration::from_secs(30)).await;
+        // The controller answers with a quota violation, which asks for a retry.
+        runnable.client_mut().respond(create_response_throttled(
+            1000,
+            vec![create_result("topic1", Errors::ThrottlingQuotaExceeded, None)],
+        ));
+        runnable.run_once().await;
+
+        let future = &result.values()["topic1"];
+        assert!(
+            future.is_done(),
+            "the quota retry must be rejected at once, not queued to be sent again during close()"
+        );
+        let error = future.get().await.expect_err("the rejected retry fails the topic");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        assert!(
+            !runnable.has_active_external_calls_for_test(),
+            "the rejected retry must not stay queued"
+        );
     }
 
     /// Java publishes the hard-shutdown deadline through a compare-and-set loop
