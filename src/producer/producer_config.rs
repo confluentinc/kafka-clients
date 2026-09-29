@@ -435,6 +435,17 @@ impl ProducerConfig {
         // computed. Clone it up front, before `maybe_override_client_id` runs.
         let mut config = Self { originals: props.clone(), ..Default::default() };
 
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so
+        // `ConfigDef.parseValue` rejects a missing key at parse time
+        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // check runs before any other value is parsed, as in Java.
+        if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
+            return Err(Error::config_message(format!(
+                "Missing required configuration \"{}\" which has no default value.",
+                Self::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
+
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
@@ -861,6 +872,12 @@ impl ProducerConfig {
 mod tests {
     use super::*;
 
+    /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
+    /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
+    fn base_props() -> HashMap<String, String> {
+        HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())])
+    }
+
     #[test]
     fn test_default_values() {
         let config = ProducerConfig::default();
@@ -905,12 +922,12 @@ mod tests {
     /// CommonClientConfigs). A value below 1 is rejected asserting the bound.
     #[test]
     fn test_metrics_num_samples_validator() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "3".to_string());
         let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_num_samples, 3);
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "0".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -919,7 +936,7 @@ mod tests {
             "unexpected message: {msg}"
         );
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ProducerConfig::new(&props).is_err());
     }
@@ -928,17 +945,17 @@ mod tests {
     /// CommonClientConfigs). A negative value is rejected asserting the bound.
     #[test]
     fn test_metrics_sample_window_ms_validator() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
         let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 0);
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
         let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 60_000);
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -957,7 +974,7 @@ mod tests {
     fn test_metrics_recording_level_validator() {
         // Uppercase enum values are accepted.
         for level in ["INFO", "DEBUG", "TRACE"] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("metrics.recording.level".to_string(), level.to_string());
             let c = ProducerConfig::new(&props).unwrap();
             assert_eq!(c.metrics_recording_level, level);
@@ -965,7 +982,7 @@ mod tests {
 
         // Lowercase is rejected (Java is case-sensitive here) with the exact
         // `ConfigException` wording.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "debug".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         assert!(
@@ -977,7 +994,7 @@ mod tests {
         );
 
         // A wholly unknown value is likewise rejected with the same wording.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         assert!(
@@ -991,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_new_basic() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093".to_string());
         props.insert("client.id".to_string(), "my-producer".to_string());
         props.insert("batch.size".to_string(), "32768".to_string());
@@ -1010,9 +1027,23 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so a config
+    /// without it fails at parse time with `ConfigDef.parseValue`'s message.
+    #[test]
+    fn test_missing_bootstrap_servers_rejected_with_exact_message() {
+        let err = ProducerConfig::new(&HashMap::new()).unwrap_err();
+        let Error::Config(config_err) = &err else {
+            panic!("expected a config error, got: {err:?}");
+        };
+        assert_eq!(
+            config_err.message(),
+            "Missing required configuration \"bootstrap.servers\" which has no default value."
+        );
+    }
+
     #[test]
     fn test_new_defaults_for_missing() {
-        let props = HashMap::new();
+        let props = base_props();
         let config = ProducerConfig::new(&props).unwrap();
         // All fields should have default values
         assert_eq!(config.batch_size, 16384);
@@ -1022,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_new_invalid_value() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("batch.size".to_string(), "not-a-number".to_string());
         let result = ProducerConfig::new(&props);
         assert!(result.is_err());
@@ -1030,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_new_unknown_key_ignored() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("unknown.key".to_string(), "value".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::new(&props).unwrap();
@@ -1041,7 +1072,7 @@ mod tests {
     /// (identical to the unset default, librdkafka `consistent_random` parity).
     #[test]
     fn test_partitioner_class_consistent_random() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("partitioner.class".to_string(), "ConsistentRandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("ConsistentRandomPartitioner"));
@@ -1052,7 +1083,7 @@ mod tests {
     /// (exact Java-client parity).
     #[test]
     fn test_partitioner_class_murmur2_random() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("Murmur2RandomPartitioner"));
@@ -1063,7 +1094,7 @@ mod tests {
     /// `ConfigException` text (DoD §3: error messages are the contract).
     #[test]
     fn test_partitioner_class_unknown_rejected_with_exact_message() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("partitioner.class".to_string(), "com.example.MyPartitioner".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         // `err.to_string()` prepends the variant tag, so assert on the exact
@@ -1083,7 +1114,7 @@ mod tests {
     /// RoundRobin producer uses the partitioner instance, not the key hash).
     #[test]
     fn test_partitioner_class_round_robin_simple_name() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("RoundRobinPartitioner"));
@@ -1100,7 +1131,7 @@ mod tests {
     /// unchanged.
     #[test]
     fn test_partitioner_class_round_robin_fqcn() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert(
             "partitioner.class".to_string(),
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
@@ -1123,7 +1154,7 @@ mod tests {
     /// `partitioner.class` (`KafkaProducer.java:382-385`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().is_some());
@@ -1133,7 +1164,7 @@ mod tests {
     /// so a Java producer config naming the round-robin partitioner works.
     #[test]
     fn test_resolve_partitioner_round_robin_fqcn() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert(
             "partitioner.class".to_string(),
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
@@ -1147,7 +1178,7 @@ mod tests {
     /// instance.
     #[test]
     fn test_resolve_partitioner_default_none() {
-        let config = ProducerConfig::new(&HashMap::new()).unwrap();
+        let config = ProducerConfig::new(&base_props()).unwrap();
         assert!(config.partitioner_class.is_none());
         assert!(config.resolve_partitioner::<String, String>().is_none());
     }
@@ -1160,7 +1191,7 @@ mod tests {
     #[test]
     fn test_resolve_partitioner_random_names_none() {
         for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("partitioner.class".to_string(), name.to_string());
             let config = ProducerConfig::new(&props).unwrap();
             assert!(
@@ -1209,13 +1240,13 @@ mod tests {
 
     #[test]
     fn test_new_transactional_id() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("transactional.id".to_string(), "my-txn".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
         // Empty string -> None
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("transactional.id".to_string(), String::new());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.transactional_id, None);
@@ -1302,7 +1333,7 @@ mod tests {
     #[test]
     fn test_client_dns_lookup() {
         assert_eq!(ProducerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         assert_eq!(
             ProducerConfig::new(&props).unwrap().client_dns_lookup,
@@ -1329,7 +1360,7 @@ mod tests {
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.
     #[test]
     fn test_invalid_security_protocol() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
@@ -1348,7 +1379,7 @@ mod tests {
     /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("compression.type".to_string(), "gzipp".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let err = ProducerConfig::new(&props).expect_err("gzipp is not a compression type");
@@ -1367,7 +1398,7 @@ mod tests {
     #[test]
     fn test_valid_compression_types_parse() {
         for name in CompressionType::names() {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("compression.type".to_string(), name.to_string());
             props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
             let config = ProducerConfig::new(&props)
@@ -1379,7 +1410,7 @@ mod tests {
     /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`.
     #[test]
     fn test_case_insensitive_security_protocol() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::new(&props).unwrap();
@@ -1388,7 +1419,7 @@ mod tests {
 
     #[test]
     fn test_sasl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
             "sasl.jaas.config".to_string(),
@@ -1404,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_ssl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());

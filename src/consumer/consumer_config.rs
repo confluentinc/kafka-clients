@@ -586,6 +586,17 @@ impl ConsumerConfig {
         // and the string-enum keys.
         let mut config = Self::default();
 
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so
+        // `ConfigDef.parseValue` rejects a missing key at parse time
+        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // check runs before any other value is parsed, as in Java.
+        if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
+            return Err(Error::config_message(format!(
+                "Missing required configuration \"{}\" which has no default value.",
+                Self::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
+
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
@@ -862,6 +873,12 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
 mod tests {
     use super::*;
 
+    /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
+    /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
+    fn base_props() -> HashMap<String, String> {
+        HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())])
+    }
+
     #[test]
     fn test_default_values() {
         let c = ConsumerConfig::default();
@@ -880,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_new_basic() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093".to_string());
         props.insert("group.id".to_string(), "g".to_string());
         props.insert("client.id".to_string(), "my-consumer".to_string());
@@ -894,7 +911,7 @@ mod tests {
 
     #[test]
     fn test_new_unknown_key_ignored() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("unknown.key".to_string(), "value".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
@@ -906,13 +923,13 @@ mod tests {
     #[test]
     fn test_metrics_num_samples_validator() {
         // Valid: >= 1.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "3".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_num_samples, 3);
 
         // Invalid: 0 (< 1).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "0".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -922,7 +939,7 @@ mod tests {
         );
 
         // Invalid: negative.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
     }
@@ -932,18 +949,18 @@ mod tests {
     #[test]
     fn test_metrics_sample_window_ms_validator() {
         // Valid: >= 0 (0 is allowed).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 0);
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 60_000);
 
         // Invalid: negative.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -960,14 +977,14 @@ mod tests {
     #[test]
     fn test_metrics_recording_level_validator() {
         for level in ["INFO", "DEBUG", "TRACE"] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("metrics.recording.level".to_string(), level.to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.metrics_recording_level, level);
         }
 
         // Lowercase is rejected (case-sensitive membership check).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "debug".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         assert!(
@@ -979,7 +996,7 @@ mod tests {
         );
 
         // A wholly unknown value is rejected too.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
     }
@@ -993,7 +1010,7 @@ mod tests {
             ("SASL_PLAINTEXT", SecurityProtocol::SaslPlaintext),
             ("SASL_SSL", SecurityProtocol::SaslSsl),
         ] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("security.protocol".to_string(), input.to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.security_protocol, expected, "for input {input}");
@@ -1004,7 +1021,7 @@ mod tests {
     /// `security.protocol` parsing is case-insensitive (mirrors Java/`for_name`).
     #[test]
     fn test_security_protocol_case_insensitive() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.security_protocol, SecurityProtocol::SaslSsl);
@@ -1014,7 +1031,7 @@ mod tests {
     /// content (DoD §3): the config key, the bad value, and the valid names.
     #[test]
     fn test_invalid_security_protocol() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = format!("{}", err);
@@ -1023,17 +1040,31 @@ mod tests {
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
     }
 
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so a config
+    /// without it fails at parse time with `ConfigDef.parseValue`'s message.
+    #[test]
+    fn test_missing_bootstrap_servers_rejected_with_exact_message() {
+        let err = ConsumerConfig::new(&HashMap::new()).unwrap_err();
+        let Error::Config(config_err) = &err else {
+            panic!("expected a config error, got: {err:?}");
+        };
+        assert_eq!(
+            config_err.message(),
+            "Missing required configuration \"bootstrap.servers\" which has no default value."
+        );
+    }
+
     /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
     /// typed [`ClientDnsLookup`], as `ConsumerConfig`'s `ConfigDef` defines it.
     #[test]
     fn test_client_dns_lookup() {
         assert_eq!(ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
         assert_eq!(
-            ConsumerConfig::new(&HashMap::new()).unwrap().client_dns_lookup(),
+            ConsumerConfig::new(&base_props()).unwrap().client_dns_lookup(),
             ClientDnsLookup::UseAllDnsIps
         );
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert(
             CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
             "resolve_canonical_bootstrap_servers_only".to_string(),
@@ -1054,7 +1085,7 @@ mod tests {
     /// `sasl.mechanism` and `sasl.jaas.config` land on `sasl_config`.
     #[test]
     fn test_sasl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
             "sasl.jaas.config".to_string(),
@@ -1070,7 +1101,7 @@ mod tests {
     /// Empty `sasl.jaas.config` → `None`.
     #[test]
     fn test_sasl_jaas_config_empty_is_none() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("sasl.jaas.config".to_string(), String::new());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.jaas_config, None);
@@ -1079,7 +1110,7 @@ mod tests {
     /// `ssl.*` keys land on `ssl_config` via the shared helper.
     #[test]
     fn test_ssl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
@@ -1104,7 +1135,7 @@ mod tests {
         use crate::common::utils::LogContext;
 
         // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "SASL_PLAINTEXT".to_string());
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
@@ -1126,7 +1157,7 @@ mod tests {
 
         // SASL_SSL with no ssl_config supplied at all → error: the
         // `channel_builders` SASL_SSL arm requires ssl_config to be present.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "SASL_SSL".to_string());
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
@@ -1158,7 +1189,7 @@ mod tests {
     /// fails much later and much less legibly.
     #[test]
     fn test_new_keeps_an_empty_group_id() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
         props.insert("group.id".to_string(), String::new());
         let c = ConsumerConfig::new(&props).unwrap();
@@ -1168,7 +1199,7 @@ mod tests {
     /// An absent `group.id` is still `None` — the two cases stay distinct.
     #[test]
     fn test_new_absent_group_id_is_none() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.group_id(), None);

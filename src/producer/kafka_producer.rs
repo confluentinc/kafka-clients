@@ -3399,7 +3399,7 @@ mod tests {
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
     ) -> KafkaProducer<String, String> {
-        let mut props = HashMap::new();
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).expect("murmur2 partitioner config is valid");
         create_producer_with_config(config, metadata, accumulator)
@@ -3504,7 +3504,7 @@ mod tests {
     /// non-empty key would otherwise hash, under murmur2 as well as the default.
     #[test]
     fn test_partition_ignore_keys_overrides_murmur2() {
-        let mut props = HashMap::new();
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
         props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
         let config = ProducerConfig::new(&props).unwrap();
