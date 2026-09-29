@@ -1085,7 +1085,7 @@ impl Admin for MockAdminClient {
         let mut state = self.state.lock().unwrap();
         let nodes: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
-        let cluster_id: KafkaFutureImpl<String> = KafkaFutureImpl::new();
+        let cluster_id: KafkaFutureImpl<Option<String>> = KafkaFutureImpl::new();
         let authorized_operations: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
 
         if state.timeout_next_requests > 0 {
@@ -1098,7 +1098,7 @@ impl Admin for MockAdminClient {
         } else {
             nodes.complete(state.brokers.clone());
             controller.complete(Some(state.controller.clone()));
-            cluster_id.complete(state.cluster_id.clone());
+            cluster_id.complete(Some(state.cluster_id.clone()));
             // Java completes with an empty set (not null).
             authorized_operations.complete(Some(BTreeSet::new()));
         }
@@ -2372,7 +2372,7 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         let controller = result.controller().get().await.unwrap();
         assert_eq!(controller.unwrap().id(), 0);
-        assert_eq!(result.cluster_id().get().await.unwrap(), DEFAULT_CLUSTER_ID);
+        assert_eq!(result.cluster_id().get().await.unwrap().as_deref(), Some(DEFAULT_CLUSTER_ID));
         assert!(result.authorized_operations().get().await.unwrap().unwrap().is_empty());
     }
 

@@ -6700,7 +6700,9 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_destroy(info: *mut kafka_
 struct DescribeClusterOutcome {
     nodes: Vec<Node>,
     controller: Option<Node>,
-    cluster_id: String,
+    /// `None` is Java's null cluster id (the `Metadata` fallback's nullable
+    /// `ClusterId`).
+    cluster_id: Option<String>,
     /// `None` when the operations were not requested or the broker omitted them
     /// (Java returns null).
     authorized_operations: Option<BTreeSet<AclOperation>>,
@@ -6718,7 +6720,7 @@ pub struct kafka_admin_DescribeClusterResult_t {
 /// four attributes of one cluster, not a map, so the handle exposes them
 /// directly and any failure is a whole-call failure.
 struct DescribeClusterResultInner {
-    cluster_id_c: CString,
+    cluster_id_c: Option<CString>,
     nodes: Vec<Node>,
     controller: Option<Node>,
     /// `None` is Java's null (the broker did not report the operations), which
@@ -6731,7 +6733,7 @@ struct DescribeClusterResultInner {
 /// Flattens the cluster description into the C handle.
 fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_admin_DescribeClusterResult_t {
     let inner = DescribeClusterResultInner {
-        cluster_id_c: to_cstring(&outcome.cluster_id),
+        cluster_id_c: outcome.cluster_id.as_deref().map(to_cstring),
         nodes: outcome.nodes,
         controller: outcome.controller,
         authorized_operations: outcome
@@ -6758,7 +6760,9 @@ unsafe fn describe_cluster_result_ref(
     unsafe { &*(result as *const DescribeClusterResultInner) }
 }
 
-/// Returns the cluster id (borrowed).
+/// Returns the cluster id (borrowed), or null where Java's `clusterId()` is
+/// null: a broker too old for `DescribeCluster` is answered through the
+/// `Metadata` fallback, whose `ClusterId` is nullable.
 ///
 /// # Safety
 ///
@@ -6771,10 +6775,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for the
-    // duration of this call, and the returned string pointer borrows the cluster-id
+    // duration of this call, and a non-null returned string pointer borrows the cluster-id
     // `CString` owned by the handle, valid until
     // `kafka_admin_DescribeClusterResult_destroy`.
-    unsafe { describe_cluster_result_ref(result) }.cluster_id_c.as_ptr()
+    match &unsafe { describe_cluster_result_ref(result) }.cluster_id_c {
+        Some(cluster_id) => cluster_id.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the number of nodes in the cluster.
@@ -30447,6 +30454,29 @@ mod tests {
         }
     }
 
+    /// Java's `clusterId()` can be null (the `Metadata` fallback); C sees
+    /// null, not `""`.
+    #[test]
+    fn describe_cluster_result_cluster_id_is_null_for_a_null_id() {
+        let outcome = |cluster_id: Option<&str>| DescribeClusterOutcome {
+            nodes: vec![],
+            controller: None,
+            cluster_id: cluster_id.map(str::to_string),
+            authorized_operations: None,
+        };
+        unsafe {
+            let null_id = box_describe_cluster_result(outcome(None));
+            assert!(kafka_admin_DescribeClusterResult_cluster_id(null_id).is_null());
+            kafka_admin_DescribeClusterResult_destroy(null_id);
+            let named = box_describe_cluster_result(outcome(Some("abc")));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeClusterResult_cluster_id(named)).to_str(),
+                Ok("abc")
+            );
+            kafka_admin_DescribeClusterResult_destroy(named);
+        }
+    }
+
     /// Every one of the four `authorized_operations` surfaces uses the same
     /// encoding: a non-negative count plus a `_has_` presence bit. An absent set
     /// and a reported-but-empty one differ only in the bit.
@@ -30490,7 +30520,7 @@ mod tests {
             box_describe_cluster_result(DescribeClusterOutcome {
                 nodes: vec![],
                 controller: None,
-                cluster_id: "c".to_string(),
+                cluster_id: Some("c".to_string()),
                 authorized_operations: ops,
             })
         };

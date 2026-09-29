@@ -1341,7 +1341,8 @@ impl AdminBackend for RustNativeAdmin {
         Ok(ClusterDescription {
             nodes: nodes?,
             controller: controller?,
-            cluster_id: cluster_id?,
+            // The view keeps a plain string, as the gRPC backends carry it.
+            cluster_id: cluster_id?.unwrap_or_default(),
             authorized_operations: authorized_operations?,
         })
     }

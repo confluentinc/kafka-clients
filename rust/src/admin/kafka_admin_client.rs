@@ -3514,7 +3514,7 @@ impl Admin for KafkaAdminClient {
 
         let nodes_handle: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller_handle: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
-        let cluster_id_handle: KafkaFutureImpl<String> = KafkaFutureImpl::new();
+        let cluster_id_handle: KafkaFutureImpl<Option<String>> = KafkaFutureImpl::new();
         let authorized_ops_handle: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
 
         let public = DescribeClusterResult::new(
@@ -3577,7 +3577,9 @@ impl Admin for KafkaAdminClient {
                     .filter(|c| c.id() != MetadataResponse::NO_CONTROLLER_ID)
                     .cloned();
                 resp_controller.complete(controller);
-                resp_cluster_id.complete(metadata_response.cluster_id().unwrap_or_default().to_string());
+                // `MetadataResponseData.ClusterId` is nullable; Java completes
+                // `clusterIdFuture` with `response.clusterId()`, null included.
+                resp_cluster_id.complete(metadata_response.cluster_id().map(str::to_string));
                 resp_authorized.complete(AdminUtils::valid_acl_operations(
                     metadata_response.cluster_authorized_operations(),
                 ));
@@ -3601,7 +3603,7 @@ impl Admin for KafkaAdminClient {
                 resp_nodes.complete(nodes.values().cloned().collect());
                 // Controller is None if the controller id is NO_CONTROLLER_ID.
                 resp_controller.complete(nodes.get(&controller_id).cloned());
-                resp_cluster_id.complete(describe_response.data().cluster_id.clone());
+                resp_cluster_id.complete(Some(describe_response.data().cluster_id.clone()));
                 resp_authorized.complete(AdminUtils::valid_acl_operations(
                     describe_response.data().cluster_authorized_operations,
                 ));
@@ -8259,7 +8261,7 @@ mod tests {
         ));
         let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
         pump(&mut runnable, 5).await;
-        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
+        assert_eq!(result.cluster_id().get().await.unwrap().as_deref(), Some(cluster_id));
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
         assert_eq!(got, nodes.iter().cloned().collect());
         assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
@@ -8321,11 +8323,31 @@ mod tests {
 
         let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
         pump(&mut runnable, 8).await;
-        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
+        assert_eq!(result.cluster_id().get().await.unwrap().as_deref(), Some(cluster_id));
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
         assert_eq!(got, nodes.iter().cloned().collect());
         assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
         assert_eq!(result.authorized_operations().get().await.unwrap(), None);
+    }
+
+    /// The `Metadata` fallback's `ClusterId` is nullable, and Java completes
+    /// `clusterId()` with that null rather than an empty string.
+    #[tokio::test]
+    async fn test_describe_cluster_fail_back_keeps_a_null_cluster_id() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_unsupported_version_response();
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes,
+                None,
+                2,
+                Vec::new(),
+            )));
+
+        let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+        pump(&mut runnable, 8).await;
+        assert_eq!(result.cluster_id().get().await.unwrap(), None);
     }
 
     #[tokio::test]
