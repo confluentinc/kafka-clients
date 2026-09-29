@@ -39,7 +39,7 @@ pub struct FilterResult {
 impl FilterResult {
     /// Creates a filter result carrying the deleted binding and/or an error.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult#FilterResult")]
-    pub fn new(binding: Option<AclBinding>, error: Option<Error>) -> Self {
+    pub(crate) fn new(binding: Option<AclBinding>, error: Option<Error>) -> Self {
         Self { binding, error }
     }
 
@@ -69,7 +69,7 @@ pub struct FilterResults {
 impl FilterResults {
     /// Creates a `FilterResults` from a list of per-ACL results.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResults#FilterResults")]
-    pub fn new(values: Vec<FilterResult>) -> Self {
+    pub(crate) fn new(values: Vec<FilterResult>) -> Self {
         Self { values }
     }
 
@@ -92,7 +92,7 @@ pub struct DeleteAclsResult {
 impl DeleteAclsResult {
     /// Creates a new result from the per-filter futures.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult#DeleteAclsResult")]
-    pub fn new(futures: HashMap<AclBindingFilter, KafkaFuture<FilterResults>>) -> Self {
+    pub(crate) fn new(futures: HashMap<AclBindingFilter, KafkaFuture<FilterResults>>) -> Self {
         Self { futures }
     }
 

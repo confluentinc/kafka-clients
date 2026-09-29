@@ -1389,7 +1389,7 @@ unsafe fn read_records_to_delete(
         let offset = unsafe { *before_offsets.add(i) };
         out.insert(
             TopicPartition::new(name, partition),
-            RecordsToDelete::with_before_offset(offset),
+            RecordsToDelete::before_offset_with_offset(offset),
         );
     }
     out

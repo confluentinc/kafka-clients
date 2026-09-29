@@ -67,7 +67,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - Rust public enums and struct MUST be "#[non_exhaustive]" in case new values are added to Java ones
     - There should be no public field in public structures: getter, setters or builders are used depending on what's also used in Java client
     - Traits must be dyn-compatible: in Java we can put objects of different types in collections with an interface as generic argument. Exception are made for performance oriented trait such as the `Producer` but they must have a corresponding dyn trait such as `DynProducer` so they pay the cost only when needed
-    - classes that are translated from Java MUST have the same name as Java, considering the translation rules, except when that are other rules changing their name
+    - classes that are translated from Java MUST have the same name as Java, considering the translation rules, except when there are other rules changing their name
+    - methods that are translated from Java methods must not be public if they're not public in Java implementation
     - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package
     - deprecated API MUST NOT be translated since the first major version of the client. Ensure this is not affecting the ability to implement later some large features that are not implemented at the moment such as the classic consumer group, because of changes to public traits
 4. **C FFI Conventions**:

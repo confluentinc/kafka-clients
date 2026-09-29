@@ -31,7 +31,7 @@ pub struct DescribeAclsResult {
 impl DescribeAclsResult {
     /// Creates a new result from the described-ACLs future.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult#DescribeAclsResult")]
-    pub fn new(future: KafkaFuture<Vec<AclBinding>>) -> Self {
+    pub(crate) fn new(future: KafkaFuture<Vec<AclBinding>>) -> Self {
         Self { future }
     }
 

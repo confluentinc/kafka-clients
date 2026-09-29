@@ -99,6 +99,31 @@ pub struct Overload {
     pub params: Vec<String>,
     /// Whether it is `@Deprecated` (its class's deprecation not included).
     pub deprecated: bool,
+    /// Its access modifier, or the implicit one: `public` in an interface,
+    /// `private` for an enum constructor, package-private otherwise.
+    pub visibility: Visibility,
+}
+
+/// A Java access level, narrowest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Visibility {
+    Private,
+    /// No modifier, outside an interface.
+    Package,
+    Protected,
+    Public,
+}
+
+impl Visibility {
+    /// The Java keyword, `package-private` for none.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Visibility::Private => "private",
+            Visibility::Package => "package-private",
+            Visibility::Protected => "protected",
+            Visibility::Public => "public",
+        }
+    }
 }
 
 impl Overload {
@@ -215,6 +240,26 @@ impl JavaClass {
         } else {
             Deprecation::No
         }
+    }
+
+    /// The visibility of method `member` — a name or an overload signature
+    /// `name(T1,T2)`: for a name, the widest of its overloads, since the Rust
+    /// item may translate any of them. `None` when the class declares no such
+    /// method (a field, or an unknown member).
+    pub fn visibility(&self, member: &str) -> Option<Visibility> {
+        let name = member.split_once('(').map_or(member, |(name, _)| name);
+        let is_signature = name.len() < member.len();
+        self.overloads
+            .iter()
+            .filter(|o| {
+                if is_signature {
+                    o.signature() == member
+                } else {
+                    o.name == name
+                }
+            })
+            .map(|o| o.visibility)
+            .max()
     }
 }
 
@@ -673,6 +718,9 @@ const MODIFIERS: &[&str] = &[
 #[derive(Debug)]
 struct Scanned {
     path: Vec<String>,
+    /// Whether it is an interface (or an `@interface`), whose members are
+    /// implicitly `public`.
+    is_interface: bool,
     overloads: Vec<Overload>,
     fields: BTreeMap<String, bool>,
     deprecated: bool,
@@ -686,6 +734,8 @@ struct Open {
     body: usize,
     /// Whether it is an enum still in its constant list (before the first `;`).
     enum_constants: bool,
+    /// Whether it is an enum, whose constructors are implicitly `private`.
+    is_enum: bool,
 }
 
 /// The classes declared in a Java file, each with the methods, constructors
@@ -701,10 +751,12 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut stack: Vec<Open> = Vec::new();
     let mut depth = 0usize;
     let mut paren = 0usize;
-    // A class declaration seen, waiting for its `{`: (name, deprecated, is enum).
-    let mut pending: Option<(String, bool, bool)> = None;
+    // A class declaration seen, waiting for its `{`: (name, deprecated, keyword).
+    let mut pending: Option<(String, bool, String)> = None;
     // An `@Deprecated` seen, waiting for the declaration it annotates.
     let mut deprecated = false;
+    // An access modifier seen, waiting for the declaration it applies to.
+    let mut visibility: Option<Visibility> = None;
     let mut i = 0;
     while i < toks.len() {
         let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
@@ -718,19 +770,27 @@ fn scan(src: &str) -> Vec<Scanned> {
                 continue;
             },
             Tok::Punct('{') => {
-                if let Some((name, dep, is_enum)) = pending.take() {
+                if let Some((name, dep, keyword)) = pending.take() {
                     let parent = stack.last().map(|o| &out[o.idx]);
                     let mut path: Vec<String> = parent.map(|p| p.path.clone()).unwrap_or_default();
                     let dep = dep || parent.is_some_and(|p| p.deprecated);
                     path.push(name);
-                    out.push(Scanned { path, overloads: Vec::new(), fields: BTreeMap::new(), deprecated: dep });
+                    out.push(Scanned {
+                        path,
+                        is_interface: keyword == "interface",
+                        overloads: Vec::new(),
+                        fields: BTreeMap::new(),
+                        deprecated: dep,
+                    });
                     depth += 1;
-                    stack.push(Open { idx: out.len() - 1, body: depth, enum_constants: is_enum });
+                    let is_enum = keyword == "enum";
+                    stack.push(Open { idx: out.len() - 1, body: depth, enum_constants: is_enum, is_enum });
                     i += 1;
                     continue;
                 }
                 if member_level {
                     deprecated = false;
+                    visibility = None;
                 }
                 depth += 1;
             },
@@ -740,9 +800,11 @@ fn scan(src: &str) -> Vec<Scanned> {
                 }
                 depth = depth.saturating_sub(1);
                 deprecated = false;
+                visibility = None;
             },
             Tok::Punct(';') if member_level => {
                 deprecated = false;
+                visibility = None;
                 if let Some(o) = stack.last_mut() {
                     o.enum_constants = false;
                 }
@@ -753,10 +815,18 @@ fn scan(src: &str) -> Vec<Scanned> {
                 // `Foo.class` is a literal, not a declaration; `@interface` is one.
                 let is_literal = i > 0 && toks[i - 1] == Tok::Punct('.');
                 if let (false, Some(Tok::Ident(name))) = (is_literal, toks.get(i + 1)) {
-                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw == "enum"));
+                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw.clone()));
+                    visibility = None;
                     i += 2;
                     continue;
                 }
+            },
+            Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
+                visibility = Some(match m.as_str() {
+                    "public" => Visibility::Public,
+                    "protected" => Visibility::Protected,
+                    _ => Visibility::Private,
+                });
             },
             Tok::Ident(name) if member_level && pending.is_none() => {
                 let Some(open) = stack.last() else {
@@ -768,15 +838,24 @@ fn scan(src: &str) -> Vec<Scanned> {
                     && matches!(next, Some(Tok::Punct(',' | ';' | '(' | '{' | '}')))
                     && !matches!(toks.get(i - 1), Some(Tok::Punct('.')));
                 let idx = open.idx;
+                let is_enum = open.is_enum;
                 if is_constant {
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                 } else if next == Some(&Tok::Punct('(')) {
                     if is_method_decl(&toks, i, &out[idx].path) {
                         let params = params(&toks, i + 1);
+                        let implicit = if out[idx].is_interface {
+                            Visibility::Public
+                        } else if is_enum && out[idx].path.last() == Some(name) {
+                            Visibility::Private
+                        } else {
+                            Visibility::Package
+                        };
                         out[idx].overloads.push(Overload {
                             name: name.clone(),
                             params,
                             deprecated: std::mem::take(&mut deprecated),
+                            visibility: visibility.take().unwrap_or(implicit),
                         });
                     }
                 } else if matches!(next, Some(Tok::Punct('=' | ';')))
@@ -947,6 +1026,47 @@ mod tests {
         assert_eq!(outer.fields.keys().collect::<Vec<_>>(), ["S", "m"]);
         let kind = classes.iter().find(|c| c.path == ["Outer", "Kind"]).unwrap();
         assert_eq!(kind.fields.keys().collect::<Vec<_>>(), ["A", "B"]);
+    }
+
+    #[test]
+    fn scans_visibilities() {
+        let src = r#"
+            package x;
+            public class Outer {
+                public Outer() {}
+                private Outer(int a) {}
+                protected void hook() {}
+                void helper() {}
+                /** @deprecated */ @Deprecated public static final int F = 1;
+                private static List<String> tags(String... names) { return null; }
+                public Set<String> tags() { return null; }
+                @Override public String toString() { return ""; }
+                interface Api { void call(); private void inner() {} default boolean ok() { return true; } }
+                enum Kind { A; Kind() {} public String code() { return ""; } int rank() { return 0; } }
+            }
+        "#;
+        let outer = class_of(src, &["Outer"]);
+        let vis = |class: &JavaClass, member: &str| class.visibility(member);
+        assert_eq!(vis(&outer, "Outer()"), Some(Visibility::Public));
+        assert_eq!(vis(&outer, "Outer(int)"), Some(Visibility::Private));
+        // A name alone matches its widest overload.
+        assert_eq!(vis(&outer, "Outer"), Some(Visibility::Public));
+        assert_eq!(vis(&outer, "hook"), Some(Visibility::Protected));
+        assert_eq!(vis(&outer, "helper"), Some(Visibility::Package));
+        assert_eq!(vis(&outer, "tags(String[])"), Some(Visibility::Private));
+        assert_eq!(vis(&outer, "tags()"), Some(Visibility::Public));
+        assert_eq!(vis(&outer, "toString"), Some(Visibility::Public));
+        // A field, or an unknown member, is no method.
+        assert_eq!(vis(&outer, "F"), None);
+        assert_eq!(vis(&outer, "missing"), None);
+        let api = class_of(src, &["Outer", "Api"]);
+        assert_eq!(vis(&api, "call"), Some(Visibility::Public));
+        assert_eq!(vis(&api, "inner"), Some(Visibility::Private));
+        assert_eq!(vis(&api, "ok"), Some(Visibility::Public));
+        let kind = class_of(src, &["Outer", "Kind"]);
+        assert_eq!(vis(&kind, "Kind"), Some(Visibility::Private));
+        assert_eq!(vis(&kind, "code"), Some(Visibility::Public));
+        assert_eq!(vis(&kind, "rank"), Some(Visibility::Package));
     }
 
     fn class_of(src: &str, path: &[&str]) -> JavaClass {

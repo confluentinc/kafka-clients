@@ -149,7 +149,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
@@ -1480,7 +1480,7 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
-    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+    AdminClient::create(config).expect("admin client")
 }
 
 /// (a no-op record is just appended).

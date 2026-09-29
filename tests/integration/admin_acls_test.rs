@@ -180,13 +180,13 @@ async fn deleted_bindings<B: AdminBackend>(admin: &B, filters: &[AclBindingFilte
     let mut bindings = Vec::new();
     for filter in filters {
         let results = deleted[filter].as_ref().expect("checked by all_of_exactly");
-        for result in results.values() {
+        for result in &results.values {
             assert!(
-                result.error().is_none(),
+                result.error.is_none(),
                 "{backend} backend: deleting an ACL matched by {filter:?} failed inside the FilterResult: {:?}",
-                result.error()
+                result.error
             );
-            if let Some(binding) = result.binding() {
+            if let Some(binding) = &result.binding {
                 bindings.push(binding.clone());
             }
         }
@@ -272,7 +272,7 @@ async fn describe_acls_filter_selectivity<F: AdminBackendFactory>(ctx: &mut Test
 }
 
 /// (c) `delete_acls` reports the removed binding through its per-filter
-/// [`FilterResults`], and `describe_acls` then shows it gone.
+/// `FilterResults`, and `describe_acls` then shows it gone.
 ///
 /// The original read only the flattened `all()` list, which is a fold over the
 /// same data. This asserts the two-level shape Java actually has — the per-filter
@@ -299,22 +299,22 @@ async fn delete_acls_reports_the_removed_binding<F: AdminBackendFactory>(ctx: &m
         .as_ref()
         .unwrap_or_else(|e| panic!("{backend} backend: delete acls for the filter: {e}"));
     assert_eq!(
-        results.values().len(),
+        results.values.len(),
         1,
         "{backend} backend: the filter matched exactly one ACL, got {results:?}"
     );
-    let result = &results.values()[0];
+    let result = &results.values[0];
     assert_eq!(
-        result.binding(),
+        result.binding.as_ref(),
         Some(&acl),
         "{backend} backend: the FilterResult should carry the deleted binding"
     );
     // Both halves of a FilterResult are independent optionals, so "the binding is
     // set" does not imply "the exception is not" — assert it.
     assert!(
-        result.error().is_none(),
+        result.error.is_none(),
         "{backend} backend: a successfully deleted ACL carries no exception, got {:?}",
-        result.error()
+        result.error
     );
 
     // describe now shows it gone.

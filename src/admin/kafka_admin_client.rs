@@ -281,7 +281,7 @@ impl KafkaAdminClient {
     /// Returns an error if the bootstrap addresses cannot be resolved or the
     /// channel builder cannot be created.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
-    pub fn new(config: AdminClientConfig) -> Result<Self, Error> {
+    pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
         // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
         // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
         //
@@ -7437,10 +7437,22 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_before_offset(3));
-        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_before_offset(10));
+        records.insert(
+            TopicPartition::new("my_topic", 0),
+            RecordsToDelete::before_offset_with_offset(3),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 1),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 2),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 3),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7474,7 +7486,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7510,8 +7522,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset_with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();

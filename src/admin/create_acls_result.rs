@@ -33,7 +33,7 @@ pub struct CreateAclsResult {
 impl CreateAclsResult {
     /// Creates a new result from the per-binding futures.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#CreateAclsResult")]
-    pub fn new(futures: HashMap<AclBinding, KafkaFuture<()>>) -> Self {
+    pub(crate) fn new(futures: HashMap<AclBinding, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
 

@@ -1410,15 +1410,15 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// `private_bounds` do not, because they ignore a `pub` item declared inside a
 /// `pub(crate)` module — the shape every privatised package here has.
 ///
-/// **Members are not checked.** Only module-level items are walked, never the
-/// `fn`s, `const`s and associated items of an `impl` block, and the Java scan
-/// ([`crate::java`]) records no member modifiers. So a `pub fn` on a public
-/// type that translates a Java `private` or package-private member (a
-/// "Visible for testing" getter, a private static helper) passes this rule;
-/// keep such members `pub(crate)` by review. A member check would need the
-/// scan to record each overload's visibility (an interface member being
-/// public by default) and the rule to walk the inherent `impl`s of every
-/// public type.
+/// **Members:** a public method another crate can call — a `pub fn` of an
+/// inherent `impl` of a public type, or a method of a public trait — must not
+/// translate a Java method that is not `public` (CLAUDE.md §3): a `private` or
+/// package-private one (a "Visible for testing" getter, a private static
+/// helper) or a `protected` one, which Java exposes only to subclasses, a
+/// relation Rust has no counterpart for. The method is found by its
+/// `Class#method` marker; a marker naming a method only by name matches its
+/// widest overload, and an interface member without a modifier is `public`.
+/// A method marked with a field, or unmarked, is not checked here.
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].
@@ -1527,7 +1527,37 @@ impl PublicAudience {
                 }
             }
         }
-        checked + check_generated_module(krate, findings)
+        checked + self.check_members(krate, findings) + check_generated_module(krate, findings)
+    }
+
+    /// The member half: no public method translates a Java method that is not
+    /// `public`.
+    fn check_members(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            for marker in java_markers(&item.attrs) {
+                let Some(member) = JavaIndex::marker_member(&marker) else {
+                    continue;
+                };
+                let Some(class) = self.index.resolve(&marker) else {
+                    continue;
+                };
+                let Some(visibility) = class.visibility(member) else {
+                    continue;
+                };
+                checked += 1;
+                if visibility != java::Visibility::Public && !self.allow.allows(&[marker.as_str()]) {
+                    findings.push(format!(
+                        "{}: `{}` is public but translates `{}`, which is {} in Java; make it `pub(crate)`",
+                        file.display(),
+                        item.name,
+                        marker.trim_start_matches(java::MARKER_PREFIX),
+                        visibility.keyword()
+                    ));
+                }
+            }
+        }
+        checked
     }
 
     /// The Java class C symbol prefix `kafka_<pkg>_<Class>` names, as its
@@ -1818,6 +1848,9 @@ impl Rule for PublicAudience {
    package-info.java says \"not a supported Kafka API\", and annotated
    `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item, or a deliberate
    exception, goes in xtask/public-audience-allowlist.txt with its reason.
+   Likewise a public method may only translate a Java method that is `public`
+   (an interface member without a modifier is): make the others `pub(crate)`,
+   or allow-list the method's marker with the reason.
    A public signature naming a crate-private type is caught by rustc's
    `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }

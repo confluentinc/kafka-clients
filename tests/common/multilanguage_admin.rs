@@ -39,16 +39,15 @@ use confluent_kafka::admin::{
     DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
     DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
-    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
-    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
-    UserScramCredentialsDescription,
+    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FinalizedVersionRange, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
+    ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions,
+    UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -71,7 +70,7 @@ use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
     AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
-    FencedProducer, Listings, Outcomes, ReplicaLogDirInfoView,
+    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -308,22 +307,22 @@ impl MultilanguageAdmin {
         ))
     }
 
-    /// Rebuilds a [`FilterResults`], preserving each matched ACL's own error.
+    /// Rebuilds a [`FilterResultsView`], preserving each matched ACL's own error.
     ///
-    /// Both halves of a [`FilterResult`] are independent optionals rather than a
+    /// Both halves of a [`FilterResultView`] are independent optionals rather than a
     /// `oneof` (the enclosing per-filter future already resolved), so both are
     /// carried through unchanged; a backend that set neither or both is visible to
     /// the scenario rather than normalised here.
-    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResults, Error> {
+    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResultsView, Error> {
         let mut values = Vec::with_capacity(results.values.len());
         for deleted in results.values {
             let binding = match deleted.binding {
                 Some(binding) => Some(self.acl_binding(binding)?),
                 None => None,
             };
-            values.push(FilterResult::new(binding, deleted.exception.map(kafka_error_from_proto)));
+            values.push(FilterResultView { binding, error: deleted.exception.map(kafka_error_from_proto) });
         }
-        Ok(FilterResults::new(values))
+        Ok(FilterResultsView { values })
     }
 
     /// Rebuilds a [`ClientQuotaEntity`], preserving each nullable entity name.
@@ -2071,7 +2070,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error> {
         let request = proto::DeleteAclsRequest {
             admin_id: self.admin_id,
             filters: filters.iter().map(acl_binding_filter_to_proto).collect(),

@@ -33,7 +33,7 @@ pub struct DescribeDelegationTokenResult {
 impl DescribeDelegationTokenResult {
     /// Creates a new result from the delegation-tokens future.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult#DescribeDelegationTokenResult")]
-    pub fn new(delegation_tokens: KafkaFuture<Vec<DelegationToken>>) -> Self {
+    pub(crate) fn new(delegation_tokens: KafkaFuture<Vec<DelegationToken>>) -> Self {
         Self { delegation_tokens }
     }
 

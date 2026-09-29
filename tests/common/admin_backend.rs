@@ -24,8 +24,8 @@ use std::time::Duration;
 use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::config_entry::{ConfigSource, ConfigType};
 use confluent_kafka::admin::{
-    AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
-    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
+    AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClient, AdminClientConfig, AlterClientQuotasOptions,
+    AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
     AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
     ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
     CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
@@ -34,11 +34,11 @@ use confluent_kafka::admin::{
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, KafkaAdminClient,
-    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
-    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
-    OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
+    LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
+    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
     UserScramCredentialAlteration, UserScramCredentialsDescription,
@@ -475,8 +475,9 @@ pub trait AdminBackend {
     /// Delete every ACL matching each filter, keyed by the filter.
     ///
     /// The per-filter value is *nested* **and** carries its own errors: Java's
-    /// per-filter future resolves to a whole [`FilterResults`], one
-    /// `FilterResult { binding, exception }` per ACL the filter matched. So a
+    /// per-filter future resolves to a whole `FilterResults`, one
+    /// `FilterResult { binding, exception }` per ACL the filter matched, here as
+    /// a [`FilterResultsView`]. So a
     /// filter can succeed here — it matched — while an individual matched ACL
     /// failed to delete. That is `admin_service.proto`'s envelope exception 3,
     /// and `deleteAcls` is the third and last of the three RPCs that reach it
@@ -485,7 +486,7 @@ pub trait AdminBackend {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error>;
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error>;
 
     /// Describe the client quotas matching `filter`, keyed by entity.
     ///
@@ -810,15 +811,15 @@ where
 // production types.
 //
 // Slice G5 added exactly one, [`FeatureMetadataView`]: `FeatureMetadata::new` is
-// `pub(crate)`. Everything else in that slice crosses as a production type,
+// `pub(crate)`. [`FilterResultsView`] joined it later, when `FilterResult::new`
+// and `FilterResults::new` were made `pub(crate)` to match Java. Everything else in that slice crosses as a production type,
 // checked one by one rather than assumed — `AclBinding::new`,
 // `AclBindingFilter::new`, `AccessControlEntry::new`,
 // `AccessControlEntryFilter::new`, `ResourcePattern::new`,
 // `ResourcePatternFilter::new`, `ClientQuotaEntity::new`,
 // `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
 // `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
-// `UserScramCredentialsDescription::new`, `FilterResult::new`,
-// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
+// `UserScramCredentialsDescription::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
 // `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
 // `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
 // private, but it is an *input* the harness only reads, and its three public
@@ -958,6 +959,35 @@ pub struct FeatureMetadataView {
     pub supported_features: HashMap<String, SupportedVersionRange>,
 }
 
+/// Every ACL one `deleteAcls` filter matched, standing in for the production
+/// `DeleteAclsResult.FilterResults`.
+///
+/// `FilterResults::new` and `FilterResult::new` are `pub(crate)` — faithfully,
+/// because both Java constructors are package-private
+/// (`DeleteAclsResult.java`, no access modifier) — so a gRPC backend cannot
+/// rebuild what the wire carried. Output-only: no API takes it back, so it
+/// needs no server-side handle, only the data the backend's accessors read.
+#[derive(Clone, Debug)]
+pub struct FilterResultsView {
+    /// Java `FilterResults.values()`. Empty is a successful "the filter
+    /// matched nothing".
+    pub values: Vec<FilterResultView>,
+}
+
+/// One ACL a `deleteAcls` filter matched, standing in for the production
+/// `DeleteAclsResult.FilterResult`.
+///
+/// Both halves are independent optionals, as Java's accessors are: a backend
+/// that set both or neither stays visible to the scenario.
+#[derive(Clone, Debug)]
+pub struct FilterResultView {
+    /// Java `FilterResult.binding()`: the deleted binding, `None` on error.
+    pub binding: Option<AclBinding>,
+    /// Java `FilterResult.exception()`: why the delete failed, `None` on
+    /// success.
+    pub error: Option<Error>,
+}
+
 /// Where one replica lives and where it is moving to, standing in for the
 /// production `ReplicaLogDirInfo`.
 ///
@@ -1071,7 +1101,7 @@ impl RustNativeAdmin {
     /// Build a network-backed admin client from `config`.
     pub fn from_config(config: &HashMap<String, String>) -> Result<Self, Error> {
         let config = AdminClientConfig::new(config)?;
-        Ok(Self { admin: Box::new(KafkaAdminClient::new(config)?) })
+        Ok(Self { admin: AdminClient::create(config)? })
     }
 
     /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.
@@ -1507,9 +1537,22 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error> {
         let result = self.admin.delete_acls_with_options(filters, options);
-        Ok(resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await)
+        let outcomes = resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await;
+        Ok(outcomes
+            .into_iter()
+            .map(|(filter, outcome)| {
+                let view = outcome.map(|results| FilterResultsView {
+                    values: results
+                        .values()
+                        .iter()
+                        .map(|r| FilterResultView { binding: r.binding().cloned(), error: r.error().cloned() })
+                        .collect(),
+                });
+                (filter, view)
+            })
+            .collect())
     }
 
     async fn describe_client_quotas(

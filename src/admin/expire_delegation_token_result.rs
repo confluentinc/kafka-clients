@@ -32,7 +32,7 @@ pub struct ExpireDelegationTokenResult {
 impl ExpireDelegationTokenResult {
     /// Creates a new result from the expiry-timestamp future.
     #[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenResult#ExpireDelegationTokenResult")]
-    pub fn new(expiry_timestamp: KafkaFuture<i64>) -> Self {
+    pub(crate) fn new(expiry_timestamp: KafkaFuture<i64>) -> Self {
         Self { expiry_timestamp }
     }
 

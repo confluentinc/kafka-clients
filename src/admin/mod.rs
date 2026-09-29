@@ -21,6 +21,7 @@
 
 mod abort_transaction_result;
 mod abort_transaction_spec;
+mod admin_client;
 mod admin_client_config;
 mod alter_client_quotas_result;
 pub mod alter_config_op;
@@ -108,6 +109,7 @@ pub(crate) mod internals;
 
 pub use abort_transaction_result::AbortTransactionResult;
 pub use abort_transaction_spec::AbortTransactionSpec;
+pub use admin_client::AdminClient;
 pub use admin_client_config::AdminClientConfig;
 pub use alter_client_quotas_result::AlterClientQuotasResult;
 pub use alter_config_op::{AlterConfigOp, OpType};
