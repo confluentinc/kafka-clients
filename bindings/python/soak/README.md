@@ -140,15 +140,12 @@ End-to-end latency comes from the `send_time_ms` field in the payload.
 ### Only gaps are a hard failure
 
 The final `SUMMARY` line reports `verdict=FAIL (message loss)` if and only if
-`missed > 0`. Duplicates are expected, for two independent reasons:
-
-1. **No rebalance listener.** The soak registers no
-   `ConsumerRebalanceListener`, so offsets are not committed on
-   partitions-revoked.
-2. **`enable.idempotence` is inert.** The key is accepted by
-   `ProducerConfig`, but there is no producer-ID/sequence machinery behind it
-   in `src/producer/internals/sender.rs`, and transactions are not exposed
-   through the bindings.
+`missed > 0`. Duplicates are expected: the soak registers no
+`ConsumerRebalanceListener`, so offsets are not committed on partitions-revoked,
+and a rebalance replays each moved partition from its last committed offset. A
+duplicate here is a re-read of an offset already seen, not a second copy in the
+log, so producer idempotence (implemented since Milestone 11) does not change
+the count.
 
 **No exactly-once claims.** A duplicate count is a data point, not a defect.
 
