@@ -5467,52 +5467,143 @@ static void admin_delete_consumer_groups_trampoline(const char* group_id,
     PyGILState_Release(g);
 }
 
-// alterConsumerGroupOffsets / deleteConsumerGroupOffsets (Phase E; fire once
-// per partition, independently). The key is a `TopicPartition`, delivered as
-// (topic, partition) - mirrors admin_alter_partition_reassignments_trampoline.
-// Java's per-partition future is KafkaFuture<Void> for both, so there is no
-// value parameter.
-static void admin_alter_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
-    kafka_common_Error_t* error, void* user_data) {
-    PyObject* cb = (PyObject*)user_data;
+// alterConsumerGroupOffsets / deleteConsumerGroupOffsets /
+// removeMembersFromConsumerGroup. Java's result wraps ONE future
+// (`KafkaFuture<Map<key, Errors>>`) from which every accessor is derived, so the
+// native callback fires EXACTLY ONCE - also for an empty request - with either
+// the result handle or the whole-request error. The Python layer still
+// resolves one Future per requested key, so these trampolines fan that single
+// outcome out, calling `cb` exactly as the former per-key native callback did:
+//
+//   - result handle: once per requested key, with that key's outcome from
+//     Java's per-key accessor (`partitionResult` / `memberResult`) - an owned
+//     error, or NULL for success;
+//   - whole-request error: once per requested key, each call handed its own
+//     owned copy (kafka_common_Error_clone); the original is freed here.
+//
+// Every error handed to `cb` is owned by it and freed exactly once on the
+// Python side (KafkaError._from_c / KafkaError_destroy). `user_data` is a
+// context tuple owning one reference to `cb` and to the requested keys; the
+// single native invocation releases it, so no per-key incref is needed.
+
+// Builds the `(cb, ((topic, partition), ...))` context for the two
+// partition-keyed RPCs. Returns a new reference, or NULL with an exception set.
+static PyObject* admin_topic_partition_ctx(PyObject* cb, const char** topics,
+                                           const int32_t* partitions, Py_ssize_t n) {
+    PyObject* keys = PyTuple_New(n);
+    if (keys == NULL) return NULL;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue("(si)", topics[i], (int)partitions[i]);
+        if (key == NULL) { Py_DECREF(keys); return NULL; }
+        PyTuple_SET_ITEM(keys, i, key);
+    }
+    PyObject* ctx = PyTuple_Pack(2, cb, keys);
+    Py_DECREF(keys);
+    return ctx;
+}
+
+// Calls `cb(topic, partition, error)` for every `(topic, partition)` key in the
+// context, `error` coming from `per_key` on a result handle or a copy of
+// `whole_error`. Caller holds the GIL and frees the handle / `whole_error`.
+typedef kafka_common_Error_t* (*admin_partition_accessor_t)(const void* result,
+                                                            const char* topic,
+                                                            int32_t partition);
+static void admin_fan_out_partitions(PyObject* ctx, const void* result,
+                                     admin_partition_accessor_t per_key,
+                                     kafka_common_Error_t* whole_error) {
+    PyObject* cb = PyTuple_GET_ITEM(ctx, 0);
+    PyObject* keys = PyTuple_GET_ITEM(ctx, 1);
+    Py_ssize_t n = PyTuple_GET_SIZE(keys);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* key = PyTuple_GET_ITEM(keys, i);
+        const char* topic = PyUnicode_AsUTF8(PyTuple_GET_ITEM(key, 0));
+        long partition = PyLong_AsLong(PyTuple_GET_ITEM(key, 1));
+        if (topic == NULL || (partition == -1 && PyErr_Occurred())) { PyErr_Print(); continue; }
+        kafka_common_Error_t* e = result != NULL
+            ? per_key(result, topic, (int32_t)partition)
+            : kafka_common_Error_clone(whole_error);
+        PyObject* r = PyObject_CallFunction(cb, "siK", topic, (int)partition,
+                                            (unsigned long long)(uintptr_t)e);
+        if (r) Py_DECREF(r); else PyErr_Print();
+    }
+}
+
+static kafka_common_Error_t* admin_alter_offsets_partition_result(const void* r, const char* topic,
+                                                                  int32_t partition) {
+    return kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+        (const kafka_admin_AlterConsumerGroupOffsetsResult_t*)r, topic, partition);
+}
+
+static kafka_common_Error_t* admin_delete_offsets_partition_result(const void* r, const char* topic,
+                                                                   int32_t partition) {
+    return kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+        (const kafka_admin_DeleteConsumerGroupOffsetsResult_t*)r, topic, partition);
+}
+
+static void admin_alter_consumer_group_offsets_trampoline(
+    kafka_admin_AlterConsumerGroupOffsetsResult_t* result, kafka_common_Error_t* error,
+    void* user_data) {
+    PyObject* ctx = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
-        (unsigned long long)(uintptr_t)error);
-    if (r) Py_DECREF(r); else PyErr_Print();
-    Py_DECREF(cb);
+    admin_fan_out_partitions(ctx, result, admin_alter_offsets_partition_result, error);
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+    kafka_common_Error_destroy(error);
+    Py_DECREF(ctx);
     PyGILState_Release(g);
 }
 
-static void admin_delete_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
-    kafka_common_Error_t* error, void* user_data) {
-    PyObject* cb = (PyObject*)user_data;
+static void admin_delete_consumer_group_offsets_trampoline(
+    kafka_admin_DeleteConsumerGroupOffsetsResult_t* result, kafka_common_Error_t* error,
+    void* user_data) {
+    PyObject* ctx = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
-        (unsigned long long)(uintptr_t)error);
-    if (r) Py_DECREF(r); else PyErr_Print();
-    Py_DECREF(cb);
+    admin_fan_out_partitions(ctx, result, admin_delete_offsets_partition_result, error);
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+    kafka_common_Error_destroy(error);
+    Py_DECREF(ctx);
     PyGILState_Release(g);
 }
 
-// removeMembersFromConsumerGroup (Phase E; fires once per member,
-// independently, keyed by group instance id). Java's per-member future is
-// KafkaFuture<Void>, so there is no value parameter. In `removeAll` mode there
-// is no per-member key: the callback fires EXACTLY ONCE with a NULL group
-// instance id (-> Python None), carrying the whole operation's all() outcome.
-static void admin_remove_members_trampoline(const char* group_instance_id,
-    kafka_common_Error_t* error, void* user_data) {
-    PyObject* cb = (PyObject*)user_data;
+// removeMembersFromConsumerGroup: `user_data` is `(cb, remove_all, (id, ...))`.
+// With explicit members `cb(group_instance_id, error)` fires once per requested
+// member with its `memberResult`. In `removeAll` mode Java's `memberResult` is
+// not applicable, so `cb` fires EXACTLY ONCE with a NULL group instance id
+// (-> Python None) carrying the `all()` outcome.
+static void admin_remove_members_trampoline(
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t* result, kafka_common_Error_t* error,
+    void* user_data) {
+    PyObject* ctx = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
-    // "z" is the documented nullable-string code: in `removeAll` mode the FFI
-    // fires with group_instance_id == NULL (intended as Python None). "z" makes
-    // that intent explicit. Note "s" would behave identically HERE: in the
-    // PyObject_CallFunction / Py_BuildValue value-building family 's' and 'z'
-    // share one do_mkvalue case and both map NULL -> None (only the PyArg_Parse*
-    // parsing family requires "s" to be non-NULL). "z" is chosen for clarity.
-    PyObject* r = PyObject_CallFunction(cb, "zK", group_instance_id,
-        (unsigned long long)(uintptr_t)error);
-    if (r) Py_DECREF(r); else PyErr_Print();
-    Py_DECREF(cb);
+    PyObject* cb = PyTuple_GET_ITEM(ctx, 0);
+    int remove_all = PyObject_IsTrue(PyTuple_GET_ITEM(ctx, 1)) == 1;
+    PyObject* ids = PyTuple_GET_ITEM(ctx, 2);
+    // "z" is the documented nullable-string code: in `removeAll` mode the key
+    // is NULL (intended as Python None). In the PyObject_CallFunction /
+    // Py_BuildValue value-building family 's' and 'z' both map NULL -> None
+    // (only the PyArg_Parse* parsing family requires "s" to be non-NULL); "z"
+    // is chosen for clarity.
+    if (remove_all) {
+        kafka_common_Error_t* e = result != NULL
+            ? kafka_admin_RemoveMembersFromConsumerGroupResult_all(result)
+            : kafka_common_Error_clone(error);
+        PyObject* r = PyObject_CallFunction(cb, "zK", (const char*)NULL,
+                                            (unsigned long long)(uintptr_t)e);
+        if (r) Py_DECREF(r); else PyErr_Print();
+    } else {
+        Py_ssize_t n = PyTuple_GET_SIZE(ids);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            const char* id = PyUnicode_AsUTF8(PyTuple_GET_ITEM(ids, i));
+            if (id == NULL) { PyErr_Print(); continue; }
+            kafka_common_Error_t* e = result != NULL
+                ? kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, id)
+                : kafka_common_Error_clone(error);
+            PyObject* r = PyObject_CallFunction(cb, "zK", id, (unsigned long long)(uintptr_t)e);
+            if (r) Py_DECREF(r); else PyErr_Print();
+        }
+    }
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+    kafka_common_Error_destroy(error);
+    Py_DECREF(ctx);
     PyGILState_Release(g);
 }
 
@@ -5702,21 +5793,22 @@ static PyObject* py_Admin_alter_consumer_group_offsets_async(PyObject* self, PyO
         topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)offset;
         metadata[i] = meta; epochs[i] = (int32_t)epoch; has_epoch[i] = has ? true : false;
     }
-    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
-    // is built from the caller's `{(topic, partition): OffsetAndMetadata}`
-    // dict, already unique by construction, so the row count matches the
-    // number of times the native callback will actually fire - see
-    // admin_alter_consumer_group_offsets_trampoline. When `n` is 0 (an empty
-    // offsets map) the callback never fires at all - there is no per-key slot
-    // for the outcome, mirroring Java's empty `Map<TopicPartition,
-    // KafkaFuture<Void>>` in that case.
-    admin_incref_n(cb, n);
-    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, offsets, metadata,
-        epochs, has_epoch, (int32_t)n, timeout_ms, admin_alter_consumer_group_offsets_trampoline,
-        cb);
+    // The native callback fires exactly once (Java's single future); the
+    // trampoline then calls `cb` once per requested partition. `spec` is built
+    // from the caller's `{(topic, partition): OffsetAndMetadata}` dict, already
+    // unique by construction, so its rows are exactly the keys to resolve - see
+    // admin_alter_consumer_group_offsets_trampoline. For an empty offsets map
+    // the trampoline calls `cb` zero times.
+    PyObject* ctx = admin_topic_partition_ctx(cb, topics, partitions, n);
+    if (ctx != NULL) {
+        kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, offsets,
+            metadata, epochs, has_epoch, (int32_t)n, timeout_ms,
+            admin_alter_consumer_group_offsets_trampoline, ctx);
+    }
     PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
     PyMem_Free(metadata); PyMem_Free(epochs); PyMem_Free(has_epoch);
+    if (ctx == NULL) return NULL;
     Py_RETURN_NONE;
 }
 
@@ -5727,14 +5819,17 @@ static PyObject* py_Admin_delete_consumer_group_offsets_async(PyObject* self, Py
     const char** topics = NULL; int32_t* partitions = NULL;
     Py_ssize_t n = build_topic_partitions(spec, &topics, &partitions);
     if (n < 0) return NULL;
-    // One callback invocation per partition - see
-    // admin_delete_consumer_group_offsets_trampoline. Never fires at all when
-    // `n` is 0, for the same reason given on alter_consumer_group_offsets_async.
-    admin_incref_n(cb, n);
-    kafka_admin_AdminClient_delete_consumer_group_offsets_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, (int32_t)n,
-        timeout_ms, admin_delete_consumer_group_offsets_trampoline, cb);
+    // The native callback fires exactly once; the trampoline calls `cb` once
+    // per requested (already deduplicated) partition - see
+    // admin_delete_consumer_group_offsets_trampoline.
+    PyObject* ctx = admin_topic_partition_ctx(cb, topics, partitions, n);
+    if (ctx != NULL) {
+        kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, (int32_t)n,
+            timeout_ms, admin_delete_consumer_group_offsets_trampoline, ctx);
+    }
     PyMem_Free(topics); PyMem_Free(partitions);
+    if (ctx == NULL) return NULL;
     Py_RETURN_NONE;
 }
 
@@ -5764,19 +5859,23 @@ static PyObject* py_Admin_remove_members_from_consumer_group_async(PyObject* sel
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(members, &ids);
     if (n < 0) return NULL;
-    // One callback invocation per member (Java's per-key KafkaFuture), keyed by
-    // group instance id - see admin_remove_members_trampoline. In `removeAll`
-    // mode there is no per-member key: `memberResult` is not applicable, so the
-    // callback fires EXACTLY ONCE with a NULL group instance id, carrying the
-    // whole operation's `all()` outcome. `members` is empty in that mode (n == 0),
-    // so incref once for that single whole-op callback. For an (unsubmittable)
-    // empty member list WITHOUT `removeAll`, `n` is also 0 and the callback never
-    // fires - there is no per-member key to deliver it to, and no incref is owed.
-    admin_incref_n(cb, remove_all ? 1 : n);
-    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
-        (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, cb);
+    // The native callback fires exactly once (Java's single future); the
+    // trampoline then calls `cb` once per requested member, keyed by group
+    // instance id, or - in `removeAll` mode, where `memberResult` is not
+    // applicable and `members` is empty - exactly once with a NULL group
+    // instance id carrying the `all()` outcome. See
+    // admin_remove_members_trampoline. The context snapshots `members` (the
+    // caller's already-deduplicated id list) so the trampoline knows the keys.
+    PyObject* id_tuple = PySequence_Tuple(members);
+    PyObject* ctx = id_tuple == NULL ? NULL
+        : Py_BuildValue("(OON)", cb, remove_all ? Py_True : Py_False, id_tuple);
+    if (ctx != NULL) {
+        kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
+            (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, ctx);
+    }
     PyMem_Free(ids);
+    if (ctx == NULL) return NULL;
     Py_RETURN_NONE;
 }
 

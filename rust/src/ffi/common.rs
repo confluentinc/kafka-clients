@@ -1385,6 +1385,23 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
     }
 }
 
+/// Returns an independent, owned copy of an error handle: same variant, code,
+/// message, payload and cause chain.
+///
+/// Every owned `kafka_common_Error_t` is freed exactly once, so a caller that
+/// must hand one error to several consumers — for example a binding that
+/// resolves one per-key future per requested key from a single whole-request
+/// failure — hands each its own copy. Free the copy with
+/// [`kafka_common_Error_destroy`]; the original is left untouched.
+///
+/// # Safety
+///
+/// `error` must be a valid, non-null error handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_clone(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    box_error(unsafe { error_ref(error) }.error.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
@@ -4401,6 +4418,33 @@ mod tests {
             let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
             assert!(!guarded_new(false, &mut out_error).is_null());
             assert!(out_error.is_null(), "a call that does not panic leaves out_error alone");
+        }
+    }
+
+    /// A clone is an independent handle with the same variant, message and
+    /// cause chain, freed separately from the original.
+    #[test]
+    fn error_clone_is_an_independent_equal_handle() {
+        let original = box_error(Error::kafka_message_source("outer", Error::group_authorization("g")));
+        // SAFETY: Test code: `original` is a live handle from `box_error` just above;
+        // `kafka_common_Error_clone` returns a fresh owned handle, every accessor reads a
+        // live handle, and each of `original` and `copy` is destroyed exactly once, with
+        // `copy` read after `original` is freed to show it is independent.
+        unsafe {
+            let copy = kafka_common_Error_clone(original);
+            assert_ne!(copy, original);
+            assert_eq!(kafka_common_Error_code(copy), kafka_common_Error_code(original));
+            assert_eq!(CStr::from_ptr(kafka_common_Error_message(copy)).to_str(), Ok("outer"));
+            assert_eq!(
+                kafka_common_Error_is_kafka_error(copy),
+                kafka_common_Error_is_kafka_error(original)
+            );
+            assert_eq!(kafka_common_Error_is_api_error(copy), kafka_common_Error_is_api_error(original));
+            assert!(matches!(error_ref(copy).error.source(), Some(Error::GroupAuthorization(_))));
+            kafka_common_Error_destroy(original);
+            // The copy outlives the original.
+            assert_eq!(CStr::from_ptr(kafka_common_Error_message(copy)).to_str(), Ok("outer"));
+            kafka_common_Error_destroy(copy);
         }
     }
 }

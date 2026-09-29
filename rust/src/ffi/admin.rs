@@ -156,10 +156,11 @@ use crate::admin::KafkaAdminClient;
 use crate::admin::config_entry::{ConfigSource, ConfigType};
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
-    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
-    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
+    ClassicGroupDescription, Config, ConfigEntry, ConsumerGroupDescription, CreateAclsOptions,
+    CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
     DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
     DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
     DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
@@ -170,11 +171,12 @@ use crate::admin::{
     ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient,
     NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState,
-    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
-    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TerminateTransactionOptions, TopicDescription,
-    TopicListing, TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState,
-    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
-    UserScramCredentialUpsertion, UserScramCredentialsDescription,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
+    ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
+    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
+    UserScramCredentialsDescription,
 };
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -185,6 +187,7 @@ use crate::common::quota::{
 };
 use crate::common::requests::ListOffsetsRequest;
 
+use crate::common::protocol::Errors;
 use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
@@ -194,6 +197,7 @@ use crate::common::{
     TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
 use crate::consumer::OffsetAndMetadata;
+use crate::leave_group_request_data::MemberIdentity;
 
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -14061,110 +14065,64 @@ fn submit_list_consumer_group_offsets_entries(
     Ok(entries)
 }
 
-/// Turns a single whole-call future into an empty per-key outcome map.
-///
-/// Three of the group RPCs back every per-key future with **one** source
-/// future. When the request selected no keys there is no per-key slot for a
-/// failure to occupy, so the source future is awaited directly and its error
-/// becomes the call's error — which mirrors Java, where `all()` is then the
-/// only observable outcome.
-fn empty_outcomes<K, V>(all: KafkaFuture<()>) -> KafkaFuture<HashMap<K, V>>
-where
-    K: Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-{
-    all.then_apply(|()| HashMap::new())
-}
+/// The outcome of the single future behind `alterConsumerGroupOffsets` and
+/// `deleteConsumerGroupOffsets`: Java's
+/// `KafkaFuture<Map<TopicPartition, Errors>>`.
+type PartitionErrorsOutcome = Result<HashMap<TopicPartition, Errors>, Error>;
+/// The outcome of the single future behind `removeMembersFromConsumerGroup`:
+/// Java's `KafkaFuture<Map<MemberIdentity, Errors>>`.
+type MemberErrorsOutcome = Result<HashMap<MemberIdentity, Errors>, Error>;
+/// A submitted `alterConsumerGroupOffsets`, its requested partitions and the
+/// outcome of its single future — what its result handle is built from.
+type AlterConsumerGroupOffsetsResolved = (AlterConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
+/// A submitted `deleteConsumerGroupOffsets`, its requested partitions and the
+/// outcome of its single future — what its result handle is built from.
+type DeleteConsumerGroupOffsetsResolved =
+    (DeleteConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
+/// A submitted `removeMembersFromConsumerGroup`, its requested members (empty
+/// in `removeAll` mode) and the outcome of its single future — what its result
+/// handle is built from.
+type RemoveMembersFromConsumerGroupResolved =
+    (RemoveMembersFromConsumerGroupResult, Vec<MemberToRemove>, MemberErrorsOutcome);
 
-/// Submits `alterConsumerGroupOffsets` and returns the collect-all future over
-/// its per-partition futures.
+/// Submits `alterConsumerGroupOffsets` and returns a future that awaits the
+/// result's **single** underlying future — Java's
+/// `KafkaFuture<Map<TopicPartition, Errors>>`, from which `partitionResult` and
+/// `all()` are both derived — once.
+///
+/// No per-partition future is built: the handle evaluates Java's accessors
+/// against the resolved outcome through the core result's `resolved_*`
+/// methods, so the derivation lives in one place.
 fn submit_alter_consumer_group_offsets(
     admin: &dyn Admin,
     group_id: &str,
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
     options: AlterConsumerGroupOffsetsOptions,
-) -> KafkaFuture<PartitionVoidOutcomes> {
+) -> impl std::future::Future<Output = AlterConsumerGroupOffsetsResolved> + Send + use<> {
     let result = admin.alter_consumer_group_offsets_with_options(group_id, offsets, options);
-    if offsets.is_empty() {
-        return empty_outcomes(result.all());
+    let requested: Vec<TopicPartition> = offsets.keys().cloned().collect();
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
-        offsets.keys().map(|tp| (tp.clone(), result.partition_result(tp))).collect();
-    KafkaFuture::join_map_results(entries)
 }
 
-/// Submits `alterConsumerGroupOffsets`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_alter_consumer_group_offsets`]; see the "RPC submission helpers
-/// — per-key (unjoined) variants" note above.
-///
-/// Unlike the joined variant, an empty `offsets` map yields **no** entries
-/// rather than falling back to `result.all()`: the per-key delivery model has
-/// no per-call callback slot to report a whole-call failure through (only one
-/// callback per key in `keys`, and `keys` is empty too when `offsets` is),
-/// exactly mirroring Java's own `Map<TopicPartition, KafkaFuture<Void>>` being
-/// empty in that case. The RPC is still submitted (so any side effect Java's
-/// real call has still happens); there is simply nothing to attach a per-key
-/// future to.
-fn submit_alter_consumer_group_offsets_entries(
-    admin: &dyn Admin,
-    group_id: &str,
-    offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-    options: AlterConsumerGroupOffsetsOptions,
-) -> Vec<(TopicPartition, KafkaFuture<()>)> {
-    let result = admin.alter_consumer_group_offsets_with_options(group_id, offsets, options);
-    if offsets.is_empty() {
-        return Vec::new();
-    }
-    offsets.keys().map(|tp| (tp.clone(), result.partition_result(tp))).collect()
-}
-
-/// Submits `deleteConsumerGroupOffsets` and returns the collect-all future over
-/// its per-partition futures.
-///
-/// `partitionResult(tp)` throws for a partition that was not requested, which
-/// cannot happen here since the requested set drives the join; the error is
-/// propagated rather than dropped.
+/// Submits `deleteConsumerGroupOffsets` and returns a future that awaits the
+/// result's single underlying future once. Same shape as
+/// [`submit_alter_consumer_group_offsets`].
 fn submit_delete_consumer_group_offsets(
     admin: &dyn Admin,
     group_id: &str,
     partitions: &HashSet<TopicPartition>,
     options: DeleteConsumerGroupOffsetsOptions,
-) -> Result<KafkaFuture<PartitionVoidOutcomes>, Error> {
+) -> impl std::future::Future<Output = DeleteConsumerGroupOffsetsResolved> + Send + use<> {
     let result = admin.delete_consumer_group_offsets_with_options(group_id, partitions, options);
-    if partitions.is_empty() {
-        return Ok(empty_outcomes(result.all()));
+    let requested: Vec<TopicPartition> = partitions.iter().cloned().collect();
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let mut entries: Vec<(TopicPartition, KafkaFuture<()>)> = Vec::with_capacity(partitions.len());
-    for tp in partitions {
-        entries.push((tp.clone(), result.partition_result(tp)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
 }
-
-/// Submits `deleteConsumerGroupOffsets`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_delete_consumer_group_offsets`]; see the "RPC submission
-/// helpers — per-key (unjoined) variants" note above. An empty `partitions`
-/// set yields no entries, for the same reason given on
-/// [`submit_alter_consumer_group_offsets_entries`].
-fn submit_delete_consumer_group_offsets_entries(
-    admin: &dyn Admin,
-    group_id: &str,
-    partitions: &HashSet<TopicPartition>,
-    options: DeleteConsumerGroupOffsetsOptions,
-) -> Result<Vec<(TopicPartition, KafkaFuture<()>)>, Error> {
-    let result = admin.delete_consumer_group_offsets_with_options(group_id, partitions, options);
-    if partitions.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut entries: Vec<(TopicPartition, KafkaFuture<()>)> = Vec::with_capacity(partitions.len());
-    for tp in partitions {
-        entries.push((tp.clone(), result.partition_result(tp)?));
-    }
-    Ok(entries)
-}
-
 /// Submits `deleteConsumerGroups` and returns the collect-all future over its
 /// per-group futures.
 fn submit_delete_consumer_groups(
@@ -14189,54 +14147,25 @@ fn submit_delete_consumer_groups_entries(
     result.deleted_groups().into_iter().collect()
 }
 
-/// Submits `removeMembersFromConsumerGroup` and returns the collect-all future
-/// over its per-member futures, keyed by group instance id.
+/// Submits `removeMembersFromConsumerGroup` and returns a future that awaits
+/// the result's single underlying future — Java's
+/// `KafkaFuture<Map<MemberIdentity, Errors>>`, from which `memberResult` and
+/// `all()` are both derived — once. Same shape as
+/// [`submit_alter_consumer_group_offsets`].
 ///
-/// In `removeAll` mode Java's `memberResult` is not applicable at all, so the
-/// single `all()` future is the outcome and the C result carries no keys.
+/// The requested members are empty in `removeAll` mode, where Java's
+/// `memberResult` is not applicable at all.
 fn submit_remove_members_from_consumer_group(
     admin: &dyn Admin,
     group_id: &str,
     options: RemoveMembersFromConsumerGroupOptions,
-) -> Result<KafkaFuture<GroupVoidOutcomes>, Error> {
-    let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
+) -> impl std::future::Future<Output = RemoveMembersFromConsumerGroupResolved> + Send + use<> {
+    let requested: Vec<MemberToRemove> = options.members().iter().cloned().collect();
     let result = admin.remove_members_from_consumer_group_with_options(group_id, options);
-    if members.is_empty() {
-        return Ok(empty_outcomes(result.all()));
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let mut entries: Vec<(String, KafkaFuture<()>)> = Vec::with_capacity(members.len());
-    for member in &members {
-        entries.push((member.group_instance_id().to_string(), result.member_result(member)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
-}
-
-/// Submits `removeMembersFromConsumerGroup`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin`
-/// call as [`submit_remove_members_from_consumer_group`]; see the "RPC
-/// submission helpers — per-key (unjoined) variants" note above.
-///
-/// In `removeAll` mode (`options.members()` empty) this yields no entries, for
-/// the same reason given on [`submit_alter_consumer_group_offsets_entries`]:
-/// Java's `memberResult` is not applicable in that mode either (it throws
-/// `IllegalArgumentException`), so there is no per-member key to deliver a
-/// callback for — a caller wanting to observe `removeAll`'s outcome uses the
-/// synchronous entry point's `all()`-backed result instead.
-fn submit_remove_members_from_consumer_group_entries(
-    admin: &dyn Admin,
-    group_id: &str,
-    options: RemoveMembersFromConsumerGroupOptions,
-) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
-    let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
-    let result = admin.remove_members_from_consumer_group_with_options(group_id, options);
-    if members.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut entries: Vec<(String, KafkaFuture<()>)> = Vec::with_capacity(members.len());
-    for member in &members {
-        entries.push((member.group_instance_id().to_string(), result.member_result(member)?));
-    }
-    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -14248,10 +14177,16 @@ fn submit_remove_members_from_consumer_group_entries(
 //   - `Map<K, KafkaFuture<V>>`      -> `_get_value(i)` and `_get_error(i)`
 //     (`describeConsumerGroups`, `describeClassicGroups`,
 //      `listConsumerGroupOffsets`)
-//   - `Map<K, KafkaFuture<Void>>` / one future over `Map<K, Errors>`
-//                                   -> `_get_error(i)` only
-//     (`deleteConsumerGroups`, `alterConsumerGroupOffsets`,
-//      `deleteConsumerGroupOffsets`, `removeMembersFromConsumerGroup`)
+//   - `Map<K, KafkaFuture<Void>>`   -> `_get_error(i)` only
+//     (`deleteConsumerGroups`)
+//   - one `KafkaFuture<Map<K, Errors>>` with accessors derived from it
+//                                   -> Java's accessors (`_partition_result` /
+//                                      `_member_result` and `_all`), evaluated
+//                                      by the core result against the resolved
+//                                      outcome, plus `_get_error(i)` over the
+//                                      requested keys
+//     (`alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`,
+//      `removeMembersFromConsumerGroup`)
 //   - one future split into `valid()` + `errors()`
 //                                   -> two independent lists, no key at all
 //     (`listGroups`)
@@ -15002,8 +14937,21 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `AlterConsumerGroupOffsetsResult`, keyed by
-/// topic partition.
+/// Opaque handle to an `AlterConsumerGroupOffsetsResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>`.
+/// This handle holds that future's resolved outcome and answers Java's two
+/// accessors against it:
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]
+/// (`partitionResult(TopicPartition)`) and
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`] (`all()`). It also lists
+/// the requested partitions, sorted by topic name then partition id, each with
+/// its `partitionResult` outcome (`_count` / `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_error(i)`).
+///
+/// Built by both [`kafka_admin_AdminClient_alter_consumer_group_offsets`] and
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`]; every
+/// function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -15011,22 +14959,42 @@ pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
 
 /// Backing state for [`kafka_admin_AlterConsumerGroupOffsetsResult_t`].
 ///
+/// `result` and `outcome` back Java's accessors: the core result evaluates
+/// them against the resolved outcome (`resolved_partition_result` /
+/// `resolved_all`), so the Java derivation is not duplicated here. The three
+/// vectors are the requested partitions, flattened for the index getters.
 /// Java's `partitionResult(tp)` is a `KafkaFuture<Void>`, so there is no
 /// per-key value: a null `_get_error(i)` is the success signal.
 struct AlterConsumerGroupOffsetsResultInner {
+    result: AlterConsumerGroupOffsetsResult,
+    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-partition `alterConsumerGroupOffsets` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `alterConsumerGroupOffsets`,
+/// deriving each requested partition's outcome through the core result's
+/// `partitionResult`.
+fn alter_consumer_group_offsets_result_inner(
+    (result, requested, outcome): AlterConsumerGroupOffsetsResolved,
+) -> AlterConsumerGroupOffsetsResultInner {
+    let per_partition: PartitionVoidOutcomes = requested
+        .into_iter()
+        .map(|tp| {
+            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
+            (tp, partition_outcome)
+        })
+        .collect();
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
+    AlterConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_alter_consumer_group_offsets_result(
-    outcomes: PartitionVoidOutcomes,
+    inner: AlterConsumerGroupOffsetsResultInner,
 ) -> *mut kafka_admin_AlterConsumerGroupOffsetsResult_t {
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
-    Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
 }
 
 /// Casts a `*const kafka_admin_AlterConsumerGroupOffsetsResult_t` to a
@@ -15052,7 +15020,84 @@ unsafe fn alter_consumer_group_offsets_result_ref(
     unsafe { &*(result as *const AlterConsumerGroupOffsetsResultInner) }
 }
 
-/// Returns the number of partitions whose offsets were altered.
+/// Converts a resolved `KafkaFuture<Void>` outcome into the C convention: null
+/// for success, otherwise an owned error the caller frees with
+/// `kafka_common_Error_destroy`.
+fn void_outcome_to_error(outcome: Result<(), Error>) -> *mut kafka_common_Error_t {
+    match outcome {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Reads a borrowed C string parameter that the contract requires to be
+/// non-null (CLAUDE.md FFI §3: such preconditions are not checked).
+///
+/// # Safety
+///
+/// `text` must be a valid, NUL-terminated C string.
+unsafe fn read_str(text: *const c_char) -> String {
+    unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+}
+
+/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
+/// `partitionResult(tp).get()` reports it.
+///
+/// Returns null when the partition's offset was committed. Otherwise returns
+/// an **owned** error — free it with `kafka_common_Error_destroy`:
+///
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Alter offset for partition "<topic>-<partition>"
+///   was not attempted` for a partition absent from the response (Java's
+///   `IllegalArgumentException`) — including one that was never requested;
+/// - otherwise the partition's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle;
+/// `topic` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    topic: *const c_char,
+    partition: i32,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
+    let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+}
+
+/// Java's `all()`: null if every partition's offset was committed.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`: the whole request's error if the request
+/// failed, or else the error of a failed partition (which one is unspecified,
+/// as in Java) with the message `Failed altering group offsets for the
+/// following partitions: [<topic>-<partition>, ...]`, listing every failed
+/// partition sorted by topic name then partition id.
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback (see
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_all(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of partitions in the request.
 ///
 /// # Safety
 ///
@@ -15113,9 +15158,11 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
     partition_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the
-/// partition's offset was altered successfully or `index` is out of range. Do
-/// not destroy it.
+/// Returns the entry at `index`'s `partitionResult` outcome (borrowed), or null
+/// if the partition's offset was altered successfully or `index` is out of
+/// range. Do not destroy it. It carries the same error
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] returns (as
+/// an owned copy) for that partition.
 ///
 /// # Safety
 ///
@@ -15161,29 +15208,58 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `DeleteConsumerGroupOffsetsResult`, keyed by
-/// topic partition.
+/// Opaque handle to a `DeleteConsumerGroupOffsetsResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>` plus
+/// the set of requested partitions. This handle holds that future's resolved
+/// outcome and answers Java's two accessors against it:
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`]
+/// (`partitionResult(TopicPartition)`) and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`] (`all()`). It also
+/// lists the requested partitions, sorted by topic name then partition id, each
+/// with its `partitionResult` outcome (`_count` / `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_error(i)`).
+///
+/// Built by both [`kafka_admin_AdminClient_delete_consumer_group_offsets`] and
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`]; every
+/// function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
 }
 
 /// Backing state for [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`]. Same
-/// per-key-error-only shape as [`AlterConsumerGroupOffsetsResultInner`].
+/// shape as [`AlterConsumerGroupOffsetsResultInner`].
 struct DeleteConsumerGroupOffsetsResultInner {
+    result: DeleteConsumerGroupOffsetsResult,
+    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-partition `deleteConsumerGroupOffsets` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `deleteConsumerGroupOffsets`,
+/// deriving each requested partition's outcome through the core result's
+/// `partitionResult`.
+fn delete_consumer_group_offsets_result_inner(
+    (result, requested, outcome): DeleteConsumerGroupOffsetsResolved,
+) -> DeleteConsumerGroupOffsetsResultInner {
+    let per_partition: PartitionVoidOutcomes = requested
+        .into_iter()
+        .map(|tp| {
+            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
+            (tp, partition_outcome)
+        })
+        .collect();
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
+    DeleteConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_delete_consumer_group_offsets_result(
-    outcomes: PartitionVoidOutcomes,
+    inner: DeleteConsumerGroupOffsetsResultInner,
 ) -> *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t {
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
-    Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
 }
 
 /// Casts a `*const kafka_admin_DeleteConsumerGroupOffsetsResult_t` to a
@@ -15210,7 +15286,67 @@ unsafe fn delete_consumer_group_offsets_result_ref(
     unsafe { &*(result as *const DeleteConsumerGroupOffsetsResultInner) }
 }
 
-/// Returns the number of partitions whose offsets were deleted.
+/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
+/// `partitionResult(tp).get()` reports it.
+///
+/// Returns null when the partition's offsets were deleted. Otherwise returns
+/// an **owned** error — free it with `kafka_common_Error_destroy`:
+///
+/// - an illegal-argument error `Partition <topic>-<partition> was not included
+///   in the original request` for a partition that was not requested. This is
+///   checked first, whatever the outcome, because Java throws it synchronously
+///   from `partitionResult` before looking at the future;
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Offset deletion result for partition
+///   "<topic>-<partition>" was not included in the response` for a requested
+///   partition absent from the response (Java's `getSubLevelError`);
+/// - otherwise the partition's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle;
+/// `topic` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    topic: *const c_char,
+    partition: i32,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
+    let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+}
+
+/// Java's `all()`: null if every requested partition's offsets were deleted.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`: the whole request's error if the request
+/// failed, or else the outcome
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] gives for
+/// the first failing requested partition, in topic-name-then-partition-id order
+/// (Java iterates the requested set in unspecified order).
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of partitions in the request.
 ///
 /// # Safety
 ///
@@ -15271,9 +15407,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
     partition_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the
-/// partition's offset was deleted successfully or `index` is out of range. Do
-/// not destroy it.
+/// Returns the entry at `index`'s `partitionResult` outcome (borrowed), or null
+/// if the partition's offsets were deleted successfully or `index` is out of
+/// range. Do not destroy it. It carries the same error
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] returns
+/// (as an owned copy) for that partition.
 ///
 /// # Safety
 ///
@@ -15448,8 +15586,22 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `RemoveMembersFromConsumerGroupResult`, keyed
-/// by group instance id.
+/// Opaque handle to a `RemoveMembersFromConsumerGroupResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<MemberIdentity, Errors>>` plus
+/// the set of requested members (empty in `removeAll` mode). This handle holds
+/// that future's resolved outcome and answers Java's two accessors against it:
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`]
+/// (`memberResult(MemberToRemove)`) and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`] (`all()`). It also
+/// lists the requested members by group instance id, sorted, each with its
+/// `memberResult` outcome (`_count` / `_get_group_instance_id(i)` /
+/// `_get_error(i)`); that list is empty in `removeAll` mode, where Java refuses
+/// `memberResult` altogether.
+///
+/// Built by both [`kafka_admin_AdminClient_remove_members_from_consumer_group`]
+/// and [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`];
+/// every function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
     _private: [u8; 0],
@@ -15457,26 +15609,41 @@ pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
 
 /// Backing state for [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`].
 ///
-/// Java's `memberResult(MemberToRemove)` is a `KafkaFuture<Void>`, so there is
-/// no per-key value. In `removeAll` mode Java *refuses* `memberResult` entirely
-/// ("The method: memberResult is not applicable in 'removeAll' mode") and
-/// `all()` is the only observable, so the C handle is then empty and the
-/// outcome is the call's error.
+/// `result` and `outcome` back Java's accessors through the core result's
+/// `resolved_member_result` / `resolved_all`, so the Java derivation is not
+/// duplicated here. The two vectors are the requested members, flattened for
+/// the index getters. Java's `memberResult(MemberToRemove)` is a
+/// `KafkaFuture<Void>`, so there is no per-key value: a null `_get_error(i)` is
+/// the success signal.
 struct RemoveMembersFromConsumerGroupResultInner {
+    result: RemoveMembersFromConsumerGroupResult,
+    outcome: MemberErrorsOutcome,
     group_instance_ids: Vec<CString>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-member `removeMembersFromConsumerGroup` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `removeMembersFromConsumerGroup`,
+/// deriving each requested member's outcome through the core result's
+/// `memberResult`.
+fn remove_members_from_consumer_group_result_inner(
+    (result, requested, outcome): RemoveMembersFromConsumerGroupResolved,
+) -> RemoveMembersFromConsumerGroupResultInner {
+    let per_member: GroupVoidOutcomes = requested
+        .iter()
+        .map(|member| {
+            let member_outcome = result.resolved_member_result(&outcome, member);
+            (member.group_instance_id().to_string(), member_outcome)
+        })
+        .collect();
+    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(per_member);
+    RemoveMembersFromConsumerGroupResultInner { result, outcome, group_instance_ids, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_remove_members_from_consumer_group_result(
-    outcomes: GroupVoidOutcomes,
+    inner: RemoveMembersFromConsumerGroupResultInner,
 ) -> *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t {
-    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(outcomes);
-    Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner {
-        group_instance_ids,
-        errors,
-    })) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
 }
 
 /// Casts a `*const kafka_admin_RemoveMembersFromConsumerGroupResult_t` to a
@@ -15503,8 +15670,91 @@ unsafe fn remove_members_result_ref(
     unsafe { &*(result as *const RemoveMembersFromConsumerGroupResultInner) }
 }
 
-/// Returns the number of members a removal was attempted for. This is 0 in
-/// `remove_all` mode, where Java exposes no per-member outcome.
+/// Java's `memberResult(MemberToRemove)` for the member whose
+/// `group.instance.id` is `group_instance_id`: the outcome for that member, as
+/// `memberResult(member).get()` reports it.
+///
+/// Returns null when the member was removed. Otherwise returns an **owned**
+/// error — free it with `kafka_common_Error_destroy`:
+///
+/// - an illegal-argument error `The method: memberResult is not applicable in
+///   'removeAll' mode` on a `remove_all` result, whatever the outcome;
+/// - an illegal-argument error `Member <group_instance_id> was not included in
+///   the original request` for a member that was not requested. (Java renders
+///   the `MemberToRemove` object itself, which has no `toString()` of its own;
+///   the group instance id is its identity, hence the rendering here.)
+///
+///   Both checks come first, whatever the outcome, because Java throws them
+///   synchronously from `memberResult` before looking at the future;
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Member "MemberIdentity(memberId='',
+///   groupInstanceId='<id>', reason=null)" was not included in the removal
+///   response` for a requested member absent from the response (Java's
+///   `getSubLevelError`);
+/// - otherwise the member's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle;
+/// `group_instance_id` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    group_instance_id: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { remove_members_result_ref(result) };
+    let member = MemberToRemove::new(unsafe { read_str(group_instance_id) });
+    void_outcome_to_error(inner.result.resolved_member_result(&inner.outcome, &member))
+}
+
+/// Java's `all()`: null if the request was 100% successful — no top-level and
+/// no member-level error.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`:
+///
+/// - the whole request's error, if the request failed;
+/// - on a `remove_all` result, for the first member the broker reports as
+///   failed: a plain Kafka error (code `UNKNOWN_SERVER_ERROR`, not an API
+///   error) with the message `Encounter error when trying to remove:
+///   MemberIdentity(memberId='<id>', groupInstanceId=<'id' or null>,
+///   reason=<'reason' or null>)`. This is Java's
+///   `new KafkaException("Encounter exception when trying to remove: " +
+///   identity, memberException)`, with "exception" spelled "error". The
+///   member's own error (for example `UNKNOWN_MEMBER_ID`) is the cause of the
+///   returned error, as in Java — but **this C API cannot read an error's
+///   cause**: `kafka_common_Error_code` / `kafka_common_Error_message` and
+///   the predicates describe only the outer error. So from C (and from the
+///   Python and gRPC layers built on it) a `removeAll` partial failure
+///   surfaces as a bare Kafka error with code -1 (`UNKNOWN_SERVER_ERROR`) and
+///   Java's message, and the member's own error code is not observable;
+/// - otherwise the outcome
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] gives
+///   for the first failing requested member, in group-instance-id order (Java
+///   iterates the requested set in unspecified order).
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { remove_members_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of members in the request. This is 0 in `remove_all`
+/// mode, where Java exposes no per-member outcome.
 ///
 /// # Safety
 ///
@@ -15546,8 +15796,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
     cstring_at(&unsafe { remove_members_result_ref(result) }.group_instance_ids, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the member
-/// was removed successfully or `index` is out of range. Do not destroy it.
+/// Returns the entry at `index`'s `memberResult` outcome (borrowed), or null if
+/// the member was removed successfully or `index` is out of range. Do not
+/// destroy it. It carries the same error
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] returns
+/// (as an owned copy) for that member.
 ///
 /// # Safety
 ///
@@ -16362,30 +16615,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
 // alterConsumerGroupOffsets
 // ---------------------------------------------------------------------------
 
-/// Per-key completion callback for
-/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`], fired
-/// **once per partition, as that partition's own future resolves** —
-/// independently of every other partition in the same call, matching Java's
-/// `Map<TopicPartition, KafkaFuture<Void>>` (`admin-client.md` §5), rather
-/// than waiting for the whole batch. The key is a `TopicPartition`, delivered
-/// as a topic name and a partition id — like the synchronous result's
-/// `_get_topic(i)` / `_get_partition(i)` pair — rather than through a single
-/// opaque key handle.
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`].
 ///
-/// `topic` is borrowed and valid only for the duration of this call — copy it
-/// if you need to retain it. There is no value parameter: Java's per-partition
-/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
-/// non-null `error` must be freed with `kafka_common_Error_destroy`.
+/// Java's `AlterConsumerGroupOffsetsResult` wraps **one**
+/// `KafkaFuture<Map<TopicPartition, Errors>>`; `partitionResult(tp)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — also when no partition was requested — and exactly one of
+/// `result` / `error` is non-null. The callback owns it:
 ///
-/// When `count` is 0, Java's `Map<TopicPartition, KafkaFuture<Void>>` is
-/// empty, so this callback is never invoked at all — there is no per-call
-/// callback slot to report a whole-call failure through. Use the synchronous
-/// entry point's `all()`-backed result to observe that outcome.
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] and
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_all`], or walk the requested
+///   partitions with `_count` / `_get_topic(i)` / `_get_partition(i)` /
+///   `_get_error(i)`; free it with
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]. A per-partition
+///   failure arrives inside `result`, not as `error`.
+/// - `error`: the future failed, so the whole request failed and every Java
+///   accessor would report this same error; or the request could not be
+///   submitted at all. Free it with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
-    unsafe extern "C" fn(*const c_char, i32, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_AlterConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Commits offsets on behalf of a consumer group, blocking until every
-/// per-partition future has resolved (synchronous).
+/// Commits offsets on behalf of a consumer group, blocking until the result's
+/// single future has resolved (synchronous).
 ///
 /// This is
 /// `alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
@@ -16393,12 +16647,16 @@ pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
 /// On success writes a [`kafka_admin_AlterConsumerGroupOffsetsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all — or that
-/// `count` was 0, in which case there is no per-key slot for the outcome and
-/// the whole-request error is returned instead, mirroring Java, where `all()`
-/// is then the only observable.
+/// The handle answers Java's accessors,
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] and
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`]. **A per-partition
+/// failure is not a call failure**: it is reported by those accessors and by
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key —
+/// and so is a failure of the whole request, which every requested partition
+/// then reports. A non-null return means the request could not be submitted at
+/// all — or that `count` was 0 and `all()` failed, in which case there is no
+/// per-key slot for the outcome and the whole-request error is returned
+/// instead.
 ///
 /// # Parameters
 ///
@@ -16463,8 +16721,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     // caller keeps the handle alive, and the `submit` closure captures only the owned
     // `group` and `parsed` results and `options` built above.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options))
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_alter_consumer_group_offsets(a, &group?, &parsed?, options);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // No per-key slot: `all()` is the only observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(alter_consumer_group_offsets_result_inner((result, requested, outcome)))
+            })
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -16480,27 +16746,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
 /// Commits consumer group offsets asynchronously. See
 /// [`kafka_admin_AdminClient_alter_consumer_group_offsets`].
 ///
-/// Unlike the synchronous entry point, the callback fires **once per
-/// partition, as that partition's future resolves**, not once for the whole
-/// batch — a fast or already-resolved partition is not held up by a slow or
-/// failing one. It is called once per distinct `(topic, partition)` pair in
-/// the input (skipping entries with a NULL topic), but not always on the same
-/// thread. Per key, it normally runs on the handle's dispatcher thread. It
-/// runs **synchronously on the calling thread, before this function returns,
-/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
-/// handle, a NULL `group_id`, a NULL topic entry, or a negative offset). And
-/// it runs on a **tokio worker thread** if the dispatcher's completion queue
-/// can no longer be reached when a given partition's result arrives.
+/// Java's result is one future, so the callback fires **exactly once** —
+/// also when `count` is 0 — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t`]. It is
+/// not always called on the same thread. It normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle, a NULL `group_id`, a NULL topic entry, or a negative
+/// offset). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
 /// Destroying the handle does not cause that — an outstanding operation holds
 /// its own sender, so it cannot disconnect the queue; what remains is a
 /// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks for different keys are not guaranteed to be
-/// serialised on one thread, nor in request order. Do not hold a lock across
-/// this call and re-acquire it in the callback, and publish everything the
-/// callback needs (including `user_data`) before calling rather than after.
-///
-/// When `count` is 0, the callback is never invoked (see the callback
-/// typedef's documentation).
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -16530,10 +16792,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
     callback: kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
-    // Computed independently of `read_alter_group_offsets`'s fallible per-entry
-    // parse, so every requested key still gets its own callback via
-    // `admin_async_per_key_op`'s fan-out even when that parse fails.
-    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
     // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
     // alive for the call. The helper turns a NULL `group_id` into
@@ -16570,15 +16828,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
     // the raw pointers are owned handles moved to the dispatcher thread; the C user is
     // responsible for the thread-safety of `user_data`.
     unsafe {
-        admin_async_per_key_op(
+        admin_async_future_op(
             admin,
             user_data,
-            keys,
-            move |a| Ok(submit_alter_consumer_group_offsets_entries(a, &group?, &parsed?, options)),
-            move |tp, outcome, ud| {
-                let topic_c = to_cstring(tp.topic());
-                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
-                callback(topic_c.as_ptr(), tp.partition(), error, ud);
+            move |a| {
+                let resolved = submit_alter_consumer_group_offsets(a, &group?, &parsed?, options);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(alter_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                })
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(inner) => (box_alter_consumer_group_offsets_result(inner), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
             },
         )
     };
@@ -16588,30 +16855,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
 // deleteConsumerGroupOffsets
 // ---------------------------------------------------------------------------
 
-/// Per-key completion callback for
-/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`], fired
-/// **once per partition, as that partition's own future resolves** —
-/// independently of every other partition in the same call, matching Java's
-/// `Map<TopicPartition, KafkaFuture<Void>>` (`admin-client.md` §5), rather
-/// than waiting for the whole batch. The key is a `TopicPartition`, delivered
-/// as a topic name and a partition id — like the synchronous result's
-/// `_get_topic(i)` / `_get_partition(i)` pair — rather than through a single
-/// opaque key handle.
+/// Completion callback for
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`].
 ///
-/// `topic` is borrowed and valid only for the duration of this call — copy it
-/// if you need to retain it. There is no value parameter: Java's per-partition
-/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
-/// non-null `error` must be freed with `kafka_common_Error_destroy`.
+/// Java's `DeleteConsumerGroupOffsetsResult` wraps **one**
+/// `KafkaFuture<Map<TopicPartition, Errors>>`; `partitionResult(tp)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — also when no partition was requested — and exactly one of
+/// `result` / `error` is non-null. The callback owns it:
 ///
-/// When `count` is 0, Java's `Map<TopicPartition, KafkaFuture<Void>>` is
-/// empty, so this callback is never invoked at all — there is no per-call
-/// callback slot to report a whole-call failure through. Use the synchronous
-/// entry point's `all()`-backed result to observe that outcome.
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] and
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`], or walk the
+///   requested partitions with `_count` / `_get_topic(i)` /
+///   `_get_partition(i)` / `_get_error(i)`; free it with
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]. A per-partition
+///   failure arrives inside `result`, not as `error`.
+/// - `error`: the future failed, so the whole request failed and every Java
+///   accessor on a requested partition would report this same error; or the
+///   request could not be submitted at all. Free it with
+///   `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
-    unsafe extern "C" fn(*const c_char, i32, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes committed offsets for a set of partitions in a consumer group,
-/// blocking until every per-partition future has resolved (synchronous).
+/// blocking until the result's single future has resolved (synchronous).
 ///
 /// This is
 /// `deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
@@ -16619,11 +16888,16 @@ pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
 /// On success writes a [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all — or that
-/// `count` was 0, in which case there is no per-key slot for the outcome and
-/// the whole-request error is returned instead.
+/// The handle answers Java's accessors,
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`]. **A per-partition
+/// failure is not a call failure**: it is reported by those accessors and by
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key —
+/// and so is a failure of the whole request, which every requested partition
+/// then reports. A non-null return means the request could not be submitted at
+/// all — or that `count` was 0 and `all()` failed, in which case there is no
+/// per-key slot for the outcome and the whole-request error is returned
+/// instead.
 ///
 /// # Parameters
 ///
@@ -16674,8 +16948,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     // caller keeps the handle alive, and the `submit` closure captures only the owned
     // `group` result, `selection` set and `options` built above.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            submit_delete_consumer_group_offsets(a, &group?, &selection, options)
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_delete_consumer_group_offsets(a, &group?, &selection, options);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // No per-key slot: `all()` is the only observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(delete_consumer_group_offsets_result_inner((result, requested, outcome)))
+            })
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -16691,27 +16973,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
 /// Deletes consumer group offsets asynchronously. See
 /// [`kafka_admin_AdminClient_delete_consumer_group_offsets`].
 ///
-/// Unlike the synchronous entry point, the callback fires **once per
-/// partition, as that partition's future resolves**, not once for the whole
-/// batch — a fast or already-resolved partition is not held up by a slow or
-/// failing one. It is called once per distinct `(topic, partition)` pair in
-/// the input (skipping entries with a NULL topic), but not always on the same
-/// thread. Per key, it normally runs on the handle's dispatcher thread. It
-/// runs **synchronously on the calling thread, before this function returns,
-/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
-/// handle or a NULL `group_id`). And it runs on a **tokio worker thread** if
-/// the dispatcher's completion queue can no longer be reached when a given
-/// partition's result arrives. Destroying the handle does not cause that — an
+/// Java's result is one future, so the callback fires **exactly once** —
+/// also when `count` is 0 — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t`]. It is
+/// not always called on the same thread. It normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle or a NULL `group_id`). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks for different keys are
-/// not guaranteed to be serialised on one thread, nor in request order. Do
-/// not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before
-/// calling rather than after.
-///
-/// When `count` is 0, the callback is never invoked (see the callback
-/// typedef's documentation).
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and
+/// re-acquire it in the callback, and publish everything the callback needs
+/// (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -16737,15 +17014,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
     callback: kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
-    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
-    // `count` readable entries each, every topic NULL or a valid C string; per this
-    // function's `# Safety`, `topics` and `partitions` are null or have `count` valid
-    // entries each. The helper treats NULL arrays as empty, iterates only `0..count.max(0)`
-    // so a negative count reads nothing, skips NULL topics, and copies every entry into
-    // owned `TopicPartition` values (the per-key fan-out set, and the `selection` set built
-    // from it) before the asynchronous work is submitted, so nothing borrowed from C
-    // outlives this call.
-    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
     // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
     // alive for the call. The helper turns a NULL `group_id` into
@@ -16753,7 +17021,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
     // owned `String` before the asynchronous work is submitted, so nothing borrowed from C
     // outlives this call.
     let group = unsafe { read_required_string(group_id, "group_id") };
-    let selection: HashSet<TopicPartition> = keys.iter().cloned().collect();
+    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
+    // `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, `topics` and `partitions` are null or have `count` valid
+    // entries each. The helper treats NULL arrays as empty, iterates only `0..count.max(0)`
+    // so a negative count reads nothing, skips NULL topics, and copies every entry into
+    // owned `TopicPartition` values (collected into the owned `selection` set) before the
+    // asynchronous work is submitted, so nothing borrowed from C outlives this call.
+    let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
+        .into_iter()
+        .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
     // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises; the helper
@@ -16771,15 +17048,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
     // pointers are owned handles moved to the dispatcher thread; the C user is responsible
     // for the thread-safety of `user_data`.
     unsafe {
-        admin_async_per_key_op(
+        admin_async_future_op(
             admin,
             user_data,
-            keys,
-            move |a| submit_delete_consumer_group_offsets_entries(a, &group?, &selection, options),
-            move |tp, outcome, ud| {
-                let topic_c = to_cstring(tp.topic());
-                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
-                callback(topic_c.as_ptr(), tp.partition(), error, ud);
+            move |a| {
+                let resolved = submit_delete_consumer_group_offsets(a, &group?, &selection, options);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(delete_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                })
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(inner) => (box_delete_consumer_group_offsets_result(inner), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
             },
         )
     };
@@ -16946,31 +17232,39 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
 // removeMembersFromConsumerGroup
 // ---------------------------------------------------------------------------
 
-/// Per-key completion callback for
-/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`], fired
-/// **once per member, as that member's own future resolves** — independently
-/// of every other member in the same call, matching Java's
-/// `Map<MemberIdentity, KafkaFuture<Void>>` (`admin-client.md` §5), rather
-/// than waiting for the whole batch. The key is the member's
-/// `group.instance.id`.
+/// Completion callback for
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`].
 ///
-/// `group_instance_id` is borrowed and valid only for the duration of this
-/// call — copy it if you need to retain it. There is no value parameter:
-/// Java's per-member future is `KafkaFuture<Void>`, so a null `error` *is*
-/// the success value. A non-null `error` must be freed with
-/// `kafka_common_Error_destroy`.
+/// Java's `RemoveMembersFromConsumerGroupResult` wraps **one**
+/// `KafkaFuture<Map<MemberIdentity, Errors>>`; `memberResult(member)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — in `removeAll` mode too — and exactly one of `result` / `error`
+/// is non-null. The callback owns it:
 ///
-/// In `removeAll` mode Java's `memberResult` is not applicable at all (there
-/// is no member list to key by), so `all()` is the only observable. This
-/// callback then fires **exactly once** with a **NULL `group_instance_id`**,
-/// carrying the whole operation's outcome once `all()` resolves — a null
-/// `error` on success, or the operation's error. This lets a caller await the
-/// operation to completion (and observe its error) even in `removeAll` mode; the
-/// binding maps the NULL key to a well-known sentinel.
-pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
-    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] and
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`], or walk the
+///   requested members with `_count` / `_get_group_instance_id(i)` /
+///   `_get_error(i)`; free it with
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]. A
+///   per-member failure arrives inside `result`, not as `error`. In
+///   `removeAll` mode `all()` is the only applicable accessor, exactly as in
+///   Java, and the member list is empty; a member failure there is reported
+///   as a bare Kafka error (code -1) whose cause — the member's own error —
+///   this C API cannot read (see
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`]).
+/// - `error`: the future failed, so the whole request failed and `all()` (and
+///   every applicable `memberResult`) would report this same error; or the
+///   request could not be submitted at all. Free it with
+///   `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
-/// Removes members from a consumer group, blocking until every per-member
+/// Removes members from a consumer group, blocking until the result's single
 /// future has resolved (synchronous).
 ///
 /// This is
@@ -16980,12 +17274,16 @@ pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`] to `*out_result`
 /// (free it with
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]) and returns
-/// null. **A per-member failure is not a call failure**: it is reported by
+/// null. The handle answers Java's accessors,
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`]. **A per-member
+/// failure is not a call failure**: it is reported by those accessors and by
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_get_error`] for that
-/// member. A non-null return means the request could not be submitted at all —
-/// or that `remove_all` was true, where Java exposes no per-member outcome at
-/// all and `all()` is the only observable, so the result handle is empty and
-/// any failure is returned here.
+/// member — and so is a failure of the whole request, which every requested
+/// member then reports. A non-null return means the request could not be
+/// submitted at all — or that `remove_all` was true and `all()` failed: Java
+/// exposes no per-member outcome in that mode, so there is no per-key slot and
+/// the error is returned here.
 ///
 /// # Parameters
 ///
@@ -17038,19 +17336,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // bounds its loop by `member_count.max(0)`). The helper null-checks `reason` before
     // `CStr::from_ptr`, and every read happens on the calling thread during this call.
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns an error for a NULL `admin` before
-        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-        // inside the `submit` closure (`submit_remove_members_from_consumer_group`) and the
-        // following `block_on`, both on the calling thread during this synchronous call,
-        // while the C caller keeps the handle alive (it has not called
-        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
-        // borrows nothing from the handle, so nothing derived from it outlives the call. A
-        // `group` or `options` marshaling error makes `submit` return `Err` without
-        // touching the handle.
-        unsafe { admin_sync_value_op(admin, move |a| submit_remove_members_from_consumer_group(a, &group?, options?)) };
+    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_remove_members_from_consumer_group`) and the
+    // following `block_on`, both on the calling thread during this synchronous call, while
+    // the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and borrows
+    // nothing from the handle, so nothing derived from it outlives the call. A `group` or
+    // `options` marshaling error makes `submit` return `Err` without touching the handle.
+    let outcome = unsafe {
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_remove_members_from_consumer_group(a, &group?, options?);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // `removeAll` mode: no per-key slot, `all()` is the only
+                    // observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(remove_members_from_consumer_group_result_inner((result, requested, outcome)))
+            })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable);
     // the helper null-checks `out_result` and on success writes exactly one element, the
@@ -17062,35 +17371,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// Removes members from a consumer group asynchronously. See
 /// [`kafka_admin_AdminClient_remove_members_from_consumer_group`].
 ///
-/// Unlike the synchronous entry point, the per-member callback fires **once per
-/// member, as that member's future resolves**, not once for the whole batch — a
-/// fast or already-resolved member is not held up by a slow or failing one. It
-/// is called once per distinct group instance id in the input (skipping NULL
-/// entries), but not always on the same thread. Per key, it normally runs on the
+/// Java's result is one future, so the callback fires **exactly once** — in
+/// `removeAll` mode too — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t`].
+/// It is not always called on the same thread. It normally runs on the
 /// handle's dispatcher thread. It runs **synchronously on the calling thread,
-/// before this function returns, for every key**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle or a NULL `group_id`). And it runs on
-/// a **tokio worker thread** if the dispatcher's completion queue can no longer
-/// be reached when a given member's result arrives. Destroying the handle does
-/// not cause that — an outstanding operation holds its own sender, so it cannot
-/// disconnect the queue; what remains is a dispatcher thread that terminated
-/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
-/// different keys are not guaranteed to be serialised on one thread, nor in
-/// request order. Do not hold a lock across this call and re-acquire it in the
-/// callback, and publish everything the callback needs (including `user_data`)
-/// before calling rather than after.
-///
-/// In `removeAll` mode (`remove_all` true) Java's `memberResult` is not
-/// applicable, so there is no per-member key: `all()` is the only observable.
-/// The callback therefore fires **exactly once** with a **NULL
-/// `group_instance_id`**, carrying the whole operation's outcome (a NULL error
-/// on success, or the operation's error) once `all()` resolves — awaiting the
-/// operation to completion exactly as the synchronous entry point does. The
-/// binding maps that NULL key to a well-known sentinel so the caller can await
-/// the operation and observe its error even though there is no per-member
-/// `Future`. It runs on the calling thread before returning only when the RPC
-/// cannot be submitted at all (NULL `admin`/`group_id`); otherwise on the
-/// dispatcher thread (or a tokio worker, per the paragraph above).
+/// before this function returns**, when the RPC cannot be submitted at all (a
+/// NULL `admin` handle, a NULL `group_id`, or an empty member list without
+/// `remove_all`). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -17119,12 +17416,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     callback: kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t,
     user_data: *mut c_void,
 ) {
-    // `group`/`options` are computed independently of the per-key vs whole-op
-    // routing below. `remove_members_options`'s empty-member-list construction is
-    // fallible (Java rejects an explicitly empty collection), and the error is
-    // still surfaced on whichever path runs: the per-key fan-out reports it per
-    // requested key, and the removeAll whole-op path reports it through its single
-    // callback.
     // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string and
     // itself turns NULL into a `LocalIllegalArgument` error; this function's `# Safety`
     // promises `group_id` is a valid C string, so the `CStr::from_ptr` inside reads a
@@ -17139,66 +17430,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // bounds its loop by `member_count.max(0)`). The helper null-checks `reason` before
     // `CStr::from_ptr`, and every read happens on the calling thread during this call.
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
-
-    if remove_all {
-        // `removeAll` mode has no per-member key at all — Java's `memberResult`
-        // is not applicable, so `all()` is the only observable. The per-key
-        // fan-out would therefore submit the operation but register no
-        // completion at all (empty entries), leaving it fire-and-forget with
-        // nothing to await: the caller could not tell whether it finished, and a
-        // whole-op failure would be silently dropped. So deliver the whole-op
-        // outcome via a SINGLE callback with a NULL `group_instance_id`, awaiting
-        // `all()` exactly as the synchronous entry point and the direct-backend
-        // path do. The binding maps the NULL key to a well-known sentinel so the
-        // caller/harness can await the operation's completion (and observe its
-        // error) even though there is no per-member `Future`.
-        unsafe {
-            admin_async_future_op(
-                admin,
-                user_data,
-                move |a| {
-                    let group = group?;
-                    let options = options?;
-                    let future = submit_remove_members_from_consumer_group(a, &group, options)?;
-                    Ok(async move { future.get().await.map(|_| ()) })
-                },
-                move |outcome: Result<(), Error>, ud| {
-                    let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
-                    callback(std::ptr::null(), error, ud);
-                },
-            )
-        };
-        return;
-    }
-
-    // Deduplicated to DISTINCT group instance ids (first-occurrence order): the
-    // Rust core keys the removal on `HashSet<MemberToRemove>` (Java's
-    // `Set<MemberToRemove>`), so two members naming the same instance id collapse
-    // to ONE outcome future — the shape
-    // `submit_remove_members_from_consumer_group_entries` returns. A raw `keys`
-    // with duplicates would make the second occurrence find no unclaimed entry
-    // and fire `admin_async_per_key_op`'s synthetic "not present" error, racing
-    // ahead of and winning the caller's real per-member outcome. The Python
-    // binding already dedups the ids it passes (`dict.fromkeys`), so this also
-    // keeps the C incref count (the passed member array length) matched to the
-    // firing count for that path.
-    let keys = {
-        let mut seen = std::collections::HashSet::new();
-        unsafe { read_strings(group_instance_ids, member_count) }
-            .into_iter()
-            .filter(|id| seen.insert(id.clone()))
-            .collect::<Vec<_>>()
-    };
     unsafe {
-        admin_async_per_key_op(
+        admin_async_future_op(
             admin,
             user_data,
-            keys,
-            move |a| submit_remove_members_from_consumer_group_entries(a, &group?, options?),
-            move |group_instance_id, outcome, ud| {
-                let id_c = to_cstring(&group_instance_id);
-                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
-                callback(id_c.as_ptr(), error, ud);
+            move |a| {
+                let resolved = submit_remove_members_from_consumer_group(a, &group?, options?);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(remove_members_from_consumer_group_result_inner((result, requested, Ok(errors))))
+                })
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(inner) => (box_remove_members_from_consumer_group_result(inner), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
             },
         )
     };
@@ -18683,7 +18933,7 @@ unsafe fn read_client_quota_entity_infallible(
 /// Reads `count` ragged entity rows into [`ClientQuotaEntity`] keys, computed
 /// independently of [`read_client_quota_alterations`]'s validated (and
 /// duplicate-rejecting) parse — mirrors
-/// `alter_consumer_group_offsets_async`'s `read_topic_partitions`-as-keys
+/// `alter_partition_reassignments_async`'s `read_topic_partitions`-as-keys
 /// pattern — so every requested row still gets a callback via
 /// [`admin_async_per_key_op`]'s fan-out even when that parse fails.
 ///
@@ -30339,21 +30589,61 @@ mod tests {
         }
     }
 
+    /// Reads an owned error's message and destroys it; `None` for null.
+    unsafe fn consume_error_message(error: *mut kafka_common_Error_t) -> Option<String> {
+        if error.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { common::kafka_common_Error_destroy(error) };
+        Some(text)
+    }
+
+    /// Reads an owned error's code and destroys it; `None` for null.
+    unsafe fn consume_error_code(error: *mut kafka_common_Error_t) -> Option<i32> {
+        if error.is_null() {
+            return None;
+        }
+        let code = unsafe { common::kafka_common_Error_code(error) } as i32;
+        unsafe { common::kafka_common_Error_destroy(error) };
+        Some(code)
+    }
+
+    /// Builds a `PartitionErrors`-style future already completed with `outcome`.
+    fn resolved_future<T: Clone + Send + Sync + 'static>(outcome: Result<T, Error>) -> KafkaFuture<T> {
+        let handle: crate::common::internals::KafkaFutureImpl<T> = crate::common::internals::KafkaFutureImpl::new();
+        match outcome {
+            Ok(value) => handle.complete(value),
+            Err(error) => handle.complete_with_error(error),
+        };
+        handle.future()
+    }
+
+    /// `alterConsumerGroupOffsets` handle: Java's `partitionResult(tp)` and
+    /// `all()` over one resolved `Map<TopicPartition, Errors>`, with the exact
+    /// Java messages, plus the index getters over the requested partitions.
     #[test]
-    fn partition_keyed_void_results_report_success_as_a_null_error() {
-        let outcomes: PartitionVoidOutcomes = HashMap::from([
-            (TopicPartition::new("t", 0), Ok(())),
-            (TopicPartition::new("t", 1), Err(Error::new(Errors::UnknownMemberId))),
+    fn alter_consumer_group_offsets_result_answers_java_accessors() {
+        let map = HashMap::from([
+            (TopicPartition::new("t", 0), Errors::None),
+            (TopicPartition::new("t", 1), Errors::UnknownMemberId),
         ]);
-        let altered = box_alter_consumer_group_offsets_result(outcomes.clone());
-        let deleted = box_delete_consumer_group_offsets_result(outcomes);
-        // SAFETY: Test code: `altered` and `deleted` were built just above by
-        // `box_alter_consumer_group_offsets_result` and
-        // `box_delete_consumer_group_offsets_result`, so each is a valid handle for its own
-        // getters; the topic strings and error pointers are borrowed and read before the
-        // owning handle is freed, out-of-range indices exercise the documented null / -1
-        // paths, and each handle is destroyed exactly once by its own `_destroy`.
+        let outcome: PartitionErrorsOutcome = Ok(map);
+        let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+        let requested = vec![TopicPartition::new("t", 1), TopicPartition::new("t", 0)];
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            result, requested, outcome,
+        )));
+        // SAFETY: Test code: `altered` was built just above by
+        // `box_alter_consumer_group_offsets_result`, so it is a valid handle for its getters
+        // and accessors; the topic strings and error pointers borrowed from it are read
+        // before it is freed, every owned error an accessor returns is destroyed once,
+        // out-of-range indices exercise the documented null / -1 paths, and the handle is
+        // destroyed exactly once by its own `_destroy`.
         unsafe {
+            // Index getters: requested partitions, sorted, with each partitionResult.
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 2);
             assert_eq!(
                 CStr::from_ptr(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, 0)).to_str(),
@@ -30369,18 +30659,354 @@ mod tests {
             );
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 2), -1);
             assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, -1).is_null());
+
+            // partitionResult: success, the partition's error, and Java's
+            // "not attempted" IllegalArgumentException for an absent partition.
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(altered, c"t".as_ptr(), 0).is_null());
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"t".as_ptr(),
+                    1
+                )),
+                Some(Errors::UnknownMemberId.code() as i32)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"absent".as_ptr(),
+                    9
+                ))
+                .as_deref(),
+                Some("Alter offset for partition \"absent-9\" was not attempted")
+            );
+
+            // all(): the failed partition's error kind with the aggregated message.
+            let all = kafka_admin_AlterConsumerGroupOffsetsResult_all(altered);
+            assert_eq!(
+                common::kafka_common_Error_code(all) as i32,
+                Errors::UnknownMemberId.code() as i32
+            );
+            assert_eq!(
+                consume_error_message(all).as_deref(),
+                Some("Failed altering group offsets for the following partitions: [t-1]")
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+        }
+
+        // all() succeeds when no partition failed — and with nothing requested.
+        for requested in [vec![TopicPartition::new("t", 0)], Vec::new()] {
+            let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
+            let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+            let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+                result, requested, outcome,
+            )));
+            unsafe {
+                assert!(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered).is_null());
+                kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+            }
+        }
+    }
+
+    /// A whole-request failure on a synchronous-path handle: every accessor
+    /// reports it, as Java's `whenComplete` forwards the `throwable`.
+    #[test]
+    fn consumer_group_offsets_results_report_a_whole_request_failure_through_every_accessor() {
+        let requested = vec![TopicPartition::new("t", 0)];
+        let failed: PartitionErrorsOutcome = Err(Error::group_authorization("g"));
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            AlterConsumerGroupOffsetsResult::new(resolved_future(failed.clone())),
+            requested.clone(),
+            failed.clone(),
+        )));
+        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+            DeleteConsumerGroupOffsetsResult::new(resolved_future(failed.clone()), requested.iter().cloned().collect()),
+            requested,
+            failed,
+        )));
+        let code = Errors::GroupAuthorizationFailed.code() as i32;
+        unsafe {
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 0))
+                    as i32,
+                code
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"t".as_ptr(),
+                    0
+                )),
+                Some(code)
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered)),
+                Some(code)
+            );
             kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
 
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"t".as_ptr(),
+                    0
+                )),
+                Some(code)
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)),
+                Some(code)
+            );
+            // The unrequested-partition guard still wins: Java throws it before
+            // looking at the future.
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"other".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Partition other-0 was not included in the original request")
+            );
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+        }
+    }
+
+    /// `deleteConsumerGroupOffsets` handle: Java's `partitionResult(tp)` (with
+    /// its synchronous unrequested-partition guard and `getSubLevelError`'s
+    /// "not included in the response") and `all()`.
+    #[test]
+    fn delete_consumer_group_offsets_result_answers_java_accessors() {
+        let requested = vec![TopicPartition::new("topic", 0), TopicPartition::new("topic", 1)];
+        let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("topic", 0), Errors::None)]));
+        let result = DeleteConsumerGroupOffsetsResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+            result, requested, outcome,
+        )));
+        let missing = "Offset deletion result for partition \"topic-1\" was not included in the response";
+        unsafe {
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_count(deleted), 2);
             assert!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 0).is_null());
             assert_eq!(
-                common::kafka_common_Error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 1))
-                    as i32,
-                Errors::UnknownMemberId.code() as i32
+                CStr::from_ptr(common::kafka_common_Error_message(
+                    kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 1)
+                ))
+                .to_str(),
+                Ok(missing)
             );
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(deleted, -1), -1);
+
+            assert!(
+                kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(deleted, c"topic".as_ptr(), 0).is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"topic".as_ptr(),
+                    1
+                ))
+                .as_deref(),
+                Some(missing)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"invalid-topic".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Partition invalid-topic-0 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)).as_deref(),
+                Some(missing)
+            );
             kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
         }
+
+        // A partition-level error surfaces as its own kind; all() succeeds when
+        // every requested partition succeeded.
+        let requested = vec![TopicPartition::new("topic", 0)];
+        for (error, expected) in [
+            (Errors::None, None),
+            (Errors::GroupSubscribedToTopic, Some(Errors::GroupSubscribedToTopic)),
+        ] {
+            let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("topic", 0), error)]));
+            let result = DeleteConsumerGroupOffsetsResult::new(
+                resolved_future(outcome.clone()),
+                requested.iter().cloned().collect(),
+            );
+            let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+                result,
+                requested.clone(),
+                outcome,
+            )));
+            unsafe {
+                assert_eq!(
+                    consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)),
+                    expected.map(|e| e.code() as i32)
+                );
+                kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+            }
+        }
+    }
+
+    /// `removeMembersFromConsumerGroup` handle with explicit members: Java's
+    /// `memberResult(member)` and `all()`.
+    #[test]
+    fn remove_members_from_consumer_group_result_answers_java_accessors() {
+        let requested = vec![MemberToRemove::new("instance-2"), MemberToRemove::new("instance-1")];
+        let outcome: MemberErrorsOutcome = Ok(HashMap::from([
+            (MemberToRemove::new("instance-1").to_member_identity(), Errors::None),
+            (MemberToRemove::new("instance-2").to_member_identity(), Errors::FencedInstanceId),
+        ]));
+        let result = RemoveMembersFromConsumerGroupResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
+            result, requested, outcome,
+        )));
+        let fenced = Errors::FencedInstanceId.code() as i32;
+        unsafe {
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(removed), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
+                    removed, 1
+                ))
+                .to_str(),
+                Ok("instance-2")
+            );
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, 0).is_null());
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, 1).is_null());
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, -1).is_null());
+
+            assert!(
+                kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(removed, c"instance-1".as_ptr())
+                    .is_null()
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-2".as_ptr()
+                )),
+                Some(fenced)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"invalid-instance-id".as_ptr()
+                ))
+                .as_deref(),
+                Some("Member invalid-instance-id was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)),
+                Some(fenced)
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+        }
+
+        // A requested member absent from the response: getSubLevelError.
+        let requested = vec![MemberToRemove::new("instance-2")];
+        let outcome: MemberErrorsOutcome = Ok(HashMap::new());
+        let result = RemoveMembersFromConsumerGroupResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
+            result, requested, outcome,
+        )));
+        let missing = "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" was not \
+                       included in the removal response";
+        unsafe {
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-2".as_ptr()
+                ))
+                .as_deref(),
+                Some(missing)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)).as_deref(),
+                Some(missing)
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+        }
+    }
+
+    /// `removeAll` mode: `memberResult` is refused with Java's exact message,
+    /// and `all()` wraps the first member error in a bare Kafka error (Java's
+    /// `new KafkaException("Encounter exception when trying to remove: ...",
+    /// memberException)`), so it is not an API error and carries no API code.
+    #[test]
+    fn remove_members_from_consumer_group_result_in_remove_all_mode() {
+        let mut identity = MemberIdentity::new();
+        identity.set_member_id("m1".to_string());
+        for (error, fails) in [(Errors::None, false), (Errors::UnknownMemberId, true)] {
+            let outcome: MemberErrorsOutcome = Ok(HashMap::from([(identity.clone(), error)]));
+            let result = RemoveMembersFromConsumerGroupResult::new(resolved_future(outcome.clone()), HashSet::new());
+            let removed = box_remove_members_from_consumer_group_result(
+                remove_members_from_consumer_group_result_inner((result, Vec::new(), outcome)),
+            );
+            unsafe {
+                assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(removed), 0);
+                assert_eq!(
+                    consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                        removed,
+                        c"instance-1".as_ptr()
+                    ))
+                    .as_deref(),
+                    Some("The method: memberResult is not applicable in 'removeAll' mode")
+                );
+                let all = kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed);
+                if fails {
+                    assert!(!common::kafka_common_Error_is_api_error(all));
+                    assert!(common::kafka_common_Error_is_kafka_error(all));
+                    assert_eq!(
+                        common::kafka_common_Error_code(all) as i32,
+                        Errors::UnknownServerError.code() as i32
+                    );
+                    assert_eq!(
+                        consume_error_message(all).as_deref(),
+                        Some(
+                            "Encounter error when trying to remove: MemberIdentity(memberId='m1', \
+                             groupInstanceId=null, reason=null)"
+                        )
+                    );
+                } else {
+                    assert!(all.is_null());
+                }
+                kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+            }
+        }
+    }
+
+    /// The accessors evaluate the handle's already-resolved outcome, so they
+    /// need no Tokio runtime and work from an arbitrary thread.
+    #[test]
+    fn consumer_group_result_accessors_run_off_any_runtime() {
+        let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
+        let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            result,
+            vec![TopicPartition::new("t", 0)],
+            outcome,
+        )));
+        let handle = altered as usize;
+        std::thread::spawn(move || unsafe {
+            let altered = handle as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t;
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(altered, c"t".as_ptr(), 0).is_null());
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered).is_null());
+        })
+        .join()
+        .unwrap();
+        unsafe { kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered) };
     }
 
     #[test]
@@ -30389,14 +31015,12 @@ mod tests {
             ("a".to_string(), Ok(())),
             ("b".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
-        let groups = box_delete_consumer_groups_result(outcomes.clone());
-        let members = box_remove_members_from_consumer_group_result(outcomes);
-        // SAFETY: Test code: `groups` and `members` were built just above by
-        // `box_delete_consumer_groups_result` and
-        // `box_remove_members_from_consumer_group_result`, so each is a valid handle for
-        // its own getters; the group-id strings and error pointers are borrowed and read
-        // before the owning handle is freed, out-of-range indices exercise the documented
-        // null paths, and each handle is destroyed exactly once by its own `_destroy`.
+        let groups = box_delete_consumer_groups_result(outcomes);
+        // SAFETY: Test code: `groups` was built just above by
+        // `box_delete_consumer_groups_result`, so it is a valid handle for its getters; the
+        // group-id strings and error pointers are borrowed and read before the handle is
+        // freed, out-of-range indices exercise the documented null paths, and the handle is
+        // destroyed exactly once by its own `_destroy`.
         unsafe {
             assert_eq!(kafka_admin_DeleteConsumerGroupsResult_count(groups), 2);
             assert_eq!(
@@ -30410,19 +31034,6 @@ mod tests {
             );
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 2).is_null());
             kafka_admin_DeleteConsumerGroupsResult_destroy(groups);
-
-            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(members), 2);
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
-                    members, 1
-                ))
-                .to_str(),
-                Ok("b")
-            );
-            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 0).is_null());
-            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 1).is_null());
-            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, -1).is_null());
-            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(members);
         }
     }
 
@@ -34118,17 +34729,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase E — end-to-end real-error-per-key proof, through the actual public
-    // async entry point and a real `MockAdminClient`. Every RPC in this family
-    // has a Java `MockAdminClient` that either throws
+    // Phase E — end-to-end real-error proof, through the actual public async
+    // entry point and a real `MockAdminClient`. Every RPC in this family has a
+    // Java `MockAdminClient` that either throws
     // `UnsupportedOperationException("Not implement(ed) yet")` unconditionally
-    // (describeConsumerGroups, describeClassicGroups, alterConsumerGroupOffsets,
-    // deleteConsumerGroupOffsets, deleteConsumerGroups,
-    // removeMembersFromConsumerGroup) or does so only for a multi-group
-    // `listConsumerGroupOffsets` call (Java `MockAdminClient.java:750`) — each
-    // test below asserts the REAL typed error (exact message text) surfaces
-    // per key, not the generic `admin_async_per_key_op` safety-net fallback
-    // ("the requested key was not present in the admin RPC's response").
+    // or does so only for a multi-group `listConsumerGroupOffsets` call (Java
+    // `MockAdminClient.java:750`).
+    //
+    // - The four map-shaped RPCs (describeConsumerGroups, describeClassicGroups,
+    //   listConsumerGroupOffsets, deleteConsumerGroups) deliver per key through
+    //   `admin_async_per_key_op`: their tests assert the REAL typed error (exact
+    //   message text) surfaces per key, not that helper's safety-net fallback
+    //   ("the requested key was not present in the admin RPC's response").
+    // - The three single-future RPCs (alterConsumerGroupOffsets,
+    //   deleteConsumerGroupOffsets, removeMembersFromConsumerGroup) wrap one
+    //   Java future and do not use `admin_async_per_key_op`: their tests
+    //   assert ONE callback carrying the whole-request error.
     // -----------------------------------------------------------------------
 
     /// `describeConsumerGroups`: two distinct group ids each independently
@@ -34402,49 +35018,103 @@ mod tests {
         }
     }
 
-    /// `alterConsumerGroupOffsets`: two partitions each independently receive
-    /// Java's real `UnsupportedOperationException("Not implement yet")`
-    /// (`MockAdminClient.java:1213` — note Java's own typo, preserved
-    /// verbatim), proving `submit_alter_consumer_group_offsets_entries`
-    /// always derives a real per-key future (via `partition_result`) rather
-    /// than relying on the generic fallback.
+    /// What a single-shot consumer-group-offsets / remove-members callback
+    /// delivered: whether a result handle arrived (it is destroyed on the
+    /// spot) and the error message, if any (the error is destroyed too).
+    type SingleShot = (bool, Option<String>);
+
+    /// Drains exactly one delivery from `rx`, then proves no second one
+    /// follows: Java's result is one future, so the callback fires once.
+    fn expect_exactly_one(rx: &std::sync::mpsc::Receiver<SingleShot>) -> SingleShot {
+        let delivered = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the callback must fire, not hang");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the callback must fire exactly once"
+        );
+        delivered
+    }
+
+    extern "C" fn on_alter_offsets_once(
+        result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    extern "C" fn on_delete_offsets_once(
+        result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    extern "C" fn on_remove_members_once(
+        result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    /// `alterConsumerGroupOffsets` async: Java's result is ONE future, so the
+    /// callback fires exactly once with the whole-request error Java's
+    /// `MockAdminClient` throws (`MockAdminClient.java:1213`, "Not implement
+    /// yet" — Java's own typo, preserved) — for two partitions, for an empty
+    /// offsets map (which used to fire nothing at all), and inline for a
+    /// request that cannot be submitted.
     #[test]
-    fn alter_consumer_group_offsets_async_reports_the_real_unsupported_error_per_partition() {
+    fn alter_consumer_group_offsets_async_fires_one_callback_with_the_whole_request_outcome() {
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
-
         let (_topics_owned, topic_ptrs) = c_array(&["acgo-topic", "acgo-topic"]);
         let partitions = [0i32, 1i32];
         let offsets = [10i64, 20i64];
         let has_leader_epoch = [false, false];
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
 
-        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>)>();
-        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>)>);
-        extern "C" fn on_alter(
-            _topic: *const c_char,
-            partition: i32,
-            error: *mut kafka_common_Error_t,
-            user_data: *mut c_void,
-        ) {
-            let ctx = unsafe { &*(user_data as *const Ctx) };
-            let message = if error.is_null() {
-                None
-            } else {
-                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-                Some(text)
-            };
-            ctx.0.send((partition, message)).unwrap();
+        for (count, group) in [(2, c"acgo-group".as_ptr()), (0, c"acgo-group".as_ptr())] {
+            unsafe {
+                kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+                    admin,
+                    group,
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    has_leader_epoch.as_ptr(),
+                    count,
+                    -1,
+                    on_alter_offsets_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implement yet".to_string())),
+                "count {count}"
+            );
         }
-        let ctx = Box::new(Ctx(tx));
-        let ctx_ptr = Box::into_raw(ctx);
 
+        // Not submittable: fires once, inline, before the call returns.
         unsafe {
             kafka_admin_AdminClient_alter_consumer_group_offsets_async(
                 admin,
-                c"acgo-group".as_ptr(),
+                std::ptr::null(),
                 topic_ptrs.as_ptr(),
                 partitions.as_ptr(),
                 offsets.as_ptr(),
@@ -34453,87 +35123,258 @@ mod tests {
                 has_leader_epoch.as_ptr(),
                 2,
                 -1,
-                on_alter,
-                ctx_ptr as *mut c_void,
+                on_alter_offsets_once,
+                tx_ptr as *mut c_void,
             );
         }
-
-        let mut seen = HashMap::new();
-        for _ in 0..2 {
-            let (partition, message) = rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("both partitions must get exactly one callback, not hang");
-            seen.insert(partition, message);
-        }
-        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
-        assert_eq!(seen[&0].as_deref(), Some("Not implement yet"));
-        assert_eq!(seen[&1].as_deref(), Some("Not implement yet"));
+        assert_eq!(rx.try_recv().ok(), Some((false, Some("group_id must not be null".to_string()))));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
 
         unsafe {
-            drop(Box::from_raw(ctx_ptr));
+            drop(Box::from_raw(tx_ptr));
             kafka_admin_AdminClient_destroy(admin);
         }
     }
 
-    /// `deleteConsumerGroupOffsets`: same shape as the test above, for Java's
-    /// `MockAdminClient.java:783` `UnsupportedOperationException`.
+    /// `deleteConsumerGroupOffsets` async: same shape as the test above, for
+    /// Java's `MockAdminClient.java:783` `UnsupportedOperationException`.
     #[test]
-    fn delete_consumer_group_offsets_async_reports_the_real_unsupported_error_per_partition() {
+    fn delete_consumer_group_offsets_async_fires_one_callback_with_the_whole_request_outcome() {
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
-
         let (_topics_owned, topic_ptrs) = c_array(&["dcgo-topic", "dcgo-topic"]);
         let partitions = [0i32, 1i32];
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
 
-        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>)>();
-        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>)>);
-        extern "C" fn on_delete(
-            _topic: *const c_char,
-            partition: i32,
-            error: *mut kafka_common_Error_t,
-            user_data: *mut c_void,
-        ) {
-            let ctx = unsafe { &*(user_data as *const Ctx) };
-            let message = if error.is_null() {
-                None
-            } else {
-                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-                Some(text)
-            };
-            ctx.0.send((partition, message)).unwrap();
+        for count in [2, 0] {
+            unsafe {
+                kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+                    admin,
+                    c"dcgo-group".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    count,
+                    -1,
+                    on_delete_offsets_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implemented yet".to_string())),
+                "count {count}"
+            );
         }
-        let ctx = Box::new(Ctx(tx));
-        let ctx_ptr = Box::into_raw(ctx);
 
         unsafe {
             kafka_admin_AdminClient_delete_consumer_group_offsets_async(
                 admin,
-                c"dcgo-group".as_ptr(),
+                std::ptr::null(),
                 topic_ptrs.as_ptr(),
                 partitions.as_ptr(),
                 2,
                 -1,
-                on_delete,
-                ctx_ptr as *mut c_void,
+                on_delete_offsets_once,
+                tx_ptr as *mut c_void,
+            );
+        }
+        assert_eq!(rx.try_recv().ok(), Some((false, Some("group_id must not be null".to_string()))));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        unsafe {
+            drop(Box::from_raw(tx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `removeMembersFromConsumerGroup` async: one callback carrying the
+    /// whole-request error Java's `MockAdminClient` throws
+    /// (`MockAdminClient.java:801-803`) — with explicit members, with a
+    /// repeated instance id (Java's `Set<MemberToRemove>` collapses it), and in
+    /// `removeAll` mode — and inline for an empty member list without
+    /// `remove_all` (Java's collection constructor throws), which used to fire
+    /// nothing at all.
+    #[test]
+    fn remove_members_from_consumer_group_async_fires_one_callback_with_the_whole_request_outcome() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
+
+        let (_two_owned, two) = c_array(&["instance-1", "instance-2"]);
+        let (_dup_owned, dup) = c_array(&["dup-instance", "dup-instance"]);
+        for (remove_all, ids, count) in [
+            (false, two.as_ptr(), 2),
+            (false, dup.as_ptr(), 2),
+            (true, std::ptr::null(), 0),
+        ] {
+            unsafe {
+                kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+                    admin,
+                    c"rmfcg-group".as_ptr(),
+                    remove_all,
+                    ids,
+                    count,
+                    std::ptr::null(),
+                    -1,
+                    on_remove_members_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implemented yet".to_string())),
+                "remove_all {remove_all}"
             );
         }
 
-        let mut seen = HashMap::new();
-        for _ in 0..2 {
-            let (partition, message) = rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("both partitions must get exactly one callback, not hang");
-            seen.insert(partition, message);
+        unsafe {
+            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+                admin,
+                c"rmfcg-group".as_ptr(),
+                false,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                on_remove_members_once,
+                tx_ptr as *mut c_void,
+            );
         }
-        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
-        assert_eq!(seen[&0].as_deref(), Some("Not implemented yet"));
-        assert_eq!(seen[&1].as_deref(), Some("Not implemented yet"));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some((false, Some("Invalid empty members has been provided".to_string())))
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
 
         unsafe {
-            drop(Box::from_raw(ctx_ptr));
+            drop(Box::from_raw(tx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// The synchronous entry points' handles answer Java's accessors too.
+    /// Against `MockAdminClient` the single future fails, so every accessor on
+    /// a requested key reports that failure — while the delete / remove
+    /// "not included in the original request" guards still win, because Java
+    /// throws them before looking at the future.
+    #[test]
+    fn consumer_group_sync_results_answer_java_accessors_against_the_mock() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (_topics_owned, topic_ptrs) = c_array(&["sync-topic"]);
+        let partitions = [0i32];
+        let offsets = [1i64];
+        unsafe {
+            let mut altered = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_alter_consumer_group_offsets(
+                    admin,
+                    c"g".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                    -1,
+                    &mut altered,
+                )
+                .is_null()
+            );
+            for (topic, partition) in [(c"sync-topic", 0), (c"other", 3)] {
+                assert_eq!(
+                    consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                        altered,
+                        topic.as_ptr(),
+                        partition
+                    ))
+                    .as_deref(),
+                    Some("Not implement yet")
+                );
+            }
+            assert_eq!(
+                consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered)).as_deref(),
+                Some("Not implement yet")
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+
+            let mut deleted = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_delete_consumer_group_offsets(
+                    admin,
+                    c"g".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    1,
+                    -1,
+                    &mut deleted,
+                )
+                .is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"sync-topic".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Not implemented yet")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"other".as_ptr(),
+                    3
+                ))
+                .as_deref(),
+                Some("Partition other-3 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)).as_deref(),
+                Some("Not implemented yet")
+            );
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+
+            let (_ids_owned, ids) = c_array(&["instance-1"]);
+            let mut removed = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_remove_members_from_consumer_group(
+                    admin,
+                    c"g".as_ptr(),
+                    false,
+                    ids.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    -1,
+                    &mut removed,
+                )
+                .is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-1".as_ptr()
+                ))
+                .as_deref(),
+                Some("Not implemented yet")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-9".as_ptr()
+                ))
+                .as_deref(),
+                Some("Member instance-9 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)).as_deref(),
+                Some("Not implemented yet")
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+
             kafka_admin_AdminClient_destroy(admin);
         }
     }
@@ -34587,152 +35428,6 @@ mod tests {
         assert_eq!(seen.len(), 2, "both groups must have delivered exactly once");
         assert_eq!(seen["group-a"].as_deref(), Some("Not implemented yet"));
         assert_eq!(seen["group-b"].as_deref(), Some("Not implemented yet"));
-
-        unsafe {
-            drop(Box::from_raw(ctx_ptr));
-            kafka_admin_AdminClient_destroy(admin);
-        }
-    }
-
-    /// `removeMembersFromConsumerGroup` (non-`removeAll` mode): two members
-    /// each independently receive Java's real
-    /// `UnsupportedOperationException("Not implemented yet")`
-    /// (`MockAdminClient.java:801-803`), proving
-    /// `submit_remove_members_from_consumer_group_entries` always derives a
-    /// real per-key future (via `member_result`) rather than relying on the
-    /// generic fallback.
-    #[test]
-    fn remove_members_from_consumer_group_async_reports_the_real_unsupported_error_per_member() {
-        let admin = kafka_admin_MockAdminClient_new(1);
-        assert!(!admin.is_null());
-
-        let (_ids_owned, id_ptrs) = c_array(&["instance-1", "instance-2"]);
-        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
-        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
-        extern "C" fn on_remove(
-            group_instance_id: *const c_char,
-            error: *mut kafka_common_Error_t,
-            user_data: *mut c_void,
-        ) {
-            let ctx = unsafe { &*(user_data as *const Ctx) };
-            let id = unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().into_owned();
-            let message = if error.is_null() {
-                None
-            } else {
-                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-                Some(text)
-            };
-            ctx.0.send((id, message)).unwrap();
-        }
-        let ctx = Box::new(Ctx(tx));
-        let ctx_ptr = Box::into_raw(ctx);
-
-        unsafe {
-            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-                admin,
-                c"rmfcg-group".as_ptr(),
-                false,
-                id_ptrs.as_ptr(),
-                2,
-                std::ptr::null(),
-                -1,
-                on_remove,
-                ctx_ptr as *mut c_void,
-            );
-        }
-
-        let mut seen = HashMap::new();
-        for _ in 0..2 {
-            let (id, message) = rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("both members must get exactly one callback, not hang");
-            seen.insert(id, message);
-        }
-        assert_eq!(seen.len(), 2, "both members must have delivered exactly once");
-        assert_eq!(seen["instance-1"].as_deref(), Some("Not implemented yet"));
-        assert_eq!(seen["instance-2"].as_deref(), Some("Not implemented yet"));
-
-        unsafe {
-            drop(Box::from_raw(ctx_ptr));
-            kafka_admin_AdminClient_destroy(admin);
-        }
-    }
-
-    /// `removeMembersFromConsumerGroup` in `removeAll` mode: Java's
-    /// `memberResult` is not applicable at all (there is no member list to key
-    /// by), so `all()` is the only observable. The callback must fire **exactly
-    /// once** with a NULL `group_instance_id`, carrying the whole operation's
-    /// outcome — this is what lets a caller/harness await the operation to
-    /// completion (and observe its error) even in `removeAll` mode, rather than
-    /// the operation being fire-and-forget with nothing to await.
-    ///
-    /// Against `MockAdminClient`, `removeMembersFromConsumerGroup` completes its
-    /// whole-op future with `UnsupportedOperationException("Not implemented
-    /// yet")` (`MockAdminClient.java:801-803`), so the single callback carries
-    /// exactly that error — proving completion is now observable.
-    #[test]
-    fn remove_members_from_consumer_group_async_fires_whole_op_once_in_remove_all_mode() {
-        let admin = kafka_admin_MockAdminClient_new(1);
-        assert!(!admin.is_null());
-
-        let (tx, rx) = std::sync::mpsc::channel::<(bool, Option<String>)>();
-        struct Ctx(std::sync::mpsc::Sender<(bool, Option<String>)>);
-        extern "C" fn on_remove(
-            group_instance_id: *const c_char,
-            error: *mut kafka_common_Error_t,
-            user_data: *mut c_void,
-        ) {
-            // removeAll delivers the whole-op outcome with a NULL key.
-            let key_is_null = group_instance_id.is_null();
-            let message = if error.is_null() {
-                None
-            } else {
-                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-                Some(text)
-            };
-            let ctx = unsafe { &*(user_data as *const Ctx) };
-            ctx.0.send((key_is_null, message)).unwrap();
-        }
-        let ctx = Box::new(Ctx(tx));
-        let ctx_ptr = Box::into_raw(ctx);
-
-        unsafe {
-            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-                admin,
-                c"rmfcg-remove-all-group".as_ptr(),
-                true,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                -1,
-                on_remove,
-                ctx_ptr as *mut c_void,
-            );
-        }
-
-        let (key_is_null, message) = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("removeAll must fire the whole-op callback exactly once");
-        assert!(
-            key_is_null,
-            "removeAll delivers the whole-op outcome with a NULL group_instance_id"
-        );
-        assert_eq!(
-            message.as_deref(),
-            Some("Not implemented yet"),
-            "the mock's removeAll whole-op future carries the unsupported error"
-        );
-        // Exactly once: no second callback.
-        assert!(
-            rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "removeAll fires the whole-op callback exactly once"
-        );
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));
@@ -35383,73 +36078,6 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "a repeated resource must not produce a second (spurious) callback"
-        );
-
-        unsafe {
-            drop(Box::from_raw(ctx_ptr));
-            kafka_admin_AdminClient_destroy(admin);
-        }
-    }
-
-    /// `remove_members_from_consumer_group_async` with two members naming the
-    /// SAME group instance id fires exactly one callback carrying the REAL
-    /// per-member outcome (Java keys the removal on `Set<MemberToRemove>`),
-    /// never a spurious "not present" error racing it.
-    #[test]
-    fn remove_members_from_consumer_group_async_dedups_a_repeated_instance_id() {
-        let admin = kafka_admin_MockAdminClient_new(1);
-        assert!(!admin.is_null());
-
-        // Same instance id twice.
-        let (_ids_owned, id_ptrs) = c_array(&["dup-instance", "dup-instance"]);
-        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
-        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
-        extern "C" fn on_remove(
-            group_instance_id: *const c_char,
-            error: *mut kafka_common_Error_t,
-            user_data: *mut c_void,
-        ) {
-            let ctx = unsafe { &*(user_data as *const Ctx) };
-            let id = unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().into_owned();
-            let message = if error.is_null() {
-                None
-            } else {
-                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-                Some(text)
-            };
-            ctx.0.send((id, message)).unwrap();
-        }
-        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
-
-        unsafe {
-            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
-                admin,
-                c"rmfcg-dup-group".as_ptr(),
-                false,
-                id_ptrs.as_ptr(),
-                2,
-                std::ptr::null(),
-                -1,
-                on_remove,
-                ctx_ptr as *mut c_void,
-            );
-        }
-
-        let (id, message) = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the deduped member must get exactly one callback, not hang");
-        assert_eq!(id, "dup-instance");
-        assert_eq!(
-            message.as_deref(),
-            Some("Not implemented yet"),
-            "the real per-member outcome must win, not a spurious 'not present' error"
-        );
-        assert!(
-            rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "a repeated instance id must not produce a second (spurious) callback"
         );
 
         unsafe {
