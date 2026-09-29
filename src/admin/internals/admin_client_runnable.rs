@@ -30,7 +30,7 @@ use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::admin::KafkaAdminClient;
 use crate::common::Errors;
-use crate::common::errors::{DisconnectError, TimeoutError};
+use crate::common::errors::{DisconnectError, TimeoutError, UnsupportedEndpointTypeError};
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
@@ -74,6 +74,54 @@ impl ShutdownSignal {
             closing: AtomicBool::new(false),
             hard_shutdown_deadline_ms: AtomicI64::new(KafkaAdminClient::NO_HARD_SHUTDOWN),
         }
+    }
+
+    /// The rejection half of `AdminClientRunnable.call`
+    /// (`KafkaAdminClient.java:1598-1609`): returns the call when it may be
+    /// enqueued, and otherwise fails it and returns `None`.
+    ///
+    /// Every new call passes this gate: user calls, driver and `listGroups`
+    /// follow-ups (through `runnable_call` in `kafka_admin_client.rs`) and the
+    /// quota-retry follow-ups a response hook returns as [`HandleResult::NewCall`]
+    /// (Java's `runnable.call(call, now)` at `:1880`, `:2025`, `:2098`, `:3257`).
+    ///
+    /// 1. Once `close()` has published the hard-shutdown deadline, reject with
+    ///    `IllegalStateException("Cannot accept new calls when AdminClient is
+    ///    closing.")` (`:1599-1601`).
+    /// 2. Reject a call whose endpoint a `bootstrap.controllers` client cannot
+    ///    serve (`:1602-1605`).
+    pub(crate) fn admit_new_call(&self, using_bootstrap_controllers: bool, mut call: Call) -> Option<Call> {
+        // Java checks `hardShutdownTimeMs`, not the runnable's `closing` flag: the
+        // latter is only set by the I/O task's `finally` and gates `enqueue`.
+        // Rust's `ShutdownSignal::closing` is set by both `close()` and
+        // `fail_all_remaining`, so gating on it would answer a call submitted after
+        // a panicked loop with this error instead of Java's "thread has exited".
+        if self.hard_shutdown_deadline_ms.load(Ordering::Acquire) != KafkaAdminClient::NO_HARD_SHUTDOWN {
+            // Java's text verbatim (finding 247a).
+            call.handle_failure(&Error::local_illegal_state(
+                "Cannot accept new calls when AdminClient is closing.",
+            ));
+            return None;
+        }
+        // Reject calls whose endpoint is incompatible with a `bootstrap.controllers`
+        // client (KIP-919).
+        if using_bootstrap_controllers && !call.node_provider.supports_use_controllers() {
+            // `new UnsupportedEndpointTypeException("This Admin API is not yet
+            // supported when communicating directly with the controller quorum.")`.
+            // Spelling it `Error::unsupported_version` gave it code 35, which
+            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+            // retry instead of failing the call (finding 247b).
+            //
+            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
+            // non-retriable, non-`UnsupportedVersionException` error on a call that
+            // has not yet passed its deadline is `handleFailure(throwable)`
+            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+                "This Admin API is not yet supported when communicating directly with the controller quorum.",
+            )));
+            return None;
+        }
+        Some(call)
     }
 }
 
@@ -686,7 +734,21 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                                 }
                             },
                             HandleResult::NewCall(new_call) => {
-                                self.pending_calls.push(*new_call);
+                                // `runnable.call(call, now)`: the same gate as
+                                // every other new call. `enqueue`'s half —
+                                // `newCalls.add(call)` unless the `finally` has
+                                // set `closing` — always accepts here, because
+                                // response hooks only run inside the loop,
+                                // before `run()` closes `admin_rx`. Pushing
+                                // straight to `pending_calls` is what the next
+                                // `drain_new_calls` would do with it.
+                                if let Some(mut new_call) = self
+                                    .shutdown
+                                    .admit_new_call(self.metadata_manager.using_bootstrap_controllers(), *new_call)
+                                {
+                                    new_call.cur_node = None;
+                                    self.pending_calls.push(new_call);
+                                }
                             },
                             HandleResult::Retry(err) => {
                                 self.fail_call(call, now, err);
