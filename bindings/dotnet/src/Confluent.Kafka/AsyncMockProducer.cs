@@ -120,6 +120,31 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         _native = NativeProducer.CreateMock(autoComplete);
     }
 
+    /// <summary>
+    /// <b>Internal test seam (M17/P1 D3), not public API.</b> As the public constructor, but the
+    /// producer's send accumulator is built with <paramref name="settings"/> instead of the
+    /// environment's — so a test can hold records in the accumulator (a long batch window and a slot
+    /// threshold above its record count) without process-wide environment variables, which the
+    /// parallel suite would share.
+    /// </summary>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <param name="autoComplete">As for the public constructor.</param>
+    /// <param name="settings">The accumulator settings.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
+    /// </exception>
+    internal AsyncMockProducer(
+        ISerializer<TKey> keySerializer,
+        ISerializer<TValue> valueSerializer,
+        bool autoComplete,
+        SendAccumulatorSettings settings)
+    {
+        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
+        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
+        _native = NativeProducer.CreateMock(autoComplete, settings);
+    }
+
     /// <inheritdoc/>
     public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {

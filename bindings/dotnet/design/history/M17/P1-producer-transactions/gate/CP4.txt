@@ -1,0 +1,401 @@
+M17/P1 CP4 gate record: the transaction control operations in NativeProducer, and S5-S7
+=======================================================================================
+
+Recorded by dotnet-actor 84 on 2026-09-29. Times are the host clock (IST,
+UTC+05:30). Plan: design/history/M17/P1-producer-transactions/PLAN.md
+(committed in 8041731b), the contract: the §4.3 CP4 row (:1335), D1-D5, D8,
+D10-D13, §5.1 (:1488-1530) and §5.2 S5-S7 (:1677-1788). This file is a short
+summary (§4.2; Q20). Raw logs stay in the Actor's scratch directory; "cp4/"
+below is its cp4 folder. Per §10.2, CP4 is reviewed uncommitted: CP4 stages
+nothing.
+
+Base. HEAD is 8ccb0f8d (CP2) throughout (12:45:08, 12:53:45). The index holds
+the Manager's CP3 staging (gate/CP3.txt, SendCompletionPump.cs,
+SendCompletionPumpBarrierTests.cs), found there and left alone; the three
+match .git/claude-m17p1-snapshots/cp3/MANIFEST.sha256. The gates ran at
+12:42:40-12:45:09 on the bytes below except two test files, whose remarks
+were then corrected to match the mutation runs (comment lines only; +4 and
++2 lines); the final check (cp4/final/final.out, 12:53:04-12:53:45) re-ran
+build, format and both full suites on the final bytes.
+
+Files (git diff --numstat HEAD; wc -l; sha256 of the final bytes, after
+the 84.13-84.15 fix at the end of this file)
+------------------------------------------------------------------------
+- M  bindings/dotnet/src/Confluent.Kafka/Internal/NativeProducer.cs
+     +821 / -15, 15 hunks (git diff -U0 HEAD), 2545 lines
+     89139580d1ffeeb95331b60c612e6c53b4d88ab24a647b7803186d884791949f
+- M  bindings/dotnet/src/Confluent.Kafka/AsyncMockProducer.cs
+     +25 / -0 (the internal settings-seam constructor only), 318 lines
+     3d6f035938709dcbd88b48ca1d8e31df81cd4db1947e74c4ae9cb1546737e43b
+- ?? tests/Confluent.Kafka.UnitTests/Interop/ProducerTransactionDrainTests.cs
+     S5, new, 612 lines
+     71a1d8b90536446485d4b4bca50bbeb51a596a46d521b5993c2ebec7659c179d
+- ?? tests/Confluent.Kafka.UnitTests/Interop/ProducerTransactionCancellationTests.cs
+     S6, new, 593 lines
+     89147cb049e4742d97a6dc56fe3fa1a46483cd4bfe10ddbc36f5750fd1005d2d
+- ?? tests/Confluent.Kafka.UnitTests/Interop/MockProducerTransactionHelperTests.cs
+     S7, new, 383 lines
+     f30d6b4ec2bc88c13c07d78ea5b1da485351eca2610133bccc50b89fca550ac8
+- ?? this file.
+No file outside §4.3's CP4 list changed: no Rust (G1), no other .cs (G7).
+Size over §10.1's CP4 row (:2249): production 861 changed lines against
+550-750 (added: xmldoc 407, comment 41, blank 68, code 330; deleted 15);
+tests 1588 lines against 1,100-1,500 (xmldoc 292, comment 60, blank 202,
+code 1034). Observation (b).
+
+What CP4 adds (NativeProducer.cs; worktree lines)
+-------------------------------------------------
+- Seams (D3): the _accumulatorSettings field (:130), set by the ctor
+  (:157) and read by EnsureAccumulator (:1587) instead of
+  SendAccumulatorSettings.FromEnvironment() when non-null;
+  CreateMock(bool, SendAccumulatorSettings) (:286); NativeSubmit widened to
+  internal (:301); NativeSendOffsetsSubmit (:313), the async send-offsets
+  P/Invoke's shape; CommittedOffsetLookup (:333), D8's native-call
+  delegate; StartedAccumulator (:1696), a test observation point.
+- DrainAccumulatorWithin (:926): the bounded drain extracted from
+  FlushWithAccumulatorDrainBound, which now calls it (:899). One message
+  template; the flush's clause, "this flush did not include them", keeps
+  its text byte-identical (the diff moves the three string literals only;
+  SendAccumulatorTests' expiry test stays green).
+- Blocking forms (:1094-1234): InitTransactions, BeginTransaction,
+  SendOffsetsToTransaction, CommitTransaction, AbortTransaction, each
+  forwarding to its XxxWithAccumulatorDrainBound(TimeSpan) with the 30 s
+  bound; each runs ThrowIfClosed, then the drain with its Java method's
+  clause, then the sync P/Invoke on the SafeProducerHandle, then
+  ThrowIfFailed. SendOffsetsToTransaction runs D2's order first:
+  groupMetadata null, then NativeConsumer.SnapshotCommitOffsets, then closed.
+- Task forms (:1240-1363): InitTransactionsWithCallback,
+  SendOffsetsToTransactionWithCallback, CommitTransactionWithCallback,
+  AbortTransactionWithCallback, each with a submit-taking overload (the
+  seam); the defaults pass the four async P/Invokes (:1075-1082).
+- SubmitControlOperation (:1390): not async. ThrowIfClosed, then the
+  token; with no accumulator (and, for commit and abort, no pump) it
+  returns SubmitVoidOperation's Task from the calling frame. Otherwise
+  DrainThenSubmitControlOperation (:1428): await DrainPendingAsync(ct);
+  read the pump and EnqueueBarrier() (commit and abort); await
+  SubmitVoidOperation; on success only, AwaitCompletionBarrier (:1459), a
+  registration-based wait that returns normally when the token fires (D5
+  row 4).
+- D12 (:1482-1553): SnapshotSendOffsets; WithTransientGroupMetadata
+  (ConsumerGroupMetadata_new, destroy in finally); ThrowIfFailed. The async
+  send-offsets submit is wrapped in the transient handle and
+  NativeConsumer.WithPinnedCommitOffsets, both released in finally blocks
+  in the submit's frame; nothing that can throw runs after the P/Invoke.
+- D8 (:1763-1960): CommittedOffsetInitialCapacity 4101 and
+  CommittedOffsetMaxCapacity 1048581; MockSetCommitTransactionError (0 and
+  outside short -> ArgumentOutOfRangeException "code", then closed, then the
+  P/Invoke; false -> InvalidOperationException);
+  MockClearCommitTransactionError; MockSentOffsets; MockCommittedOffset
+  (ArgumentNullException groupId; ArgumentException "Topic names must not be
+  null." partition; closed; keys pinned for the lookups; the delegate always
+  passes metadata.Length as the cap); ReadCommittedOffset, the grow rule:
+  accept when length < cap - 4, else x4 up to 1048581, then
+  InvalidOperationException.
+- No P/Invoke added (G6); no new type besides the three delegates
+  (observation (e)).
+
+S5: Interop.ProducerTransactionDrainTests (new; 11 methods, 15 cases)
+---------------------------------------------------------------------
+Holding settings (slot threshold 1000, window 60 000 ms) through the seam;
+the "drained" witness is DrainPendingSends(TimeSpan.Zero) read after the
+operation, the "still buffered" one AdmittedRecordCount before it.
+  SettingsSeams_BuildTheAccumulatorWithTheSettingsGiven   both seams
+  CommitTransaction_IncludesTheSendsThatReturnedBeforeIt   history 3
+  AbortTransaction_DiscardsTheSendsThatReturnedBeforeIt    history 0, sends complete
+  BeginTransaction_DoesNotSweepAnEarlierSendIntoTheTransaction  history 1
+  EachControlOperation_ReturnsWithTheAccumulatorEmptyAndIdle    5 ops, history 4
+  SyncSurface_NeverStartsAnAccumulator_AcrossAWholeTransaction  accessor null
+  BlockingControlOperation_WhenTheDrainExpires_ThrowsWithoutANativeCall
+      5 rows: D3's message, Code 0, IsRetriable false
+  CommitTransaction_OnSuccess_CompletesOnlyAfterTheEarlierDeliveryCallbacksReturned
+  CommitTransaction_OnFailure_FaultsWithoutWaitingForTheBarrier  Code 120
+  AbortTransaction_OnSuccess_CompletesOnlyAfterTheEarlierDeliveryCallbacksReturned
+  AbortTransaction_OnFailure_FaultsWithoutWaitingForTheBarrier   Code -4
+S6: Interop.ProducerTransactionCancellationTests (new; 7 methods, 25 cases;
+in SerialMemoryMeasurementCollection, §5.1 item 6)
+  AlreadyCanceledToken_ThrowsSynchronously_WithoutASubmit  4 ops x with/without accumulator
+  CanceledDuringTheDrain_CancelsTheTask_WithoutASubmit_AndTheDrainCarriesOn  4 ops
+  CanceledAfterTheSubmit_CancelsTheAwaiter_AndTheLateCallbackIsHarmless
+      4 ops x late success / live KafkaErrorNew(120); IsClosed false after
+      Dispose, true after the late callback; context collectable
+  CanceledWhileAwaitingTheBarrier_CompletesTheTaskSuccessfully  commit, abort
+  EachAsyncOperation_SubmitsOnceThroughItsAsyncSymbol  Python 1557 analogue
+  SendOffsetsToTransaction_MarshalsTheOffsetsAndTheGroupMetadataIntoTheSubmit
+  SendOffsetsToTransaction_WithAnEmptyMap_IsStillSubmitted  D13 (both forms)
+S7: Interop.MockProducerTransactionHelperTests (new; 12 methods, 25 cases)
+  SetCommitTransactionError_RejectsCodesOutsideItsRange  0, 32768, -32769
+  SetCommitTransactionError_AcceptsBothEndsOfTheRange    short.Min/Max
+  SetCommitTransactionError_IsStickyUntilCleared         two commits fail
+  SetCommitTransactionError_WithANullMessage_UsesTheCodesDefaultMessage
+  SentOffsets_FollowsTheTransactionLifecycle
+  CommittedOffset_RejectsANullGroupIdAndANullTopic
+  CommittedOffset_ReturnsWhatTheTransactionCommitted
+  ReadCommittedOffset_ReturnsTheMetadataWhole     6 rows, fake, attempts 1/2/2/2/2/5
+  ReadCommittedOffset_WhenTheMetadataIsTooLarge_ThrowsAfterFiveAttempts
+  ReadCommittedOffset_NotFoundIsNull_AndMinusOneIsNoEpoch
+  CommittedOffset_ReturnsLargeMetadataWhole_EndToEnd   the 6 rows, mock core
+  CommittedOffset_WhenTheMetadataIsTooLarge_Throws_EndToEnd
+Core values measured at CP4 (§5.1 item 2; cp4/tests/s67-first.log and the
+first S5 run, s5-first.log, which passed with them):
+  abort with no open transaction: Code -4, "There is no open transaction."
+  commit hook (120, "commit failed abortably"): Code 120, that message,
+      IsTransactionAbortableError true
+  commit hook (120, null): "The server encountered an error with the
+      transaction. The client can abort the transaction to continue using
+      this transactional ID." (errors.rs:544)
+  a control op on a closed core (seen in the drain-mutation reds):
+      "MockProducer is already closed."
+  sync sendOffsets, empty map, no open transaction (84.13;
+      cp4/fix1315/probe.log): Code -4, "There is no open transaction."
+Each matches the core's source text; none contradicts a plan prediction.
+
+Mutation check (§5.1 item 7; not committed)
+-------------------------------------------
+cp4/mut/run.py with muts.py: one or more exact-text replacements, dotnet
+build -c Release of the unit-test csproj, dotnet test -f net10.0 --no-build
+--filter <the class(es)> at normal verbosity, then a sha-checked restore
+(3ca8cd9d6a19 for NativeProducer.cs each time). Baselines green: S5 15/15,
+S6 25/25, S7 25/25. Runs 12:34:31-12:36:25, then P11b, P16+F01 and P19
+(12:38-12:52). Logs cp4/mut/<id>.log; analyze.py prints each red.
+Production:
+  P01-P05 drop the drain in one blocking form (init, begin, sendOffsets,
+      commit, abort): each reddens its expiry row with "MockProducer is
+      already closed." (1/15 each); P02 also reddens BeginTransaction_...
+      (history 0) and EachControlOperation ("beginTransaction returned with
+      a send still in the accumulator"), 3/15.
+  P06 drop the async drain (shared by the four Task ops): 8 red over S5+S6
+      (40 cases): Commit_Includes (history 0), Abort_Discards (3),
+      EachControlOperation ("initTransactions returned ..."),
+      AbortTransaction_OnSuccess [30 s] (the abort's flush found nothing),
+      CanceledDuringTheDrain x4 (submit count 1).
+  P07 drop the barrier await: 2/15, both OnSuccess tests at their hold
+      window (Assert.NotSame: the Task completed inside it).
+  P08 drop the barrier enqueue: the same 2/15.
+  P09 await the barrier on the failure path too: 2/15, both OnFailure
+      tests [10 s] TimeoutException.
+  P10 remove SubmitControlOperation's token check (row 1 into the async
+      half): 4/25, the four withAccumulator rows, "No exception was thrown".
+  P11 swallow the drain's cancellation: GREEN 25/25. SubmitVoidOperation
+      re-checks the token and throws before any submit (observation (f)).
+  P11b P11 plus SubmitVoidOperation(CancellationToken.None): 4/25,
+      CanceledDuringTheDrain x4 [30 s] TimeoutException.
+  P12 throw on cancellation after the barrier wait: 2/25, row 4 x2
+      (OperationCanceledException).
+  P13 release the span-the-op reference as soon as it is taken: 8/25,
+      row 3 x8 "the native producer was destroyed with the operation's
+      reference outstanding".
+  P14 transient group metadata built with the member id as group id: 1/25,
+      the D12 marshalling test ("group=member-1 ...").
+  P15 return early on an empty offsets map: 1/25, D13 test (submits 0).
+  P20 the same in the sync form (84.13): 1/25, D13 test, "Assert.Throws()
+      Failure: No exception was thrown".
+  P16 naive grow condition, accept when length < cap - 1: 7/25, both
+      straddle rows on the fake and end to end ("came back altered"), the
+      4097 row (1 attempt, not 2), both too-large tests (no exception).
+  P17 EnsureAccumulator ignores the settings field: 1/15, the seam test
+      (window 10, the environment default, not 60 000).
+  P18 InitTransactionsWithCallback(ct, submit) ignores submit: 3/25, row 3
+      init x2 and the 1557 analogue (count 0).
+  P19 drop RegisterCancellation in SubmitVoidOperation: 8/25, row 3 x8
+      [30 s] TimeoutException.
+Fixture, mutated separately (ffi §A1):
+  F01 the committed-offset fake cuts mid-character: GREEN 25/25 alone.
+  P16+F01: 5/25; the fake's two straddle rows turn green again (only the
+      end-to-end ones stay red), so the fake's boundary rule is what lets
+      P16 show on the fake (observation (g)).
+  F02 the gated delivery callback does not park: 7/15, both OnSuccess
+      tests and all five expiry rows.
+  F03 the S6 fake fires the callback at submit: 6/25, row 3's init,
+      commit and abort cases (the Task completes before the cancel).
+20 production mutations run (P11 masked, P11b its unmasked form), 19 red;
+3 fixture mutations, 2 red alone. Every red is in a test whose remarks
+claim it; the remarks were corrected to the runs (see Base). After each run
+NativeProducer.cs and the test file restored sha-identical
+(cp4/mut/pre.sha, sha256sum -c: all OK).
+
+Reader sweep (cp4/sweep/probe.sh, probe.out, 12:40:23-12:40:38)
+---------------------------------------------------------------
+A scratch copy of the worktree library and tests; each declaration marked
+[Obsolete("CP4 probe", true)] in turn; every use is a CS0619 (lines below
+mapped back from the +1 shift). Test-project uses are listed only where the
+library compiled.
+  declaration                     uses (NativeProducer.cs unless named)
+  _pump (:119)                    EnsureAccumulator :1580 (write, ??=),
+                                  PumpToStop :1969 (read) - nothing else
+  _accumulator (:124)             EnsureAccumulator :1569, :1586;
+                                  AccumulatorToStop :1660
+  _accumulatorSettings (:130)     ctor :157; EnsureAccumulator :1587
+  EnsureAccumulator (:1567)       SendViaPump :572 only
+  DrainAccumulatorWithin (:926)   Flush :898; the five blocking forms
+                                  :1104, :1130, :1171, :1205, :1228
+  SubmitControlOperation (:1390)  the four Task forms :1249, :1301,
+                                  :1340, :1362
+  EnqueueBarrier (pump :364)      DrainThenSubmitControlOperation :1441
+  CreateMock(bool, settings)      AsyncMockProducer.cs :145
+  ReadCommittedOffset (:1919)     MockCommittedOffset :1888
+  StartedAccumulator (:1696)      tests only (S5 8 lines, S6 1)
+  AsyncMockProducer settings ctor S5 :95
+So D4's "FIFO plus drain" holds as written: the pump is created only in
+EnsureAccumulator, before the accumulator and under _pumpLock, and
+EnsureAccumulator runs only from SendViaPump, so the drain never creates a
+pump; an accumulator read non-null in SubmitControlOperation has a pump.
+
+Gates (cp4/gates/gates.sh: gates.out, g*.log)
+---------------------------------------------
+G2 (12:42:40) cargo build --features ffi --release: exit 0 ("in 0.25s").
+   dotnet build -c Release bindings/dotnet/Confluent.Kafka.sln: exit 0, 0
+   Warning(s), 0 Error(s); --no-incremental (12:42:42) the same,
+   00:00:02.11, all six outputs (3 library, 3 test TFMs incl. net462)
+   written 12:42:43-12:42:44.
+G3 (12:42:44) dotnet format <the sln> --verify-no-changes: exit 0, 0 bytes.
+G4 (12:43:01) dotnet test -c Release -f net10.0 <the sln>: exit 1, Passed
+   2439, Failed 1 of 2440: ProducerSubmitHandleRefTests.SubmitVoidOperation_
+   WhenAddRefThrows_DoesNotRootTheCompletionContext, "managed memory grew
+   2038256 bytes ... (budget 2000000)". Re-runs (cp4/flake/run.out,
+   12:45:51-12:46:45): the full net10.0 suite 3 times, 2440/2440 each; the
+   test alone 10/10; with S6 (same serial collection) 10/10. Final check
+   (12:53): 2440/2440, exit 0. /usr/local/share/dotnet/dotnet, no DOTNET_
+   variable set. Observation (a).
+G5 (12:43:16) env DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH
+   DOTNET_MULTILEVEL_LOOKUP=0 dotnet test -c Release -f net8.0 <the sln>:
+   exit 0, 2440/2440 on the first run; final check 2440/2440.
+   /Users/ankithl/.dotnet/dotnet, NETCore 8.0.31 and 10.0.12,
+   DOTNET_ROLL_FORWARD unset. net462 built in G2, not run.
+   Totals 2375 (CP3) -> 2440: S5 15 + S6 25 + S7 25.
+   The three classes (normal verbosity, 12:43:32): net10.0 65/65 (15, 25,
+   25), net8.0 65/65. Repeated 10 times per runtime (12:43:36-12:44:16):
+   65/65 every run on both.
+   Budget, DoD row 10 (budget.log, 12:44:16): 6/6, exit 0. SendAccumulator
+   Tests 44/44, incl. Flush_WhenTheAccumulatorDrainExpires_ThrowsRather
+   ThanReportingSuccess (the flush message pin).
+G8 (12:44:27) make -C bindings/dotnet test-soak-dotnet: exit 2. Build and
+   both format checks passed; the net8.0 leg failed to start ("You must
+   install or update .NET", framework 8.0.0: the default dotnet has no
+   .NET 8 runtime), so make stopped before the net10.0 leg. Per Q18:
+   the net8.0 leg with the $HOME/.dotnet env: 165/165, exit 0; the net10.0
+   leg run directly (12:47:07): 165/165, exit 0; and the whole target
+   under the $HOME/.dotnet env (12:47:19, SDK 10.0.401): exit 0, 0/0
+   warnings/errors twice, 165/165 on net8.0 and on net10.0.
+   dotnet build -c Release bindings/dotnet/tests/Performance/PerfV3: exit 0,
+   0 Warning(s), 0 Error(s). dotnet test -c Release -f net10.0
+   <PerformanceTests.csproj> --filter 'FullyQualifiedName!~PerfV3SmokeTests':
+   exit 0, 25/25. Observation (c).
+G1 (12:45:08) git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/
+   tests/: 0 bytes; untracked there: 0 lines. shasum -a 256
+   target/include/confluent_kafka.h:
+     e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111
+   the CP0 value (gate/CP0.txt:54). git diff --stat HEAD over
+   bindings/dotnet/{src,tests,grpc-server,soak}: CP4's two files and CP3's
+   two staged files.
+G6 internal static extern: 715 (NativeMethods.cs 236, NativeMethods.Admin.cs
+   479), the same at HEAD (git grep -c). The diff's one +/- "DllImport"
+   line pair is the class xmldoc; the test files' one hit is a remark.
+G7 git diff HEAD over bindings/dotnet/src, tests, grpc-server and Makefile,
+   added lines, marker pattern: exit 1; control (DrainAccumulatorWithin|
+   SubmitControlOperation): 19. The three new files: marker grep exit 1;
+   'Apache License' once in each. No Thread.Sleep or WaitAsync in code;
+   the one diff hit is xmldoc ("no Task.WaitAsync on netstandard2.0").
+   Task.Delay: S5's two barrier hold windows (§5.1 item 3) and the 2 ms
+   step of two PollUntil loops (30 s Stopwatch bound). Observation (i).
+   git diff --cached --name-only: the Manager's three CP3 paths, nothing
+   of CP4's (12:45:08 and 12:53:45). git status --short: CP4's two M and
+   three ?? paths, COMMENTS.DONE.84.md and the agent memory folders (??),
+   the user's own entries, untouched.
+Freeze (12:45:09, 12:53:45) shasum -a 256 -c on
+   .git/claude-m17p1-snapshots/{cp2,cp2-plan,cp3}/MANIFEST.sha256: every
+   entry OK, exit 0, each time. COMMENTS.84.md is 0 bytes.
+
+Observations for the Manager (not CP4 blockers)
+-----------------------------------------------
+(a) Decision: the known flake failed on net10.0 (G4's first run, 38 256
+    bytes over), where the brief records it on net8.0 only. Same test, same
+    symptom; re-runs green (3 full, 10 alone, 10 with S6). S6 joined its
+    serial collection (§5.1 item 6) and did not perturb it in 10 paired
+    runs. Accept as the known flake, or widen its budget in a later CP.
+(b) Decision: size over §10.1's CP4 estimates (production 853 against
+    550-750, of which 440 xmldoc and comment; tests 1575 against
+    1,100-1,500).
+(c) G8's make target cannot run its net8.0 leg with the default dotnet on
+    this host; under the $HOME/.dotnet env the whole target exits 0.
+(d) S5's witness is NativeProducer.DrainPendingSends(TimeSpan.Zero), the
+    call AsyncMockProducer.WaitForSendsToReachCore wraps (the plan names
+    the latter); the operations are driven on NativeProducer because the
+    public members forward to it only at CP5.
+(e) DoD row 7: three delegate types. NativeSendOffsetsSubmit is the async
+    send-offsets P/Invoke's shape (NativeSubmit cannot carry the arrays or
+    the group-metadata handle), so D3's "overload taking the submit
+    delegate" for SendOffsetsToTransaction takes this one; the D12
+    marshalling test reads through it. CommittedOffsetLookup is D8's
+    "native call as a delegate".
+(f) P11 is masked by SubmitVoidOperation's own token check, so D5 row 2's
+    "not submitted" has two guards; P11b removes both.
+(g) The committed-offset fake's boundary rule is load-bearing only in the
+    pair P16+F01, which the end-to-end rows cover independently.
+(h) D10 by reading, not measured (S11 is CP5's): with an idle accumulator,
+    DrainPendingAsync returns a completed task, so the async method reaches
+    SubmitVoidOperation synchronously too and an inline -2 rejection is an
+    already-faulted Task at return; only a non-idle drain makes it later.
+(i) Decision: two waits poll a condition instead of awaiting a signal:
+    S5's commit OnSuccess test polls HistoryCount() == N (the plan's "the
+    native commit is observed done"; the mock gives no signal for it), and
+    S6's row 4 polls the fake's submit count (the drain runs on a pool
+    continuation). Each stops at the first observation, bounded at 30 s,
+    as SendAccumulatorTests' PollUntil does. §5.1 item 3 names neither.
+
+84.13-84.15 fix (Critic CP4 review; cp4/fix1315/)
+-------------------------------------------------
+The sections above record the gate-run bytes except the Files list, the
+size line and the S6/mutation lines marked 84.13, which are updated to the
+final bytes. NativeProducer.cs line citations above are for the pre-fix
+bytes; from :1071 on they shift by +1 to +8.
+- 84.13, ProducerTransactionCancellationTests.cs (580 -> 593 lines): the
+  D13 test now also calls the sync SendOffsetsToTransaction with an empty
+  map after CommitTransaction, with no transaction open, and asserts the
+  core's KafkaException: Code -4 (a first run asserting int.MinValue read
+  "Actual: -4"), "There is no open transaction.". The mock checks the
+  transaction state before its empty-map return (mock_producer.rs:1064,
+  :1070-1072), so a managed early return would succeed instead. The summary
+  now claims only what each half detects. P20 (next to P15, muts.py): red
+  1/25, at :425. P15 re-run on the new test: red 1/25 (submits 0), at :416.
+  Both restored sha-identical (89139580d1ff).
+- 84.14, NativeProducer.cs: the Commit/AbortTransactionWithCallback(ct)
+  summaries add D5 row 4's exception: if the token fires during the barrier
+  wait, the Task completes successfully without that ordering.
+- 84.15, NativeProducer.cs, the transaction-region comment: the Task is
+  already faulted on return only when the accumulator has nothing to drain;
+  while a drain is pending, the submit and the fault come after it.
+- Batched nits: (n1) S5 remarks, DrainPendingSends(TimeSpan.Zero) forces a
+  drain only when the accumulator is not idle (same line count); (n2) the
+  two SendOffsetsToTransaction exception lists add ArgumentOutOfRange-
+  Exception for a negative partition; (n3) MockCommittedOffset says "the
+  newest entry for that key", the header's wording (h:16595-16596).
+- 84.16 (re-review): the mutation total. The pre-fix "18 run, 17 red" had
+  left out P19 (12:52:28, red 8/25), and the fix added only P20. Recounted
+  from the log, first result per id, P11b folded into P11 as this file
+  counts it:
+    awk '$2 ~ /^P[0-9]+b?$/ && !d[$2]++ {n++; if ($3=="exit=1") r++;
+      if ($2 !~ /b$/) {m++; if ($3=="exit=1") q++}} END {print "P11b
+      counted apart: " n " runs, " r " red; P11b folded into P11: " m
+      " mutations, " q " red"}' cp4/mut/summary.txt
+    -> P11b counted apart: 21 runs, 20 red; P11b folded into P11:
+       20 mutations, 19 red
+  So "20 production mutations run ..., 19 red" above and in
+  commit-cp4.msg. Nit: the Files list's hunk count, measured with
+  git diff -U0 HEAD -- <NativeProducer.cs> | grep -c '^@@': 15, not 17.
+- Comment-only check: the diff of NativeProducer.cs against its pre-fix
+  bytes with every // line removed is 0 bytes; AsyncMockProducer.cs is
+  unchanged (3d6f0359). So the budget run and G8 were not re-run.
+Checks (cp4/fix1315/gates/gates.out, 13:11:31-13:12:29): G2 cargo exit 0;
+dotnet build exit 0, 0 Warning(s), 0 Error(s); --no-incremental the same,
+00:00:02.35, all six outputs fresh. G3 format exit 0, 0 bytes. G4 net10.0
+2440/2440, exit 0. G5 net8.0 ($HOME/.dotnet env, ROLL_FORWARD unset)
+2440/2440, exit 0. The three classes: 65/65 on each runtime (15, 25, 25).
+Totals unchanged at 2440: no test added. G1 0 bytes, 0 untracked, header
+e8d39f09. G6 715 (236 + 479), as at HEAD. G7 marker grep exit 1, control
+19. Freeze: the cp2, cp2-plan and cp3 manifests OK, exit 0 each. git diff
+--cached --name-only: the Manager's three CP3 paths only. COMMENTS.84.md
+0 bytes.
+
+Not run at CP4 (per the plan's schedule)
+----------------------------------------
+G9 (CP6, CP7), G10 (CP7) and G11 (CP7).

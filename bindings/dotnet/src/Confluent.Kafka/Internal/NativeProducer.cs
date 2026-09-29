@@ -16,6 +16,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -51,7 +52,12 @@ namespace Confluent.Kafka.Internal;
 /// <see cref="MockClear"/>). M14/P1 threaded the optional <see cref="DeliveryRegistration"/> through
 /// both send methods — Java's second <c>send(record, Callback)</c> signature — firing it on the pump
 /// thread (async) or inline on the caller's thread (sync); it is managed-only and adds no
-/// <c>[DllImport]</c>.
+/// <c>[DllImport]</c>. M17/P1 added the transaction control operations — the five blocking forms
+/// (<see cref="InitTransactions"/> and its siblings) and the four <see cref="Task"/> forms
+/// (<see cref="InitTransactionsWithCallback(CancellationToken)"/> and its siblings), each of which
+/// drains the binding's send accumulator before the core sees it — and the mock transaction
+/// helpers (<see cref="MockSetCommitTransactionError"/>, <see cref="MockSentOffsets"/>,
+/// <see cref="MockCommittedOffset"/>).
 /// </para>
 /// <para>
 /// <b>Teardown — one layer, three flavors, graceful-close-before-destroy (M11/P2.1).</b> This
@@ -117,6 +123,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // and the same ordering against the _closed latch, so teardown never races one into existence.
     private SendAccumulator? _accumulator;
 
+    // The accumulator settings to use instead of SendAccumulatorSettings.FromEnvironment() — null
+    // in production. Set only through CreateMock(bool, SendAccumulatorSettings), the M17/P1 D3 test
+    // seam: the suite runs in parallel and FromEnvironment reads process-wide variables, so a test
+    // that needs a 60 s batch window cannot get one through the environment.
+    private readonly SendAccumulatorSettings? _accumulatorSettings;
+
     // One permanently-pinned NUL-terminated UTF-8 buffer per DISTINCT topic name, for the deferred
     // async send path (M11/P3.1 §4.1). Interning rather than a per-record topic pin keeps the cost
     // at O(distinct topics) permanent pins instead of O(records) transient ones; a topic beyond the
@@ -139,9 +151,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    private NativeProducer(SafeProducerHandle handle)
+    private NativeProducer(SafeProducerHandle handle, SendAccumulatorSettings? accumulatorSettings = null)
     {
         _handle = handle;
+        _accumulatorSettings = accumulatorSettings;
     }
 
     /// <summary>
@@ -261,11 +274,63 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         return new NativeProducer(handle);
     }
 
-    /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
-    private delegate void NativeSubmit(
+    /// <summary>
+    /// Creates a broker-less mock producer whose send accumulator, once an async send starts it,
+    /// uses <paramref name="settings"/> instead of <see cref="SendAccumulatorSettings.FromEnvironment"/>
+    /// — the M17/P1 D3 test seam. A test that needs records to stay buffered until something drains
+    /// them passes a long batch window and a slot threshold above its record count; the environment
+    /// cannot carry that, because it is process-wide and the suite runs in parallel.
+    /// </summary>
+    /// <param name="autoComplete">As for <see cref="CreateMock(bool)"/>.</param>
+    /// <param name="settings">The accumulator settings the producer's accumulator is built with.</param>
+    internal static NativeProducer CreateMock(bool autoComplete, SendAccumulatorSettings settings)
+    {
+        SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
+
+        return new NativeProducer(handle, settings);
+    }
+
+    /// <summary>
+    /// The submit shape of a void-result async operation run through
+    /// <see cref="SubmitVoidOperation"/>: <c>(producer, callback, userData)</c>. <c>internal</c>
+    /// (M17/P1 D3) so a test can pass its own to the <c>*WithCallback</c> overloads that take one
+    /// — a counting fake, or one that captures the callback without firing it — in place of the
+    /// real P/Invoke (the admin precedent, <c>NativeAdminClient</c>'s <c>Native*Submit</c>
+    /// delegates).
+    /// </summary>
+    internal delegate void NativeSubmit(
         IntPtr producer,
         ProducerCallbacks.OperationCallback callback,
         IntPtr userData);
+
+    /// <summary>
+    /// The submit shape of <c>kafka_producer_Producer_send_offsets_to_transaction_async</c>, the
+    /// parameters of <see cref="NativeMethods.ProducerSendOffsetsToTransactionAsync"/> in their
+    /// order. <see cref="NativeSubmit"/> cannot carry the offsets arrays or the transient group
+    /// metadata, so a test that inspects what the operation passes to native (M17/P1 S6) needs this
+    /// shape; production passes the real P/Invoke.
+    /// </summary>
+    internal delegate void NativeSendOffsetsSubmit(
+        IntPtr producer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count,
+        IntPtr groupMetadata,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The native read behind <see cref="ReadCommittedOffset"/>: one
+    /// <c>kafka_producer_MockProducer_committed_offset</c> lookup that writes the metadata into
+    /// <paramref name="metadata"/>, whose <c>Length</c> is the capacity the call passes. Taking the
+    /// buffer rather than a buffer and a capacity is what keeps <c>metadataCap</c> equal to the
+    /// pinned array's length: a larger capacity would let native write past it (M17/P1 D12).
+    /// </summary>
+    /// <returns><see langword="true"/> if an entry was found.</returns>
+    internal delegate bool CommittedOffsetLookup(byte[] metadata, out long offset, out int leaderEpoch);
 
     /// <summary>
     /// The submit shape for the owned-handle async peripheral (<c>partitions_for</c>). Passes
@@ -831,19 +896,41 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // wait with, so an unbounded drain there is Java-faithful (flush() blocks until every
         // previously-sent record completes) and still escapable. This surface has neither a token
         // nor any other escape, so it takes a bound — and a bound that expires has to say so.
-        if (AccumulatorToStop()?.DrainPending(accumulatorDrainTimeout) == false)
-        {
-            throw new KafkaException(
-                "The producer's send accumulator did not drain within " +
-                $"{accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
-                "binding have not reached the core and this flush did not include them.");
-        }
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "this flush did not include them");
 
         NativeMethods.ProducerFlush(_handle, out IntPtr error);
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
         {
             throw failure;
+        }
+    }
+
+    /// <summary>
+    /// The bounded accumulator drain of the blocking operations — <see cref="Flush()"/> and, since
+    /// M17/P1 (D3), the five blocking transaction control operations. Waits up to
+    /// <paramref name="accumulatorDrainTimeout"/> for the accumulator to reach empty-and-idle and
+    /// throws when it does not, so the caller makes no native call on expiry. A no-op when no async
+    /// send ever started an accumulator, which is always the case on the sync producer types.
+    /// </summary>
+    /// <remarks>
+    /// The message is built from one template so the flush's text is unchanged by the extraction:
+    /// <paramref name="consequence"/> is the clause that ends it — "this flush did not include
+    /// them" for the flush, "<c>&lt;javaMethod&gt;</c> was not attempted" for a control operation.
+    /// It is the public message-only <see cref="KafkaException"/> constructor, so <c>Code</c> is 0
+    /// and <c>IsRetriable</c> is <see langword="false"/>.
+    /// </remarks>
+    /// <param name="accumulatorDrainTimeout">How long to wait for empty-and-idle.</param>
+    /// <param name="consequence">The message's final clause, without the full stop.</param>
+    /// <exception cref="KafkaException">The accumulator did not drain in time.</exception>
+    private void DrainAccumulatorWithin(TimeSpan accumulatorDrainTimeout, string consequence)
+    {
+        if (AccumulatorToStop()?.DrainPending(accumulatorDrainTimeout) == false)
+        {
+            throw new KafkaException(
+                "The producer's send accumulator did not drain within " +
+                $"{accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
+                $"binding have not reached the core and {consequence}.");
         }
     }
 
@@ -969,6 +1056,509 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         return ProducerMetricMapMarshal.CopyOutAndDestroy(map);
     }
 
+    // ---- Transaction control (M17/P1: D3 drain, D4 barrier, D5 cancellation, D12 hygiene) ----
+    //
+    // Two families, one per surface shape (D1). The BLOCKING family — InitTransactions,
+    // BeginTransaction, SendOffsetsToTransaction, CommitTransaction, AbortTransaction — backs the
+    // sync producer types and IAsyncProducer.BeginTransaction: it drains the accumulator with the
+    // bounded DrainAccumulatorWithin, then calls the sync P/Invoke with the SafeProducerHandle (the
+    // marshaller's call-scoped reference, ffi §A2). The TASK family — the four *WithCallback
+    // methods — backs the rest of IAsyncProducer: preconditions run synchronously in a non-async
+    // wrapper (the FlushWithCallback shape), the drain is awaited, and the operation goes through
+    // SubmitVoidOperation unchanged (span-the-op reference, rooted ProducerCallbacks.Operation).
+    //
+    // The binding adds no guard against overlapping control calls (D10): the core rejects one with
+    // its ConcurrentModification error, which surfaces verbatim — thrown by the blocking family, a
+    // faulted Task from the Task family. That Task is already faulted when it is returned if the
+    // accumulator has nothing to drain, because the core fires the callback inline during the
+    // submit; while a drain is pending, the submit and the fault come after it.
+
+    private static readonly NativeSubmit s_initTransactionsSubmit = NativeMethods.ProducerInitTransactionsAsync;
+
+    private static readonly NativeSendOffsetsSubmit s_sendOffsetsToTransactionSubmit =
+        NativeMethods.ProducerSendOffsetsToTransactionAsync;
+
+    private static readonly NativeSubmit s_commitTransactionSubmit = NativeMethods.ProducerCommitTransactionAsync;
+
+    private static readonly NativeSubmit s_abortTransactionSubmit = NativeMethods.ProducerAbortTransactionAsync;
+
+    /// <summary>
+    /// Initializes the producer for transactions and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.initTransactions()</c>) — the sync producer's worker. Drains the binding's send
+    /// accumulator first, bounded (D3), then calls the sync <c>Producer_init_transactions</c>.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure, or the accumulator did not drain within its bound (then no native
+    /// call was made).
+    /// </exception>
+    internal void InitTransactions() => InitTransactionsWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="InitTransactions()"/> with the accumulator-drain bound supplied rather than
+    /// defaulted — the D3 test seam, as <see cref="FlushWithAccumulatorDrainBound"/> is for the flush.
+    /// </summary>
+    /// <param name="accumulatorDrainTimeout">How long to wait for the accumulator to drain.</param>
+    internal void InitTransactionsWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
+    {
+        ThrowIfClosed();
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "initTransactions() was not attempted");
+        ThrowIfFailed(NativeMethods.ProducerInitTransactions(_handle));
+    }
+
+    /// <summary>
+    /// Begins a transaction (Java <c>Producer.beginTransaction()</c>): a local state transition in the
+    /// core, so this stays synchronous on <b>both</b> surfaces (D1). It backs the sync producer types,
+    /// which never have an accumulator, and <c>IAsyncProducer.BeginTransaction()</c>, which can. The
+    /// bounded drain comes first (D3), so a send that returned before this call reaches the core
+    /// before the transaction opens and is not swept into it — Java registers a record inside
+    /// <c>send()</c>, so it never is.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure, or the accumulator did not drain within its bound (then no native
+    /// call was made).
+    /// </exception>
+    internal void BeginTransaction() => BeginTransactionWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="BeginTransaction()"/> with the accumulator-drain bound supplied — the D3 test seam.
+    /// </summary>
+    /// <param name="accumulatorDrainTimeout">How long to wait for the accumulator to drain.</param>
+    internal void BeginTransactionWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
+    {
+        ThrowIfClosed();
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "beginTransaction() was not attempted");
+        ThrowIfFailed(NativeMethods.ProducerBeginTransaction(_handle));
+    }
+
+    /// <summary>
+    /// Sends consumer-group offsets to the current transaction and <b>blocks</b> until the core has
+    /// done so (Java <c>Producer.sendOffsetsToTransaction(Map, ConsumerGroupMetadata)</c>) — the sync
+    /// producer's worker. D2's precondition order: <paramref name="groupMetadata"/> null (Java's own
+    /// first check), then the offsets map's null and per-entry checks (the consumer's
+    /// <c>Commit(offsets)</c> snapshot, reused), then closed, then the bounded drain (D3). The map is
+    /// snapshotted before anything else happens, so the caller mutating it later cannot change the
+    /// operation. An empty map is forwarded with <c>count == 0</c> (D13).
+    /// </summary>
+    /// <param name="offsets">The offsets to send, keyed by partition.</param>
+    /// <param name="groupMetadata">The consumer group the offsets belong to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="groupMetadata"/> or <paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key's topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key's partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure, or the accumulator did not drain within its bound (then no native
+    /// call was made).
+    /// </exception>
+    internal void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata) =>
+        SendOffsetsToTransactionWithAccumulatorDrainBound(offsets, groupMetadata, s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="SendOffsetsToTransaction"/> with the accumulator-drain bound supplied — the D3 test
+    /// seam.
+    /// </summary>
+    /// <param name="offsets">The offsets to send, keyed by partition.</param>
+    /// <param name="groupMetadata">The consumer group the offsets belong to.</param>
+    /// <param name="accumulatorDrainTimeout">How long to wait for the accumulator to drain.</param>
+    internal void SendOffsetsToTransactionWithAccumulatorDrainBound(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        TimeSpan accumulatorDrainTimeout)
+    {
+        NativeConsumer.CommitOffsetsSnapshot snapshot = SnapshotSendOffsets(offsets, groupMetadata);
+        ThrowIfClosed();
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "sendOffsetsToTransaction() was not attempted");
+
+        // D12: the transient group-metadata handle and every pin are scoped to the one sync call,
+        // released in the finally blocks of the two helpers.
+        IntPtr error = IntPtr.Zero;
+        WithTransientGroupMetadata(groupMetadata, nativeGroupMetadata =>
+            NativeConsumer.WithPinnedCommitOffsets(snapshot, (topics, partitions, offsetValues, leaderEpochs, metadata, count) =>
+                error = NativeMethods.ProducerSendOffsetsToTransaction(
+                    _handle, topics, partitions, offsetValues, leaderEpochs, metadata, count, nativeGroupMetadata)));
+        ThrowIfFailed(error);
+    }
+
+    /// <summary>
+    /// Commits the current transaction and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.commitTransaction()</c>) — the sync producer's worker. The bounded drain comes
+    /// first (D3), so every send that returned before this call is in the commit. There is no
+    /// completion barrier on this surface (D4): the sync <c>Send</c> returns only after its callback
+    /// has run, and a sync send racing this call on another thread is not ordered against it, as in
+    /// Java.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure, or the accumulator did not drain within its bound (then no native
+    /// call was made).
+    /// </exception>
+    internal void CommitTransaction() => CommitTransactionWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="CommitTransaction()"/> with the accumulator-drain bound supplied — the D3 test seam.
+    /// </summary>
+    /// <param name="accumulatorDrainTimeout">How long to wait for the accumulator to drain.</param>
+    internal void CommitTransactionWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
+    {
+        ThrowIfClosed();
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "commitTransaction() was not attempted");
+        ThrowIfFailed(NativeMethods.ProducerCommitTransaction(_handle));
+    }
+
+    /// <summary>
+    /// Aborts the current transaction and <b>blocks</b> until the core has done so (Java
+    /// <c>Producer.abortTransaction()</c>) — the sync producer's worker. The bounded drain comes
+    /// first (D3), so every send that returned before this call is discarded with the transaction.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a failure, or the accumulator did not drain within its bound (then no native
+    /// call was made).
+    /// </exception>
+    internal void AbortTransaction() => AbortTransactionWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="AbortTransaction()"/> with the accumulator-drain bound supplied — the D3 test seam.
+    /// </summary>
+    /// <param name="accumulatorDrainTimeout">How long to wait for the accumulator to drain.</param>
+    internal void AbortTransactionWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
+    {
+        ThrowIfClosed();
+        DrainAccumulatorWithin(accumulatorDrainTimeout, "abortTransaction() was not attempted");
+        ThrowIfFailed(NativeMethods.ProducerAbortTransaction(_handle));
+    }
+
+    /// <summary>
+    /// Initializes the producer for transactions (async; Java <c>Producer.initTransactions()</c>) —
+    /// the async producer's worker, over <c>Producer_init_transactions_async</c>. See
+    /// <see cref="SubmitControlOperation"/> for the drain and the cancellation semantics.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task InitTransactionsWithCallback(CancellationToken cancellationToken = default) =>
+        InitTransactionsWithCallback(cancellationToken, s_initTransactionsSubmit);
+
+    /// <summary>
+    /// <see cref="InitTransactionsWithCallback(CancellationToken)"/> with the native submit supplied —
+    /// the D3 seam that lets a test count or capture the submit.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <param name="submit">The native submit; production passes <c>Producer_init_transactions_async</c>.</param>
+    internal Task InitTransactionsWithCallback(CancellationToken cancellationToken, NativeSubmit submit) =>
+        SubmitControlOperation(cancellationToken, submit, awaitCompletionBarrier: false);
+
+    /// <summary>
+    /// Sends consumer-group offsets to the current transaction (async; Java
+    /// <c>Producer.sendOffsetsToTransaction(Map, ConsumerGroupMetadata)</c>) — the async producer's
+    /// worker, over <c>Producer_send_offsets_to_transaction_async</c>. The preconditions run
+    /// synchronously in D2's order — <paramref name="groupMetadata"/> null, then the offsets
+    /// snapshot, then (in <see cref="SubmitControlOperation"/>) closed and an already-canceled
+    /// token. The snapshot is taken before this returns, so the caller mutating the map afterwards —
+    /// even while the operation still waits for the drain — cannot change what is sent. An empty map
+    /// is forwarded with <c>count == 0</c> (D13).
+    /// </summary>
+    /// <param name="offsets">The offsets to send, keyed by partition.</param>
+    /// <param name="groupMetadata">The consumer group the offsets belong to.</param>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="groupMetadata"/> or <paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key's topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key's partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task SendOffsetsToTransactionWithCallback(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default) =>
+        SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken, s_sendOffsetsToTransactionSubmit);
+
+    /// <summary>
+    /// <see cref="SendOffsetsToTransactionWithCallback(IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, ConsumerGroupMetadata, CancellationToken)"/>
+    /// with the native submit supplied — the D3 seam, in the full P/Invoke shape so a test can read
+    /// what the operation marshals.
+    /// </summary>
+    /// <remarks>
+    /// <b>D12 — everything but the producer reference is scoped to the submit.</b> The async ABI
+    /// marshals every input on the calling thread before it returns, so the transient
+    /// <c>ConsumerGroupMetadata_t</c> and the topic and metadata pins are released in
+    /// <c>finally</c> blocks around the submit, never held until the callback. Nothing that can
+    /// throw runs after <paramref name="submit"/> returns — only those unpins and the destroy —
+    /// because <see cref="SubmitVoidOperation"/>'s <c>catch</c> treats a throw as "native never ran"
+    /// and would then free a context the callback still owns.
+    /// </remarks>
+    /// <param name="offsets">The offsets to send, keyed by partition.</param>
+    /// <param name="groupMetadata">The consumer group the offsets belong to.</param>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <param name="submit">
+    /// The native submit; production passes <c>Producer_send_offsets_to_transaction_async</c>.
+    /// </param>
+    internal Task SendOffsetsToTransactionWithCallback(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken,
+        NativeSendOffsetsSubmit submit)
+    {
+        NativeConsumer.CommitOffsetsSnapshot snapshot = SnapshotSendOffsets(offsets, groupMetadata);
+        return SubmitControlOperation(
+            cancellationToken,
+            (producer, callback, userData) =>
+                WithTransientGroupMetadata(groupMetadata, nativeGroupMetadata =>
+                    NativeConsumer.WithPinnedCommitOffsets(snapshot, (topics, partitions, offsetValues, leaderEpochs, metadata, count) =>
+                        submit(
+                            producer,
+                            topics,
+                            partitions,
+                            offsetValues,
+                            leaderEpochs,
+                            metadata,
+                            count,
+                            nativeGroupMetadata,
+                            callback,
+                            userData))),
+            awaitCompletionBarrier: false);
+    }
+
+    /// <summary>
+    /// Commits the current transaction (async; Java <c>Producer.commitTransaction()</c>) — the async
+    /// producer's worker, over <c>Producer_commit_transaction_async</c>. On success the returned
+    /// <see cref="Task"/> completes only after the delivery callbacks and send <see cref="Task"/>s of
+    /// every send that returned before this call have completed (the D4 completion barrier; Java
+    /// <c>KafkaProducer.java:754-755</c>), unless <paramref name="cancellationToken"/> fires during
+    /// that wait: the <see cref="Task"/> then completes successfully without that ordering (D5
+    /// row 4). See <see cref="SubmitControlOperation"/>.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task CommitTransactionWithCallback(CancellationToken cancellationToken = default) =>
+        CommitTransactionWithCallback(cancellationToken, s_commitTransactionSubmit);
+
+    /// <summary>
+    /// <see cref="CommitTransactionWithCallback(CancellationToken)"/> with the native submit supplied —
+    /// the D3 seam.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <param name="submit">The native submit; production passes <c>Producer_commit_transaction_async</c>.</param>
+    internal Task CommitTransactionWithCallback(CancellationToken cancellationToken, NativeSubmit submit) =>
+        SubmitControlOperation(cancellationToken, submit, awaitCompletionBarrier: true);
+
+    /// <summary>
+    /// Aborts the current transaction (async; Java <c>Producer.abortTransaction()</c>) — the async
+    /// producer's worker, over <c>Producer_abort_transaction_async</c>. On success the returned
+    /// <see cref="Task"/> completes only after the delivery callbacks and send <see cref="Task"/>s of
+    /// every send that returned before this call have completed (the D4 completion barrier), unless
+    /// <paramref name="cancellationToken"/> fires during that wait: the <see cref="Task"/> then
+    /// completes successfully without that ordering (D5 row 4). See
+    /// <see cref="SubmitControlOperation"/>.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task AbortTransactionWithCallback(CancellationToken cancellationToken = default) =>
+        AbortTransactionWithCallback(cancellationToken, s_abortTransactionSubmit);
+
+    /// <summary>
+    /// <see cref="AbortTransactionWithCallback(CancellationToken)"/> with the native submit supplied —
+    /// the D3 seam.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait, not the operation (D5).</param>
+    /// <param name="submit">The native submit; production passes <c>Producer_abort_transaction_async</c>.</param>
+    internal Task AbortTransactionWithCallback(CancellationToken cancellationToken, NativeSubmit submit) =>
+        SubmitControlOperation(cancellationToken, submit, awaitCompletionBarrier: true);
+
+    /// <summary>
+    /// The shared body of the four <see cref="Task"/> control operations: the synchronous
+    /// preconditions, then the D3 drain, the D4 barrier (commit and abort only) and the submit.
+    /// Deliberately <b>not</b> <c>async</c>, so a closed producer and an already-canceled token throw
+    /// synchronously rather than faulting the returned <see cref="Task"/> (ffi §A5; D5 row 1) — the
+    /// <see cref="FlushWithCallback"/> shape.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>No accumulator, no pump — straight to the core.</b> Nothing is buffered on this side, so
+    /// <see cref="SubmitVoidOperation"/> is called in this frame and its <see cref="Task"/> returned
+    /// as it is. This keeps the core's inline rejection of an overlapping control call (D10) an
+    /// already-faulted <see cref="Task"/> when this returns.
+    /// </para>
+    /// <para>
+    /// <b>Cancellation abandons the wait, not the operation (D5).</b> Already canceled: thrown here,
+    /// before any drain or submit. During the drain: the <see cref="Task"/> is canceled and the
+    /// operation is never submitted; the drain itself carries on. After the submit: the awaiter is
+    /// canceled (<see cref="OperationCompletionSource{TResult}.CancelAwaiter"/>), while the core runs
+    /// the operation to completion and a retry while it still runs is rejected with the
+    /// ConcurrentModification error. While awaiting the barrier: the <see cref="Task"/> completes
+    /// <b>successfully</b>, because the operation did happen and only the callback-ordering guarantee
+    /// is given up.
+    /// </para>
+    /// </remarks>
+    private Task SubmitControlOperation(
+        CancellationToken cancellationToken,
+        NativeSubmit submit,
+        bool awaitCompletionBarrier)
+    {
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        SendAccumulator? accumulator = AccumulatorToStop();
+        if (accumulator is null && (!awaitCompletionBarrier || PumpToStop() is null))
+        {
+            return SubmitVoidOperation(cancellationToken, submit);
+        }
+
+        return DrainThenSubmitControlOperation(accumulator, cancellationToken, submit, awaitCompletionBarrier);
+    }
+
+    /// <summary>
+    /// The <c>async</c> half of <see cref="SubmitControlOperation"/>: drain (D3), enqueue the
+    /// completion barrier (D4), submit, and — on success only — await the barrier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the barrier covers every send that returned (D4, "FIFO plus drain").</b> A returned
+    /// async send was appended to the accumulator, which exists from the first async send on, so it
+    /// was non-null when <see cref="SubmitControlOperation"/> read it. The drain completes only when
+    /// the accumulator is empty and idle, and the batch thread clears its draining flag only after it
+    /// has enqueued the chain's group on the pump, so every such send's group is in the pump's queue
+    /// before the barrier is enqueued behind it. The pump is read after the drain, under
+    /// <see cref="_pumpLock"/>; <see cref="EnsureAccumulator"/> creates it before the accumulator,
+    /// under the same lock, so an accumulator that exists always has one. A send whose call races
+    /// this operation is not ordered against it, as in Java.
+    /// </para>
+    /// <para>
+    /// <b>On failure the barrier is not awaited</b>: the failure is returned at once, as Java throws
+    /// without the callback guarantee. The barrier then completes unobserved.
+    /// </para>
+    /// </remarks>
+    private async Task DrainThenSubmitControlOperation(
+        SendAccumulator? accumulator,
+        CancellationToken cancellationToken,
+        NativeSubmit submit,
+        bool awaitCompletionBarrier)
+    {
+        if (accumulator is not null)
+        {
+            // Unbounded except by the token, as FlushAfterDrain's is: this caller has a token to
+            // escape with. A cancellation here cancels only this wait (D5 row 2).
+            await accumulator.DrainPendingAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        Task? barrier = awaitCompletionBarrier ? PumpToStop()?.EnqueueBarrier() : null;
+
+        // A failure (a core error, or a cancellation before the submit) propagates from here, so the
+        // barrier is awaited on success only.
+        await SubmitVoidOperation(cancellationToken, submit).ConfigureAwait(false);
+
+        if (barrier is not null)
+        {
+            await AwaitCompletionBarrier(barrier, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Waits for <paramref name="barrier"/>, returning <b>normally</b> — not canceled — when
+    /// <paramref name="cancellationToken"/> fires first (D5 row 4: the operation already succeeded).
+    /// Registration-based because netstandard2.0 has no <c>Task.WaitAsync</c>; the registration is
+    /// disposed when the wait ends. The barrier never faults, so nothing is lost by not observing it.
+    /// </summary>
+    private static async Task AwaitCompletionBarrier(Task barrier, CancellationToken cancellationToken)
+    {
+        if (barrier.IsCompleted || !cancellationToken.CanBeCanceled)
+        {
+            await barrier.ConfigureAwait(false);
+            return;
+        }
+
+        TaskCompletionSource<bool> canceled =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(
+            static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), canceled))
+        {
+            await Task.WhenAny(barrier, canceled.Task).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// D2 steps 1 and 2: <paramref name="groupMetadata"/> null (Java's own first check,
+    /// <c>KafkaProducer.java:1498-1500</c>), then the offsets map through the consumer's
+    /// <see cref="NativeConsumer.SnapshotCommitOffsets"/>, reused verbatim for its checks, messages
+    /// and snapshot.
+    /// </summary>
+    private static NativeConsumer.CommitOffsetsSnapshot SnapshotSendOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata)
+    {
+        if (groupMetadata is null)
+        {
+            throw new ArgumentNullException(nameof(groupMetadata), "Consumer group metadata could not be null");
+        }
+
+        return NativeConsumer.SnapshotCommitOffsets(offsets);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="body"/> with a transient native <c>ConsumerGroupMetadata_t</c> built from
+    /// <paramref name="groupMetadata"/> and destroys it in a <c>finally</c> — the D12 transient owned
+    /// input handle, lent to exactly one call. The three strings are pinned only for
+    /// <c>ConsumerGroupMetadata_new</c>, which copies them.
+    /// </summary>
+    private static void WithTransientGroupMetadata(ConsumerGroupMetadata groupMetadata, Action<IntPtr> body)
+    {
+        IntPtr nativeGroupMetadata = CreateTransientGroupMetadata(groupMetadata);
+        try
+        {
+            body(nativeGroupMetadata);
+        }
+        finally
+        {
+            NativeMethods.ConsumerGroupMetadataDestroy(nativeGroupMetadata);
+        }
+    }
+
+    /// <summary>
+    /// Builds the owned native group metadata for <see cref="WithTransientGroupMetadata"/>. A null
+    /// <see cref="ConsumerGroupMetadata.GroupInstanceId"/> is passed as a null pointer (Java's
+    /// <c>Optional.empty()</c>).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The ABI returned a null handle. The header documents no null return, so this is unreachable;
+    /// it exists so that such a return fails before anything is submitted.
+    /// </exception>
+    private static IntPtr CreateTransientGroupMetadata(ConsumerGroupMetadata groupMetadata)
+    {
+        using Utf8Marshal.PinnedUtf8String groupId = Utf8Marshal.Pin(groupMetadata.GroupId);
+        using Utf8Marshal.PinnedUtf8String memberId = Utf8Marshal.Pin(groupMetadata.MemberId);
+        using Utf8Marshal.PinnedUtf8String? groupInstanceId =
+            groupMetadata.GroupInstanceId is null ? null : Utf8Marshal.Pin(groupMetadata.GroupInstanceId);
+
+        IntPtr nativeGroupMetadata = NativeMethods.ConsumerGroupMetadataNew(
+            groupId.Pointer,
+            groupMetadata.GenerationId,
+            memberId.Pointer,
+            groupInstanceId?.Pointer ?? IntPtr.Zero);
+        if (nativeGroupMetadata == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("kafka_consumer_ConsumerGroupMetadata_new returned a null handle.");
+        }
+
+        return nativeGroupMetadata;
+    }
+
+    /// <summary>
+    /// Reads and frees an owned error handle returned by a sync P/Invoke, throwing it as a
+    /// <see cref="KafkaException"/> when non-null.
+    /// </summary>
+    private static void ThrowIfFailed(IntPtr error)
+    {
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
     /// <summary>
     /// Returns the send accumulator, starting it — and the completion pump it feeds — on first use
     /// (lazy: a producer driven only through the sync surface spins neither thread). Refuses to
@@ -996,11 +1586,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ThrowIfClosed();
             SendCompletionPump pump = _pump ??= new SendCompletionPump();
 
-            // Every accumulator setting comes from the environment, read here. Nothing is taken
-            // from the producer's config map (SendAccumulatorSettings.FromEnvironment documents
-            // why `max.block.ms` no longer is).
+            // Every accumulator setting comes from the environment, read here, unless the D3 test
+            // seam supplied them (CreateMock(bool, SendAccumulatorSettings)). Nothing is taken from
+            // the producer's config map (SendAccumulatorSettings.FromEnvironment documents why
+            // `max.block.ms` no longer is).
             return _accumulator ??= new SendAccumulator(
-                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment());
+                _handle, _topics, pump, _accumulatorSettings ?? SendAccumulatorSettings.FromEnvironment());
         }
     }
 
@@ -1104,6 +1695,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal long DrainedSendCount => PumpToStop()?.DrainedSendCount ?? 0;
 
     /// <summary>
+    /// <b>Test observation point (M17/P1 S5), not public API:</b> the started send accumulator, or
+    /// <see langword="null"/> while no async send has started one — which is what a producer driven
+    /// only through the sync surface keeps it. Read under <see cref="_pumpLock"/>; readable after
+    /// teardown, like <see cref="DrainedSendCount"/>.
+    /// </summary>
+    internal SendAccumulator? StartedAccumulator => AccumulatorToStop();
+
+    /// <summary>
     /// Completes the next pending mock send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>). Mock only; returns <see langword="false"/> if there is no
     /// pending completion. Inherent on the public <c>AsyncMockProducer</c>, not on the interface.
@@ -1155,6 +1754,213 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
         NativeMethods.MockProducerClear(_handle);
+    }
+
+    // ---- Mock transaction helpers (M17/P1 D8; mock only) ----
+    //
+    // The three transaction controls the ABI exports for the mock, behind the public MockProducer /
+    // AsyncMockProducer members. Each is synchronous and passes the SafeProducerHandle (the ffi §A2
+    // sync convention, D12); the order is argument checks, then ThrowIfClosed, then native.
+
+    /// <summary>
+    /// The initial metadata capacity <see cref="ReadCommittedOffset"/> passes: Kafka's default
+    /// <c>offset.metadata.max.bytes</c> (4096), plus the NUL, plus the 4-byte window in which a
+    /// result is ambiguous — so metadata within the broker default resolves in one lookup (D8).
+    /// </summary>
+    internal const int CommittedOffsetInitialCapacity = 4101;
+
+    /// <summary>
+    /// The largest metadata capacity <see cref="ReadCommittedOffset"/> passes: 1 MiB plus 5, so that a
+    /// result still ambiguous at this capacity proves the metadata is longer than 1 MiB (D8).
+    /// </summary>
+    internal const int CommittedOffsetMaxCapacity = 1_048_581;
+
+    /// <summary>
+    /// Installs the error every later mock commit fails with, until
+    /// <see cref="MockClearCommitTransactionError"/> (Java's public
+    /// <c>MockProducer.commitTransactionException</c> field). A null <paramref name="message"/> uses
+    /// the code's default message (the ABI's null convention); the message is pinned call-scoped.
+    /// </summary>
+    /// <remarks>
+    /// The two range checks are the ABI's own rejections, made first so they surface as
+    /// <see cref="ArgumentOutOfRangeException"/> instead of a <see langword="false"/> return. The ABI
+    /// calls this <b>setup-only</b>: it must not overlap a transaction control call on the same
+    /// producer, which may or may not observe the new value. The binding adds no guard for that.
+    /// </remarks>
+    /// <param name="code">The error code; non-zero, and within <see cref="short"/>.</param>
+    /// <param name="message">The error message, or <see langword="null"/> for the code's default.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="code"/> is 0 or outside <see cref="short"/>.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The ABI did not apply the hook. After the checks above it returns <see langword="false"/> only
+    /// for a producer that is not a mock, which the mock types cannot hold, so this is unreachable
+    /// from them.
+    /// </exception>
+    internal void MockSetCommitTransactionError(int code, string? message)
+    {
+        if (code == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(code), code, "The commit-transaction error code must be non-zero; 0 is Errors.NONE.");
+        }
+
+        if (code < short.MinValue || code > short.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(code), code, "The commit-transaction error code must fit in a 16-bit signed integer.");
+        }
+
+        ThrowIfClosed();
+
+        bool applied;
+        if (message is null)
+        {
+            applied = NativeMethods.MockProducerSetCommitTransactionError(_handle, false, code, IntPtr.Zero);
+        }
+        else
+        {
+            using Utf8Marshal.PinnedUtf8String pinnedMessage = Utf8Marshal.Pin(message);
+            applied = NativeMethods.MockProducerSetCommitTransactionError(_handle, false, code, pinnedMessage.Pointer);
+        }
+
+        if (!applied)
+        {
+            throw new InvalidOperationException("The producer did not apply the commit-transaction error hook.");
+        }
+    }
+
+    /// <summary>
+    /// Removes the error <see cref="MockSetCommitTransactionError"/> installed; later mock commits
+    /// behave normally again. Setup-only, as the setter is.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The ABI did not apply the clear, which it does only for a producer that is not a mock
+    /// (unreachable from the mock types).
+    /// </exception>
+    internal void MockClearCommitTransactionError()
+    {
+        ThrowIfClosed();
+
+        if (!NativeMethods.MockProducerSetCommitTransactionError(_handle, true, 0, IntPtr.Zero))
+        {
+            throw new InvalidOperationException("The producer did not apply the commit-transaction error hook.");
+        }
+    }
+
+    /// <summary>
+    /// Whether the mock has staged consumer-group offsets in the current transaction (Java
+    /// <c>MockProducer.sentOffsets()</c>). The core resets it on <c>beginTransaction</c>, not on
+    /// commit.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    internal bool MockSentOffsets()
+    {
+        ThrowIfClosed();
+        return NativeMethods.MockProducerSentOffsets(_handle);
+    }
+
+    /// <summary>
+    /// The offset a committed transaction staged for <paramref name="groupId"/> and
+    /// <paramref name="partition"/> — the newest entry for that key in Java's
+    /// <c>MockProducer.consumerGroupOffsetsHistory()</c>, searched latest transaction first — or
+    /// <see langword="null"/> when there is none. A leader epoch the ABI reports as absent is
+    /// <see langword="null"/>. The metadata is read with the D8 grow rule
+    /// (<see cref="ReadCommittedOffset"/>); an embedded NUL ends it, a limitation of the
+    /// NUL-terminated ABI.
+    /// </summary>
+    /// <param name="groupId">The consumer group id.</param>
+    /// <param name="partition">The partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="partition"/>'s topic is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="InvalidOperationException">The metadata is longer than 1 MiB.</exception>
+    internal OffsetAndMetadata? MockCommittedOffset(string groupId, TopicPartition partition)
+    {
+        if (groupId is null)
+        {
+            throw new ArgumentNullException(nameof(groupId));
+        }
+
+        if (partition.Topic is null)
+        {
+            throw new ArgumentException("Topic names must not be null.", nameof(partition));
+        }
+
+        ThrowIfClosed();
+
+        // Both keys pinned call-scoped across the (at most five) lookups: the core copies them
+        // during each call.
+        using Utf8Marshal.PinnedUtf8String pinnedGroupId = Utf8Marshal.Pin(groupId);
+        using Utf8Marshal.PinnedUtf8String pinnedTopic = Utf8Marshal.Pin(partition.Topic);
+        int partitionIndex = partition.Partition;
+        return ReadCommittedOffset((byte[] metadata, out long offset, out int leaderEpoch) =>
+            NativeMethods.MockProducerCommittedOffset(
+                _handle,
+                pinnedGroupId.Pointer,
+                pinnedTopic.Pointer,
+                partitionIndex,
+                out offset,
+                out leaderEpoch,
+                metadata,
+                metadata.Length));
+    }
+
+    /// <summary>
+    /// The D8 grow rule over one <paramref name="lookup"/> per attempt. The ABI truncates metadata
+    /// that does not fit at a UTF-8 character boundary and does not say so; it leaves
+    /// <c>capacity - 1</c> bytes of room and a character is at most 4 bytes, so a truncated result is
+    /// at least <c>capacity - 4</c> bytes long. A shorter result is therefore complete. A result of
+    /// <c>capacity - 4</c> bytes or more is ambiguous, and the lookup is repeated with four times the
+    /// capacity, up to <see cref="CommittedOffsetMaxCapacity"/>: 4101, 16404, 65616, 262464,
+    /// 1048581, so at most five lookups. Still ambiguous at the ceiling means the metadata is longer
+    /// than 1 MiB, which throws rather than returning a truncated value.
+    /// </summary>
+    /// <remarks>
+    /// Each attempt is a fresh lookup, which is sound because the helper is test-setup-only, like the
+    /// hook. A complete value that happens to fall in the ambiguous window costs one extra lookup.
+    /// <c>internal static</c> and delegate-driven so a test can count the attempts with a fake.
+    /// </remarks>
+    /// <param name="lookup">One native lookup into the buffer it is given.</param>
+    /// <returns>The committed offset, or <see langword="null"/> when <paramref name="lookup"/> finds none.</returns>
+    /// <exception cref="InvalidOperationException">The metadata is longer than 1 MiB.</exception>
+    internal static OffsetAndMetadata? ReadCommittedOffset(CommittedOffsetLookup lookup)
+    {
+        int capacity = CommittedOffsetInitialCapacity;
+        while (true)
+        {
+            byte[] metadata = new byte[capacity];
+            if (!lookup(metadata, out long offset, out int leaderEpoch))
+            {
+                return null;
+            }
+
+            // The ABI always writes a NUL within the buffer. Without one, the length is treated as
+            // the whole buffer, which is ambiguous, so the lookup is repeated.
+            int length = Array.IndexOf(metadata, (byte)0);
+            if (length < 0)
+            {
+                length = capacity;
+            }
+
+            if (length < capacity - 4)
+            {
+                // The input side maps every negative epoch to "no epoch", so the ABI's -1 is the
+                // only negative it reports.
+                return new OffsetAndMetadata(
+                    offset,
+                    Encoding.UTF8.GetString(metadata, 0, length),
+                    leaderEpoch < 0 ? null : leaderEpoch);
+            }
+
+            if (capacity == CommittedOffsetMaxCapacity)
+            {
+                throw new InvalidOperationException(
+                    "The committed offset metadata is larger than 1048576 bytes and cannot be returned untruncated.");
+            }
+
+            capacity = (int)Math.Min((long)capacity * 4, CommittedOffsetMaxCapacity);
+        }
     }
 
     /// <summary>
