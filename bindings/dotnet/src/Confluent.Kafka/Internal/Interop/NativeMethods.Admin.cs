@@ -3050,12 +3050,25 @@ internal static partial class NativeMethods
     /// <c>removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ In <b>removeAll</b> mode Java exposes no per-member outcome at all, so the caller
-    /// passes <paramref name="groupInstanceIds"/> as <see langword="null"/> and
-    /// <paramref name="memberCount"/> as <c>0</c>; the ABI then fires <b>exactly one</b>
-    /// callback with a <b>NULL</b> group-instance-id carrying the whole operation's outcome,
-    /// instead of one per member — so this is the one RPC whose callback count depends on
-    /// the mode.
+    /// <para>
+    /// ⚠ Java's result is <b>one</b> future, so <paramref name="callback"/> fires <b>exactly
+    /// once</b> — in <b>removeAll</b> mode too — carrying either the result handle or the
+    /// whole-request error, never both. In removeAll mode Java exposes no per-member outcome
+    /// at all: the caller passes <paramref name="groupInstanceIds"/> as
+    /// <see langword="null"/> and <paramref name="memberCount"/> as <c>0</c>, and the result's
+    /// <see cref="RemoveMembersFromConsumerGroupResultAll"/> is its only outcome. The "returns
+    /// the error when <c>remove_all</c> is true and <c>all()</c> failed" rule belongs to the
+    /// joined sync sibling (<c>kafka_admin_AdminClient_remove_members_from_consumer_group</c>),
+    /// not to this form.
+    /// </para>
+    /// <para>
+    /// ⚠ It fires <b>synchronously on the calling thread, before this function returns</b>,
+    /// when the RPC cannot be submitted at all — a NULL <paramref name="admin"/>, a NULL
+    /// <paramref name="groupId"/>, or an empty member list without
+    /// <paramref name="removeAll"/>. So the operation's
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> may already be freed when this
+    /// call returns, and the caller must not touch it afterwards.
+    /// </para>
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_remove_members_from_consumer_group_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientRemoveMembersFromConsumerGroupAsync(
@@ -3086,6 +3099,24 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_get_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr RemoveMembersFromConsumerGroupResultGetError(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c> — Java's <c>all()</c>: null
+    /// if the request was 100% successful, otherwise its fault. ⚠ <b>OWNED</b> — read with
+    /// <see cref="KafkaException.FromHandle"/>, never <c>FromBorrowedHandle</c> (which would
+    /// leak one error per faulting <c>All()</c>).
+    /// </summary>
+    /// <remarks>
+    /// The core derives the fault, so the binding never rebuilds it: the whole request's error
+    /// if the request failed; on a <c>remove_all</c> result, for the first member the broker
+    /// reports as failed, a plain Kafka error with code -1 (<c>UNKNOWN_SERVER_ERROR</c>) and
+    /// the message <c>Encounter error when trying to remove: MemberIdentity(...)</c>, whose
+    /// cause — the member's own error — the C API cannot read; otherwise the outcome
+    /// <c>member_result</c> gives for the first failing requested member, in
+    /// group-instance-id order. Never blocks, so it is safe inside the completion callback.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_all", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr RemoveMembersFromConsumerGroupResultAll(IntPtr result);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void RemoveMembersFromConsumerGroupResultDestroy(IntPtr result);

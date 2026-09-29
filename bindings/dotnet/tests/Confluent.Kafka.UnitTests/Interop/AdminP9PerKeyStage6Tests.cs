@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -32,21 +33,20 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Since M15/P13.1 the two group-offsets RPCs are on PR #201's <b>single-callback</b> ABI:
-/// one callback carrying the result root or the whole-request error, never both — the
-/// <c>electLeaders</c> shape. Their per-key walk and the lifetime of that one callback are
-/// pinned in <c>AdminP13GroupOffsetsSingleCallbackTests</c>; the rows here are the
-/// end-to-end ones against the mock.
-/// </para>
-/// <para>
-/// <c>removeMembersFromConsumerGroup</c> is still <b>shape 4c</b> — one callback per key —
-/// and is the one RPC whose callback count depends on the request mode (1 NULL-keyed
-/// callback in removeAll mode, else one per member).
+/// Since M15/P13.1 all three are on PR #201's <b>single-callback</b> ABI: one callback
+/// carrying the result root or the whole-request error, never both — the
+/// <c>electLeaders</c> shape — whatever the key count, and for
+/// <c>removeMembersFromConsumerGroup</c> whatever the mode. Their per-key walk and the
+/// lifetime of that one callback are pinned in <c>AdminP13GroupOffsetsSingleCallbackTests</c>;
+/// the rows here are the end-to-end ones against the mock.
 /// </para>
 /// </remarks>
 public sealed class AdminP9PerKeyStage6Tests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long a fire count is left to settle before it is read.</summary>
+    private static readonly TimeSpan s_settleWindow = TimeSpan.FromMilliseconds(250);
 
     /// <summary>The code the mock reports for every unimplemented RPC.</summary>
     private const int UnsupportedVersionCode = 35;
@@ -177,176 +177,185 @@ public sealed class AdminP9PerKeyStage6Tests
     }
 
     // ------------------------------------------------------------------------------------
-    // removeMembersFromConsumerGroup — the string key, and the phase's only mode-dependent n.
+    // removeMembersFromConsumerGroup — one callback in either mode, against the real ABI.
     // ------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Non-removeAll mode: one callback per <c>group.instance.id</c>, and each member's error
-    /// is a map value.
-    /// </summary>
-    [Fact]
-    public async Task RemoveMembers_NonRemoveAllMode_PerMemberErrorIsAMapValue()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        MemberToRemove good = new MemberToRemove("cp7-member-ok");
-        MemberToRemove bad = new MemberToRemove("cp7-member-bad");
-
-        bool sawRemoveAll = true;
-        int sawCount = -1;
-
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
-            "cp7-group",
-            new RemoveMembersFromConsumerGroupOptions(new[] { good, bad }),
-            (handle, groupId, removeAll, groupInstanceIds, memberCount, reason, timeoutMs,
-             callback, userData) =>
-            {
-                sawRemoveAll = removeAll;
-                sawCount = memberCount;
-
-                for (int i = 0; i < memberCount; i++)
-                {
-                    string id = Utf8Marshal.PtrToString(groupInstanceIds![i])!;
-                    callback(
-                        groupInstanceIds[i],
-                        id == bad.GroupInstanceId ? MintError(25, "cp7-member-failure") : IntPtr.Zero,
-                        userData);
-                }
-            });
-
-        Assert.False(sawRemoveAll);
-        Assert.Equal(2, sawCount);
-
-        await TestTimeout.Run(() => result.MemberResult(good), s_deadline);
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.MemberResult(bad), s_deadline));
-        Assert.Equal(25, failure.Code);
-        Assert.Equal("cp7-member-failure", failure.Message);
-
-        KafkaException fromAll = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
-        Assert.Equal("cp7-member-failure", fromAll.Message);
-    }
-
-    /// <summary>
-    /// ⚠⚠ removeAll mode, success: the ABI fires ONE callback with a <b>NULL</b> key and a
-    /// null error, which must resolve the aggregate with an <b>empty</b> map — no sentinel key
-    /// enters the dictionary. <c>MemberResult</c> keeps throwing synchronously.
-    /// </summary>
-    [Fact]
-    public async Task RemoveMembers_RemoveAllMode_ANullKeyWithNoError_ResolvesEmpty()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        bool sawRemoveAll = false;
-        int sawCount = -1;
-        bool sawNullArray = false;
-
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
-            "cp7-group",
-            new RemoveMembersFromConsumerGroupOptions(),
-            (handle, groupId, removeAll, groupInstanceIds, memberCount, reason, timeoutMs,
-             callback, userData) =>
-            {
-                sawRemoveAll = removeAll;
-                sawCount = memberCount;
-                sawNullArray = groupInstanceIds is null;
-
-                callback(IntPtr.Zero, IntPtr.Zero, userData);
-            });
-
-        Assert.True(sawRemoveAll);
-        Assert.Equal(0, sawCount);
-        Assert.True(sawNullArray, "removeAll mode passes no member array at all");
-
-        Assert.True(result.RemoveAll);
-        await TestTimeout.Run(result.All, s_deadline);
-
-        Assert.Throws<ArgumentException>(() =>
-        {
-            // Synchronously, before any await — so the discard is the assertion's subject.
-            _ = result.MemberResult(new MemberToRemove("cp7-anyone"));
-        });
-    }
-
-    /// <summary>
-    /// ⚠⚠ removeAll mode, failure: the NULL-keyed callback's error <b>faults</b> the aggregate
-    /// verbatim. The absence of <c>All</c>'s per-key wording is what proves no sentinel key was
-    /// mapped — a sentinel would have surfaced as a re-wrapped per-member failure instead.
-    /// </summary>
-    [Fact]
-    public async Task RemoveMembers_RemoveAllMode_ANullKeyWithAnError_FaultsTheAggregate()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
-            "cp7-group",
-            new RemoveMembersFromConsumerGroupOptions(),
-            (handle, groupId, removeAll, groupInstanceIds, memberCount, reason, timeoutMs,
-             callback, userData) =>
-                callback(IntPtr.Zero, MintError(37, "cp7-remove-all-failure"), userData));
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
-        Assert.Equal(37, failure.Code);
-        Assert.Equal("cp7-remove-all-failure", failure.Message);
-        Assert.DoesNotContain(
-            "Encounter exception when trying to remove",
-            failure.Message,
-            StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// ⚠ Against the real ABI, removeAll mode must arm the countdown for exactly ONE callback:
-    /// armed for zero, the aggregate would resolve empty at the submit boundary and
-    /// <c>All()</c> would complete instead of faulting.
+    /// ⚠ removeAll mode against the real ABI: the core fires its ONE callback "in
+    /// <c>remove_all</c> mode too" — against the mock, with the whole-request refusal, which
+    /// <c>All()</c> rethrows verbatim — and that callback's <c>finally</c> is what releases the
+    /// client. The seam forwards to the real P/Invoke through a counting wrapper, so the fire
+    /// count is the core's, and it pins the removeAll submit shape: the flag set, no member
+    /// array at all, a zero count.
     /// </summary>
     [Fact]
     public async Task RemoveMembers_RemoveAllMode_AgainstTheMock_FaultsAndReleases()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
+        CountingRemoveMembersSeam seam = new CountingRemoveMembersSeam();
 
         RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
-            "cp7-group", new RemoveMembersFromConsumerGroupOptions());
+            "cp7-group", new RemoveMembersFromConsumerGroupOptions(), seam.Submit);
+
+        Assert.True(seam.RemoveAll);
+        Assert.Equal(0, seam.MemberCount);
+        Assert.Null(seam.GroupInstanceIds);
+        Assert.True(result.RemoveAll);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(result.All, s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
-        admin.Dispose();
-        Assert.True(handle.IsClosed, "the removeAll countdown must have reached zero");
+        await seam.AssertFiredExactlyOnceAfterSettling();
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        Assert.True(handle.IsClosed, "the one callback's finally must have released the client");
     }
 
     /// <summary>
-    /// Non-removeAll mode against the real ABI, with a duplicate id in the request that the
-    /// options' member set collapses — so the countdown is armed for the DISTINCT count and
-    /// reaches zero. An over-armed countdown leaks the <c>GCHandle</c> forever, leaving
-    /// <c>IsClosed</c> false after <see cref="IDisposable.Dispose"/>.
+    /// ⚠⚠ Member-list mode against the real ABI with <b>N &gt; 1</b> members: the core fires
+    /// <b>one</b> callback, not one per member, and that one callback both resolves every
+    /// accessor — <c>All()</c> and each requested member's <c>MemberResult</c> rethrow the
+    /// <b>same</b> whole-request refusal instance — and releases the operation, so the client's
+    /// <see cref="IDisposable.Dispose"/> returns and closes the handle.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A duplicate id in the request collapses in the options' member set, so the core is
+    /// handed exactly the three distinct ids. Before M15/P13.1 this row armed a countdown for
+    /// that distinct count and needed one callback per member to reach zero; on the
+    /// single-callback ABI there is nothing to count down, and a leftover per-member arming
+    /// would leave the handle open below (no second callback ever arrives).
+    /// </para>
+    /// <para>
+    /// <c>IsClosed</c> is the witness for "the <c>GCHandle</c> was freed" as well as for the
+    /// client reference: <c>AdminOperation.FreeGcHandle</c> frees the one and releases the
+    /// other inside a single once-only block, so the reference cannot be released without the
+    /// <c>GCHandle</c> free having run first.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task RemoveMembers_NonRemoveAllMode_AgainstTheMock_ArmsTheDistinctCount()
+    public async Task RemoveMembers_NonRemoveAllMode_AgainstTheMock_ManyMembersFireOneCallbackAndRelease()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
+        CountingRemoveMembersSeam seam = new CountingRemoveMembersSeam();
 
-        MemberToRemove member = new MemberToRemove("cp7-mock-member");
-        RemoveMembersFromConsumerGroupOptions options =
-            new RemoveMembersFromConsumerGroupOptions(new[] { member, new MemberToRemove("cp7-mock-member") });
-        Assert.Single(options.Members);
+        MemberToRemove[] members =
+        {
+            new MemberToRemove("cp7-many-a"),
+            new MemberToRemove("cp7-many-b"),
+            new MemberToRemove("cp7-many-c"),
+        };
+        RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions(
+            new[] { members[0], members[1], members[2], new MemberToRemove("cp7-many-b") });
+        Assert.Equal(3, options.Members.Count);
 
         RemoveMembersFromConsumerGroupResult result =
-            admin.RemoveMembersFromConsumerGroup("cp7-group", options);
+            admin.RemoveMembersFromConsumerGroup("cp7-group", options, seam.Submit);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.MemberResult(member), s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
-        Assert.Equal(NotImplemented, failure.Message);
+        Assert.False(seam.RemoveAll);
+        Assert.Equal(3, seam.MemberCount);
+        Assert.Equal(
+            new[] { "cp7-many-a", "cp7-many-b", "cp7-many-c" },
+            SortedOrdinal(seam.GroupInstanceIds!));
 
-        admin.Dispose();
-        Assert.True(handle.IsClosed, "the per-member countdown must have reached zero");
+        KafkaException fromAll = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(result.All, s_deadline));
+        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        Assert.Equal(NotImplemented, fromAll.Message);
+
+        foreach (MemberToRemove member in members)
+        {
+            KafkaException fromMember = await Assert.ThrowsAsync<KafkaException>(
+                () => TestTimeout.Run(() => result.MemberResult(member), s_deadline));
+            Assert.Same(fromAll, fromMember);
+        }
+
+        await seam.AssertFiredExactlyOnceAfterSettling();
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        Assert.True(handle.IsClosed, "the one callback's finally must have released the client");
+    }
+
+    private static string[] SortedOrdinal(IEnumerable<string> values)
+    {
+        List<string> sorted = new List<string>(values);
+        sorted.Sort(StringComparer.Ordinal);
+        return sorted.ToArray();
+    }
+
+    /// <summary>
+    /// A <c>remove_members_from_consumer_group_async</c> submit seam that forwards to the
+    /// <b>real</b> P/Invoke through a wrapper counting the core's fires, recording what the
+    /// core was handed.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The wrapper is a fresh delegate the core holds a thunk for until it fires, so it is
+    /// rooted in a field of this seam, and the test keeps the seam reachable past the settle
+    /// window with <see cref="GC.KeepAlive(object)"/> (DoD §12: the wrapper forwards to the
+    /// production trampoline it was handed, never a stand-in).
+    /// </remarks>
+    private sealed class CountingRemoveMembersSeam
+    {
+        private int _fires;
+        private AdminCallbacks.RemoveMembersFromConsumerGroupCallback? _wrapper;
+
+        internal bool RemoveAll { get; private set; }
+
+        internal int MemberCount { get; private set; } = -1;
+
+        internal string[]? GroupInstanceIds { get; private set; }
+
+        internal void Submit(
+            IntPtr admin,
+            IntPtr groupId,
+            bool removeAll,
+            IntPtr[]? groupInstanceIds,
+            int memberCount,
+            IntPtr reason,
+            int timeoutMs,
+            AdminCallbacks.RemoveMembersFromConsumerGroupCallback callback,
+            IntPtr userData)
+        {
+            Assert.Same(AdminCallbacks.RemoveMembersFromConsumerGroup, callback);
+
+            RemoveAll = removeAll;
+            MemberCount = memberCount;
+            if (groupInstanceIds is not null)
+            {
+                string[] ids = new string[memberCount];
+                for (int i = 0; i < memberCount; i++)
+                {
+                    ids[i] = Utf8Marshal.PtrToString(groupInstanceIds[i])!;
+                }
+
+                GroupInstanceIds = ids;
+            }
+
+            _wrapper = (result, error, operationUserData) =>
+            {
+                Interlocked.Increment(ref _fires);
+                callback(result, error, operationUserData);
+            };
+
+            NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync(
+                admin, groupId, removeAll, groupInstanceIds, memberCount, reason, timeoutMs,
+                _wrapper, userData);
+        }
+
+        /// <summary>
+        /// Exactly one fire, read <b>after</b> a settle window: a first observation of 1
+        /// cannot tell one invocation from two.
+        /// </summary>
+        internal async Task AssertFiredExactlyOnceAfterSettling()
+        {
+            await Task.Delay(s_settleWindow);
+            Assert.Equal(1, Volatile.Read(ref _fires));
+            GC.KeepAlive(this);
+        }
     }
 
     // ------------------------------------------------------------------------------------
@@ -396,14 +405,5 @@ public sealed class AdminP9PerKeyStage6Tests
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.True(handle.IsClosed, "an empty request must still release the client");
-    }
-
-    /// <summary>Mints an owned error handle the way the core would.</summary>
-    private static IntPtr MintError(int code, string message)
-    {
-        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
     }
 }

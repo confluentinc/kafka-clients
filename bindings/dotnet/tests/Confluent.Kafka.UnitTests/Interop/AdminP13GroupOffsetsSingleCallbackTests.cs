@@ -26,9 +26,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M15/P13.1 CP1 — <c>alterConsumerGroupOffsets</c> and <c>deleteConsumerGroupOffsets</c> on
-/// PR #201's single-callback ABI: <b>one</b> callback per call, carrying the result root or
-/// the whole-request error, never both, and firing "also when <c>count</c> is 0".
+/// M15/P13.1 — <c>alterConsumerGroupOffsets</c> and <c>deleteConsumerGroupOffsets</c> (CP1)
+/// and <c>removeMembersFromConsumerGroup</c> (CP2) on PR #201's single-callback ABI:
+/// <b>one</b> callback per call, carrying the result root or the whole-request error, never
+/// both, and firing "also when <c>count</c> is 0" (for <c>removeMembersFromConsumerGroup</c>,
+/// "in <c>removeAll</c> mode too").
 /// </summary>
 /// <remarks>
 /// <para>
@@ -63,6 +65,13 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// on native memory — a borrowed error read as owned would double-free at the destroy and
 /// take the test host down, which is the loud half of the ownership contract.
 /// </para>
+/// <para>
+/// ⚠ <c>removeMembersFromConsumerGroup</c>'s sync entry point produces a root only in
+/// member-list mode. In <c>removeAll</c> mode it returns the error instead ("A non-null return
+/// means the request could not be submitted at all — or that <c>remove_all</c> was true and
+/// <c>all()</c> failed"), so no in-process root carries a <c>removeAll</c> result: its
+/// <c>_all</c> read is pinned by <c>AdminP4ReaderWiringTests</c>, not driven on native memory.
+/// </para>
 /// </remarks>
 public sealed class AdminP13GroupOffsetsSingleCallbackTests
 {
@@ -86,6 +95,13 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// core's own test at <c>:23604</c>).
     /// </summary>
     private const string NegativeOffsetAtZero = "offset at index 0: Invalid negative offset";
+
+    /// <summary>
+    /// The core's message for an empty member list without <c>remove_all</c> — Java's
+    /// <c>IllegalArgumentException("Invalid empty members has been provided")</c>, as the
+    /// header's <c>kafka_admin_AdminClient_remove_members_from_consumer_group</c> documents it.
+    /// </summary>
+    private const string EmptyMembers = "Invalid empty members has been provided";
 
     private const string Group = "p13-group";
 
@@ -116,7 +132,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                     IntPtr.Zero, groupId, topics, partitions, offsets, metadata, leaderEpochs,
                     hasLeaderEpoch, count, timeoutMs, callback, userData));
 
-        AssertFaultedInline(result.All(), result.PartitionResult(partition), NullAdmin);
+        AssertFaultedInline(result.All(), NullAdmin, result.PartitionResult(partition));
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -147,7 +163,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                     hasLeaderEpoch, count, timeoutMs, callback, userData);
             });
 
-        AssertFaultedInline(result.All(), result.PartitionResult(partition), NegativeOffsetAtZero);
+        AssertFaultedInline(result.All(), NegativeOffsetAtZero, result.PartitionResult(partition));
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -170,7 +186,74 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                 NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync(
                     IntPtr.Zero, groupId, topics, partitions, count, timeoutMs, callback, userData));
 
-        AssertFaultedInline(result.All(), result.PartitionResult(partition), NullAdmin);
+        AssertFaultedInline(result.All(), NullAdmin, result.PartitionResult(partition));
+        AssertReleasedExactlyOnce(admin, handle);
+    }
+
+    /// <summary>
+    /// A NULL admin handle for <c>remove_members_from_consumer_group_async</c>, in both modes:
+    /// the same inline fault, through the same single release. In <c>removeAll</c> mode only
+    /// <c>All()</c> is reachable — <c>MemberResult</c> is rejected synchronously there, before
+    /// the task is consulted.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RemoveMembers_ANullAdmin_FaultsInlineWithTheCoresMessage(bool removeAll)
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+        MemberToRemove member = new MemberToRemove("p13-inline-rm");
+
+        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+            Group,
+            RemoveMembersOptions(removeAll, member),
+            (nativeHandle, groupId, removeAllFlag, groupInstanceIds, memberCount, reason, timeoutMs,
+             callback, userData) =>
+                NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync(
+                    IntPtr.Zero, groupId, removeAllFlag, groupInstanceIds, memberCount, reason,
+                    timeoutMs, callback, userData));
+
+        Assert.Equal(removeAll, result.RemoveAll);
+        if (removeAll)
+        {
+            AssertFaultedInline(result.All(), NullAdmin);
+        }
+        else
+        {
+            AssertFaultedInline(result.All(), NullAdmin, result.MemberResult(member));
+        }
+
+        AssertReleasedExactlyOnce(admin, handle);
+    }
+
+    /// <summary>
+    /// An empty member list without <c>remove_all</c> — the managed
+    /// <see cref="RemoveMembersFromConsumerGroupOptions"/> rejects one, so the seam forwards a
+    /// zero <c>member_count</c> with the <b>real</b> handle. The core refuses it on the calling
+    /// thread (a trigger the header lists for this RPC only).
+    /// </summary>
+    [Fact]
+    public void RemoveMembers_AnEmptyMemberListWithoutRemoveAll_FaultsInlineWithTheCoresMessage()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+        MemberToRemove member = new MemberToRemove("p13-inline-rm-empty");
+
+        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+            Group,
+            RemoveMembersOptions(removeAll: false, member),
+            (nativeHandle, groupId, removeAllFlag, groupInstanceIds, memberCount, reason, timeoutMs,
+             callback, userData) =>
+            {
+                Assert.False(removeAllFlag);
+                Assert.Equal(1, memberCount);
+                NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync(
+                    nativeHandle, groupId, removeAllFlag, groupInstanceIds, 0, reason, timeoutMs,
+                    callback, userData);
+            });
+
+        AssertFaultedInline(result.All(), EmptyMembers, result.MemberResult(member));
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -225,7 +308,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         Assert.Same(AdminCallbacks.AlterConsumerGroupOffsets, capturedCallback);
 
         Task all = result.All();
-        AssertPendingAndRooted(admin, handle, all, capturedUserData);
+        AssertPendingAndRooted<TopicPartition>(admin, handle, all, capturedUserData);
 
         capturedCallback!(IntPtr.Zero, MintError(7, "p13-late-acgo"), capturedUserData);
 
@@ -277,7 +360,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         Assert.Same(AdminCallbacks.DeleteConsumerGroupOffsets, capturedCallback);
 
         Task all = result.All();
-        AssertPendingAndRooted(admin, handle, all, capturedUserData);
+        AssertPendingAndRooted<TopicPartition>(admin, handle, all, capturedUserData);
 
         capturedCallback!(IntPtr.Zero, MintError(11, "p13-late-dcgo"), capturedUserData);
 
@@ -286,6 +369,80 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
             () => TestTimeout.Run(() => all, s_deadline));
         Assert.Equal(11, failure.Code);
         Assert.Equal("p13-late-dcgo", failure.Message);
+    }
+
+    /// <summary>
+    /// The same lifetime for <c>removeMembersFromConsumerGroup</c>, in both modes: ONE
+    /// callback is owed whatever the member count, and nothing on the submit side may resolve
+    /// or release the operation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The removeAll row also pins the submit shape: no member array at all and a zero count,
+    /// with the <c>remove_all</c> flag carrying the mode. The member-list row pins that
+    /// <c>N &gt; 1</c> members still take the one-callback path — the pre-CP2 countdown was
+    /// armed for one callback per member there.
+    /// </para>
+    /// <para>
+    /// ⚠ Unlike the empty group-offsets row, <b>neither</b> row here is reachable by a
+    /// replay of the pre-CP2 <c>SetPendingCallbacks(pendingCallbacks)</c> +
+    /// <c>ReleaseSubmitToken()</c> lines: <c>pendingCallbacks</c> was 1 in removeAll mode and
+    /// the member count otherwise, and the options reject an empty member set, so that
+    /// countdown is armed at two or more and one submit release never reaches zero. What
+    /// these rows discriminate is any submit-side release that <em>does</em> reach zero —
+    /// <c>SetPendingCallbacks(0)</c> + <c>ReleaseSubmitToken()</c>, or a direct
+    /// <c>FreeGcHandle</c>.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true, 0)]
+    [InlineData(false, 2)]
+    public async Task RemoveMembers_UntilTheCallbackFires_TheOperationStaysPendingAndRooted(
+        bool removeAll, int memberCount)
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        MemberToRemove[] members = new MemberToRemove[memberCount];
+        for (int i = 0; i < memberCount; i++)
+        {
+            members[i] = new MemberToRemove("p13-pending-rm-" + i);
+        }
+
+        AdminCallbacks.RemoveMembersFromConsumerGroupCallback? capturedCallback = null;
+        IntPtr capturedUserData = IntPtr.Zero;
+        int capturedCount = -1;
+        bool? capturedRemoveAll = null;
+        bool capturedNullArray = false;
+
+        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+            Group,
+            RemoveMembersOptions(removeAll, members),
+            (nativeHandle, groupId, removeAllFlag, groupInstanceIds, count, reason, timeoutMs,
+             callback, userData) =>
+            {
+                capturedCallback = callback;
+                capturedUserData = userData;
+                capturedCount = count;
+                capturedRemoveAll = removeAllFlag;
+                capturedNullArray = groupInstanceIds is null;
+            });
+
+        Assert.Equal(memberCount, capturedCount);
+        Assert.Equal(removeAll, capturedRemoveAll);
+        Assert.Equal(removeAll, capturedNullArray);
+        Assert.Same(AdminCallbacks.RemoveMembersFromConsumerGroup, capturedCallback);
+
+        Task all = result.All();
+        AssertPendingAndRooted<string>(admin, handle, all, capturedUserData);
+
+        capturedCallback!(IntPtr.Zero, MintError(13, "p13-late-rm"), capturedUserData);
+
+        Assert.True(handle.IsClosed, "the one callback's finally must be the release");
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => all, s_deadline));
+        Assert.Equal(13, failure.Code);
+        Assert.Equal("p13-late-rm", failure.Message);
     }
 
     // ------------------------------------------------------------------------------------
@@ -330,13 +487,13 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         Assert.NotEqual(IntPtr.Zero, root);
 
         SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
-            RootedOperation("alterConsumerGroupOffsets", handle, out IntPtr userData);
+            RootedOperation<TopicPartition>("alterConsumerGroupOffsets", handle, out IntPtr userData);
 
         // ⚠ Ownership of `root` transfers to the trampoline: it destroys it after the reads,
         // so nothing below may touch `root` again.
         AdminCallbacks.AlterConsumerGroupOffsets(root, IntPtr.Zero, userData);
 
-        AssertWholeErrorOnEveryPartition(
+        AssertWholeErrorOnEveryKey(
             operation, new[] { first, second }, NotImplementedTypo);
         AssertReleasedExactlyOnce(admin, handle);
     }
@@ -373,13 +530,97 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         Assert.NotEqual(IntPtr.Zero, root);
 
         SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
-            RootedOperation("deleteConsumerGroupOffsets", handle, out IntPtr userData);
+            RootedOperation<TopicPartition>("deleteConsumerGroupOffsets", handle, out IntPtr userData);
 
         // ⚠ Ownership of `root` transfers to the trampoline — see the alter twin.
         AdminCallbacks.DeleteConsumerGroupOffsets(root, IntPtr.Zero, userData);
 
-        AssertWholeErrorOnEveryPartition(
+        AssertWholeErrorOnEveryKey(
             operation, new[] { first, second }, NotImplemented);
+        AssertReleasedExactlyOnce(admin, handle);
+    }
+
+    /// <summary>
+    /// ⚠⚠ The rooted <c>removeMembersFromConsumerGroup</c> trampoline, fed a <b>real</b>
+    /// member-list-mode root from the sync entry point, resolves the operation with every
+    /// requested member keyed by its <c>group.instance.id</c> and carrying the whole-request
+    /// error (header: "so is a failure of the whole request, which every requested member then
+    /// reports"), plus the <c>_all</c> outcome carrying the same — and the one callback
+    /// releases the client.
+    /// </summary>
+    [Fact]
+    public void RemoveMembersTrampoline_OnARealSyncRoot_ReadsEveryMemberAndTheOwnedAll()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        string firstMember = "p13-d7-rm-b";
+        string secondMember = "p13-d7-rm-a";
+
+        IntPtr root = IntPtr.Zero;
+        using (Utf8Marshal.PinnedUtf8String groupId = Utf8Marshal.Pin(Group))
+        using (Utf8Marshal.PinnedUtf8String firstPin = Utf8Marshal.Pin(firstMember))
+        using (Utf8Marshal.PinnedUtf8String secondPin = Utf8Marshal.Pin(secondMember))
+        {
+            KafkaException? submitError = KafkaException.FromHandle(
+                SyncNativeMethods.RemoveMembersFromConsumerGroup(
+                    handle,
+                    groupId.Pointer,
+                    removeAll: false,
+                    new[] { firstPin.Pointer, secondPin.Pointer },
+                    memberCount: 2,
+                    reason: IntPtr.Zero,
+                    timeoutMs: -1,
+                    ref root));
+            Assert.Null(submitError);
+        }
+
+        Assert.NotEqual(IntPtr.Zero, root);
+
+        SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> operation =
+            RootedOperation<string>("removeMembersFromConsumerGroup", handle, out IntPtr userData);
+
+        // ⚠ Ownership of `root` transfers to the trampoline — see the alter twin.
+        AdminCallbacks.RemoveMembersFromConsumerGroup(root, IntPtr.Zero, userData);
+
+        AssertWholeErrorOnEveryKey(operation, new[] { firstMember, secondMember }, NotImplemented);
+        AssertReleasedExactlyOnce(admin, handle);
+    }
+
+    /// <summary>
+    /// ⚠ The removeAll half of D7 has <b>no</b> root to feed: the sync entry point returns the
+    /// failed <c>all()</c> directly (header: "A non-null return means … or that
+    /// <c>remove_all</c> was true and <c>all()</c> failed") and writes nothing to
+    /// <c>out_result</c>. Pinned here so the reachability claim in this class's remarks rests
+    /// on an observation, not on a reading of the header alone.
+    /// </summary>
+    [Fact]
+    public void RemoveMembersSync_RemoveAllMode_ReturnsTheErrorAndWritesNoRoot()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        IntPtr root = IntPtr.Zero;
+        KafkaException? error;
+        using (Utf8Marshal.PinnedUtf8String groupId = Utf8Marshal.Pin(Group))
+        {
+            error = KafkaException.FromHandle(
+                SyncNativeMethods.RemoveMembersFromConsumerGroup(
+                    handle,
+                    groupId.Pointer,
+                    removeAll: true,
+                    groupInstanceIds: null,
+                    memberCount: 0,
+                    reason: IntPtr.Zero,
+                    timeoutMs: -1,
+                    ref root));
+        }
+
+        Assert.NotNull(error);
+        Assert.Equal(UnsupportedVersionCode, error!.Code);
+        Assert.Equal(NotImplemented, error.Message);
+        Assert.Equal(IntPtr.Zero, root);
+
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -388,17 +629,20 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     // ------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Both accessors are faulted at submit return — so the callback ran inside the P/Invoke —
+    /// Every accessor is faulted at submit return — so the callback ran inside the P/Invoke —
     /// with the one error instance carrying <paramref name="message"/>.
     /// </summary>
-    private static void AssertFaultedInline(Task all, Task partitionResult, string message)
+    private static void AssertFaultedInline(Task all, string message, params Task[] keyResults)
     {
         Assert.True(all.IsFaulted, "the inline callback must have faulted the task before the submit returned");
         KafkaException error = Assert.IsType<KafkaException>(all.Exception!.InnerException);
         Assert.Equal(message, error.Message);
 
-        Assert.True(partitionResult.IsFaulted, "PartitionResult awaits the same, already-faulted task");
-        Assert.Same(error, partitionResult.Exception!.InnerException);
+        foreach (Task keyResult in keyResults)
+        {
+            Assert.True(keyResult.IsFaulted, "a per-key accessor awaits the same, already-faulted task");
+            Assert.Same(error, keyResult.Exception!.InnerException);
+        }
     }
 
     /// <summary>
@@ -419,8 +663,9 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// After the submit returned without firing: the task is pending, the client stays open
     /// past its own <c>Dispose</c>, and <c>user_data</c> still resolves to the operation.
     /// </summary>
-    private static void AssertPendingAndRooted(
+    private static void AssertPendingAndRooted<TKey>(
         NativeAdminClient admin, SafeAdminHandle handle, Task all, IntPtr userData)
+        where TKey : notnull
     {
         Assert.NotEqual(IntPtr.Zero, userData);
         Assert.False(all.IsCompleted, "nothing but the callback may resolve the operation");
@@ -434,7 +679,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
             "the outstanding operation must still hold its client reference (PLAN R1)");
 
         object? target = GCHandle.FromIntPtr(userData).Target;
-        Assert.IsType<SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>>(
+        Assert.IsType<SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)>>(
             target);
         Assert.False(all.IsCompleted);
     }
@@ -444,11 +689,12 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// <see cref="GCHandle"/> and holding a span-the-op reference on the client, both of which
     /// the trampoline's <c>finally</c> releases.
     /// </summary>
-    private static SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
-        RootedOperation(string operationName, SafeAdminHandle handle, out IntPtr userData)
+    private static SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)>
+        RootedOperation<TKey>(string operationName, SafeAdminHandle handle, out IntPtr userData)
+        where TKey : notnull
     {
-        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
-            new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+        SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)> operation =
+            new SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)>(
                 operationName);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -464,21 +710,22 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
 
     /// <summary>
     /// The operation resolved (not faulted — the root arrived with a null error), keyed by
-    /// exactly the requested partitions, each carrying the whole-request error, with the
+    /// exactly the requested keys, each carrying the whole-request error, with the
     /// <c>_all</c> outcome carrying it too.
     /// </summary>
-    private static void AssertWholeErrorOnEveryPartition(
-        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation,
-        TopicPartition[] requested,
+    private static void AssertWholeErrorOnEveryKey<TKey>(
+        SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)> operation,
+        TKey[] requested,
         string message)
+        where TKey : notnull
     {
         Assert.Equal(TaskStatus.RanToCompletion, operation.Task.Status);
-        (IReadOnlyDictionary<TopicPartition, KafkaException?> perKey, KafkaException? all) = operation.Task.Result;
+        (IReadOnlyDictionary<TKey, KafkaException?> perKey, KafkaException? all) = operation.Task.Result;
 
         Assert.Equal(requested.Length, perKey.Count);
-        foreach (TopicPartition partition in requested)
+        foreach (TKey key in requested)
         {
-            Assert.True(perKey.TryGetValue(partition, out KafkaException? error), partition + " must be keyed");
+            Assert.True(perKey.TryGetValue(key, out KafkaException? error), key + " must be keyed");
             Assert.NotNull(error);
             Assert.Equal(UnsupportedVersionCode, error!.Code);
             Assert.Equal(message, error.Message);
@@ -499,7 +746,17 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     }
 
     /// <summary>
-    /// ⚠ <b>Test-only</b> P/Invokes of the two <b>synchronous</b> entry points (PLAN D7): the
+    /// The options for either mode: Java's no-argument constructor for <c>removeAll</c>, the
+    /// member-list constructor otherwise.
+    /// </summary>
+    private static RemoveMembersFromConsumerGroupOptions RemoveMembersOptions(
+        bool removeAll, params MemberToRemove[] members) =>
+        removeAll
+            ? new RemoveMembersFromConsumerGroupOptions()
+            : new RemoveMembersFromConsumerGroupOptions(members);
+
+    /// <summary>
+    /// ⚠ <b>Test-only</b> P/Invokes of the three <b>synchronous</b> entry points (PLAN D7): the
     /// binding itself ships only the <c>_async</c> forms, so these live here and nowhere in
     /// the library. Declared exactly as the header's prototypes, with the admin handle passed
     /// as the <see cref="SafeAdminHandle"/> so the marshaller holds a call-scoped reference
@@ -542,5 +799,23 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
             int count,
             int timeoutMs,
             out IntPtr outResult);
+
+        /// <summary>
+        /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group</c> — returns the owned
+        /// error (null on success) and, in member-list mode, writes the owned result root to
+        /// <paramref name="outResult"/>. In <c>removeAll</c> mode a failed <c>all()</c> is the
+        /// return value instead, and nothing is written. <c>ref</c>, not <c>out</c>, so a caller
+        /// can pre-zero the slot and observe that.
+        /// </summary>
+        [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_remove_members_from_consumer_group", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr RemoveMembersFromConsumerGroup(
+            SafeAdminHandle admin,
+            IntPtr groupId,
+            [MarshalAs(UnmanagedType.I1)] bool removeAll,
+            IntPtr[]? groupInstanceIds,
+            int memberCount,
+            IntPtr reason,
+            int timeoutMs,
+            ref IntPtr outResult);
     }
 }

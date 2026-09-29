@@ -32,26 +32,32 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠⚠ <b>A per-member failure is a map VALUE here, not a faulted awaitable</b> — the same
 /// shape as <see cref="DeleteConsumerGroupOffsetsResult"/> / <see cref="AlterConsumerGroupOffsetsResult"/>.
+/// A whole-request failure faults the awaitable itself, and both accessors rethrow it
+/// unchanged, as Java's continuations test the <c>throwable</c> first.
 /// </para>
 /// <para>
-/// ⚠⚠ <b><see cref="RemoveAll"/> forces a real ABI deviation, recorded here rather than
-/// hidden.</b> Java's <c>removeAll()</c> (<c>:113-115</c>) is <c>memberInfos.isEmpty()</c>,
-/// and when it is true <see cref="All"/> iterates the <em>resolved</em> map instead of the
-/// original request set — because in real Java the broker still reports one outcome per
-/// member it actually removed. The Rust core has no per-member outcome model for "remove
-/// everyone": in removeAll mode the ABI fires <b>one NULL-keyed callback</b> carrying the
-/// whole operation's outcome, which the binding resolves as an <b>empty</b> map on success
-/// and as a call-level fault on failure (see
-/// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_async</c>'s doc comment). So
-/// <see cref="All"/> below is written in Java's exact shape — it still iterates the resolved
-/// map in removeAll mode — but that iteration is over a map the core guarantees is empty,
-/// so it can only ever find success there; the only way a removeAll request's own failure
-/// reaches the caller is the <see langword="await"/> propagating a faulted <see cref="Task"/>.
+/// ⚠ <b><see cref="All"/> rethrows the core's own <c>all()</c> outcome</b>, read off the
+/// native result together with the map, rather than re-deriving it here. Outside
+/// <see cref="RemoveAll"/> mode that is the outcome <see cref="MemberResult"/> reports for the
+/// first failing requested member; which member is first is the core's choice
+/// (group-instance-id order — Java iterates its set in unspecified order).
+/// </para>
+/// <para>
+/// ⚠⚠ <b>In <see cref="RemoveAll"/> mode a member failure has a different error code than
+/// in Java, recorded here rather than hidden.</b> Java's <c>all()</c> (<c>:56-64</c>) throws
+/// <c>new KafkaException("Encounter exception when trying to remove: " + identity,
+/// memberException)</c>. The core builds the same error, with "exception" spelled "error",
+/// but the C API cannot read an error's cause, so it arrives as a bare
+/// <see cref="KafkaException"/> with <see cref="KafkaException.Code"/> -1
+/// (<c>UNKNOWN_SERVER_ERROR</c>), not retriable, with no
+/// <see cref="Exception.InnerException"/>: the message still names the member, but the
+/// member's own error code is not observable. There is no per-member outcome in this mode
+/// at all, as in Java.
 /// </para>
 /// </remarks>
 public sealed class RemoveMembersFromConsumerGroupResult
 {
-    private readonly Task<IReadOnlyDictionary<string, KafkaException?>> _future;
+    private readonly Task<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> _future;
     private readonly IReadOnlyCollection<MemberToRemove> _memberInfos;
 
     /// <summary>
@@ -60,8 +66,15 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// <c>RemoveMembersFromConsumerGroupResult(KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;,
     /// Set&lt;MemberToRemove&gt;)</c> (<c>:38-42</c>).
     /// </summary>
+    /// <param name="future">
+    /// The single awaitable: <c>PerKey</c> is the per-member map keyed by
+    /// <c>group.instance.id</c> (a <see langword="null"/> value is Java's <c>Errors.NONE</c>;
+    /// empty in removeAll mode), <c>All</c> the fault Java's <c>all()</c> reports, or
+    /// <see langword="null"/> when it succeeds.
+    /// </param>
+    /// <param name="memberInfos">The original request's members; empty in removeAll mode.</param>
     internal RemoveMembersFromConsumerGroupResult(
-        Task<IReadOnlyDictionary<string, KafkaException?>> future,
+        Task<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> future,
         IReadOnlyCollection<MemberToRemove> memberInfos)
     {
         _future = future;
@@ -82,36 +95,22 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// first member error is thrown.
     /// </summary>
     /// <returns>A task representing the whole request.</returns>
-    /// <remarks>See the type remarks for the removeAll-mode deviation this forces.</remarks>
+    /// <remarks>
+    /// The fault is the core's <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>,
+    /// rethrown unchanged — see the type remarks for what it carries in
+    /// <see cref="RemoveAll"/> mode. A whole-request failure faults the awaitable instead and
+    /// propagates unchanged through the <see langword="await"/> (<c>:52-53</c>). A fresh task
+    /// per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per <c>all()</c> call
+    /// (<c>:50</c>).
+    /// </remarks>
     public async Task All()
     {
-        IReadOnlyDictionary<string, KafkaException?> results = await _future.ConfigureAwait(false);
+        // A call-level failure propagates by the await itself.
+        KafkaException? all = (await _future.ConfigureAwait(false)).All;
 
-        if (RemoveAll)
+        if (all is not null)
         {
-            // Java iterates `memberErrors.entrySet()` here (:56-64). The core guarantees this
-            // map is empty in removeAll mode (see the type remarks), so this can only find
-            // success — a removeAll failure reaches the caller only via the await above.
-            foreach (KeyValuePair<string, KafkaException?> entry in results)
-            {
-                if (entry.Value is not null)
-                {
-                    throw new KafkaException(
-                        entry.Value.Code,
-                        string.Format(
-                            CultureInfo.InvariantCulture,
-                            "Encounter exception when trying to remove: {0}",
-                            entry.Key),
-                        entry.Value.IsRetriable);
-                }
-            }
-        }
-        else
-        {
-            foreach (MemberToRemove member in _memberInfos)
-            {
-                ThrowIfSubLevelError(results, member.GroupInstanceId);
-            }
+            throw all;
         }
     }
 
@@ -165,30 +164,16 @@ public sealed class RemoveMembersFromConsumerGroupResult
 
     private async Task MemberResultAsync(MemberToRemove member)
     {
-        IReadOnlyDictionary<string, KafkaException?> results = await _future.ConfigureAwait(false);
+        // A call-level failure propagates by the await itself — Java's `throwable != null`
+        // branch (:91-92).
+        IReadOnlyDictionary<string, KafkaException?> perKey = (await _future.ConfigureAwait(false)).PerKey;
 
-        ThrowIfSubLevelError(results, member.GroupInstanceId);
-    }
-
-    /// <summary>
-    /// Java's <c>maybeCompleteExceptionally</c> / <c>KafkaAdminClient.getSubLevelError</c>
-    /// (<c>:100-111</c>): a member missing from the resolved map faults with an
-    /// <see cref="ArgumentException"/> distinct from <see cref="MemberResult"/>'s synchronous
-    /// "not in the original request" one; a present entry with a non-null value is that
-    /// member's own error.
-    /// </summary>
-    private static void ThrowIfSubLevelError(
-        IReadOnlyDictionary<string, KafkaException?> results, string groupInstanceId)
-    {
-        if (!results.TryGetValue(groupInstanceId, out KafkaException? error))
-        {
-            throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Member \"{0}\" was not included in the removal response",
-                    groupInstanceId));
-        }
-
+        // The indexer, not TryGetValue: `member` passed the request-set check above, and the
+        // core reports one row per requested member, so a miss is a core contract violation —
+        // faulting loudly beats reporting a success nobody observed. A value is that member's
+        // own outcome, including the core's "not included in the removal response" error for a
+        // requested member the broker did not answer (Java's `getSubLevelError`, :100-111).
+        KafkaException? error = perKey[member.GroupInstanceId];
         if (error is not null)
         {
             throw error;

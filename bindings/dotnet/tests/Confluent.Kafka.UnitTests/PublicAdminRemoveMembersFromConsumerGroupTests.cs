@@ -177,10 +177,10 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void MemberResult_NullMember_ThrowsArgumentNullException_Synchronously()
     {
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)),
-            new[] { new MemberToRemove("instance-1") });
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal),
+            all: null,
+            new MemberToRemove("instance-1"));
 
         ArgumentNullException? thrown = null;
         try
@@ -202,10 +202,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void MemberResult_RemoveAllMode_ThrowsArgumentException_Synchronously()
     {
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)),
-            Array.Empty<MemberToRemove>());
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null);
 
         ArgumentException? thrown = null;
         try
@@ -226,7 +224,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
 
     /// <summary>
     /// A member never included in the original request is rejected synchronously with Java's
-    /// exact (unquoted) message — distinct from the "missing from the response" message below.
+    /// exact (unquoted) message — distinct from the core's "not included in the removal
+    /// response" error, which is a stored map value (see below).
     /// </summary>
     [Fact]
     public void MemberResult_MemberNotInOriginalRequest_ThrowsArgumentException_Synchronously()
@@ -234,10 +233,10 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         MemberToRemove requested = new MemberToRemove("instance-1");
         MemberToRemove notRequested = new MemberToRemove("instance-2");
 
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)),
-            new[] { requested });
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = null },
+            all: null,
+            requested);
 
         ArgumentException? thrown = null;
         try
@@ -254,27 +253,56 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     }
 
     /// <summary>
-    /// A requested member missing from the resolved map faults <em>asynchronously</em> with a
-    /// distinct, quoted message — Java's <c>getSubLevelError</c> (<c>:100-111</c>).
+    /// A requested member's map value is thrown <b>asynchronously</b>, via the returned
+    /// <see cref="Task"/> — including the core's own "not included in the removal response"
+    /// error for a requested member the broker did not answer (Java's
+    /// <c>KafkaAdminClient.getSubLevelError</c>, reached from
+    /// <c>RemoveMembersFromConsumerGroupResult.java:100-111</c>). The binding no longer
+    /// composes that message; it rethrows the stored value. The text is the header's
+    /// (<c>kafka_admin_RemoveMembersFromConsumerGroupResult_member_result</c>).
     /// </summary>
     [Fact]
-    public async Task MemberResult_MemberMissingFromResponse_ThrowsArgumentException_Asynchronously()
+    public async Task MemberResult_ARequestedMembersStoredError_IsThrownAsynchronously()
     {
         MemberToRemove member = new MemberToRemove("instance-1");
+        KafkaException stored = new KafkaException(
+            -1,
+            "Member \"MemberIdentity(memberId='', groupInstanceId='instance-1', reason=null)\" "
+                + "was not included in the removal response",
+            isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)),
-            new[] { member });
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = stored },
+            all: stored,
+            member);
 
         // Captured BEFORE the assertion: a synchronous throw here would surface at this line,
         // outside Assert.ThrowsAsync's catch — which is what proves the fault is genuinely
         // asynchronous rather than merely tolerated by an assertion helper that accepts either.
         Task task = result.MemberResult(member);
 
-        ArgumentException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ArgumentException>(() => task), s_deadline);
-        Assert.Equal("Member \"instance-1\" was not included in the removal response", thrown.Message);
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => task), s_deadline);
+        Assert.Same(stored, thrown);
+    }
+
+    /// <summary>
+    /// ⚠ A requested member missing from the resolved map is a <b>core contract violation</b>
+    /// — the core reports one row per requested member — and it faults the task rather than
+    /// reporting a success nobody observed.
+    /// </summary>
+    [Fact]
+    public async Task MemberResult_ARequestedMemberMissingFromTheMap_FaultsInsteadOfSucceeding()
+    {
+        MemberToRemove member = new MemberToRemove("instance-1");
+
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null, member);
+
+        Task task = result.MemberResult(member);
+
+        await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KeyNotFoundException>(() => task), s_deadline);
     }
 
     /// <summary>A present, null-valued map entry means that member succeeded.</summary>
@@ -283,10 +311,10 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     {
         MemberToRemove member = new MemberToRemove("instance-1");
 
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = null }),
-            new[] { member });
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = null },
+            all: null,
+            member);
 
         await TestTimeout.Run(() => result.MemberResult(member), s_deadline);
     }
@@ -301,10 +329,10 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         MemberToRemove member = new MemberToRemove("instance-1");
         KafkaException error = new KafkaException(11, "member failure", isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = error }),
-            new[] { member });
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = error },
+            all: error,
+            member);
 
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
@@ -312,43 +340,139 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     }
 
     /// <summary>
-    /// <see cref="RemoveMembersFromConsumerGroupResult.All"/> in non-removeAll mode reports the
-    /// first member-level failure it encounters, iterating <c>_memberInfos</c> in order.
+    /// ⚠ <see cref="RemoveMembersFromConsumerGroupResult.All"/> rethrows the <b>stored</b>
+    /// outcome — the same instance, unchanged. Which failing member is "first"
+    /// (<c>RemoveMembersFromConsumerGroupResult.java:47</c>, <c>:66-70</c>) is the core's choice
+    /// now (group-instance-id order); the binding only carries it, so the request order below
+    /// is deliberately the reverse of it.
     /// </summary>
     [Fact]
-    public async Task All_NonRemoveAllMode_ThrowsFirstMemberFailure()
+    public async Task All_NonRemoveAllMode_RethrowsTheStoredOutcomeUnchanged()
     {
-        MemberToRemove good = new MemberToRemove("instance-good");
-        MemberToRemove bad = new MemberToRemove("instance-bad");
-        KafkaException error = new KafkaException(11, "member failure", isRetriable: false);
+        MemberToRemove good = new MemberToRemove("instance-a");
+        MemberToRemove bad = new MemberToRemove("instance-b");
+        MemberToRemove worse = new MemberToRemove("instance-c");
 
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)
-                {
-                    ["instance-good"] = null,
-                    ["instance-bad"] = error,
-                }),
-            new[] { good, bad });
+        KafkaException first = new KafkaException(25, "first failure", isRetriable: false);
+
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal)
+            {
+                ["instance-a"] = null,
+                ["instance-b"] = first,
+                ["instance-c"] = new KafkaException(11, "second failure", isRetriable: false),
+            },
+            first,
+            worse,
+            bad,
+            good);
 
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
-        Assert.Same(error, thrown);
+        Assert.Same(first, thrown);
     }
 
     /// <summary>
-    /// removeAll mode's <c>All()</c> iterates the resolved map (guaranteed empty by the core) —
-    /// a clean resolve with an empty map completes successfully.
+    /// ⚠ The control for <see cref="All_NonRemoveAllMode_RethrowsTheStoredOutcomeUnchanged"/>: a
+    /// <b>null</b> stored outcome completes <see cref="RemoveMembersFromConsumerGroupResult.All"/>
+    /// even though the map carries a failure — so nothing is derived from the map.
     /// </summary>
     [Fact]
-    public async Task All_RemoveAllMode_CompletesOnEmptyResolvedMap()
+    public async Task All_NonRemoveAllMode_CompletesOnANullStoredOutcome_WhateverTheMapHolds()
     {
-        RemoveMembersFromConsumerGroupResult result = new RemoveMembersFromConsumerGroupResult(
-            Task.FromResult<IReadOnlyDictionary<string, KafkaException?>>(
-                new Dictionary<string, KafkaException?>(StringComparer.Ordinal)),
-            Array.Empty<MemberToRemove>());
+        MemberToRemove bad = new MemberToRemove("instance-bad");
+        KafkaException perMember = new KafkaException(25, "member failure", isRetriable: false);
+
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-bad"] = perMember },
+            all: null,
+            bad);
+
+        await TestTimeout.Run(result.All, s_deadline);
+
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(bad)), s_deadline);
+        Assert.Same(perMember, thrown);
+    }
+
+    /// <summary>
+    /// removeAll mode: the map is empty (the header's <c>count</c> is 0 in that mode) and a
+    /// null stored outcome completes <see cref="RemoveMembersFromConsumerGroupResult.All"/>.
+    /// </summary>
+    [Fact]
+    public async Task All_RemoveAllMode_CompletesOnANullStoredOutcome()
+    {
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null);
 
         Assert.True(result.RemoveAll);
         await TestTimeout.Run(result.All, s_deadline);
     }
+
+    /// <summary>
+    /// ⚠⚠ removeAll mode: the stored outcome is the <b>only</b> carrier of a member failure
+    /// (the map is empty), and <see cref="RemoveMembersFromConsumerGroupResult.All"/> rethrows
+    /// it unchanged — the shape the core builds, with code -1 (<c>UNKNOWN_SERVER_ERROR</c>),
+    /// not retriable, no cause, and the header's
+    /// (<c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>) message for a dynamic
+    /// member with no reason. Nothing here rewrites the code or message the way the old
+    /// binding-side "Encounter exception" loop did.
+    /// </summary>
+    [Fact]
+    public async Task All_RemoveAllMode_RethrowsTheStoredOutcomeUnchanged()
+    {
+        KafkaException stored = new KafkaException(
+            -1,
+            "Encounter error when trying to remove: "
+                + "MemberIdentity(memberId='member-1', groupInstanceId=null, reason=null)",
+            isRetriable: false);
+
+        RemoveMembersFromConsumerGroupResult result = Resolved(
+            new Dictionary<string, KafkaException?>(StringComparer.Ordinal), stored);
+
+        Assert.True(result.RemoveAll);
+
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        Assert.Same(stored, thrown);
+        Assert.Equal(-1, thrown.Code);
+        Assert.False(thrown.IsRetriable);
+        Assert.Null(thrown.InnerException);
+        Assert.Equal(
+            "Encounter error when trying to remove: "
+                + "MemberIdentity(memberId='member-1', groupInstanceId=null, reason=null)",
+            thrown.Message);
+    }
+
+    /// <summary>A call-level failure of the single awaitable propagates from both accessors.</summary>
+    [Fact]
+    public async Task AFaultedFuture_PropagatesFromBothAccessors()
+    {
+        MemberToRemove member = new MemberToRemove("instance-1");
+        KafkaException callLevel = new KafkaException(35, "call failed", isRetriable: false);
+        TaskCompletionSource<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> source =
+            new TaskCompletionSource<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>();
+        source.SetException(callLevel);
+
+        RemoveMembersFromConsumerGroupResult result =
+            new RemoveMembersFromConsumerGroupResult(source.Task, new[] { member });
+
+        KafkaException fromMemberResult = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
+        Assert.Same(callLevel, fromMemberResult);
+
+        KafkaException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        Assert.Same(callLevel, fromAll);
+    }
+
+    /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>
+    private static RemoveMembersFromConsumerGroupResult Resolved(
+        IReadOnlyDictionary<string, KafkaException?> perKey,
+        KafkaException? all,
+        params MemberToRemove[] requested) =>
+        new RemoveMembersFromConsumerGroupResult(
+            Task.FromResult<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
+                (perKey, all)),
+            requested);
 }

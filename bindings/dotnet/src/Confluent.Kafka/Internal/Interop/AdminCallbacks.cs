@@ -456,22 +456,22 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c> — result
-    /// shape <b>4c</b>, with a <b>mode-dependent</b> key.
+    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c>: Java's
+    /// <b>single</b> <c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;</c>, so it fires
+    /// <b>exactly once</b> per submission — in <c>removeAll</c> mode too.
     /// </summary>
     /// <remarks>
-    /// ⚠⚠ <b>Same arity as the aggregate callback it replaced — only the first parameter's
-    /// meaning changed</b> (result root → key), so the compiler cannot catch a stale wiring.
-    /// Non-removeAll: one call per distinct <c>group.instance.id</c>, whose
-    /// <paramref name="error"/> is that member's map <b>VALUE</b>. removeAll: exactly one
-    /// call with a <b>NULL</b> <paramref name="groupInstanceId"/> carrying the whole
-    /// operation's outcome — a null error resolves the aggregate task with an <b>empty</b>
-    /// map, a non-null one <b>faults</b> it (§3.0.3; no sentinel key is ever mapped).
-    /// <paramref name="error"/> is <b>owned</b> on both paths.
+    /// ⚠⚠ Exactly one of <paramref name="result"/> / <paramref name="error"/> is non-null and
+    /// the callback <b>owns</b> it. A per-member failure arrives <b>inside</b>
+    /// <paramref name="result"/> (read through
+    /// <see cref="RemoveMembersFromConsumerGroupOptionalError"/>, a <em>value</em>, not a
+    /// fault); a non-null <paramref name="error"/> means the whole request failed or could
+    /// not be submitted at all. In <c>removeAll</c> mode the result's member list is empty and
+    /// its <c>all()</c> is the only carrier of a member failure.
     /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RemoveMembersFromConsumerGroupCallback(
-        IntPtr groupInstanceId, IntPtr error, IntPtr userData);
+        IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_create_acls_callback_t</c>:
@@ -602,14 +602,15 @@ internal static class AdminCallbacks
             KeyedResultMarshal.ReadStringKey(getTopic(result, index)), getPartition(result, index));
 
     /// <summary>
-    /// Builds a consumer-group-offsets <b>outcome</b> reader: the per-partition map walked off
+    /// Builds a single-future group RPC's <b>outcome</b> reader: the per-key map walked off
     /// the result root, paired with the core's own <c>all()</c> outcome read once off the same
-    /// root — the value <see cref="Admin.AlterConsumerGroupOffsetsResult"/> and
-    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult"/> are resolved with.
+    /// root — the value <see cref="Admin.AlterConsumerGroupOffsetsResult"/>,
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult"/> and
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult"/> are resolved with.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠⚠ <b>Two ownership regimes on one root.</b> Each per-partition error is
+    /// ⚠⚠ <b>Two ownership regimes on one root.</b> Each per-key error is
     /// <b>BORROWED</b> — <paramref name="readError"/> is a <see cref="BorrowedOptionalError"/>
     /// reader, never destroyed. The <c>all()</c> error is <b>OWNED</b> — it goes through
     /// <see cref="KafkaException.FromHandle"/>, which frees it before this returns. So nothing
@@ -619,29 +620,33 @@ internal static class AdminCallbacks
     /// <para>
     /// The walk runs <b>before</b> <paramref name="all"/>: a throw mid-walk then never calls
     /// it, so there is no owned error to leak. The per-key map is keyed by the core's rows,
-    /// which cover every requested partition (the header documents <c>count</c> as "the
-    /// number of partitions in the request").
+    /// which cover every requested key (the header documents <c>count</c> as the number of
+    /// partitions, or members, in the request).
     /// </para>
     /// <para>
     /// Called once per RPC at static initialization, like the readers it composes, so its
     /// closure is not on any completion.
     /// </para>
     /// </remarks>
+    /// <typeparam name="TKey">The map's key type.</typeparam>
     /// <param name="count">That RPC's <c>*Result_count</c>.</param>
-    /// <param name="readKey">That RPC's composite key reader.</param>
-    /// <param name="readError">That RPC's borrowed per-partition error reader.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="readError">That RPC's borrowed per-key error reader.</param>
     /// <param name="all">That RPC's <c>*Result_all</c>, returning an <b>owned</b> error.</param>
+    /// <param name="keyComparer">The key equality the map is built with.</param>
     /// <returns>The outcome reader.</returns>
-    internal static Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
-        PartitionOutcomes(
+    internal static Func<IntPtr, (IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)>
+        KeyedOutcomes<TKey>(
             KeyedResultMarshal.CountAccessor count,
-            Func<IntPtr, int, TopicPartition> readKey,
+            Func<IntPtr, int, TKey> readKey,
             Func<IntPtr, int, KafkaException?> readError,
-            Func<IntPtr, IntPtr> all) =>
+            Func<IntPtr, IntPtr> all,
+            IEqualityComparer<TKey> keyComparer)
+        where TKey : notnull =>
         result =>
         {
-            IReadOnlyDictionary<TopicPartition, KafkaException?> perKey = KeyedResultMarshal.ReadAggregate(
-                result, count, readKey, readError, EqualityComparer<TopicPartition>.Default);
+            IReadOnlyDictionary<TKey, KafkaException?> perKey = KeyedResultMarshal.ReadAggregate(
+                result, count, readKey, readError, keyComparer);
 
             // ⚠ OWNED — FromHandle frees it exactly once.
             return (perKey, KafkaException.FromHandle(all(result)));
@@ -970,8 +975,8 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The rooted instance passed to every
-    /// <c>remove_members_from_consumer_group_async</c> submission (result shape 4c, with
-    /// the mode-dependent key of <see cref="RemoveMembersFromConsumerGroupCallback"/>).
+    /// <c>remove_members_from_consumer_group_async</c> submission (the same one-shot shape as
+    /// <see cref="AlterConsumerGroupOffsets"/>).
     /// </summary>
     internal static readonly RemoveMembersFromConsumerGroupCallback RemoveMembersFromConsumerGroup =
         OnRemoveMembersFromConsumerGroup;
@@ -1217,7 +1222,7 @@ internal static class AdminCallbacks
     /// what frees it exactly once. Whatever <paramref name="readRoot"/> reads off the root is
     /// its own business to classify: a <b>borrowed</b> pointer must be copied out before it
     /// returns, and an <b>owned</b> one freed by it (the group-offsets outcome readers do both
-    /// — see <see cref="PartitionOutcomes"/>). Nothing it returns may point into the root.
+    /// — see <see cref="KeyedOutcomes{TKey}"/>). Nothing it returns may point into the root.
     /// </para>
     /// <para>
     /// The <c>finally</c> discharges the usual three obligations, with the destroy strictly
@@ -1735,9 +1740,13 @@ internal static class AdminCallbacks
     /// future resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>
     /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) — one future over the whole
     /// map, so a per-member error is an ordinary map value, not a per-member fault. Only
-    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.MemberResult"/> and
-    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.All"/> turn a non-null entry
-    /// into a fault, mirroring Java's <c>maybeCompleteExceptionally</c> / <c>all()</c>.
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.MemberResult"/> turns a non-null
+    /// entry into a fault, mirroring Java's <c>memberResult</c>;
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.All"/> does not consult the map at
+    /// all: it carries the core's own <c>all()</c> outcome, read beside the map by
+    /// <see cref="RemoveMembersFromConsumerGroupOutcome"/>. ⚠ The pointer is <b>BORROWED</b>
+    /// from the result root, so it goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> and is never destroyed.
     /// </summary>
     internal static readonly Func<IntPtr, int, KafkaException?> RemoveMembersFromConsumerGroupOptionalError =
         BorrowedOptionalError(NativeMethods.RemoveMembersFromConsumerGroupResultGetError);
@@ -1874,14 +1883,15 @@ internal static class AdminCallbacks
     /// The <c>all()</c> fault is the <b>core's</b>, not rebuilt here — including Java's
     /// aggregate <c>Failed altering group offsets for the following partitions: [...]</c>
     /// message — so <see cref="Admin.AlterConsumerGroupOffsetsResult.All"/> rethrows it
-    /// unchanged. See <see cref="PartitionOutcomes"/> for the ownership of the two reads.
+    /// unchanged. See <see cref="KeyedOutcomes{TKey}"/> for the ownership of the two reads.
     /// </remarks>
     internal static readonly Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
-        AlterConsumerGroupOffsetsOutcome = PartitionOutcomes(
+        AlterConsumerGroupOffsetsOutcome = KeyedOutcomes(
             NativeMethods.AlterConsumerGroupOffsetsResultCount,
             AlterConsumerGroupOffsetsKey,
             AlterConsumerGroupOffsetsOptionalError,
-            NativeMethods.AlterConsumerGroupOffsetsResultAll);
+            NativeMethods.AlterConsumerGroupOffsetsResultAll,
+            EqualityComparer<TopicPartition>.Default);
 
     /// <summary>
     /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' <b>outcome</b> reader: the per-partition map
@@ -1893,14 +1903,52 @@ internal static class AdminCallbacks
     /// The <c>all()</c> fault is the <b>core's</b> choice of the first failing requested
     /// partition, not re-derived here, so
     /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.All"/> rethrows it unchanged. See
-    /// <see cref="PartitionOutcomes"/> for the ownership of the two reads.
+    /// <see cref="KeyedOutcomes{TKey}"/> for the ownership of the two reads.
     /// </remarks>
     internal static readonly Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
-        DeleteConsumerGroupOffsetsOutcome = PartitionOutcomes(
+        DeleteConsumerGroupOffsetsOutcome = KeyedOutcomes(
             NativeMethods.DeleteConsumerGroupOffsetsResultCount,
             DeleteConsumerGroupOffsetsKey,
             DeleteConsumerGroupOffsetsOptionalError,
-            NativeMethods.DeleteConsumerGroupOffsetsResultAll);
+            NativeMethods.DeleteConsumerGroupOffsetsResultAll,
+            EqualityComparer<TopicPartition>.Default);
+
+    /// <summary>
+    /// <c>removeMembersFromConsumerGroup</c>' per-member key reader:
+    /// <c>get_group_instance_id(i)</c>, borrowed and NUL-terminated. Built by the shared
+    /// <see cref="KeyedResultMarshal.StringKeyReader"/> factory so the wiring guard can see
+    /// which accessor it closes over.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> RemoveMembersFromConsumerGroupKey =
+        KeyedResultMarshal.StringKeyReader(NativeMethods.RemoveMembersFromConsumerGroupResultGetGroupInstanceId);
+
+    /// <summary>
+    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' <b>outcome</b> reader: the per-member map
+    /// (<see cref="RemoveMembersFromConsumerGroupKey"/> →
+    /// <see cref="RemoveMembersFromConsumerGroupOptionalError"/>) plus the core's
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The <c>all()</c> fault is the <b>core's</b> — its choice of the first failing requested
+    /// member, in group-instance-id order — not re-derived here, so
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.All"/> rethrows it unchanged.
+    /// </para>
+    /// <para>
+    /// ⚠ In <c>removeAll</c> mode <c>count</c> is 0, so the map is empty and <c>all()</c> is
+    /// the <b>only</b> carrier of a member failure: a bare Kafka error with code -1 and
+    /// Java's "Encounter error when trying to remove: MemberIdentity(...)" message, whose
+    /// cause the C API cannot read. See <see cref="KeyedOutcomes{TKey}"/> for the ownership of
+    /// the two reads.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, (IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>
+        RemoveMembersFromConsumerGroupOutcome = KeyedOutcomes(
+            NativeMethods.RemoveMembersFromConsumerGroupResultCount,
+            RemoveMembersFromConsumerGroupKey,
+            RemoveMembersFromConsumerGroupOptionalError,
+            NativeMethods.RemoveMembersFromConsumerGroupResultAll,
+            StringComparer.Ordinal);
 
     /// <summary>
     /// <c>alterPartitionReassignments</c>' universal accessors — result <b>shape 2</b>:
@@ -2265,6 +2313,10 @@ internal static class AdminCallbacks
     /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
     private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupOffsetsResult =
         NativeMethods.DeleteConsumerGroupOffsetsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    private static readonly Action<IntPtr> s_destroyRemoveMembersFromConsumerGroupResult =
+        NativeMethods.RemoveMembersFromConsumerGroupResultDestroy;
 
     /// <summary>
     /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
@@ -2695,13 +2747,13 @@ internal static class AdminCallbacks
     /// <summary>
     /// <b>Shape 4c, whole-operation form</b> — one callback carrying the whole operation's
     /// outcome instead of a key's, which is what <c>removeMembersFromConsumerGroup</c>'s
-    /// removeAll mode delivers through a NULL key (§3.0.3).
+    /// removeAll mode delivered through a NULL key (§3.0.3) before M15/P13.1 moved that RPC
+    /// to the single-callback ABI; no trampoline delegates here since.
     /// </summary>
     /// <remarks>
     /// ⚠ A null <paramref name="error"/> adds <b>nothing</b>, so countdown zero resolves the
-    /// aggregate task with an <b>empty</b> map — exactly what
-    /// <c>RemoveMembersFromConsumerGroupResult.All</c> already expects in that mode. A
-    /// non-null one faults the task; it is never mapped to a sentinel key.
+    /// aggregate task with an <b>empty</b> map. A non-null one faults the task; it is never
+    /// mapped to a sentinel key.
     /// </remarks>
     private static void CompleteFanInWholeOperation<TKey>(IntPtr error, IntPtr userData)
         where TKey : notnull
@@ -3010,26 +3062,23 @@ internal static class AdminCallbacks
         CompletePerKeyVoid(key, error, userData, s_stringKey);
 
     /// <summary>
-    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' shape-4c trampoline, with the
-    /// <b>mode-dependent</b> key of
-    /// <see cref="RemoveMembersFromConsumerGroupCallback"/>: a member's
-    /// <c>group.instance.id</c>, or <b>NULL</b> for removeAll's single whole-operation
-    /// callback (§3.0.3). Java's
-    /// <c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;</c>
-    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) makes a per-member error an
-    /// ordinary map value.
+    /// <c>removeMembersFromConsumerGroup</c>' trampoline — the same one-shot shell as
+    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same kind of Java return type
+    /// (<c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;</c>,
+    /// <c>RemoveMembersFromConsumerGroupResult.java:35</c>), over this RPC's own
+    /// <see cref="RemoveMembersFromConsumerGroupOutcome"/>.
     /// </summary>
-    private static void OnRemoveMembersFromConsumerGroup(
-        IntPtr groupInstanceId, IntPtr error, IntPtr userData)
-    {
-        if (groupInstanceId == IntPtr.Zero)
-        {
-            CompleteFanInWholeOperation<string>(error, userData);
-            return;
-        }
-
-        CompletePerKeyFanIn(groupInstanceId, error, userData, s_stringKey);
-    }
+    /// <remarks>
+    /// It fires once in both modes. In <c>removeAll</c> mode the walked map is empty and the
+    /// core's <c>all()</c> is the whole outcome.
+    /// </remarks>
+    private static void OnRemoveMembersFromConsumerGroup(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            RemoveMembersFromConsumerGroupOutcome,
+            s_destroyRemoveMembersFromConsumerGroupResult);
 
     /// <summary>
     /// <c>createAcls</c>' shape-4b trampoline, whose <b>key</b> is owned.

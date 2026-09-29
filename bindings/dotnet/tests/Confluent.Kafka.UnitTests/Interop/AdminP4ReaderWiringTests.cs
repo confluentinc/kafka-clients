@@ -281,6 +281,10 @@ public sealed class AdminP4ReaderWiringTests
         nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
         nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
         nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))]
+    [InlineData(
+        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
+        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
+        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))]
     public void EachGroupOffsetsOutcome_ComposesItsOwnKeyAndErrorReaders(
         string outcomeName, string keyName, string errorName)
     {
@@ -317,6 +321,39 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[] { "kafka_admin_RemoveMembersFromConsumerGroupResult_get_error" },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))));
+
+    /// <summary>
+    /// <c>removeMembersFromConsumerGroup</c>' <b>key</b> reader (M15/P13.1 CP2) captures
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id</c> — its
+    /// own, not a byte-identical string-key twin's (the group RPCs' <c>get_group_id</c>
+    /// accessors share its <c>(const Result_t*, int32_t) → const char*</c> layout).
+    /// </summary>
+    [Fact]
+    public void RemoveMembersFromConsumerGroupKey_CapturesItsOwnGroupInstanceIdAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey))));
+
+    /// <summary>
+    /// ⚠ <c>removeMembersFromConsumerGroup</c>' <b>outcome</b> reader (M15/P13.1 CP2) captures
+    /// its own <c>count</c> and its own <c>all</c> — the accessor that carries Java's
+    /// <c>all()</c>, including the removeAll-mode partial failure no in-process root can
+    /// reach, so for that mode the symbol is pinned here rather than on native memory.
+    /// </summary>
+    /// <remarks>
+    /// The group-offsets twins' <c>_all</c> / <c>_count</c> are layout-identical
+    /// (<c>const Result_t*</c> → owned <c>Error_t*</c> / <c>int32_t</c>), so a cross-wire
+    /// compiles and hands this RPC's root to another RPC's accessor.
+    /// </remarks>
+    [Fact]
+    public void RemoveMembersFromConsumerGroupOutcome_CapturesItsOwnCountAndAllAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_RemoveMembersFromConsumerGroupResult_all",
+                "kafka_admin_RemoveMembersFromConsumerGroupResult_count",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome))));
 
     /// <summary>
     /// <c>deleteAcls</c>' <b>per-key</b> value reader captures the three accessors of the
@@ -445,8 +482,10 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
+            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
             nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
+            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
             nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
             nameof(AdminCallbacks.DescribeAclsValue),
             nameof(AdminCallbacks.DescribeClientQuotasKey),
@@ -522,7 +561,9 @@ public sealed class AdminP4ReaderWiringTests
                 nameof(AdminCallbacks.FenceProducersValue),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
                 nameof(AdminCallbacks.ListTransactionsOptionalError),
+                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
+                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
             },
             discovered);
     }

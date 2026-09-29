@@ -427,9 +427,9 @@ internal static class KeyedResultMarshal
     /// <remarks>
     /// Split out so a completion that resolves with <em>more</em> than the map reuses the walk
     /// rather than copying it: <c>alterConsumerGroupOffsets</c> /
-    /// <c>deleteConsumerGroupOffsets</c> pair it with the core's own <c>all()</c> outcome
-    /// (<c>AdminCallbacks.PartitionOutcomes</c>). A throw from either reader propagates, as
-    /// it does from <see cref="CompleteAggregate{TKey, TValue}"/>.
+    /// <c>deleteConsumerGroupOffsets</c> / <c>removeMembersFromConsumerGroup</c> pair it with
+    /// the core's own <c>all()</c> outcome (<c>AdminCallbacks.KeyedOutcomes</c>). A throw from
+    /// either reader propagates, as it does from <see cref="CompleteAggregate{TKey, TValue}"/>.
     /// </remarks>
     /// <param name="result">The result root, borrowed for the walk.</param>
     /// <param name="count">That RPC's <c>*Result_count</c>.</param>

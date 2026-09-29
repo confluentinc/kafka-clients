@@ -567,10 +567,9 @@ internal sealed class NativeAdminClient : IDisposable
     /// is <see langword="null"/> and <paramref name="memberCount"/> is 0 — Java's
     /// <c>RemoveMembersFromConsumerGroupOptions()</c> no-arg constructor
     /// (<c>removeAll = members.isEmpty()</c>). The ABI's result carries zero rows in that mode
-    /// (there is no per-member outcome model at the wire level for "remove everyone"), so
-    /// success/failure travels entirely through the callback's own <c>error</c> parameter — see
-    /// <see cref="RemoveMembersFromConsumerGroupResult"/>'s remarks for the resulting
-    /// <c>All()</c> deviation.
+    /// (Java exposes no per-member outcome for "remove everyone"), so its outcome is the
+    /// result's own <c>all()</c> — see <see cref="RemoveMembersFromConsumerGroupResult"/>'s
+    /// remarks for what that means for <c>All()</c>'s error code.
     /// </remarks>
     internal delegate void NativeRemoveMembersFromConsumerGroupSubmit(
         IntPtr admin,
@@ -3308,25 +3307,26 @@ internal sealed class NativeAdminClient : IDisposable
     /// <summary>
     /// Submits <c>removeMembersFromConsumerGroup</c> and returns immediately with the
     /// <b>single</b> awaitable Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
-    /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 4c) —
+    /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 3) —
     /// plus the original request's member collection, the second stored field Java carries
     /// (<c>memberInfos</c>, <c>:36</c>), the same two-field pattern as
     /// <see cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions?, NativeDeleteConsumerGroupOffsetsSubmit)"/>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES</b> — Java's future
-    /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c> while the ABI fires one callback per
-    /// member, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result shape 4c.
+    /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES.</b> Java's future
+    /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>, and the ABI fires <b>one</b>
+    /// callback for it in both modes — the same <see cref="SingleAdminOperation{TValue}"/>
+    /// shape, with the same no-countdown / no-submit-token rule, as
+    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </para>
     /// <para>
-    /// ⚠⚠ <b>removeAll mode passes no member array at all, and its callback count is 1.</b>
-    /// When <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> is
+    /// ⚠ <b>removeAll mode passes no member array at all.</b> When
+    /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> is
     /// <see langword="true"/>, Java has no per-member request to send, so
     /// <paramref name="submit"/> gets a <see langword="null"/> group-instance-id array and a
-    /// count of 0 — and the ABI answers with <b>one</b> NULL-keyed whole-operation callback
-    /// instead of one per member. This is the only RPC in the phase whose <c>n</c> is
-    /// mode-dependent.
+    /// count of 0; the result then has no member rows, and its <c>all()</c> is the whole
+    /// outcome.
     /// </para>
     /// </remarks>
     internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
@@ -3362,13 +3362,11 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        // Shape 4c, MODE-DEPENDENT n: one NULL-keyed whole-operation callback in removeAll
-        // mode, else one per distinct group.instance.id — and `options.Members` is a set of
-        // non-null ids, so `keys` carries no duplicate and no NULL the core would skip.
-        int pendingCallbacks = removeAll ? 1 : keys!.Count;
-        FanInAdminOperation<string, KafkaException?> operation =
-            new FanInAdminOperation<string, KafkaException?>(
-                keys?.Count ?? 0, StringComparer.Ordinal);
+        // `options.Members` is a set of non-null ids, so `keys` carries no duplicate and no
+        // NULL the core would skip.
+        SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> operation =
+            new SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
+                "removeMembersFromConsumerGroup");
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3403,8 +3401,6 @@ internal sealed class NativeAdminClient : IDisposable
                 memberCount = keys.Count;
             }
 
-            operation.SetPendingCallbacks(pendingCallbacks);
-
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -3415,8 +3411,6 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.RemoveMembersFromConsumerGroup,
                 GCHandle.ToIntPtr(gcHandle));
-
-            operation.ReleaseSubmitToken();
         }
         catch
         {
