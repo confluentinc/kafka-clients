@@ -207,7 +207,21 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             );
         }
 
-        // finally: time out any remaining calls, then close the client.
+        // finally: `closing = true` (`KafkaAdminClient.java:1474`), which makes
+        // `enqueue` reject every later call with "The AdminClient thread has
+        // exited." (`:1576-1586`). Closing the receiver is that flag: from here
+        // on a send fails, so `runnable_call` fails the call at once. That
+        // covers a call submitted while `client.close()` below is awaited, and a
+        // follow-up that a failure hook run by `fail_all_remaining` issues when
+        // the loop ended without `close()` having set the closing gate (a panic).
+        // Without it such a call is queued after the final drain, the runnable
+        // is dropped with it still in the channel, and its future never
+        // resolves. Calls already buffered can still be drained, so
+        // `fail_all_remaining` fails them as Java's
+        // `handleTimeouts(newCalls, ..)` does.
+        self.admin_rx.close();
+
+        // Time out any remaining calls, then close the client.
         let now = self.time.milliseconds();
         self.fail_all_remaining(now);
         self.client.close().await;
