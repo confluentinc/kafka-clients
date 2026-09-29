@@ -1403,7 +1403,8 @@ struct NewTopicBuilder {
     num_partitions: Option<i32>,
     replication_factor: Option<i16>,
     replicas_assignments: BTreeMap<i32, Vec<i32>>,
-    configs: BTreeMap<String, String>,
+    /// `None` is Java's null config value.
+    configs: BTreeMap<String, Option<String>>,
 }
 
 impl NewTopicBuilder {
@@ -1499,11 +1500,18 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 }
 
 /// Sets a topic-level configuration entry (Java's `NewTopic.configs(Map)`,
-/// applied one key at a time). No-op if any parameter is null.
+/// applied one key at a time; a repeated key replaces the earlier value, as
+/// `Map.put` does). No-op if `topic` or `key` is null.
+///
+/// A NULL `value` is Java's null map value: the entry is kept and sent to the
+/// broker with a null value (`NewTopic.convertToCreatableTopic` copies it into
+/// `CreatableTopicConfig.value`, which is nullable), which is distinct from the
+/// empty string `""`.
 ///
 /// # Safety
 ///
-/// `topic` must be a valid handle; `key` and `value` valid C strings.
+/// `topic` must be a valid handle; `key` a valid C string; `value` NULL or a
+/// valid C string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
@@ -1511,23 +1519,24 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     key: *const c_char,
     value: *const c_char,
 ) {
-    if topic.is_null() || key.is_null() || value.is_null() {
+    if topic.is_null() || key.is_null() {
         return;
     }
-    // SAFETY: `key` is non-null (checked above together with `topic` and `value`) and, per
-    // this function's `# Safety`, a valid C string; it is borrowed only for the
-    // `to_string_lossy` copy made in this call.
-    let builder = unsafe { new_topic_mut(topic) };
-    // SAFETY: `value` is non-null (checked above together with `topic` and `key`) and, per
-    // this function's `# Safety`, a valid C string; it is borrowed only for the
-    // `to_string_lossy` copy made in this call.
-    let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
     // SAFETY: `new_topic_mut` requires a valid handle from `kafka_admin_NewTopic_new`;
     // `topic` is non-null (checked above) and, per this function's `# Safety`, a valid
     // handle. The `&mut NewTopicBuilder` is used only for this one config insertion within
     // the call; its exclusivity rests on the C caller not using the same builder from
     // another thread meanwhile (builder handles carry no thread-safety claim).
-    let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
+    let builder = unsafe { new_topic_mut(topic) };
+    // SAFETY: `key` is non-null (checked above together with `topic`) and, per this
+    // function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
+    let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    // SAFETY: the closure runs only when `value` is non-null (the `then` guard), and per
+    // this function's `# Safety` a non-null `value` is a valid C string; it is borrowed only
+    // for the `to_string_lossy` copy made in this call. A NULL `value` is Java's null map
+    // value and is kept as `None`.
+    let v = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string());
     builder.configs.insert(k, v);
 }
 
@@ -30451,6 +30460,24 @@ mod tests {
             }
             kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
             kafka_admin_DescribeClassicGroupsResult_destroy(classic_result);
+        }
+    }
+
+    /// A NULL `value` is Java's null config value: kept, and distinct from "".
+    #[test]
+    fn new_topic_put_config_keeps_a_null_value() {
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"t".as_ptr(), 1, 1);
+            kafka_admin_NewTopic_put_config(topic, c"retention.ms".as_ptr(), std::ptr::null());
+            kafka_admin_NewTopic_put_config(topic, c"cleanup.policy".as_ptr(), c"".as_ptr());
+            let built = new_topic_ref(topic).build();
+            let configs = built.configs().expect("configs were set");
+            assert_eq!(configs.get("retention.ms"), Some(&None));
+            assert_eq!(configs.get("cleanup.policy"), Some(&Some(String::new())));
+            let creatable = built.convert_to_creatable_topic();
+            let retention = creatable.configs.iter().find(|c| c.name == "retention.ms").unwrap();
+            assert_eq!(retention.value, None);
+            kafka_admin_NewTopic_destroy(topic);
         }
     }
 

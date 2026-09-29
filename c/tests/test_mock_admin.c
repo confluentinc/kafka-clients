@@ -1656,6 +1656,44 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
 }
 
 /* A NULL resource name skips that row rather than drifting the two arrays. */
+/* A NULL config value is Java's null map value in NewTopic.configs(Map): it
+ * is kept (not dropped) and stays distinct from "". The mock echoes it on the
+ * created topic's config and in describeConfigs, as Java's mock does
+ * (`new ConfigEntry(name, null)`). */
+static void test_mock_admin_new_topic_null_config_value(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    kafka_admin_NewTopic_t *t = kafka_admin_NewTopic_new("null-cfg-topic", 1, 1);
+    kafka_admin_NewTopic_put_config(t, "retention.ms", NULL);
+    kafka_admin_NewTopic_put_config(t, "cleanup.policy", "");
+    const kafka_admin_NewTopic_t *topics[1] = {t};
+    kafka_admin_CreateTopicsResult_t *created = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_topics(admin, topics, 1, -1, false, false,
+                                                           &created));
+    const kafka_admin_Config_t *config =
+        kafka_admin_TopicMetadataAndConfig_config(kafka_admin_CreateTopicsResult_get_value(created, 0));
+    TEST_ASSERT_NOT_NULL(config);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_Config_entry_count(config));
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(kafka_admin_Config_find_entry(config, "retention.ms")));
+    TEST_ASSERT_EQUAL_STRING("",
+        kafka_admin_ConfigEntry_value(kafka_admin_Config_find_entry(config, "cleanup.policy")));
+    kafka_admin_CreateTopicsResult_destroy(created);
+
+    const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"null-cfg-topic"};
+    kafka_admin_DescribeConfigsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_configs(admin, types, names, 1, -1, false,
+                                                              false, &described));
+    const kafka_admin_Config_t *topic_config = kafka_admin_DescribeConfigsResult_get_value(described, 0);
+    TEST_ASSERT_NOT_NULL(topic_config);
+    const kafka_admin_ConfigEntry_t *retention = kafka_admin_Config_find_entry(topic_config, "retention.ms");
+    TEST_ASSERT_NOT_NULL(retention);
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(retention));
+    kafka_admin_DescribeConfigsResult_destroy(described);
+
+    kafka_admin_NewTopic_destroy(t);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_describe_configs_null_row_skipped(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const int32_t types[2] = {RESOURCE_TYPE_BROKER, RESOURCE_TYPE_BROKER};
@@ -7289,6 +7327,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_cluster_async_null_handle);
     RUN_TEST(test_mock_admin_describe_configs_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_null_row_skipped);
+    RUN_TEST(test_mock_admin_new_topic_null_config_value);
     RUN_TEST(test_mock_admin_describe_configs_async_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_async_null_handle);
     RUN_TEST(test_mock_admin_incremental_alter_configs_set_then_delete);
