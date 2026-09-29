@@ -24,7 +24,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test test-all-features test-integration \
 	test-integration-grpc-python test-integration-grpc-c \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check lint doc-check install-rust-analyzer clean
+	format-check lint doc-check package-check install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -152,6 +152,11 @@ lint:
 # runs `cargo doc`. The doctests themselves run as part of `cargo test`.
 doc-check:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+
+# Package the crate as it would be published, fail if the compressed `.crate`
+# is above 3 MiB, and build a fresh project that depends on it.
+package-check:
+	cargo xtask package-check
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the

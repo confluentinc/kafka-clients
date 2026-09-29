@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-use crate::message::{CodeBuffer, FieldSpec, FieldType, MessageSpec, StructSpec, Versions};
+use super::{CodeBuffer, FieldSpec, FieldType, MessageSpec, StructSpec, Versions};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Generates Schemas for Kafka MessageData classes

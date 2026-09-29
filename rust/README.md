@@ -25,8 +25,10 @@ src/                    # The confluent_kafka crate
 ├── admin/              # org.apache.kafka.clients.admin
 └── ffi/                # C FFI (feature `ffi`)
 generator/              # Wire-protocol code generator
+├── src/                # Generator sources, compiled into build.rs
 ├── messages/           # Kafka JSON RPC definitions
-└── test-messages/      # Test-only message specs
+├── test-messages/      # Test-only message specs
+└── crate/              # Manifest for the generator's tests and CLI
 build.rs                # Runs the generator; writes the C header
 tests/                  # Integration and multilanguage tests
 examples/

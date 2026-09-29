@@ -37,6 +37,7 @@ fn main() -> anyhow::Result<()> {
         Some("coverage-all") => coverage_all()?,
         Some("test-multilanguage") => test_multilanguage()?,
         Some("producer-perf-test") => producer_perf_test()?,
+        Some("package-check") => package_check()?,
         _ => print_help(),
     }
 
@@ -50,7 +51,7 @@ fn format() -> anyhow::Result<()> {
     run_command("cargo", &["fmt"])?;
 
     // Format generator crate
-    run_command("cargo", &["fmt", "--manifest-path", "generator/Cargo.toml"])?;
+    run_command("cargo", &["fmt", "--manifest-path", "generator/crate/Cargo.toml"])?;
 
     println!("✅ Formatting complete!");
     Ok(())
@@ -64,7 +65,7 @@ fn format_check() -> anyhow::Result<()> {
 
     // Check generator crate
     let gen_result = Command::new("cargo")
-        .args(["fmt", "--manifest-path", "generator/Cargo.toml", "--", "--check"])
+        .args(["fmt", "--manifest-path", "generator/crate/Cargo.toml", "--", "--check"])
         .status()?;
 
     if !main_result.success() || !gen_result.success() {
@@ -117,7 +118,7 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
         let entry = entry?;
         let path = entry.path();
 
-        if path.is_dir() && path.file_name().unwrap().to_str().unwrap().starts_with("confluent-kafka-rust-") {
+        if path.is_dir() && path.file_name().unwrap().to_str().unwrap().starts_with("confluent-kafka-") {
             let generated_dir = path.join("out/generated");
             if generated_dir.exists() {
                 let modified = entry.metadata()?.modified()?;
@@ -582,7 +583,7 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     let mut args = vec![
         "llvm-cov",
         "--package",
-        "confluent-kafka-rust",
+        "confluent-kafka",
         "--ignore-filename-regex",
         "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
         "--lcov",
@@ -595,6 +596,109 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
 
 fn run_grcov_html() -> anyhow::Result<()> {
     run_command("grcov", &["coverage/lcov.info", "-s", ".", "-t", "html", "-o", "coverage/html"])
+}
+
+// ---------------------------------------------------------------------------
+// Published-package check
+// ---------------------------------------------------------------------------
+//
+// `cargo package` only compiles the unpacked crate on its own. This check goes
+// one step further and uses the `.crate` the way a user does: it depends on it
+// from a fresh project outside the workspace, resolving the dependencies anew,
+// so a file missing from the `include` list in `Cargo.toml`, or a dependency
+// that only resolves through the workspace lock file, fails here and not after
+// a release. It also bounds the compressed size, so the package cannot grow
+// back unnoticed (tests, the C FFI, generated output, ...).
+
+const PACKAGE_NAME: &str = "confluent-kafka";
+/// The largest `.crate` accepted, compressed: 3 MiB (crates.io allows 10 MiB).
+const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
+const PACKAGE_CHECK_DIR: &str = "target/package-check";
+
+fn package_check() -> anyhow::Result<()> {
+    println!("📦 Packaging {PACKAGE_NAME}...");
+    // `--no-verify`: the install below builds the packaged crate anyway.
+    // `--allow-dirty`: check the working tree as it is, so the task also runs
+    // before a commit; CI works on a clean checkout.
+    run_command("cargo", &["package", "-p", PACKAGE_NAME, "--no-verify", "--allow-dirty"])?;
+
+    let version = package_version()?;
+    let crate_file = PathBuf::from(format!("target/package/{PACKAGE_NAME}-{version}.crate"));
+    let size = fs::metadata(&crate_file)?.len();
+    println!(
+        "   {}: {:.2} MiB (limit {:.2} MiB)",
+        crate_file.display(),
+        size as f64 / (1024.0 * 1024.0),
+        MAX_PACKAGE_BYTES as f64 / (1024.0 * 1024.0)
+    );
+    if size > MAX_PACKAGE_BYTES {
+        eprintln!(
+            "❌ {} is {size} bytes, above the {MAX_PACKAGE_BYTES}-byte limit. \
+             Check the `include` list in Cargo.toml for files that should not ship.",
+            crate_file.display()
+        );
+        exit(1);
+    }
+
+    println!("📥 Installing the package in a fresh project...");
+    let check_dir = PathBuf::from(PACKAGE_CHECK_DIR);
+    if check_dir.exists() {
+        fs::remove_dir_all(&check_dir)?;
+    }
+    let unpacked = check_dir.join("unpacked");
+    fs::create_dir_all(&unpacked)?;
+    run_command(
+        "tar",
+        &[
+            "-xzf",
+            &crate_file.display().to_string(),
+            "-C",
+            &unpacked.display().to_string(),
+        ],
+    )?;
+    let package_dir = fs::canonicalize(unpacked.join(format!("{PACKAGE_NAME}-{version}")))?;
+
+    let consumer = check_dir.join("consumer");
+    fs::create_dir_all(consumer.join("src"))?;
+    // The empty `[workspace]` makes the project its own workspace root, so the
+    // enclosing `rust/` workspace neither claims it nor lends it its lock file.
+    fs::write(
+        consumer.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {{ path = {:?} }}\n",
+            package_dir.display().to_string()
+        ),
+    )?;
+    fs::write(
+        consumer.join("src/main.rs"),
+        "fn main() {\n    let error: Option<confluent_kafka::common::Error> = None;\n    assert!(error.is_none());\n}\n",
+    )?;
+    let manifest = consumer.join("Cargo.toml").display().to_string();
+    let status = Command::new("cargo")
+        .args(["build", "--manifest-path", &manifest])
+        .env("CARGO_TARGET_DIR", check_dir.join("target"))
+        .status()?;
+    if !status.success() {
+        eprintln!("❌ A project depending on the packaged {PACKAGE_NAME} does not build");
+        exit(1);
+    }
+
+    println!("✅ {PACKAGE_NAME} {version} packages within the size limit and builds as a dependency");
+    Ok(())
+}
+
+/// The version of [`PACKAGE_NAME`], from `cargo pkgid`
+/// (`path+file:///…/rust#confluent-kafka@0.1.0`, or `…#0.1.0` when the
+/// directory is named after the package).
+fn package_version() -> anyhow::Result<String> {
+    let output = Command::new("cargo").args(["pkgid", "-p", PACKAGE_NAME]).output()?;
+    if !output.status.success() {
+        anyhow::bail!("cargo pkgid -p {PACKAGE_NAME} failed");
+    }
+    let pkgid = String::from_utf8(output.stdout)?;
+    let fragment = pkgid.trim().rsplit('#').next().unwrap_or_default();
+    Ok(fragment.rsplit('@').next().unwrap_or(fragment).to_string())
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -955,6 +1059,7 @@ fn print_help() {
   coverage-all    Run all test coverage including integration (requires Docker)
   test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
+  package-check   Package the crate, fail above 3 MiB, and build a fresh project depending on it
 
 Usage:
   cargo xtask format
@@ -970,6 +1075,7 @@ Usage:
   cargo xtask coverage-lcov
   cargo xtask coverage-all
   cargo xtask test-multilanguage
-  cargo xtask producer-perf-test"
+  cargo xtask producer-perf-test
+  cargo xtask package-check"
     );
 }

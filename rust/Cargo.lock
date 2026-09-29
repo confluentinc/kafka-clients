@@ -475,7 +475,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
-name = "confluent-kafka-rust"
+name = "confluent-kafka"
 version = "0.1.0"
 dependencies = [
  "ambassador",
@@ -489,7 +489,6 @@ dependencies = [
  "env_logger",
  "flate2",
  "futures-util",
- "generator",
  "indexmap 2.14.0",
  "log",
  "lz4_flex",
@@ -520,7 +519,7 @@ dependencies = [
 name = "consumer-perf"
 version = "0.1.0"
 dependencies = [
- "confluent-kafka-rust",
+ "confluent-kafka",
  "env_logger",
  "log",
  "sysinfo",
@@ -3043,7 +3042,7 @@ name = "verifiable-clients"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "confluent-kafka-rust",
+ "confluent-kafka",
  "env_logger",
  "indexmap 2.14.0",
  "serde",
