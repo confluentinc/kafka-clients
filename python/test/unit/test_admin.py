@@ -1061,10 +1061,10 @@ def test_describe_replica_log_dirs_resolves_unknown_topics_with_an_explicit_erro
     mock behavior" as an excuse: Java's own mock never promises a ``Future``
     per key in the first place - a Java caller sees the key simply absent
     from the returned `Map`, not a hanging `Future`. The fix belongs in, and
-    was made in, the per-key delivery layer itself
-    (`admin_async_per_key_op` in `src/ffi/admin.rs`): any key present in the
-    request but absent from the admin core's response now resolves with an
-    explicit synthetic error instead of never firing at all.
+    was made in the per-key delivery: the native layer fires the key's
+    callback once, reporting it absent (Java's absent map key: no value and no
+    error), and the binding resolves the key's ``Future`` with an explicit
+    ``LocalIllegalState`` error instead of leaving it pending.
 
     This is mock-only in the sense that the *scenario* (an unknown-topic
     replica) only arises this way against `MockAdminClient` - KafkaAdminClient
@@ -1093,6 +1093,12 @@ def test_describe_replica_log_dirs_resolves_unknown_topics_with_an_explicit_erro
         # regression back to that state into a fast, explicit failure.
         error = futures[unknown].exception(timeout=5.0)
         assert isinstance(error, KafkaError)
+        assert error.code == -4  # LOCAL_ILLEGAL_STATE, unchanged
+        assert str(error) == "the requested key was not present in the admin RPC's response"
+        # Every KafkaError attribute is readable, as on one built by `_from_c`.
+        assert error.is_retriable is False
+        assert error.is_fatal is False
+        assert error.txn_requires_abort is False
 
 
 def test_config_resource_and_replica_are_usable_dict_keys():

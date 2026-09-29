@@ -9326,12 +9326,19 @@ fn submit_describe_replica_log_dirs_entries(
 /// single opaque key handle.
 ///
 /// `topic` is borrowed and valid only for the duration of this call — copy it
-/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// if you need to retain it. At most one of `value` / `error` is non-null;
 /// `value` is owned by the callback and must be freed with
 /// [`kafka_admin_ReplicaLogDirInfo_destroy`] (**not**
 /// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`], which is for the
 /// synchronous / flattened result only), and `error` with
 /// `kafka_common_Error_destroy`.
+///
+/// **Both null means the replica is absent from the result** — Java's
+/// `values().get(replica) == null`. Only Java's `MockAdminClient` produces
+/// that: it skips a replica of a topic it does not know (`if (topicMetadata !=
+/// null)` guards the future's creation), whereas `KafkaAdminClient` completes
+/// a future for every requested replica. The callback still fires exactly
+/// once for such a replica, so nothing waits on it forever.
 pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t = unsafe extern "C" fn(
     *const c_char,
     i32,
@@ -9404,8 +9411,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
 /// Unlike the synchronous entry point, the callback fires **once per replica,
 /// as that replica's future resolves**, not once for the whole batch — a fast
 /// or already-resolved replica is not held up by a slow or failing one. It is
-/// called once per requested replica (skipping entries with a NULL topic), but
-/// not always on the same thread. Per key, it normally runs on the handle's
+/// called once per distinct requested replica (skipping entries with a NULL
+/// topic; a replica the result omits is delivered with both `value` and `error`
+/// null, see [`kafka_admin_AdminClient_describe_replica_log_dirs_callback_t`]),
+/// but not always on the same thread. Per key, it normally runs on the handle's
 /// dispatcher thread. It runs **synchronously on the calling thread, before
 /// this function returns, for every key**, when the RPC cannot be submitted
 /// at all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
@@ -9451,19 +9460,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     // `TopicPartitionReplica` values before the asynchronous work is submitted, so nothing
     // borrowed from C outlives this call.
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
-    // Deduplicated to DISTINCT replicas (first-occurrence order): Java's
-    // `describeReplicaLogDirs` result map is keyed by `TopicPartitionReplica`
-    // (`Map<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>`), so a
-    // repeated replica collapses to ONE outcome future — the shape
-    // `submit_describe_replica_log_dirs_entries` returns (via `values()`, a
-    // `HashMap`). A raw `keys` with duplicates would make the second occurrence
-    // find no unclaimed entry and fire `admin_async_per_key_op`'s synthetic
-    // "not present" error, racing ahead of and winning the caller's real
-    // per-replica outcome. This dedup does NOT affect the *genuinely-omitted*
-    // key case (a replica of an unknown topic, which the mock's own
-    // `continue`-before-creating-a-future guard drops from `entries`): a distinct
-    // key with no matching entry still gets its explicit synthetic error, exactly
-    // as before. The C incref count must match: distinct replicas
+    // Distinct replicas (first-occurrence order): Java's `describeReplicaLogDirs`
+    // result map is keyed by `TopicPartitionReplica`, so a repeated replica is
+    // one key. `admin_async_per_key_outcome_op` de-duplicates as well; doing it
+    // here keeps the key list in step with the C incref count
     // (`count_distinct_replicas`).
     let keys = {
         let mut seen = std::collections::HashSet::new();
@@ -9474,23 +9474,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
             .collect::<Vec<_>>()
     };
     let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // The outcome form: a replica the result omits (the mock's unknown-topic
+    // skip) arrives as `None` and is delivered as Java's absent key — both
+    // `value` and `error` null — rather than as an invented error.
+    // SAFETY: `admin_async_per_key_outcome_op` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises; the helper
-    // tolerates a NULL `admin` by running the completion inline on the calling thread with
-    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
-    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
-    // `SendUserData(user_data)` and the completion closure, never the `&'static
-    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
-    // caller along with `user_data` and fires exactly once, as the callback contract
-    // documents: on the dispatcher thread via the completion queue, inline on the calling
-    // thread for the two synchronous failures, or on a tokio worker through
-    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
-    // `box_describe_replica_log_dirs_result` and `error` by `box_error`, exactly one of
-    // them is non-null and ownership transfers to the callee; the raw pointers are owned
-    // handles moved to the dispatcher thread; the C user is responsible for the
-    // thread-safety of `user_data`.
+    // tolerates a NULL `admin` by failing every distinct key inline on the calling thread
+    // with a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise
+    // the `&'static AdminHandle` is used only during this call, to run `submit` and register
+    // one `when_complete` per key; each registration captures only a clone of
+    // `completion_tx`, `SendUserData(user_data)` and the shared completion closure, never
+    // the handle. `callback` was supplied by the C caller along with `user_data` and fires
+    // exactly once per distinct replica, as the callback contract documents: on the
+    // dispatcher thread via the completion queue, inline on the calling thread for the
+    // synchronous failures and for an omitted replica, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `topic_c` outlives the call it
+    // is borrowed for, `value` / `error` are fresh handles whose ownership transfers to the
+    // callee, and the C user is responsible for the thread-safety of `user_data`.
     unsafe {
-        admin_async_per_key_op(
+        admin_async_per_key_outcome_op(
             admin,
             user_data,
             keys,
@@ -9498,12 +9500,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
             move |replica, outcome, ud| {
                 let topic_c = to_cstring(replica.topic());
                 let (value, error) = match outcome {
-                    Ok(info) => (
+                    Some(Ok(info)) => (
                         Box::into_raw(Box::new(ReplicaLogDirInfoInner::new(&info)))
                             as *mut kafka_admin_ReplicaLogDirInfo_t,
                         std::ptr::null_mut(),
                     ),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                    Some(Err(e)) => (std::ptr::null_mut(), box_error(e)),
+                    None => (std::ptr::null_mut(), std::ptr::null_mut()),
                 };
                 callback(topic_c.as_ptr(), replica.partition(), replica.broker_id(), value, error, ud);
             },
@@ -34297,11 +34300,11 @@ mod tests {
     // missing from an otherwise-successful `entries` got no callback at all —
     // and since the Python/C caller had already created a Future for it (from
     // `keys`, before this call even runs), that Future stayed pending forever.
-    // Fixed generically in `admin_async_per_key_op` itself (shared by every
-    // per-key RPC, Phases A-C so far), not by changing what
-    // `MockAdminClient::describe_replica_log_dirs` resolves to — Java's own
-    // mock has the identical omission, but a Java caller sees the key simply
-    // missing from the returned `Map`, not a `Future` that hangs.
+    // Fixed generically: `admin_async_per_key_outcome_op` reports such a key
+    // as `None`. `describe_replica_log_dirs_async` delivers that as Java's
+    // absent key (both `value` and `error` null); every other per-key RPC,
+    // through `admin_async_per_key_op`, gets the explicit error below, because
+    // its Java result can never omit a requested key.
 
     #[test]
     fn admin_async_per_key_op_reports_an_explicit_error_for_a_key_missing_from_entries() {
@@ -34609,17 +34612,15 @@ mod tests {
         }
     }
 
-    // COMMENTS.67 fixup, end to end: `describe_replica_log_dirs_async` against
-    // a real `MockAdminClient` with a replica of an unknown topic alongside a
-    // known one. Before the fix in `admin_async_per_key_op`, the unknown
-    // replica's callback never fired at all (the mock never creates a future
-    // for it — `MockAdminClient::describe_replica_log_dirs`'s `continue`
-    // guard), so this test would hang. Replaces the older
-    // `test_describe_replica_log_dirs_omits_unknown_topics` Python test's
-    // "proves the pending state" framing with "proves eventual resolution,
-    // with an explicit error."
+    // End to end: `describe_replica_log_dirs_async` against a real
+    // `MockAdminClient` with a replica of an unknown topic alongside a known
+    // one. The mock never creates a future for the unknown replica (Java's
+    // `if (topicMetadata != null)` guard), so Java's caller finds it absent
+    // from the map. The callback still fires exactly once for it (no hang,
+    // COMMENTS.67), with both `value` and `error` null — Java's absent key —
+    // rather than an invented error.
     #[test]
-    fn describe_replica_log_dirs_async_resolves_an_unknown_topic_replica_with_an_explicit_error() {
+    fn describe_replica_log_dirs_async_reports_an_unknown_topic_replica_as_absent() {
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
         unsafe {
@@ -34636,8 +34637,9 @@ mod tests {
         let partitions = [0i32, 0i32];
         let broker_ids = [0i32, 0i32];
 
-        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
-        struct Ctx(std::sync::mpsc::Sender<(String, bool)>);
+        // (had value, had error) per topic.
+        let (tx, rx) = std::sync::mpsc::channel::<(String, (bool, bool))>();
+        struct Ctx(std::sync::mpsc::Sender<(String, (bool, bool))>);
         extern "C" fn on_describe(
             topic: *const c_char,
             _partition: i32,
@@ -34648,13 +34650,12 @@ mod tests {
         ) {
             let ctx = unsafe { &*(user_data as *const Ctx) };
             let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
-            let had_error = !error.is_null();
-            if had_error {
-                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-            } else {
-                unsafe { kafka_admin_ReplicaLogDirInfo_destroy(value) };
+            let outcome = (!value.is_null(), !error.is_null());
+            unsafe {
+                crate::ffi::common::kafka_common_Error_destroy(error);
+                kafka_admin_ReplicaLogDirInfo_destroy(value);
             }
-            ctx.0.send((name, had_error)).unwrap();
+            ctx.0.send((name, outcome)).unwrap();
         }
         let ctx = Box::new(Ctx(tx));
         let ctx_ptr = Box::into_raw(ctx);
@@ -34674,16 +34675,21 @@ mod tests {
 
         let mut seen = HashMap::new();
         for _ in 0..2 {
-            let (topic, had_error) = rx
+            let (topic, outcome) = rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("both the known and the unknown-topic replica must get exactly one callback, not hang");
-            seen.insert(topic, had_error);
+            seen.insert(topic, outcome);
         }
         assert_eq!(seen.len(), 2, "both replicas must have delivered exactly once");
-        assert!(!seen["drld-known"], "the known topic's replica resolves successfully");
-        assert!(
+        assert_eq!(
+            seen["drld-known"],
+            (true, false),
+            "the known topic's replica resolves successfully"
+        );
+        assert_eq!(
             seen["drld-missing"],
-            "the unknown topic's replica must resolve with an explicit error, not hang forever"
+            (false, false),
+            "the unknown topic's replica is absent: both null"
         );
 
         unsafe {
