@@ -38,7 +38,7 @@ The proposals below break that effort into focused pieces that can be reviewed o
 
 You can provide feedback by opening a GitHub issue or starting a GitHub
 discussion that references the proposal. Substantive changes to a Proposed RFC are made
-through follow-up commits on its pull request so the discussion and the text stay together.
+through follow-up commits on its pull request.
 
 ## Adding a proposal
 
