@@ -570,7 +570,7 @@ impl fmt::Display for NodeConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     /// A concrete instantiation used purely to name the associated constants.
     /// They do not depend on `H`, but a generic type cannot infer it (E0282).
@@ -982,6 +982,44 @@ mod tests {
         connection_states.connecting(NODE_ID1, time.milliseconds(), HOST_TWO_IPS);
         let addr3 = connection_states.current_address(NODE_ID1).await.unwrap();
         assert_ne!(addr1, addr3);
+    }
+
+    /// A dual-stack host whose resolver lists IPv6 first: the IPv4 address is
+    /// tried first, and after that attempt fails the next attempt uses the
+    /// IPv6 address instead of retrying IPv4 forever (the IPv6 fallback of
+    /// `ClientUtils::filter_preferred_addresses`).
+    #[tokio::test]
+    async fn test_dual_stack_falls_back_to_ipv6_after_ipv4_fails() {
+        struct DualStackIpv6First;
+        impl HostResolver for DualStackIpv6First {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                Ok(vec![IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)])
+            }
+        }
+        let mut connection_states = ClusterConnectionStates::new(
+            RECONNECT_BACKOFF_MS,
+            RECONNECT_BACKOFF_MAX,
+            CONNECTION_SETUP_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            LogContext::empty(),
+            DualStackIpv6First,
+        );
+        let mut time = MockTime::new();
+
+        connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+        assert_eq!(
+            connection_states.current_address(NODE_ID1).await.unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        // The IPv4 connection attempt fails.
+        connection_states.disconnected(NODE_ID1, time.milliseconds());
+        time.sleep(RECONNECT_BACKOFF_MAX + 1);
+
+        connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+        assert_eq!(
+            connection_states.current_address(NODE_ID1).await.unwrap(),
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        );
     }
 
     /// Translated from `ClusterConnectionStatesTest.testHostResolveChange`
