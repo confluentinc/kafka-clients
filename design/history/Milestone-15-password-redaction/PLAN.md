@@ -2,7 +2,8 @@
 
 **Status:** COMPLETE (2026-09-29) on the branch below; the user opens the PR. Phase 1 done via
 Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` after one Critic finding
-(§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). Phase 2 (§11) is proposed, **not approved**.
+(§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). **Phase 2 (§11) APPROVED 2026-09-30**,
+executing as Actor/Critic 85 on the same branch.
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -353,7 +354,8 @@ exist at the pinned SHA (HTTP 404 verified). Java exercises `Password` only thro
 
 **Outcome:** one Critic round with one finding (§4.3 amendment), one fixup, second Critic round clean.
 Handoff done on 2026-09-29: `structure.md`, `status.md`, `MILESTONES.md` (14 and 15), `COMMENTS.DONE.85.md`
-copied here, this plan amended. Phase 2 (§11) awaits the user's approval.
+copied here, this plan amended. Phase 2 (§11) was approved by the user on 2026-09-30 and runs the same
+loop (Actor 85 → Critic 85 → fix → handoff) on the same branch.
 
 ## 10. Assumptions and open points for the reviewer
 
@@ -376,7 +378,7 @@ copied here, this plan amended. Phase 2 (§11) awaits the user's approval.
 6. No zeroize-on-drop (§3.5).
 7. Breaking the `pub` field types of `SslConfig` / `SaslConfig` is acceptable below 1.0.
 
-## 11. Phase 2 (proposed, NOT yet approved) — the same defect beyond the Phase-1 list
+## 11. Phase 2 (APPROVED 2026-09-30) — the same defect beyond the Phase-1 list
 
 Found by Actor 85 and independently verified by Critic 85 against the Java `toString()` at the
 pinned commit. Same technique as Phase 1 (§3.3): drop `Debug` from the derive list and delegate to
