@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -363,6 +364,56 @@ public sealed class PublicAdminTopicResultConstructionTests
         await TestTimeout.Run(async () => allById = await byIdResult.AllTopicIds()!, s_deadline);
         Assert.Same(description, allById[topicId]);
         Assert.True(allById.ContainsKey(new Uuid(7L, 9L)));
+    }
+
+    /// <summary>
+    /// A user-built <see cref="DescribeTopicsResult"/> whose map's comparer is finer than
+    /// ordinal — reference equality, holding two distinct <c>"t"</c> instances — still
+    /// yields a successful <see cref="DescribeTopicsResult.AllTopicNames"/>, with one entry
+    /// carrying the last-enumerated value. That is Java's <c>all(Map)</c>, which fills a
+    /// <c>HashMap</c> with <c>put</c> (<c>DescribeTopicsResult.java:105</c>): an equal key
+    /// is replaced, never rejected. (M15/P13.2 finding 85.5.)
+    /// </summary>
+    [Fact]
+    public async Task DescribeTopicsResult_TwoOrdinallyEqualNames_AggregateKeepsTheLastValue()
+    {
+        TopicDescription first = new TopicDescription("t", false, Array.Empty<TopicPartitionInfo>());
+        TopicDescription second = new TopicDescription("t", true, Array.Empty<TopicPartitionInfo>());
+
+        string nameA = new string('t', 1);
+        string nameB = new string('t', 1);
+        Assert.NotSame(nameA, nameB);
+
+        Dictionary<string, Task<TopicDescription>> byName =
+            new Dictionary<string, Task<TopicDescription>>(ReferenceComparer.Instance)
+            {
+                [nameA] = Task.FromResult(first),
+                [nameB] = Task.FromResult(second),
+            };
+        Assert.Equal(2, byName.Count);
+
+        DescribeTopicsResult result = new DescribeTopicsResult(null, byName);
+
+        IReadOnlyDictionary<string, TopicDescription> all = default!;
+        await TestTimeout.Run(async () => all = await result.AllTopicNames()!, s_deadline);
+
+        TopicDescription lastEnumerated = await byName.Last().Value;
+        KeyValuePair<string, TopicDescription> only = Assert.Single(all);
+        Assert.Equal("t", only.Key);
+        Assert.Same(lastEnumerated, only.Value);
+    }
+
+    /// <summary>
+    /// Reference equality over strings, built by hand so it compiles on the net462 leg
+    /// (<c>ReferenceEqualityComparer</c> is net5+).
+    /// </summary>
+    private sealed class ReferenceComparer : IEqualityComparer<string>
+    {
+        public static readonly ReferenceComparer Instance = new ReferenceComparer();
+
+        public bool Equals(string? x, string? y) => ReferenceEquals(x, y);
+
+        public int GetHashCode(string obj) => RuntimeHelpers.GetHashCode(obj);
     }
 
     private static TopicMetadataAndConfig Metadata(int numPartitions) =>

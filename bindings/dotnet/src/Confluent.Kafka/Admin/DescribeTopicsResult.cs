@@ -72,9 +72,14 @@ public sealed class DescribeTopicsResult
     /// The aggregate a user-built result hands back from <see cref="AllTopicNames"/> /
     /// <see cref="AllTopicIds"/> is keyed with <see cref="StringComparer.Ordinal"/> /
     /// <see cref="EqualityComparer{T}.Default"/> — Java's own key semantics for a
-    /// <c>String</c> / <see cref="Uuid"/> <c>HashMap</c>. (A result built by the client
-    /// keys it with the bridge's own comparer instead, so the aggregate and
-    /// <see cref="TopicNameValues"/> cannot disagree about a key.)
+    /// <c>String</c> / <see cref="Uuid"/> <c>HashMap</c>. Its handling of an equal key is
+    /// Java's too: the aggregate is filled with <c>HashMap.put</c> semantics
+    /// (<c>DescribeTopicsResult.java:105</c>), so where the supplied dictionary's comparer
+    /// is finer than that — reference equality holding two distinct instances of one name,
+    /// say — the entries collapse to one and the last-enumerated value wins, rather than
+    /// faulting. (A result built by the client keys it with the bridge's own comparer
+    /// instead, so the aggregate and <see cref="TopicNameValues"/> cannot disagree about a
+    /// key.)
     /// </para>
     /// <para>
     /// <b>Public rather than <c>protected</c>, on a <see langword="sealed"/> type</b>
@@ -216,7 +221,9 @@ public sealed class DescribeTopicsResult
                 new Dictionary<TKey, TopicDescription>(values.Count, comparer);
             foreach (KeyValuePair<TKey, Task<TopicDescription>> entry in values)
             {
-                descriptions.Add(entry.Key, entry.Value.Result);
+                // The indexer, not Add: Java's `descriptions.put(...)` (`:105`) replaces an
+                // equal key and never throws, so the last-enumerated value wins.
+                descriptions[entry.Key] = entry.Value.Result;
             }
 
             return descriptions;
