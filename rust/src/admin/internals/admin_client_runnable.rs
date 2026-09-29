@@ -751,6 +751,19 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                                     self.pending_calls.push(new_call);
                                 }
                             },
+                            HandleResult::CallAgain => {
+                                // `runnable.call(this, time.milliseconds())`: the
+                                // same gate as `NewCall`, applied to the call itself,
+                                // so its deadline, tries and backoff carry over as
+                                // they do for Java's re-queued `this`.
+                                if let Some(mut call) = self
+                                    .shutdown
+                                    .admit_new_call(self.metadata_manager.using_bootstrap_controllers(), call)
+                                {
+                                    call.cur_node = None;
+                                    self.pending_calls.push(call);
+                                }
+                            },
                             HandleResult::Retry(err) => {
                                 self.fail_call(call, now, err);
                             },
