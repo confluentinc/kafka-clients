@@ -1,6 +1,6 @@
 ---
 name: review-m15-password-redaction
-description: M15 Password/secret-redaction review (Critic 85), CLOSED clean in round 2 — raw-map Debug must render key set only (by-key filter can't cover untranslated PASSWORD + unknown keys); check live {:?} log sinks before accepting "latent"; out-of-repo probe crate and git-archive mutation copies for executed proofs
+description: M15 Password/secret-redaction review (Critic 85): Phase 1 CLOSED r2, Phase 2 CLOSED r3 with 0 issues — raw-map Debug renders key set only; check live {:?} log sinks before accepting "latent"; pre-existing over-redacting Display the plan says to delegate to is a deviation note, not a phase defect; &dyn Display + deny(dead_code) pins a log argument; git-archive mutation copies
 metadata:
   type: project
 ---
@@ -50,5 +50,42 @@ and lint/format pass.
 **Lesson 4: count assertions.** For a `[hidden]` count, compare the fields that are *reachable* with
 the fields the input *can set*. There were eight `Option<Password>` fields but only seven config keys
 (`SaslConfig::password` is programmatic-only), so the count was right and "once per field" was loose.
+
+**Round 3 (Phase 2, `35d399fa`, 12 items) closed clean: 0 issues.**
+- 13 mutants: 12 compiled and all were caught. 11 were caught by a test, and 1 by the
+  lib-target lint only, which is by design.
+
+**Lesson 5: an asymmetry that predates the milestone is a note, not the phase's defect.**
+- The SCRAM and IncrementalAlterConfigs request `Display` renders counts only, while Java
+  renders `maskData(data)`. It came from `3e84b9bd` (PR #127), before M15.
+- The approved plan row said "delegate Debug to the existing Display". The Display hides
+  more than Java, so it leaks nothing.
+- **Why:** a Behavior Mismatch filed against the phase would ask the Actor to go beyond the
+  approved scope.
+- **How to apply:** before you call a deviation the phase's defect, check where it came from
+  (`git log -S`) and what the plan row says. Report it as "pre-existing, fidelity-only", and
+  add a one-line follow-up and the tests the change would touch.
+
+**Lesson 6: technique for pinning a log argument when the logger cannot be captured.**
+- The logger is process-wide, and `env_logger` is installed by the ffi tests.
+- The pattern: a private helper that returns `&dyn Display`, so `{:?}` on its result is
+  E0277, and that carries `#[deny(dead_code)]`.
+- To verify it, mutate the log line away from the helper. The unit test still passes, but
+  `cargo check --lib` fails. `cargo xtask lint` runs clippy with `--all-targets`, which
+  includes the lib target.
+
+**Lesson 7: mutants against a hand-written Debug.**
+- An exhaustive `let Self { .. } = self;` under `#![deny(warnings)]` rejects a mutant that
+  renders `&self.field` next to an unused binding: the unused binding is an error.
+- Mutate the binding's own rendering instead, for example drop its `.map(config_keys)`.
+
+**Lesson 8: completeness sweep for Java masking.**
+- Grep `common/requests/*.java` for
+  `maskData|REDACTED|setHmac\(new byte|setSalt|setAuthBytes\(new byte`. At 4.3.1 this finds
+  9 classes. `AlterConfigsRequest` has no Rust translation.
+- Checking each of the 119 classes that override `toString` was not needed: the others print
+  `data.toString()`.
+- The plan's §11.2 rows 4–5 misstated Java: builder `toString()` is `maskData(data)`, not
+  "type only". Check the Java yourself, not the plan's paraphrase of it.
 
 - Related: [[review-expectations]], [[review-fix-commit-rereview]].
