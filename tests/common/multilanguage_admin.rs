@@ -1006,7 +1006,15 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
+        // The proto map cannot carry Java's null config value, and no
+        // multilanguage test sends one.
+        configs: topic
+            .configs()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, value)| (name, value.expect("a null config value cannot cross the gRPC harness")))
+            .collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {

@@ -104,10 +104,15 @@ struct TopicMetadata {
     // Read by `describe_configs` / `incremental_alter_configs`. Java's
     // `TopicMetadata.configs` is never null (defaults to an empty map); the
     // Rust `Option` treats `None` as an empty map.
-    configs: Option<BTreeMap<String, String>>,
+    configs: Option<ConfigMap>,
     marked_for_deletion: bool,
     fetches_remaining_until_visible: i32,
 }
+
+/// An in-memory config map: Java's `Map<String, String>`, whose values are
+/// nullable (a `NewTopic` config, `addTopic`'s configs, or an `AlterConfigOp`
+/// SET of a null value), so a `None` value is Java's null.
+type ConfigMap = BTreeMap<String, Option<String>>;
 
 /// Mutable state, guarded by a mutex (mirrors Java's `synchronized` methods).
 #[derive(Debug)]
@@ -125,14 +130,14 @@ struct State {
     timeout_next_requests: i32,
     // Per-broker config maps (index = broker id), mirroring Java's
     // `brokerConfigs`. Each is seeded with `default.replication.factor`.
-    broker_configs: Vec<BTreeMap<String, String>>,
+    broker_configs: Vec<ConfigMap>,
     // Client-metrics subscription configs, keyed by resource name.
-    client_metrics_configs: BTreeMap<String, BTreeMap<String, String>>,
+    client_metrics_configs: BTreeMap<String, ConfigMap>,
     // Group configs, keyed by group id.
-    group_configs: BTreeMap<String, BTreeMap<String, String>>,
+    group_configs: BTreeMap<String, ConfigMap>,
     // Defaults overlaid onto group configs on read (mirrors Java's
     // `defaultGroupConfigs`; empty for the `create(num_brokers)` builder).
-    default_group_configs: BTreeMap<String, String>,
+    default_group_configs: ConfigMap,
     // Per-broker list of log directories (index = broker id), mirroring Java's
     // `brokerLogDirs`. Seeded with `DEFAULT_LOG_DIRS` for each broker.
     broker_log_dirs: Vec<Vec<String>>,
@@ -215,10 +220,13 @@ impl MockAdminClient {
         let default_replication_factor = num_brokers.clamp(0, 3) as i16;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
-        let broker_configs: Vec<BTreeMap<String, String>> = (0..num_brokers)
+        let broker_configs: Vec<ConfigMap> = (0..num_brokers)
             .map(|_| {
                 let mut config = BTreeMap::new();
-                config.insert("default.replication.factor".to_string(), default_replication_factor.to_string());
+                config.insert(
+                    "default.replication.factor".to_string(),
+                    Some(default_replication_factor.to_string()),
+                );
                 config
             })
             .collect();
@@ -345,7 +353,7 @@ impl MockAdminClient {
         internal: bool,
         name: &str,
         partitions: Vec<TopicPartitionInfo>,
-        configs: Option<BTreeMap<String, String>>,
+        configs: Option<BTreeMap<String, Option<String>>>,
     ) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         if state.all_topics.contains_key(name) {
@@ -497,7 +505,7 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
         .map(|configs| {
             configs
                 .iter()
-                .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+                .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -507,10 +515,10 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
 /// Builds a [`Config`] from an in-memory config map.
 ///
 /// Corresponds to `MockAdminClient.toConfigObject`.
-fn to_config_object(map: &BTreeMap<String, String>) -> Config {
+fn to_config_object(map: &ConfigMap) -> Config {
     let entries = map
         .iter()
-        .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+        .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
         .collect::<Vec<_>>();
     Config::new(entries)
 }
@@ -520,13 +528,15 @@ fn to_config_object(map: &BTreeMap<String, String>) -> Config {
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
 /// that Java's mock does not implement, matching its `default` branch.
-fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), Error> {
+fn apply_alter_ops(map: &mut ConfigMap, ops: &[AlterConfigOp]) -> Result<(), Error> {
     for op in ops {
         match op.op_type() {
             OpType::Set => {
+                // Java: `newMap.put(op.configEntry().name(), op.configEntry().value())`,
+                // a null value included.
                 map.insert(
                     op.config_entry().name().to_string(),
-                    op.config_entry().value().unwrap_or_default().to_string(),
+                    op.config_entry().value().map(str::to_string),
                 );
             },
             OpType::Delete => {
@@ -2435,7 +2445,7 @@ mod tests {
     async fn describe_configs_topic_returns_stored_configs() {
         let client = admin();
         let mut configs = BTreeMap::new();
-        configs.insert("retention.ms".to_string(), "1000".to_string());
+        configs.insert("retention.ms".to_string(), Some("1000".to_string()));
         let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
         client
             .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
