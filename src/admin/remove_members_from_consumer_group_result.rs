@@ -53,38 +53,15 @@ impl RemoveMembersFromConsumerGroupResult {
     /// (no top-level or member-level error); otherwise the first member error
     /// is returned.
     ///
-    /// Mirrors `all()`.
+    /// Mirrors `all()`. In `removeAll` mode the first member-level error is
+    /// wrapped, as Java's `new KafkaException("Encounter exception when trying
+    /// to remove: " + identity, exception)` does: the returned error is a bare
+    /// [`Error::KafkaError`] whose [`source`](Error::source) is the member's
+    /// own error. With explicit members the member's error is returned as is.
     pub fn all(&self) -> KafkaFuture<()> {
-        // Stable iteration order for a deterministic "first error" (Java relies
-        // on unspecified set/map iteration order anyway).
-        let mut member_infos: Vec<MemberToRemove> = self.member_infos.iter().cloned().collect();
-        member_infos.sort_by(|a, b| a.group_instance_id().cmp(b.group_instance_id()));
-        self.future.then_apply_try(move |member_errors| {
-            if member_infos.is_empty() {
-                // removeAll mode: fail on the first member-level error.
-                let mut entries: Vec<(&MemberIdentity, &Errors)> = member_errors.iter().collect();
-                entries.sort_by(|a, b| {
-                    (a.0.member_id.as_str(), a.0.group_instance_id.as_deref())
-                        .cmp(&(b.0.member_id.as_str(), b.0.group_instance_id.as_deref()))
-                });
-                for (identity, error) in entries {
-                    if *error != Errors::None {
-                        return Err(Error::with_message(
-                            *error,
-                            format!("Encounter error when trying to remove: {}", describe_identity(identity)),
-                        ));
-                    }
-                }
-            } else {
-                for member in &member_infos {
-                    let identity = member.to_member_identity();
-                    if let Some(error) = sub_level_error(&member_errors, &identity) {
-                        return Err(error);
-                    }
-                }
-            }
-            Ok(())
-        })
+        let member_infos = self.sorted_member_infos();
+        self.future
+            .then_apply_try(move |member_errors| all_of(&member_errors, &member_infos))
     }
 
     /// Returns the selected member's future.
@@ -98,6 +75,52 @@ impl RemoveMembersFromConsumerGroupResult {
     /// request. The returned future fails if the member's removal failed (or the
     /// member is missing from the response).
     pub fn member_result(&self, member: &MemberToRemove) -> Result<KafkaFuture<()>, Error> {
+        self.ensure_member_result_applicable(member)?;
+        let identity = member.to_member_identity();
+        Ok(self
+            .future
+            .then_apply_try(move |member_errors| member_result_of(&member_errors, &identity)))
+    }
+
+    /// The single future every accessor derives from — Java's
+    /// `KafkaFuture<Map<MemberIdentity, Errors>> future` field.
+    ///
+    /// Crate-internal so the C FFI can await the one outcome once and then
+    /// evaluate [`member_result`](Self::member_result) / [`all`](Self::all)
+    /// against it through [`resolved_member_result`](Self::resolved_member_result)
+    /// / [`resolved_all`](Self::resolved_all).
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn future(&self) -> &KafkaFuture<MemberErrors> {
+        &self.future
+    }
+
+    /// Evaluates [`member_result`](Self::member_result) against an
+    /// already-resolved outcome of [`future`](Self::future), without awaiting.
+    ///
+    /// Same derivation as the future-based accessor: the `removeAll` and
+    /// "not included in the original request" checks come first and do not
+    /// depend on the outcome (Java throws them before touching the future);
+    /// then a failed outcome propagates its error, as Java's `whenComplete`
+    /// forwards the `throwable`.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn resolved_member_result(
+        &self,
+        outcome: &Result<MemberErrors, Error>,
+        member: &MemberToRemove,
+    ) -> Result<(), Error> {
+        self.ensure_member_result_applicable(member)?;
+        member_result_of(outcome.as_ref().map_err(Error::clone)?, &member.to_member_identity())
+    }
+
+    /// Evaluates [`all`](Self::all) against an already-resolved outcome of
+    /// [`future`](Self::future), without awaiting.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn resolved_all(&self, outcome: &Result<MemberErrors, Error>) -> Result<(), Error> {
+        all_of(outcome.as_ref().map_err(Error::clone)?, &self.sorted_member_infos())
+    }
+
+    /// Java's two synchronous `memberResult` guards, in Java's order.
+    fn ensure_member_result_applicable(&self, member: &MemberToRemove) -> Result<(), Error> {
         if self.remove_all() {
             return Err(Error::local_illegal_argument(
                 "The method: memberResult is not applicable in 'removeAll' mode",
@@ -109,14 +132,58 @@ impl RemoveMembersFromConsumerGroupResult {
                 member.group_instance_id()
             )));
         }
-        let identity = member.to_member_identity();
-        Ok(self
-            .future
-            .then_apply_try(move |member_errors| match sub_level_error(&member_errors, &identity) {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }))
+        Ok(())
     }
+
+    /// The requested members in a stable order, for a deterministic "first
+    /// error" in `all()` (Java relies on unspecified set iteration order).
+    fn sorted_member_infos(&self) -> Vec<MemberToRemove> {
+        let mut member_infos: Vec<MemberToRemove> = self.member_infos.iter().cloned().collect();
+        member_infos.sort_by(|a, b| a.group_instance_id().cmp(b.group_instance_id()));
+        member_infos
+    }
+}
+
+/// The body of Java's `memberResult` `whenComplete` lambda, for a
+/// successfully resolved map.
+fn member_result_of(member_errors: &MemberErrors, identity: &MemberIdentity) -> Result<(), Error> {
+    match sub_level_error(member_errors, identity) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The body of Java's `all()` `whenComplete` lambda, for a successfully
+/// resolved map. An empty `member_infos` is `removeAll` mode.
+fn all_of(member_errors: &MemberErrors, member_infos: &[MemberToRemove]) -> Result<(), Error> {
+    if member_infos.is_empty() {
+        // removeAll mode: fail on the first member-level error, wrapped in a
+        // bare `KafkaException` carrying the member's error as its cause.
+        // Stable iteration order for a deterministic "first error" (Java
+        // relies on unspecified map iteration order anyway).
+        let mut entries: Vec<(&MemberIdentity, &Errors)> = member_errors.iter().collect();
+        entries.sort_by(|a, b| {
+            (a.0.member_id.as_str(), a.0.group_instance_id.as_deref())
+                .cmp(&(b.0.member_id.as_str(), b.0.group_instance_id.as_deref()))
+        });
+        for (identity, error) in entries {
+            if *error != Errors::None {
+                // "exception" is reworded to "error" per CLAUDE.md §2; the rest
+                // is Java's text verbatim.
+                return Err(Error::kafka_message_source(
+                    format!("Encounter error when trying to remove: {}", describe_identity(identity)),
+                    Error::new(*error),
+                ));
+            }
+        }
+    } else {
+        for member in member_infos {
+            if let Some(error) = sub_level_error(member_errors, &member.to_member_identity()) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Mirrors `KafkaAdminClient.getSubLevelError` specialised for member removal:
@@ -281,7 +348,16 @@ mod tests {
         handle.complete(MemberErrors::from([(member, Errors::UnknownMemberId)]));
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
         let err = result.all().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnknownMemberId);
+        // Java wraps the member's exception in a bare `KafkaException`
+        // (`RemoveMembersFromConsumerGroupResult.java`, `all()`), so the
+        // outer error is not the member's own kind: it is a plain Kafka error
+        // whose cause is the member's error.
+        assert!(matches!(err, Error::KafkaError(_)), "{err:?}");
+        assert!(err.is_kafka_error());
+        assert!(!err.is_api_error());
+        let cause = err.source().expect("the member's error is the cause");
+        assert!(matches!(cause, Error::UnknownMemberId(_)), "{cause:?}");
+        assert_eq!(cause.error(), Errors::UnknownMemberId);
         // Exact Java text (with `exception` spelled `error`, per CLAUDE.md §2),
         // including the generated `toString()` of the identity. `reason` is
         // populated here so the field a shorter rendering would omit is the
@@ -291,6 +367,81 @@ mod tests {
             "Encounter error when trying to remove: \
              MemberIdentity(memberId='m1', groupInstanceId='instance-1', reason='left the group')"
         );
+    }
+
+    /// `member_result` / `all` and their `resolved_*` twins share one
+    /// derivation, so they must agree on every requested member, including
+    /// the exact messages; the unrequested-member guard fires first, whatever
+    /// the outcome.
+    #[tokio::test]
+    async fn resolved_accessors_agree_with_the_future_based_ones() {
+        let mut errors = errors_map();
+        errors.remove(&instance_two().to_member_identity());
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(errors);
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
+        let outcome = result.future().get().await;
+
+        for member in [instance_one(), instance_two()] {
+            let via_future = result.member_result(&member).unwrap().get().await;
+            let resolved = result.resolved_member_result(&outcome, &member);
+            assert_eq!(
+                format!("{via_future:?}"),
+                format!("{resolved:?}"),
+                "{}",
+                member.group_instance_id()
+            );
+        }
+        assert_eq!(
+            format!("{:?}", result.all().get().await),
+            format!("{:?}", result.resolved_all(&outcome))
+        );
+
+        let unrequested = MemberToRemove::new("invalid-instance-id");
+        let via_future = result.member_result(&unrequested).unwrap_err();
+        let failed: Result<MemberErrors, Error> = Err(Error::group_authorization("g"));
+        for outcome in [&outcome, &failed] {
+            let resolved = result.resolved_member_result(outcome, &unrequested).unwrap_err();
+            assert_eq!(format!("{via_future:?}"), format!("{resolved:?}"));
+            assert_eq!(
+                resolved.message(),
+                "Member invalid-instance-id was not included in the original request"
+            );
+        }
+
+        // A failed outcome reaches the requested-member accessors unchanged.
+        assert!(matches!(
+            result.resolved_member_result(&failed, &instance_one()),
+            Err(Error::GroupAuthorization(_))
+        ));
+        assert!(matches!(result.resolved_all(&failed), Err(Error::GroupAuthorization(_))));
+    }
+
+    /// `removeAll` mode through the resolved accessors: `member_result` is
+    /// refused whatever the outcome, and `all` wraps the first member error.
+    #[test]
+    fn resolved_accessors_in_remove_all_mode() {
+        let result = RemoveMembersFromConsumerGroupResult::new(KafkaFutureImpl::new().future(), HashSet::new());
+        let mut member = MemberIdentity::new();
+        member.set_member_id("m1".to_string());
+        let ok: Result<MemberErrors, Error> = Ok(MemberErrors::from([(member.clone(), Errors::None)]));
+        let failed_member: Result<MemberErrors, Error> = Ok(MemberErrors::from([(member, Errors::UnknownMemberId)]));
+        let failed: Result<MemberErrors, Error> = Err(Error::group_authorization("g"));
+        for outcome in [&ok, &failed_member, &failed] {
+            assert_eq!(
+                result.resolved_member_result(outcome, &instance_one()).unwrap_err().message(),
+                "The method: memberResult is not applicable in 'removeAll' mode"
+            );
+        }
+        assert!(result.resolved_all(&ok).is_ok());
+        let err = result.resolved_all(&failed_member).unwrap_err();
+        assert!(matches!(err, Error::KafkaError(_)));
+        assert_eq!(
+            err.message(),
+            "Encounter error when trying to remove: MemberIdentity(memberId='m1', groupInstanceId=null, reason=null)"
+        );
+        assert!(matches!(err.source(), Some(Error::UnknownMemberId(_))));
+        assert!(matches!(result.resolved_all(&failed), Err(Error::GroupAuthorization(_))));
     }
 
     /// The three-field, quoted rendering is what Java's generated
