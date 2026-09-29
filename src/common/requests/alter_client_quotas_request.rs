@@ -19,12 +19,12 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::alter_client_quotas_request_data::{AlterClientQuotasRequestData, EntityData, EntryData, OpData};
-use crate::alter_client_quotas_response_data::{
-    AlterClientQuotasResponseData, EntityData as ResponseEntityData, EntryData as ResponseEntryData,
-};
+use crate::AlterClientQuotasRequestData;
+use crate::AlterClientQuotasResponseData;
+use crate::alter_client_quotas_request_data::{EntityData, EntryData, OpData};
+use crate::alter_client_quotas_response_data::{EntityData as ResponseEntityData, EntryData as ResponseEntryData};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::quota::client_quota_alteration::Op;
+use crate::common::quota::Op;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity};
 
 use super::{AlterClientQuotasResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
@@ -214,15 +214,14 @@ impl RequestBuilder for AlterClientQuotasRequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::USER;
 
     fn entity(name: &str) -> ClientQuotaEntity {
-        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), Some(name.to_string()))]))
+        ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), Some(name.to_string()))]))
     }
 
     /// The built-in default entity: a `None` (wire-null) name.
     fn default_entity() -> ClientQuotaEntity {
-        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]))
+        ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), None)]))
     }
 
     #[test]
@@ -278,7 +277,7 @@ mod tests {
         let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.entries(), alterations);
     }
@@ -381,15 +380,18 @@ mod tests {
         let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         let decoded = parsed.entries();
         assert_eq!(decoded.len(), 2);
 
         let default_decoded = decoded.iter().find(|a| a.entity() == &default_entity()).unwrap();
-        assert_eq!(default_decoded.entity().entries().get(USER), Some(&None));
+        assert_eq!(default_decoded.entity().entries().get(ClientQuotaEntity::USER), Some(&None));
         let empty_decoded = decoded.iter().find(|a| a.entity() == &entity("")).unwrap();
-        assert_eq!(empty_decoded.entity().entries().get(USER), Some(&Some(String::new())));
+        assert_eq!(
+            empty_decoded.entity().entries().get(ClientQuotaEntity::USER),
+            Some(&Some(String::new()))
+        );
 
         // The two entities must remain distinct after the round trip.
         assert_ne!(default_decoded.entity(), empty_decoded.entity());

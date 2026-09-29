@@ -21,7 +21,7 @@
 
 use crate::common::utils::LogContext;
 
-use super::delete_groups_handler::DeleteGroupsHandler;
+use super::DeleteGroupsHandler;
 
 /// The `apiName()` reported by `DeleteConsumerGroupsHandler`.
 const API_NAME: &str = "deleteConsumerGroups";
@@ -60,12 +60,13 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::admin::internals::admin_api_handler::{AdminApiHandler, ApiResult};
-    use crate::admin::internals::coordinator_key::CoordinatorKey;
-    use crate::common::protocol::Errors;
+    use crate::DeleteGroupsResponseData;
+    use crate::admin::internals::CoordinatorKey;
+    use crate::admin::internals::{AdminApiHandler, ApiResult};
+    use crate::common::Errors;
     use crate::common::requests::{ConcreteResponse, DeleteGroupsResponse, RequestBuilder};
     use crate::common::{Error, Node};
-    use crate::delete_groups_response_data::{DeletableGroupResult, DeleteGroupsResponseData};
+    use crate::delete_groups_response_data::DeletableGroupResult;
 
     const GROUP_ID1: &str = "group-id1";
 

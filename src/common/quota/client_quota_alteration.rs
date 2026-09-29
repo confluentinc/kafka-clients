@@ -102,12 +102,11 @@ impl std::fmt::Display for ClientQuotaAlteration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::USER;
     use std::collections::HashMap;
 
     fn entity() -> ClientQuotaEntity {
         let mut m = HashMap::new();
-        m.insert(USER.to_string(), Some("u1".to_string()));
+        m.insert(ClientQuotaEntity::USER.to_string(), Some("u1".to_string()));
         ClientQuotaEntity::new(m)
     }
 

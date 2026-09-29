@@ -21,22 +21,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::describe_producers_result::PartitionProducerState;
-use crate::admin::kafka_admin_client::message_with_fallback;
-use crate::admin::options::DescribeProducersOptions;
-use crate::admin::producer_state::ProducerState;
-use crate::common::protocol::Errors;
+use crate::DescribeProducersRequestData;
+use crate::admin::DescribeProducersOptions;
+use crate::admin::KafkaAdminClient;
+use crate::admin::PartitionProducerState;
+use crate::admin::ProducerState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, DescribeProducersRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
-use crate::describe_producers_request_data::{DescribeProducersRequestData, TopicRequest};
+use crate::describe_producers_request_data::TopicRequest;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
-use super::static_broker_strategy::StaticBrokerStrategy;
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::StaticBrokerStrategy;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `describeProducers`.
 ///
@@ -53,7 +54,7 @@ impl DescribeProducersHandler {
     /// [`StaticBrokerStrategy`] targets that broker directly; otherwise a
     /// [`PartitionLeaderStrategy`] looks up each partition's leader.
     pub(crate) fn new(options: DescribeProducersOptions, log_context: LogContext) -> Self {
-        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id_opt() {
+        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id() {
             Some(broker_id) => Box::new(StaticBrokerStrategy::new(broker_id)),
             None => Box::new(PartitionLeaderStrategy::new(log_context.clone())),
         };
@@ -104,7 +105,7 @@ impl DescribeProducersHandler {
     ) {
         match error {
             Errors::NotLeaderOrFollower => {
-                if let Some(broker_id) = self.options.broker_id_opt() {
+                if let Some(broker_id) = self.options.broker_id() {
                     // Typically these errors are retriable, but if the user
                     // specified the brokerId explicitly, then they are fatal.
                     kafka_error!(
@@ -147,11 +148,11 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    Error::invalid_topics_with_message(
+                    Error::invalid_topics_message(
                         HashSet::from([topic_partition.topic().to_string()]),
                         format!(
                             "Failed to fetch metadata for partition {topic_partition} due to invalid topic error: {}",
-                            message_with_fallback(error.code(), error_message)
+                            KafkaAdminClient::message_with_fallback(error.code(), error_message)
                         ),
                     ),
                 );
@@ -164,7 +165,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    Error::topic_authorization_with_message(
+                    Error::topic_authorization_message(
                         HashSet::from([topic_partition.topic().to_string()]),
                         format!(
                             "Failed to describe active producers for partition {topic_partition} due to \
@@ -283,9 +284,10 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DescribeProducersResponseData;
     use crate::common::requests::DescribeProducersResponse;
     use crate::describe_producers_response_data::{
-        DescribeProducersResponseData, PartitionResponse, ProducerState as WireProducerState, TopicResponse,
+        PartitionResponse, ProducerState as WireProducerState, TopicResponse,
     };
 
     fn new_handler(options: DescribeProducersOptions) -> DescribeProducersHandler {
@@ -326,7 +328,7 @@ mod tests {
     #[test]
     fn broker_id_set_in_options() {
         let broker_id = 3;
-        let handler = new_handler(DescribeProducersOptions::new().broker_id(broker_id));
+        let handler = new_handler(DescribeProducersOptions::new().set_broker_id(broker_id));
         for tp in [tp("foo", 5), tp("bar", 3), tp("foo", 4)] {
             let scope = handler.lookup_strategy().lookup_scope(&tp);
             assert_eq!(scope.destination_broker_id(), Some(broker_id), "Unexpected brokerId for {tp}");
@@ -450,7 +452,7 @@ mod tests {
     #[test]
     fn fatal_not_leader_error_if_static_mapped() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let result = handle_response_with_error(options, &topic_partition, Errors::NotLeaderOrFollower);
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
@@ -468,7 +470,7 @@ mod tests {
     #[test]
     fn completed_result() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let handler = new_handler(options);
 
         let mut wire0 = WireProducerState::new();

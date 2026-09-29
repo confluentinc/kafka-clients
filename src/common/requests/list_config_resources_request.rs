@@ -18,10 +18,10 @@
 
 use std::io;
 
+use crate::ListConfigResourcesRequestData;
+use crate::ListConfigResourcesResponseData;
 use crate::common::config::ConfigResourceType;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
-use crate::list_config_resources_response_data::ListConfigResourcesResponseData;
 
 use super::{ConcreteRequest, ConcreteResponse, ListConfigResourcesResponse, RequestBuilder};
 
@@ -100,7 +100,7 @@ pub struct ListConfigResourcesRequestBuilder {
 
 impl ListConfigResourcesRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: ListConfigResourcesRequestData) -> Self {
+    pub fn new(data: ListConfigResourcesRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::LIST_CONFIG_RESOURCES.oldest_version(),
@@ -166,7 +166,7 @@ mod tests {
     fn build_v0_rejects_non_client_metrics() {
         let mut data = ListConfigResourcesRequestData::new();
         data.set_resource_types(vec![ConfigResourceType::Topic.id()]);
-        let mut builder = ListConfigResourcesRequestBuilder::from_data(data);
+        let mut builder = ListConfigResourcesRequestBuilder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
@@ -174,7 +174,7 @@ mod tests {
     fn build_v0_allows_client_metrics() {
         let mut data = ListConfigResourcesRequestData::new();
         data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
-        let mut builder = ListConfigResourcesRequestBuilder::from_data(data);
+        let mut builder = ListConfigResourcesRequestBuilder::new(data);
         assert!(builder.build_version(0).is_ok());
     }
 
@@ -184,7 +184,7 @@ mod tests {
         data.set_resource_types(vec![ConfigResourceType::Topic.id(), ConfigResourceType::Broker.id()]);
         let mut request = ConcreteRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListConfigResourcesRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().resource_types, vec![2, 4]);
     }

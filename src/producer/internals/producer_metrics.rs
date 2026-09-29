@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::common::MetricNameTemplate;
 use crate::common::metrics::Metrics;
-use crate::producer::internals::sender_metrics_registry::SenderMetricsRegistry;
+use crate::producer::internals::SenderMetricsRegistry;
 
 /// Aggregates the producer's metric-name registries. Currently just wraps the
 /// [`SenderMetricsRegistry`], mirroring Java's `ProducerMetrics`.
@@ -55,7 +55,7 @@ mod tests {
     fn test_all_templates_delegates_to_sender_registry() {
         let mut tags = BTreeMap::new();
         tags.insert("client-id".to_string(), "client-id".to_string());
-        let metrics = Arc::new(Metrics::with_config(Arc::new(MetricConfig::new().with_tags(tags))));
+        let metrics = Arc::new(Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(tags))));
         let producer_metrics = ProducerMetrics::new(metrics);
         // 22 client-level + 9 topic-level templates.
         assert_eq!(31, producer_metrics.all_templates().len());

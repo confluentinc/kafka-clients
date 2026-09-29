@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::CreatePartitionsRequestData;
+use crate::CreatePartitionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::create_partitions_request_data::CreatePartitionsRequestData;
-use crate::create_partitions_response_data::{CreatePartitionsResponseData, CreatePartitionsTopicResult};
+use crate::create_partitions_response_data::CreatePartitionsTopicResult;
 
 use super::{ConcreteRequest, ConcreteResponse, CreatePartitionsResponse, RequestBuilder};
 
@@ -110,7 +111,7 @@ pub struct CreatePartitionsRequestBuilder {
 
 impl CreatePartitionsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreatePartitionsRequestData) -> Self {
+    pub fn new(data: CreatePartitionsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_PARTITIONS.oldest_version(),
@@ -179,7 +180,7 @@ mod tests {
         data.set_validate_only(true);
         let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreatePartitionsRequest::parse(&mut readable, 3).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

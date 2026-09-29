@@ -34,26 +34,26 @@ impl DescribeClassicGroupsOptions {
     /// Whether to include authorized operations in the description. Mirrors
     /// `includeAuthorizedOperations`.
     #[must_use]
-    pub fn include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
+    pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
         self.include_authorized_operations = include_authorized_operations;
         self
     }
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// Whether authorized operations are requested. Mirrors
     /// `includeAuthorizedOperations()`.
-    pub fn should_include_authorized_operations(&self) -> bool {
+    pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -65,8 +65,8 @@ mod tests {
     #[test]
     fn defaults_and_setter() {
         let options = DescribeClassicGroupsOptions::new();
-        assert!(!options.should_include_authorized_operations());
-        let options = options.include_authorized_operations(true);
-        assert!(options.should_include_authorized_operations());
+        assert!(!options.include_authorized_operations());
+        let options = options.set_include_authorized_operations(true);
+        assert!(options.include_authorized_operations());
     }
 }

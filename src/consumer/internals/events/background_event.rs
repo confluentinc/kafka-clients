@@ -30,7 +30,7 @@
 use tokio::sync::oneshot;
 
 use crate::common::{Error, TopicPartition};
-use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+use crate::consumer::ConsumerRebalanceListenerMethodName;
 
 /// Single-enum translation of Java's `BackgroundEvent` hierarchy.
 pub(crate) enum BackgroundEvent {

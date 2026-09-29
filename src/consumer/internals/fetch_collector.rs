@@ -34,7 +34,7 @@
 //! Phase 7b is exactly:
 //!
 //! - 2 × user-supplied `Deserializer::<T>::deserialize` (key + value).
-//! - 1 × `RecordHeaders::from_slice` (owned headers per §27's
+//! - 1 × `RecordHeaders::with_header_iter` (owned headers per §27's
 //!   milestone-8 ruling).
 //!
 //! Specifically NOT in the per-record budget:
@@ -54,24 +54,25 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 use log::{debug, info, trace, warn};
 
+use crate::common::Error;
+use crate::common::Errors;
 use crate::common::TopicPartition;
-use crate::common::protocol::Errors;
 use crate::common::record::MemoryRecords;
-use crate::common::{Error, requests::fetch_response::records_size};
+use crate::common::requests::FetchResponse;
 use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::internals::completed_fetch::CompletedFetch;
-use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::deserializers::Deserializers;
-use crate::consumer::internals::fetch_buffer::FetchBuffer;
-use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::CompletedFetch;
+use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::Deserializers;
+use crate::consumer::internals::FetchBuffer;
+use crate::consumer::internals::FetchConfig;
 #[cfg(test)]
-use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
-use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
-use crate::consumer::internals::fetch_utils::request_metadata_update;
-use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+use crate::consumer::internals::FetchMetricsAggregator;
+use crate::consumer::internals::FetchMetricsManager;
+use crate::consumer::internals::FetchUtils;
+use crate::consumer::internals::{FetchPosition, SubscriptionState};
 use crate::fetch_response_data::PartitionData;
 
 /// Time source used by `FetchCollector` for the preferred-read-replica
@@ -262,7 +263,7 @@ where
                     // pushing back on the "leave" path.
                     let completed_fetch = fetch_buffer.poll().expect("non-empty checked above");
                     // Snapshot records size BEFORE moving cf into initialize.
-                    let records_size_bytes = records_size(&completed_fetch.partition_data);
+                    let records_size_bytes = FetchResponse::records_size(&completed_fetch.partition_data);
 
                     match self.initialize(completed_fetch) {
                         Ok(maybe_initialized) => {
@@ -420,7 +421,7 @@ where
             return Err(e);
         }
 
-        Ok(ConsumerRecords::new_with_position_advanced(
+        Ok(ConsumerRecords::with_position_advanced(
             records_by_partition,
             next_offsets,
             position_advanced,
@@ -608,10 +609,11 @@ where
                     self.metrics_manager.record_partition_lead(&tp, lead);
                 }
 
-                let metadata = match OffsetAndMetadata::with_leader_epoch(cf.next_fetch_offset(), cf.last_epoch(), "") {
-                    Ok(m) => m,
-                    Err(e) => return Err(Box::new((cf, e))),
-                };
+                let metadata =
+                    match OffsetAndMetadata::with_leader_epoch_metadata(cf.next_fetch_offset(), cf.last_epoch(), "") {
+                        Ok(m) => m,
+                        Err(e) => return Err(Box::new((cf, e))),
+                    };
 
                 Ok(FetchPartitionOutcome {
                     partition_records: part_records,
@@ -732,7 +734,7 @@ where
         let partition = &completed_fetch.partition_data;
         trace!(
             "Preparing to read {} bytes of data for partition {tp} with offset {fetch_offset}",
-            records_size(partition)
+            FetchResponse::records_size(partition)
         );
 
         // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
@@ -753,11 +755,11 @@ where
         // folded into "no batch" — that would relabel a retriable
         // `CORRUPT_MESSAGE` as a non-retriable bare `KafkaException` whose message
         // misdescribes the fault.
-        let records_size_bytes = records_size(partition);
+        let records_size_bytes = FetchResponse::records_size(partition);
         if records_size_bytes > 0 {
             // Java's `FetchResponse.recordsOrFail(partition)`, with the same
             // absent-buffer-means-empty contract as
-            // `fetch_response::records_or_fail`. Cloned rather than borrowed
+            // `fetch_response::FetchResponse::records_or_fail`. Cloned rather than borrowed
             // because `partition.records` is already a refcounted
             // `bytes::Bytes` slice of the FetchResponse payload (§27), so the
             // clone is a refcount bump — where going through the `&[u8]` form
@@ -768,7 +770,7 @@ where
             match records.has_complete_first_batch() {
                 Ok(true) => {},
                 Ok(false) => {
-                    let error = Error::kafka(format!(
+                    let error = Error::kafka_message(format!(
                         "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
                          fetch response from the server, but no complete records were found."
                     ));
@@ -816,7 +818,7 @@ where
         }
 
         // Java: FetchResponse.isPreferredReplica(partitionData).
-        if preferred_read_replica != crate::common::requests::fetch_response::INVALID_PREFERRED_REPLICA_ID {
+        if preferred_read_replica != crate::common::requests::FetchResponse::INVALID_PREFERRED_REPLICA_ID {
             let expire_time_ms = self.time.milliseconds() + self.metadata.metadata_arc().metadata_expire_ms();
             debug!(
                 "Updating preferred read replica for partition {tp} to {preferred_read_replica}, set to expire at {expire_time_ms}"
@@ -846,22 +848,22 @@ where
             | Errors::FencedLeaderEpoch
             | Errors::OffsetNotAvailable => {
                 debug!("Error in fetch for partition {tp}: {:?}", error);
-                request_metadata_update(&self.metadata, &self.subscriptions, &tp);
+                FetchUtils::request_metadata_update(&self.metadata, &self.subscriptions, &tp);
                 Ok(completed_fetch)
             },
             Errors::UnknownTopicOrPartition => {
                 warn!("Received unknown topic or partition error in fetch for partition {tp}");
-                request_metadata_update(&self.metadata, &self.subscriptions, &tp);
+                FetchUtils::request_metadata_update(&self.metadata, &self.subscriptions, &tp);
                 Ok(completed_fetch)
             },
             Errors::UnknownTopicId => {
                 warn!("Received unknown topic ID error in fetch for partition {tp}");
-                request_metadata_update(&self.metadata, &self.subscriptions, &tp);
+                FetchUtils::request_metadata_update(&self.metadata, &self.subscriptions, &tp);
                 Ok(completed_fetch)
             },
             Errors::InconsistentTopicId => {
                 warn!("Received inconsistent topic ID error in fetch for partition {tp}");
-                request_metadata_update(&self.metadata, &self.subscriptions, &tp);
+                FetchUtils::request_metadata_update(&self.metadata, &self.subscriptions, &tp);
                 Ok(completed_fetch)
             },
             Errors::OffsetOutOfRange => self.handle_offset_out_of_range(completed_fetch, fetch_offset),
@@ -887,7 +889,7 @@ where
             // to that retriable class and invert the decision.
             Errors::CorruptMessage => Err(Box::new((
                 completed_fetch,
-                Error::kafka(format!(
+                Error::kafka_message(format!(
                     "Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"
                 )),
             ))),
@@ -991,9 +993,9 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord, abstract_records};
+    use crate::common::record::internal::{AbstractRecords, MemoryRecords, RecordBatch, SimpleRecord};
     use crate::common::serialization::Deserializer;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::fetch_response_data::PartitionData;
     use crate::metadata::LeaderAndEpoch;
     use std::collections::HashSet;
@@ -1038,15 +1040,14 @@ mod tests {
     fn make_records(starting_offset: i64, count: i32) -> Vec<u8> {
         let records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
-                SimpleRecord::new(
+                SimpleRecord::with_timestamp_key_value(
                     0,
                     Some("key".as_bytes().to_vec()),
                     Some(format!("value-{i}").into_bytes()),
-                    vec![],
                 )
             })
             .collect();
-        let mr = MemoryRecords::with_records_at_offset(
+        let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
             Compression::none(),
@@ -1119,9 +1120,9 @@ mod tests {
             partition_data.set_error_code(e.code());
         }
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -1156,7 +1157,7 @@ mod tests {
         assert!(!fetch.is_empty());
         assert_eq!(record_count as usize, fetch.count());
         assert_eq!(1, fetch.next_offsets().len());
-        let expected_meta = OffsetAndMetadata::with_leader_epoch(record_count as i64, None, "").unwrap();
+        let expected_meta = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, None, "").unwrap();
         assert_eq!(&expected_meta, fetch.next_offsets().get(&partition).unwrap());
 
         // Buffer queue empty, next-in-line still has the cf.
@@ -1497,9 +1498,9 @@ mod tests {
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
         }
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -1674,7 +1675,7 @@ mod tests {
         let corruption_errors = [
             // `maybeEnsureValid(batch)` / decompression — a *bare* KafkaException,
             // which is a sibling of `ApiException`, not a subclass.
-            Error::kafka("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
+            Error::kafka_message("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
             // premature EOF / records remaining / invalid headers — InvalidRecordException.
             Error::InvalidRecord(crate::common::InvalidRecordError::new(
                 "Incorrect declared batch size for partition topic-a-1, premature EOF reached",
@@ -1903,21 +1904,45 @@ mod tests {
     fn txn_data_batch(base_offset: i64, count: i32, producer_id: i64, plep: i32) -> Vec<u8> {
         use crate::common::compress::Compression;
         use crate::common::record::TimestampType;
-        use crate::common::record::internal::{MemoryRecords, RecordBatch};
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,          // log_append_time
-            producer_id, // producer_id
-            0,           // producer_epoch
-            0,           // base_sequence
-            true,        // is_transactional
-            false,       // is_control_batch
-            plep,        // partition_leader_epoch
-            512,
+        use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch};
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(
+                    // log_append_time
+                    producer_id,
+                )
+                .set_producer_epoch(
+                    // producer_id
+                    0,
+                )
+                .set_base_sequence(
+                    // producer_epoch
+                    0,
+                )
+                .set_is_transactional(
+                    // base_sequence
+                    true,
+                )
+                .set_is_control_batch(
+                    // is_transactional
+                    false,
+                )
+                .set_partition_leader_epoch(
+                    // is_control_batch
+                    plep,
+                )
+                .set_write_limit(
+                    // partition_leader_epoch
+                    512,
+                )
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for i in 0..count {
             let offset = base_offset + i as i64;
@@ -1947,9 +1972,9 @@ mod tests {
         partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         partition_data.set_aborted_transactions(Some(vec![txn]));
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2011,7 +2036,7 @@ mod tests {
         );
         assert_eq!(0, fetch.count(), "all records aborted ⇒ zero records");
         assert_eq!(1, fetch.next_offsets().len());
-        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(&expected, fetch.next_offsets().get(&partition).unwrap());
 
         // Second CompletedFetch: a committed (non-aborted) transactional data
@@ -2038,7 +2063,7 @@ mod tests {
         assert_eq!(record_count as usize, fetch.count(), "committed data records returned");
         assert_eq!(1, fetch.next_offsets().len());
         let expected2 =
-            OffsetAndMetadata::with_leader_epoch((start_offset + record_count) as i64, Some(0), "").unwrap();
+            OffsetAndMetadata::with_leader_epoch_metadata((start_offset + record_count) as i64, Some(0), "").unwrap();
         assert_eq!(&expected2, fetch.next_offsets().get(&partition).unwrap());
     }
 
@@ -2132,7 +2157,7 @@ mod tests {
     // per-record `DefaultRecord` clones, NO `tokio::spawn`.
     //
     // The test wraps `collect_fetch` in a thread-local
-    // [`crate::test_alloc_tracker::AllocTrackingGuard`] and asserts
+    // [`crate::AllocTrackingGuard`] and asserts
     // that the per-record allocation count is bounded by the
     // user-deserializer budget. Specifically:
     //
@@ -2144,7 +2169,7 @@ mod tests {
     //     the `Vec<u8>` it owns came from `to_vec` above; counted)
     //   - 1 × `Vec<u8>::to_vec` for value
     //   - 1 × `String::from_utf8` for value
-    //   - 1 × `RecordHeaders::from_slice` (Vec backing the headers list,
+    //   - 1 × `RecordHeaders::with_header_iter` (Vec backing the headers list,
     //     which may or may not allocate depending on input size)
     //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
     //     (amortized; only counts on grow)
@@ -2228,12 +2253,12 @@ mod tests {
         let alloc_count;
         let fetch_count;
         {
-            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            let _guard = crate::AllocTrackingGuard::new();
             // Reset just before the measured call to drop any setup
             // allocations that happened inside `new()`.
-            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            crate::AllocTrackingGuard::reset();
             let fetch = collector.collect_fetch(&h.fetch_buffer).unwrap();
-            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            alloc_count = crate::AllocTrackingGuard::count();
             fetch_count = fetch.count();
         }
 
@@ -2324,10 +2349,10 @@ mod tests {
         let alloc_count;
         let fetch_count;
         {
-            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
-            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
             let fetch = collector.collect_fetch(&h.fetch_buffer).unwrap();
-            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            alloc_count = crate::AllocTrackingGuard::count();
             fetch_count = fetch.count();
         }
 
@@ -2417,7 +2442,7 @@ mod tests {
         assert_eq!(0, fetch.count(), "the aborted batch yields no records");
         assert!(!fetch.is_fetch_empty(), "Fetch.isEmpty() must be false — the position advanced");
         // The position progress the swallow exists to preserve.
-        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(Some(&expected), fetch.next_offsets().get(&advancing));
         // And the entry Java's first condition keeps queued, so the next poll
         // reconsiders it instead of losing it.
@@ -2470,9 +2495,9 @@ mod tests {
         partition_data.set_high_watermark(1000);
         partition_data.set_records(Some(bytes::Bytes::from(records)));
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2503,7 +2528,7 @@ mod tests {
         // A well-formed single-record batch, then cut short. The header (and
         // therefore the declared batch length) survives; the body does not.
         let full = make_records(0, 1);
-        assert!(full.len() > abstract_records::HEADER_SIZE_UP_TO_MAGIC);
+        assert!(full.len() > AbstractRecords::HEADER_SIZE_UP_TO_MAGIC);
         let truncated = full[..full.len() - 1].to_vec();
         // Precondition: the header still validates, so this really is the
         // `nextBatchSize() != null && remaining < batchSize` case.
@@ -2528,7 +2553,7 @@ mod tests {
     /// "Failed to make progress" `KafkaException`.
     #[test]
     fn test_initialize_header_absent_fails_to_make_progress() {
-        let err = collect_with_raw_records(vec![0u8; abstract_records::LOG_OVERHEAD - 1]);
+        let err = collect_with_raw_records(vec![0u8; AbstractRecords::LOG_OVERHEAD - 1]);
         assert_eq!(
             err.message(),
             "Failed to make progress reading messages at topic-a-0=0. Received a non-empty fetch \
@@ -2545,7 +2570,7 @@ mod tests {
     /// corruption into a permanent failure and misdescribe the fault.
     #[test]
     fn test_initialize_corrupt_batch_size_propagates_corrupt_record_error() {
-        let mut buf = vec![0u8; abstract_records::LOG_OVERHEAD];
+        let mut buf = vec![0u8; AbstractRecords::LOG_OVERHEAD];
         // Length field (`RecordBatch::LENGTH_OFFSET`) = 3, below the 14-byte
         // minimum record overhead.
         buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3i32.to_be_bytes());
@@ -2560,7 +2585,7 @@ mod tests {
     /// (`ByteBufferLogInputStream.java:83-84`).
     #[test]
     fn test_initialize_corrupt_magic_propagates_corrupt_record_error() {
-        let mut buf = vec![0u8; abstract_records::HEADER_SIZE_UP_TO_MAGIC];
+        let mut buf = vec![0u8; AbstractRecords::HEADER_SIZE_UP_TO_MAGIC];
         buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&64i32.to_be_bytes());
         buf[RecordBatch::MAGIC_OFFSET] = 99;
 
@@ -2592,7 +2617,7 @@ mod tests {
     /// that did return data.
     #[test]
     fn test_discarded_fetch_records_zero_so_the_response_metrics_publish() {
-        use crate::common::metric::Metric;
+        use crate::common::Metric;
         use crate::common::metrics::MetricValue;
 
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
@@ -2620,9 +2645,9 @@ mod tests {
             partition_data.set_partition_index(partition.partition());
             partition_data.set_high_watermark(1000);
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
-            CompletedFetch::new_full(
+            CompletedFetch::with_full(
                 h.subs.clone(),
-                Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+                Arc::new(crate::common::memory::BufferSupplier::create()),
                 partition,
                 partition_data,
                 Arc::clone(&aggregator),
@@ -2638,7 +2663,9 @@ mod tests {
         let fetch = h.collector.collect_fetch(&h.fetch_buffer).expect("collect");
         assert_eq!(3, fetch.count(), "only the non-stale partition contributes records");
 
-        let records_total = metrics.metric_instance(&registry.records_consumed_total, &[]).unwrap();
+        let records_total = metrics
+            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .unwrap();
         assert_eq!(
             MetricValue::Double(3.0),
             metrics.metric(&records_total).unwrap().metric_value(),

@@ -29,12 +29,12 @@ pub struct ApiKeys {
     forwardable: bool,
 }
 
-// Versions 0-2 were removed in Apache Kafka 4.0, version 3 is the new baseline.
-// Due to a bug in librdkafka, version `0` has to be included in the api versions response
-// (see KAFKA-18659).
-pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
-
 impl ApiKeys {
+    // Versions 0-2 were removed in Apache Kafka 4.0, version 3 is the new baseline.
+    // Due to a bug in librdkafka, version `0` has to be included in the api versions response
+    // (see KAFKA-18659).
+    pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
+
     const fn new(message_type: ApiMessageType) -> Self {
         Self { message_type, cluster_action: false, forwardable: false }
     }
@@ -276,7 +276,7 @@ impl ApiKeys {
     }
 
     /// The latest supported version, with optional control over unstable versions.
-    pub fn latest_version_with_unstable(&self, enable_unstable_last_version: bool) -> i16 {
+    pub fn latest_version_enable_unstable_last_version(&self, enable_unstable_last_version: bool) -> i16 {
         self.message_type.highest_supported_version(enable_unstable_last_version)
     }
 
@@ -299,7 +299,7 @@ impl ApiKeys {
             return true;
         }
         api_version >= self.oldest_version()
-            && api_version <= self.latest_version_with_unstable(enable_unstable_last_version)
+            && api_version <= self.latest_version_enable_unstable_last_version(enable_unstable_last_version)
     }
 
     /// Whether the given version is deprecated.
@@ -358,11 +358,11 @@ impl ApiKeys {
     ) -> Option<ApiVersion> {
         // See `PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
         let oldest_version = if self == Self::PRODUCE && (listener_type == Some(ListenerType::Broker)) {
-            PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
+            ApiKeys::PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
         } else {
             self.oldest_version()
         };
-        let latest_version = self.latest_version_with_unstable(enable_unstable_last_version);
+        let latest_version = self.latest_version_enable_unstable_last_version(enable_unstable_last_version);
 
         // API is entirely disabled if latestStableVersion is smaller than oldestVersion.
         if latest_version >= oldest_version {

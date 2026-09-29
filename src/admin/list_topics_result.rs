@@ -56,7 +56,7 @@ impl ListTopicsResult {
 mod tests {
     use super::*;
     use crate::common::Uuid;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn names_listings_and_map() {

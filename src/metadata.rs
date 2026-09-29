@@ -36,19 +36,19 @@ use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 use crate::common::Cluster;
 use crate::common::ClusterResource;
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::protocol::Errors;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 
+use super::CommonClientConfigs;
 use super::MetadataSnapshot;
-use super::common_client_configs;
 
 /// Type alias for the retain topic function used to override topic retention behavior.
 ///
@@ -329,9 +329,9 @@ impl Metadata {
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
-            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            CommonClientConfigs::RETRY_BACKOFF_EXP_BASE,
             refresh_backoff_max_ms,
-            common_client_configs::RETRY_BACKOFF_JITTER,
+            CommonClientConfigs::RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
 
@@ -392,9 +392,9 @@ impl Metadata {
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
-            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            CommonClientConfigs::RETRY_BACKOFF_EXP_BASE,
             refresh_backoff_max_ms,
-            common_client_configs::RETRY_BACKOFF_JITTER,
+            CommonClientConfigs::RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
 
@@ -1395,7 +1395,7 @@ impl Metadata {
     /// relabel it as `"Producer closed while send in progress"`.
     fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
         if inner.is_closed {
-            return Err(Error::kafka("Requested metadata update after close"));
+            return Err(Error::kafka_message("Requested metadata update after close"));
         }
         Ok(())
     }
@@ -1618,7 +1618,7 @@ mod tests {
     use crate::common::ApiKeys;
     use crate::common::ClusterResourceListener;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::common::requests::request_test_utils;
+    use crate::common::requests::RequestTestUtils;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     fn empty_metadata_response() -> MetadataResponse {
-        request_test_utils::metadata_response(&[], None, -1, Vec::new())
+        RequestTestUtils::metadata_response(&[], None, -1, Vec::new())
     }
 
     /// Translated from `MetadataTest.testMetadataUpdateAfterClose`.
@@ -1727,9 +1727,9 @@ mod tests {
 
         // Backing off. Remaining time until next try should be returned.
         let lower_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 - super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+            (REFRESH_BACKOFF_MS as f64 * (1.0 - CommonClientConfigs::RETRY_BACKOFF_JITTER)) as i64;
         let upper_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 + super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+            (REFRESH_BACKOFF_MS as f64 * (1.0 + CommonClientConfigs::RETRY_BACKOFF_JITTER)) as i64;
         let tolerance = upper_bound_backoff_ms - lower_bound_backoff_ms;
         let actual = metadata.time_to_next_update(now);
         assert!(
@@ -1768,9 +1768,9 @@ mod tests {
         metadata.failed_update(1100);
 
         let lower_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 - super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+            (REFRESH_BACKOFF_MS as f64 * (1.0 - CommonClientConfigs::RETRY_BACKOFF_JITTER)) as i64;
         let upper_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 + super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+            (REFRESH_BACKOFF_MS as f64 * (1.0 + CommonClientConfigs::RETRY_BACKOFF_JITTER)) as i64;
         let tolerance = upper_bound_backoff_ms - lower_bound_backoff_ms;
 
         let actual = metadata.time_to_next_update(1100);
@@ -1828,13 +1828,10 @@ mod tests {
         let mut partition_counts = HashMap::new();
         partition_counts.insert("topic".to_string(), 1);
         partition_counts.insert("topic1".to_string(), 1);
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
-            "dummy",
-            1,
-            &HashMap::new(),
-            &partition_counts,
-            &|_tp| None,
-        );
+        let metadata_response =
+            RequestTestUtils::metadata_update_with_cluster_id("dummy", 1, &HashMap::new(), &partition_counts, &|_tp| {
+                None
+            });
         metadata.update_with_current_request_version(&metadata_response, false, 100);
 
         let stored_id = cluster_id_holder.lock().unwrap().clone();
@@ -1859,7 +1856,7 @@ mod tests {
         let update_result = [true, false, false, false, false, true, false, false, false, true];
         let tp = TopicPartition::new("topic".to_string(), 0);
 
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
+        let metadata_response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -1899,7 +1896,7 @@ mod tests {
         assert!(metadata.last_seen_leader_epoch(&tp).is_none());
 
         // Metadata with newer epoch is handled
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
+        let metadata_response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -1921,7 +1918,7 @@ mod tests {
         assert!(metadata.update_last_seen_epoch_if_newer(&tp, 12).unwrap());
         assert_eq!(Some(12), metadata.last_seen_leader_epoch(&tp));
 
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
+        let metadata_response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -1932,7 +1929,7 @@ mod tests {
         assert_eq!(Some(12), metadata.last_seen_leader_epoch(&tp));
 
         // Don't overwrite metadata with older epoch
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
+        let metadata_response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -1953,7 +1950,7 @@ mod tests {
 
         // Start with a topic with a random topic ID
         let topic_ids: HashMap<String, Uuid> = [("topic-1".to_string(), Uuid::random_uuid())].into_iter().collect();
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -1965,7 +1962,7 @@ mod tests {
         assert_eq!(Some(10), metadata.last_seen_leader_epoch(&tp));
 
         // Topic deleted so Response contains an Error. LeaderEpoch should maintain old value
-        let response = request_test_utils::metadata_update_with_cluster_id(
+        let response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &[("topic-1".to_string(), Errors::UnknownTopicOrPartition)].into_iter().collect(),
@@ -1977,7 +1974,7 @@ mod tests {
 
         // Create topic-1 again with a different topic ID. LeaderEpoch should update even if lower.
         let new_topic_ids: HashMap<String, Uuid> = [("topic-1".to_string(), Uuid::random_uuid())].into_iter().collect();
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -1999,7 +1996,7 @@ mod tests {
         metadata.update_with_current_request_version(&empty_metadata_response(), false, 0);
 
         // Start with a topic with no topic ID
-        let response = request_test_utils::metadata_update_with_cluster_id(
+        let response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -2010,7 +2007,7 @@ mod tests {
         assert_eq!(Some(100), metadata.last_seen_leader_epoch(&tp));
 
         // If the older topic ID is null, we should go with the new topic ID
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -2022,7 +2019,7 @@ mod tests {
         assert_eq!(Some(10), metadata.last_seen_leader_epoch(&tp));
 
         // Don't cause update if it's the same one
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -2034,7 +2031,7 @@ mod tests {
         assert_eq!(Some(10), metadata.last_seen_leader_epoch(&tp));
 
         // Update if we see newer epoch
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -2047,7 +2044,7 @@ mod tests {
 
         // We should also update if we see a new topicId even if the epoch is lower
         let new_topic_ids: HashMap<String, Uuid> = [("topic-1".to_string(), Uuid::random_uuid())].into_iter().collect();
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -2061,7 +2058,7 @@ mod tests {
         // Update when the topic ID is new and the epoch is higher
         let new_topic_ids2: HashMap<String, Uuid> =
             [("topic-1".to_string(), Uuid::random_uuid())].into_iter().collect();
-        let response = request_test_utils::metadata_update_with_ids(
+        let response = RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -2084,7 +2081,7 @@ mod tests {
 
         // First epoch seen, accept it
         {
-            let response = request_test_utils::metadata_update_with_cluster_id(
+            let response = RequestTestUtils::metadata_update_with_cluster_id(
                 "dummy",
                 1,
                 &HashMap::new(),
@@ -2099,7 +2096,7 @@ mod tests {
 
         // Fake an empty ISR, but with an older epoch, should reject it
         {
-            let response = request_test_utils::metadata_update_with_full(
+            let response = RequestTestUtils::metadata_update_with_full(
                 "dummy",
                 1,
                 &HashMap::new(),
@@ -2124,7 +2121,7 @@ mod tests {
 
         // Fake an empty ISR, with same epoch, accept it
         {
-            let response = request_test_utils::metadata_update_with_full(
+            let response = RequestTestUtils::metadata_update_with_full(
                 "dummy",
                 1,
                 &HashMap::new(),
@@ -2149,7 +2146,7 @@ mod tests {
 
         // Empty metadata response, should not keep old partition but should keep the last-seen epoch
         {
-            let response = request_test_utils::metadata_update_with_cluster_id(
+            let response = RequestTestUtils::metadata_update_with_cluster_id(
                 "dummy",
                 1,
                 &HashMap::new(),
@@ -2163,7 +2160,7 @@ mod tests {
 
         // Back in the metadata, with old epoch, should not get added
         {
-            let response = request_test_utils::metadata_update_with_cluster_id(
+            let response = RequestTestUtils::metadata_update_with_cluster_id(
                 "dummy",
                 1,
                 &HashMap::new(),
@@ -2182,7 +2179,7 @@ mod tests {
         let metadata = new_metadata();
         metadata.update_with_current_request_version(&empty_metadata_response(), false, 0);
 
-        let response = request_test_utils::metadata_update_with_cluster_id(
+        let response = RequestTestUtils::metadata_update_with_cluster_id(
             "dummy",
             1,
             &HashMap::new(),
@@ -2217,12 +2214,12 @@ mod tests {
         let mut errors = HashMap::new();
         counts.insert("topic1".to_string(), 2);
         counts.insert("topic2".to_string(), 3);
-        counts.insert(crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME.to_string(), 3);
+        counts.insert(crate::common::internals::Topic::GROUP_METADATA_TOPIC_NAME.to_string(), 3);
         errors.insert("topic3".to_string(), Errors::InvalidTopicError);
         errors.insert("topic4".to_string(), Errors::TopicAuthorizationFailed);
 
         let metadata_response =
-            request_test_utils::metadata_update_with_cluster_id("dummy", 4, &errors, &counts, &|_tp| None);
+            RequestTestUtils::metadata_update_with_cluster_id("dummy", 4, &errors, &counts, &|_tp| None);
         metadata.update_with_current_request_version(&metadata_response, false, 0);
 
         let cluster = metadata.fetch();
@@ -2240,7 +2237,7 @@ mod tests {
         );
         assert_eq!(3, cluster.topics().count());
         assert_eq!(
-            &[crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME.to_string()]
+            &[crate::common::internals::Topic::GROUP_METADATA_TOPIC_NAME.to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
             cluster.internal_topics()
@@ -2271,7 +2268,7 @@ mod tests {
         let now: i64 = 10000;
 
         let invalid_topic = "topic dfsa";
-        let invalid_topic_response = request_test_utils::metadata_update_with_cluster_id(
+        let invalid_topic_response = RequestTestUtils::metadata_update_with_cluster_id(
             "clusterId",
             1,
             &[(invalid_topic.to_string(), Errors::InvalidTopicError)].into_iter().collect(),
@@ -2309,7 +2306,7 @@ mod tests {
         let now: i64 = 10000;
 
         let unauthorized_topic = "foo";
-        let unauthorized_response = request_test_utils::metadata_update_with_cluster_id(
+        let unauthorized_response = RequestTestUtils::metadata_update_with_cluster_id(
             "clusterId",
             1,
             &[(unauthorized_topic.to_string(), Errors::TopicAuthorizationFailed)]
@@ -2352,13 +2349,10 @@ mod tests {
         topic_errors.insert("invalidTopic".to_string(), Errors::InvalidTopicError);
         topic_errors.insert("sensitiveTopic1".to_string(), Errors::TopicAuthorizationFailed);
         topic_errors.insert("sensitiveTopic2".to_string(), Errors::TopicAuthorizationFailed);
-        let metadata_response = request_test_utils::metadata_update_with_cluster_id(
-            "clusterId",
-            1,
-            &topic_errors,
-            &HashMap::new(),
-            &|_tp| None,
-        );
+        let metadata_response =
+            RequestTestUtils::metadata_update_with_cluster_id("clusterId", 1, &topic_errors, &HashMap::new(), &|_tp| {
+                None
+            });
 
         metadata.update_with_current_request_version(&metadata_response, false, now);
         let err = metadata.maybe_return_error_for_topic("sensitiveTopic1").unwrap_err();
@@ -2421,13 +2415,10 @@ mod tests {
         assert!(!metadata.update_last_seen_epoch_if_newer(&tp, 99).unwrap());
 
         // Update epoch to 100
-        let response = request_test_utils::metadata_update_with_cluster_id(
-            "dummy",
-            1,
-            &HashMap::new(),
-            &partition_counts,
-            &|_tp| Some(100),
-        );
+        let response =
+            RequestTestUtils::metadata_update_with_cluster_id("dummy", 1, &HashMap::new(), &partition_counts, &|_tp| {
+                Some(100)
+            });
         metadata.update_with_current_request_version(&response, false, 10);
         assert!(metadata.fetch().partition(&tp).is_some());
         assert_eq!(Some(100), metadata.last_seen_leader_epoch(&tp));
@@ -2449,13 +2440,10 @@ mod tests {
         assert_eq!(Some(101), metadata.last_seen_leader_epoch(&tp));
 
         // Metadata with equal or newer epoch is accepted
-        let response = request_test_utils::metadata_update_with_cluster_id(
-            "dummy",
-            1,
-            &HashMap::new(),
-            &partition_counts,
-            &|_tp| Some(101),
-        );
+        let response =
+            RequestTestUtils::metadata_update_with_cluster_id("dummy", 1, &HashMap::new(), &partition_counts, &|_tp| {
+                Some(101)
+            });
         metadata.update_with_current_request_version(&response, false, 30);
         assert!(metadata.fetch().partition(&tp).is_some());
         assert_eq!(Some(5), metadata.fetch().partition_count_for_topic("topic-1"));
@@ -2473,7 +2461,7 @@ mod tests {
         let v_and_b = metadata.new_metadata_request_and_version(now);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             false,
             now,
         );
@@ -2487,7 +2475,7 @@ mod tests {
         metadata.request_update_for_new_topics();
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             true,
             now,
         );
@@ -2499,7 +2487,7 @@ mod tests {
         let v_and_b = metadata.new_metadata_request_and_version(now);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             true,
             now,
         );
@@ -2515,7 +2503,7 @@ mod tests {
         let node0 = Node::new(0, "localhost".to_string(), 9092);
         let node1 = Node::new(1, "localhost".to_string(), 9093);
 
-        let response = request_test_utils::metadata_update_with_full(
+        let response = RequestTestUtils::metadata_update_with_full(
             "dummy",
             2,
             &HashMap::new(),
@@ -2583,10 +2571,10 @@ mod tests {
             topic_id,
             is_internal: false,
             partition_metadata: vec![partition0, partition1],
-            authorized_operations: crate::common::requests::metadata_response::AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations: MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
         };
 
-        let response = request_test_utils::metadata_response(
+        let response = RequestTestUtils::metadata_response(
             &[node1.clone(), node2],
             Some("clusterId"),
             node1.id(),
@@ -2615,9 +2603,10 @@ mod tests {
     /// progress, so we cannot rely on it.
     #[test]
     fn test_ignore_leader_epoch_in_older_metadata_response() {
-        use crate::common::protocol::Readable;
-        use crate::common::protocol::message_util;
-        use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+        use crate::MetadataResponseData;
+        use crate::common::Readable;
+        use crate::common::protocol::MessageUtil;
+        use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic".to_string(), 0);
@@ -2645,7 +2634,7 @@ mod tests {
 
         // For versions < 9, leader epochs should not be reliable
         for version in ApiKeys::METADATA.oldest_version()..9 {
-            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
+            let mut readable = MessageUtil::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 !response.has_reliable_leader_epochs(),
@@ -2665,7 +2654,7 @@ mod tests {
 
         // For versions >= 9, leader epochs should be reliable
         for version in 9..=ApiKeys::METADATA.latest_version() {
-            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
+            let mut readable = MessageUtil::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 response.has_reliable_leader_epochs(),
@@ -2687,7 +2676,8 @@ mod tests {
     /// Translated from `MetadataTest.testStaleMetadata`.
     #[test]
     fn test_stale_metadata() {
-        use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+        use crate::MetadataResponseData;
+        use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic".to_string(), 0);
@@ -2714,7 +2704,7 @@ mod tests {
         data.set_brokers(Vec::new());
 
         metadata.update_with_current_request_version(
-            &MetadataResponse::new(data.clone(), ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data.clone(), ApiKeys::METADATA.latest_version()),
             false,
             100,
         );
@@ -2732,7 +2722,7 @@ mod tests {
         data.set_topics(vec![topic_metadata]);
 
         metadata.update_with_current_request_version(
-            &MetadataResponse::new(data, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()),
             false,
             101,
         );
@@ -2768,7 +2758,7 @@ mod tests {
         assert!(!v_and_b.is_partial_update);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             false,
             now,
         );
@@ -2780,7 +2770,7 @@ mod tests {
         assert!(v_and_b.is_partial_update);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             true,
             now,
         );
@@ -2793,7 +2783,7 @@ mod tests {
         assert!(!v_and_b.is_partial_update);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             false,
             now,
         );
@@ -2806,7 +2796,7 @@ mod tests {
         assert!(!v_and_b.is_partial_update);
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
             true,
             refresh_time_ms,
         );
@@ -2822,14 +2812,14 @@ mod tests {
         assert!(metadata.update_requested());
         metadata.update(
             v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic-1".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic-1".to_string(), 1)].into_iter().collect()),
             true,
             now,
         );
         assert!(metadata.update_requested());
         metadata.update(
             overlapping_v_and_b.request_version,
-            &request_test_utils::metadata_update_with(1, &[("topic-2".to_string(), 1)].into_iter().collect()),
+            &RequestTestUtils::metadata_update_with(1, &[("topic-2".to_string(), 1)].into_iter().collect()),
             true,
             now,
         );
@@ -2844,7 +2834,7 @@ mod tests {
         partition_counts.insert("topic-1".to_string(), 1);
         let node0 = Node::new(0, "localhost".to_string(), 9092);
 
-        let response = request_test_utils::metadata_update_with_full(
+        let response = RequestTestUtils::metadata_update_with_full(
             "dummy",
             2,
             &HashMap::new(),
@@ -2875,7 +2865,7 @@ mod tests {
     #[test]
     fn test_node_if_online_non_existent_topic_partition() {
         let metadata = new_metadata();
-        let metadata_response = request_test_utils::metadata_update_with(2, &HashMap::new());
+        let metadata_response = RequestTestUtils::metadata_update_with(2, &HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
 
         let tp = TopicPartition::new("topic-1".to_string(), 0);
@@ -2892,9 +2882,8 @@ mod tests {
     /// is elected leader. The client sees these two events in the opposite order.
     #[test]
     fn test_leader_metadata_inconsistent_with_broker_metadata() {
-        use crate::metadata_response_data::{
-            MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
-        };
+        use crate::MetadataResponseData;
+        use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic".to_string(), 0);
@@ -2951,7 +2940,7 @@ mod tests {
         data1.set_topics(build_topic_collection(tp.topic(), first_partition_metadata));
         data1.set_brokers(build_broker_collection(&[&node0, &node1, &node2]));
         metadata.update_with_current_request_version(
-            &MetadataResponse::new(data1, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data1, ApiKeys::METADATA.latest_version()),
             false,
             10,
         );
@@ -2960,7 +2949,7 @@ mod tests {
         data2.set_topics(build_topic_collection(tp.topic(), second_partition_metadata));
         data2.set_brokers(build_broker_collection(&[&node1, &node2]));
         metadata.update_with_current_request_version(
-            &MetadataResponse::new(data2, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data2, ApiKeys::METADATA.latest_version()),
             false,
             20,
         );
@@ -3019,7 +3008,7 @@ mod tests {
 
         topic_ids.insert("oldValidTopic".to_string(), Uuid::random_uuid());
         topic_ids.insert("keepValidTopic".to_string(), Uuid::random_uuid());
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             old_cluster_id,
             old_nodes,
             &old_topic_errors,
@@ -3092,7 +3081,7 @@ mod tests {
         .collect();
 
         topic_ids.insert("newValidTopic".to_string(), Uuid::random_uuid());
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             new_cluster_id,
             new_nodes,
             &new_topic_errors,
@@ -3146,7 +3135,7 @@ mod tests {
         // Perform another metadata update, but this time all topic metadata should be cleared.
         *retain_topics.lock().unwrap() = HashSet::new();
 
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             new_cluster_id,
             new_nodes,
             &new_topic_errors,
@@ -3207,7 +3196,7 @@ mod tests {
 
         topic_ids.insert("validTopic1".to_string(), Uuid::random_uuid());
         topic_ids.insert("validTopic2".to_string(), Uuid::random_uuid());
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             cluster_id,
             nodes,
             &HashMap::new(),
@@ -3229,7 +3218,7 @@ mod tests {
         // Try removing the topic ID from validTopic1 (simulating receiving a request
         // from a controller with an older IBP)
         topic_ids.remove("validTopic1");
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             cluster_id,
             nodes,
             &HashMap::new(),
@@ -3293,7 +3282,7 @@ mod tests {
         topic_ids.insert(topic1.to_string(), Uuid::random_uuid());
         topic_ids.insert(topic2.to_string(), Uuid::random_uuid());
         let old_leader_epoch = 100;
-        let metadata_response = request_test_utils::metadata_update_with_ids(
+        let metadata_response = RequestTestUtils::metadata_update_with_ids(
             "cluster",
             old_node_count,
             &HashMap::new(),
@@ -3337,7 +3326,7 @@ mod tests {
                     let mut new_topic_partition_counts = HashMap::new();
                     new_topic_partition_counts.insert(topic1.to_string(), old_partition_count as i32 + id as i32);
                     new_topic_partition_counts.insert(topic2.to_string(), old_partition_count as i32 + id as i32);
-                    let new_metadata_response = request_test_utils::metadata_update_with_ids(
+                    let new_metadata_response = RequestTestUtils::metadata_update_with_ids(
                         "clusterId",
                         n_nodes,
                         &HashMap::new(),

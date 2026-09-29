@@ -17,26 +17,30 @@
 //! This module provides traits and implementations for reading and writing
 //! Kafka protocol messages to/from byte streams.
 
-pub mod api_keys;
-pub mod byte_buffer_accessor;
-pub mod bytes_reader;
-pub mod errors;
-pub mod message;
-pub mod message_size_accumulator;
-pub mod message_util;
-pub mod object_serialization_cache;
-pub mod readable;
+mod api_keys;
+mod api_message;
+mod byte_buffer_accessor;
+mod bytes_reader;
+mod errors;
+mod message;
+mod message_size_accumulator;
+mod message_util;
+mod object_serialization_cache;
+mod readable;
 pub mod types;
-pub mod varint;
-pub mod writable;
+mod varint;
+mod writable;
 
 pub use api_keys::ApiKeys;
+pub use api_message::ApiMessage;
 pub use byte_buffer_accessor::ByteBufferAccessor;
 pub use bytes_reader::BytesReader;
 pub use errors::Errors;
-pub use message::{ApiMessage, Message};
+pub use message::Message;
 pub use message_size_accumulator::MessageSizeAccumulator;
+pub use message_util::MessageUtil;
 pub use object_serialization_cache::ObjectSerializationCache;
-pub use readable::{RawTaggedField, Readable};
-pub use types::{BoundField, Field, Schema, SchemaType, TaggedField};
+pub use readable::Readable;
+pub use types::{BoundField, Field, RawTaggedField, Schema, SchemaType, TaggedField};
+pub use varint::ByteUtils;
 pub use writable::Writable;

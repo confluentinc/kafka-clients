@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::DescribeConfigsRequestData;
+use crate::DescribeConfigsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_configs_request_data::DescribeConfigsRequestData;
-use crate::describe_configs_response_data::{DescribeConfigsResponseData, DescribeConfigsResult};
+use crate::describe_configs_response_data::DescribeConfigsResult;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeConfigsResponse, RequestBuilder};
 
@@ -115,7 +116,7 @@ pub struct DescribeConfigsRequestBuilder {
 
 impl DescribeConfigsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeConfigsRequestData) -> Self {
+    pub fn new(data: DescribeConfigsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_CONFIGS.oldest_version(),
@@ -184,7 +185,7 @@ mod tests {
         data.set_include_documentation(true);
         let mut request = ConcreteRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeConfigsRequest::parse(&mut readable, 4).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "topic");

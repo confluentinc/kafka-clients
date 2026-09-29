@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeProducersResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_producers_response_data::DescribeProducersResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DescribeProducers response.
 ///
@@ -78,7 +78,7 @@ impl DescribeProducersResponse {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts
@@ -132,7 +132,7 @@ mod tests {
         data.set_throttle_time_ms(7);
         let mut concrete = super::super::ConcreteResponse::DescribeProducers(DescribeProducersResponse::new(data));
         let bytes = concrete.serialize(0).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeProducersResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 7);
     }

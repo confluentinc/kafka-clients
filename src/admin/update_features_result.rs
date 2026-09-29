@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 
-/// The result of the [`update_features`](crate::admin::Admin::update_features)
+/// The result of the [`update_features_with_options`](crate::admin::Admin::update_features_with_options)
 /// call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesResult`.
@@ -55,8 +55,8 @@ impl UpdateFeaturesResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::kafka_future::KafkaFutureImpl;
-    use crate::common::protocol::Errors;
+    use crate::common::Errors;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {

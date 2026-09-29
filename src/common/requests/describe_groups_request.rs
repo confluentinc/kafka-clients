@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::DescribeGroupsRequestData;
+use crate::DescribeGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_groups_request_data::DescribeGroupsRequestData;
-use crate::describe_groups_response_data::{DescribeGroupsResponseData, DescribedGroup};
+use crate::describe_groups_response_data::DescribedGroup;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;

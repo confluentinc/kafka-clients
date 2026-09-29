@@ -121,8 +121,8 @@ impl Metric for KafkaMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::time::mock::MockTime;
     use crate::common::metrics::{ClosureGauge, Stat, SystemTime};
     use std::collections::BTreeMap;
 

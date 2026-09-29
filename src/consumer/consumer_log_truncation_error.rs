@@ -19,7 +19,7 @@ use std::fmt;
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::consumer::OffsetAndMetadata;
 
 /// Log truncation was detected: the broker's log diverges from the offsets the

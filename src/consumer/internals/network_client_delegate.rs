@@ -26,19 +26,19 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
-use crate::client_response::ClientResponse;
-use crate::common::protocol::Errors;
+use crate::ClientResponse;
+use crate::KafkaClient;
+use crate::Metadata;
+use crate::NetworkClientUtils;
+use crate::common::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
-use crate::kafka_client::KafkaClient;
-use crate::metadata::Metadata;
-use crate::network_client_utils;
+use crate::consumer::internals::AsyncConsumerMetrics;
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
 
-/// Result returned from [`super::request_manager::RequestManager::poll`].
+/// Result returned from [`super::RequestManager::poll`].
 ///
 /// Either carries a list of requests to dispatch through the delegate or,
 /// when nothing can be sent yet, the time (in ms) the caller can wait
@@ -65,7 +65,7 @@ pub(crate) struct PollResult {
     /// (ConsumerNetworkThread `runOnce`).
     ///
     /// Currently emitted only by
-    /// [`super::offsets_request_manager::OffsetsRequestManager`] when
+    /// [`super::OffsetsRequestManager`] when
     /// `NodeApiVersions` are missing for a broker scheduled to receive an
     /// `OffsetsForLeaderEpoch` request.
     pub try_connect: Vec<Node>,
@@ -80,13 +80,13 @@ impl PollResult {
     ///
     /// Java: `PollResult.EMPTY`.
     pub(crate) fn empty() -> Self {
-        Self::from_wait(Self::WAIT_FOREVER)
+        Self::with_time_until_next_poll_ms(Self::WAIT_FOREVER)
     }
 
     /// A result with the given wait time and an empty request list.
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs)`.
-    pub(crate) fn from_wait(time_until_next_poll_ms: i64) -> Self {
+    pub(crate) fn with_time_until_next_poll_ms(time_until_next_poll_ms: i64) -> Self {
         Self { time_until_next_poll_ms, unsent_requests: Vec::new(), try_connect: Vec::new() }
     }
 
@@ -126,7 +126,7 @@ impl fmt::Debug for PollResult {
     }
 }
 
-/// A request enqueued by a [`super::request_manager::RequestManager`] for
+/// A request enqueued by a [`super::RequestManager`] for
 /// the bg task to dispatch through the delegate.
 ///
 /// Java: `NetworkClientDelegate.UnsentRequest`. Carries:
@@ -139,7 +139,7 @@ impl fmt::Debug for PollResult {
 /// - `node` — the target broker. `None` lets the delegate pick the
 ///   `least_loaded_node`.
 /// - `deadline_ms` and `enqueue_time_ms` — set by the delegate on
-///   [`super::network_client_delegate::NetworkClientDelegate::add`] (and
+///   [`super::NetworkClientDelegate::add`] (and
 ///   `add_all`); `-1` means "not yet enqueued".
 pub(crate) struct UnsentRequest {
     /// `Some` while the request is on the unsent queue; consumed
@@ -151,7 +151,7 @@ pub(crate) struct UnsentRequest {
     /// (after dispatching the request) to learn when the response or
     /// failure arrives. `Option<...>` so that callers wiring up a
     /// `whenComplete`-equivalent can `take()` it (Phase 6 (6/7) does this
-    /// inside [`super::coordinator_request_manager::CoordinatorRequestManager`]).
+    /// inside [`super::CoordinatorRequestManager`]).
     response_rx: Option<oneshot::Receiver<Result<ClientResponse, Error>>>,
     node: Option<Node>,
     /// Absolute wall-clock millisecond deadline at which the request
@@ -159,7 +159,7 @@ pub(crate) struct UnsentRequest {
     /// `-1` if not yet enqueued (Java leaves the `Timer` null in this case).
     deadline_ms: i64,
     /// Time when the request was enqueued, for metric collection. `-1`
-    /// before [`super::network_client_delegate::NetworkClientDelegate::add`]
+    /// before [`super::NetworkClientDelegate::add`]
     /// sets it (Phase 6 (5/7)).
     enqueue_time_ms: i64,
 }
@@ -170,7 +170,7 @@ impl UnsentRequest {
     ///
     /// Java: `new UnsentRequest(AbstractRequest.Builder<?>, Optional<Node>)`.
     pub(crate) fn new(request_builder: Box<dyn RequestBuilder>, node: Option<Node>) -> Self {
-        let (handler, rx) = FutureCompletionHandler::new_with_receiver();
+        let (handler, rx) = FutureCompletionHandler::new();
         Self {
             request_builder: Some(request_builder),
             handler,
@@ -271,7 +271,7 @@ impl fmt::Debug for UnsentRequest {
 
 /// Idempotent completion handle for an [`UnsentRequest`].
 ///
-/// Mirrors Phase 5's [`super::events::completable_event::CompletableEventHandle`]
+/// Mirrors Phase 5's [`super::events::CompletableEventHandle`]
 /// pattern: `Arc<Mutex<Option<oneshot::Sender<...>>>>`. Multiple completion
 /// calls are safe — only the first call wins; subsequent calls are no-ops
 /// (matches Java's `CompletableFuture.complete` / `completeExceptionally`).
@@ -304,7 +304,7 @@ impl FutureCompletionHandler {
     /// results off the receiver; the manager calls `on_complete` /
     /// `on_failure` on the handle. Each `UnsentRequest` owns the
     /// receiver inside `UnsentRequest::new`.
-    pub(crate) fn new_with_receiver() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
+    pub(crate) fn new() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(FutureCompletionInner { sender: Mutex::new(Some(tx)), completion_time_ms: Mutex::new(0) });
         (Self { inner }, rx)
@@ -348,7 +348,7 @@ impl FutureCompletionHandler {
             return;
         }
         if response.was_disconnected() {
-            self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
+            self.on_failure(completion_time_ms, Error::new(crate::common::Errors::NetworkError));
             return;
         }
         if let Some(msg) = response.version_mismatch() {
@@ -387,7 +387,7 @@ impl FutureCompletionHandler {
         let version_mismatch = response.version_mismatch().map(|s| s.to_string());
         let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
-        let owned = ClientResponse::with_timeout(
+        let owned = ClientResponse::with_timed_out(
             request_header,
             None,
             &destination,
@@ -454,7 +454,7 @@ impl fmt::Debug for FutureCompletionHandler {
 /// [`KafkaClient::ready`] and [`KafkaClient::poll`] return `impl Future`,
 /// which makes [`KafkaClient`] non-object-safe. The delegate is therefore
 /// generic over `K: KafkaClient + Send`; the bg task (Phase 10) holds a
-/// concrete `K = NetworkClient<...>` and tests use [`crate::mock_client::MockClient`].
+/// concrete `K = NetworkClient<...>` and tests use [`crate::MockClient`].
 ///
 /// # `async fn poll`
 ///
@@ -549,7 +549,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `isUnavailable(Node)`.
     pub(crate) fn is_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
-        network_client_utils::is_unavailable(&self.client, node, current_time_ms)
+        NetworkClientUtils::is_unavailable(&self.client, node, current_time_ms)
     }
 
     /// Returns an authentication error for the given node, if any.
@@ -571,7 +571,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `tryConnect(Node)`.
     pub(crate) async fn try_connect(&mut self, node: &Node, current_time_ms: i64) {
-        network_client_utils::try_connect(&mut self.client, node, current_time_ms).await;
+        NetworkClientUtils::try_connect(&mut self.client, node, current_time_ms).await;
     }
 
     /// Returns `true` if there is at least one in-flight request or an
@@ -884,13 +884,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::FindCoordinatorRequestData;
+    use crate::MockClient;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::requests::{
         ConcreteResponse, FindCoordinatorRequestBuilder, FindCoordinatorResponse, MetadataRequestBuilder,
         RequestBuilder,
     };
-    use crate::find_coordinator_request_data::FindCoordinatorRequestData;
-    use crate::mock_client::MockClient;
 
     const GROUP_ID: &str = "group";
     const REQUEST_TIMEOUT_MS: i32 = 5_000;
@@ -900,10 +900,10 @@ mod tests {
     }
 
     fn test_config() -> ConsumerConfig {
-        ConsumerConfig::new(vec!["localhost:9092".to_string()])
-            .with_client_id("test-client")
-            .with_group_id(GROUP_ID)
-            .with_request_timeout_ms(REQUEST_TIMEOUT_MS)
+        ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
+            .set_client_id("test-client")
+            .set_group_id(GROUP_ID)
+            .set_request_timeout_ms(REQUEST_TIMEOUT_MS)
     }
 
     /// Helper builder for a `FindCoordinator` `UnsentRequest` targeting
@@ -926,7 +926,7 @@ mod tests {
     ) -> (
         NetworkClientDelegate<MockClient>,
         Arc<Metadata>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let handler = Arc::new(BackgroundEventHandler::new(tx));
@@ -934,7 +934,7 @@ mod tests {
             let time = Arc::clone(&time);
             Arc::new(move || time.load(Ordering::SeqCst))
         };
-        let client = MockClient::new(vec![mock_node()], Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(vec![mock_node()], Arc::clone(&time_provider));
         let metadata = Arc::new(Metadata::new(100, 1_000, 60_000, ClusterResourceListeners::new()));
         let config = test_config();
         let delegate = NetworkClientDelegate::new(&config, client, Arc::clone(&metadata), handler, notify_via_queue);
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn poll_result_from_wait_carries_value() {
-        let res = PollResult::from_wait(500);
+        let res = PollResult::with_time_until_next_poll_ms(500);
         assert_eq!(res.time_until_next_poll_ms, 500);
         assert!(res.unsent_requests.is_empty());
     }
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn future_completion_handler_idempotent_send() {
-        let (handle, rx) = FutureCompletionHandler::new_with_receiver();
+        let (handle, rx) = FutureCompletionHandler::new();
         assert!(!handle.is_done());
 
         handle.on_failure(123, Error::timeout("boom"));
@@ -1141,11 +1141,18 @@ mod tests {
         // Build a synthetic, non-disconnected response carrying a
         // FindCoordinator body. The handler's on_complete pulls
         // `received_time_ms` off the response and stores it.
-        let header =
-            crate::common::requests::RequestHeader::new(&crate::common::protocol::ApiKeys::FIND_COORDINATOR, 0, "", 1)
-                .expect("header ok");
+        let header = crate::common::requests::RequestHeader::with_options(
+            crate::common::requests::RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&crate::common::ApiKeys::FIND_COORDINATOR)
+                .set_request_version(0)
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("header ok");
         let body = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
-        let response = ClientResponse::with_timeout(
+        let response = ClientResponse::with_timed_out(
             header,
             None,
             "0",

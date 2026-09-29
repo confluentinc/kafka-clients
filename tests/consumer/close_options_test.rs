@@ -27,8 +27,8 @@ use confluent_kafka::consumer::{CloseOptions, GroupMembershipOperation};
 /// Translated from `CloseOptionsTest.operationShouldHaveDefaultValue`.
 #[test]
 fn operation_should_have_default_value() {
-    let opts = CloseOptions::timeout(Duration::ZERO);
-    assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::Default);
+    let opts = CloseOptions::new_timeout(Duration::ZERO);
+    assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::Default);
 }
 
 /// Translated from `CloseOptionsTest.timeoutCouldBeNull`.
@@ -40,13 +40,13 @@ fn operation_should_have_default_value() {
 /// `None`.
 #[test]
 fn timeout_could_be_null() {
-    let close_options = CloseOptions::default();
-    assert_eq!(close_options.timeout_value(), None);
+    let close_with_options = CloseOptions::default();
+    assert_eq!(close_with_options.timeout(), None);
 }
 
 /// Translated from `CloseOptionsTest.timeoutShouldBeDefaultEmpty`.
 #[test]
 fn timeout_should_be_default_empty() {
-    let opts = CloseOptions::group_membership_operation(GroupMembershipOperation::Default);
-    assert_eq!(opts.timeout_value(), None);
+    let opts = CloseOptions::new_group_membership_operation(GroupMembershipOperation::Default);
+    assert_eq!(opts.timeout(), None);
 }

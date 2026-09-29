@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use crate::common::metrics::internals::metrics_utils;
+use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::{
     ClosureGauge, Gauge, KafkaMetric, Measurable, MetricConfig, MetricValue, MetricValueProvider, MetricsReporter,
     RecordingLevel, Sensor, SystemTime, Time,
@@ -96,25 +96,185 @@ pub struct Metrics {
     time: Arc<dyn Time>,
 }
 
-impl Metrics {
-    /// Create a metrics repository with a default config, no reporters, and the
-    /// system clock.
+/// The parameters of [`Metrics::sensor_options`].
+///
+/// Java's widest `sensor` overload
+/// (`sensor(String, MetricConfig, long, Sensor.RecordingLevel, Sensor...)`,
+/// `Metrics.java:401`) carries four parameters beyond the overload group's
+/// `{name}` intersection, so CLAUDE.md §2 caps the derived name and makes this
+/// struct the method's *only* parameter — every Java parameter lives here,
+/// `name` included. This struct has no Java counterpart: it exists solely to
+/// satisfy that naming rule (DoD #7).
+///
+/// It is `#[non_exhaustive]`, so build it from [`SensorOptionsBuilder::new`]
+/// and set the fields you need. Every other field's initial value is Java's —
+/// what its narrower `sensor` overloads pass on the caller's behalf. `name` has
+/// no such initial value: Java declares no `sensor` overload that omits it, so
+/// there is no Java-derived default to fall back on, and
+/// [`SensorOptionsBuilder::build`] returns an error if it was not set. `SensorOptions`
+/// itself has deliberately no `Default` for the same reason.
+// No `Debug` — `Sensor` is not `Debug`, and adding it there is out of scope for
+// a naming change. No `Copy` either: `config` is an `Option<Arc<..>>`.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct SensorOptions<'a> {
+    /// Java's `name`, the sensor's unique registry key.
+    pub name: &'a str,
+    /// Java's `config`. Starts as `None`, meaning the registry's own config,
+    /// as in `Metrics.java:325,336,348,360`.
+    pub config: Option<Arc<MetricConfig>>,
+    /// Java's `inactiveSensorExpirationTimeSeconds`. Starts as `i64::MAX`, as
+    /// in `Metrics.java:325,336,348,360,372,386`.
+    pub inactive_sensor_expiration_time_seconds: i64,
+    /// Java's `recordingLevel`. Starts as `INFO`, as in
+    /// `Metrics.java:325,348,372,427`.
+    pub recording_level: RecordingLevel,
+    /// Java's `parents` varargs. Starts empty, as in `Metrics.java:325,336`.
+    pub parents: &'a [Arc<Sensor>],
+}
+
+/// Fluent builder for [`SensorOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set. Like [`SensorOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct SensorOptionsBuilder<'a> {
+    name: Option<&'a str>,
+    config: Option<Arc<MetricConfig>>,
+    inactive_sensor_expiration_time_seconds: i64,
+    recording_level: RecordingLevel,
+    parents: &'a [Arc<Sensor>],
+}
+
+impl<'a> Default for SensorOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> SensorOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
     pub fn new() -> Self {
-        Self::with_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
+        Self {
+            name: None,
+            config: None,
+            inactive_sensor_expiration_time_seconds: i64::MAX,
+            recording_level: RecordingLevel::Info,
+            parents: &[],
+        }
+    }
+
+    /// Sets [`SensorOptions::name`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+    /// Sets [`SensorOptions::config`].
+    pub fn set_config(mut self, config: Option<Arc<MetricConfig>>) -> Self {
+        self.config = config;
+        self
+    }
+    /// Sets [`SensorOptions::inactive_sensor_expiration_time_seconds`].
+    pub fn set_inactive_sensor_expiration_time_seconds(mut self, inactive_sensor_expiration_time_seconds: i64) -> Self {
+        self.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
+        self
+    }
+    /// Sets [`SensorOptions::recording_level`].
+    pub fn set_recording_level(mut self, recording_level: RecordingLevel) -> Self {
+        self.recording_level = recording_level;
+        self
+    }
+    /// Sets [`SensorOptions::parents`].
+    pub fn set_parents(mut self, parents: &'a [Arc<Sensor>]) -> Self {
+        self.parents = parents;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
+    /// set which was not given a setter call. Only presence is checked here;
+    /// semantic validation belongs to the method the options are passed to
+    /// (CLAUDE.md §2).
+    pub fn build(self) -> Result<SensorOptions<'a>, Error> {
+        Ok(SensorOptions {
+            name: self.name.ok_or_else(|| Self::missing("name"))?,
+            config: self.config,
+            inactive_sensor_expiration_time_seconds: self.inactive_sensor_expiration_time_seconds,
+            recording_level: self.recording_level,
+            parents: self.parents,
+        })
+    }
+
+    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// [`Self::build`] found unset.
+    fn missing(parameter: &str) -> Error {
+        Error::local_illegal_argument(format!(
+            "SensorOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
+        ))
+    }
+}
+
+impl Metrics {
+    // Java's `Metrics` constructors (`Metrics.java:85,93,101,111,122,134,145,158`)
+    // have an EMPTY parameter-name intersection, and the no-arg `:85` matches it,
+    // so that one keeps the plain name `new` and every sibling is suffixed with
+    // its full Rust parameter list (CLAUDE.md §2). The two `MetricsContext`
+    // overloads (`:134`, `:158`) are not translated — `MetricsContext` itself is
+    // untranslated.
+    //
+    // `Metrics(defaultConfig, reporters, time, boolean enableExpiration)` (`:145`)
+    // is likewise not translated. Its one distinguishing parameter exists solely to
+    // decide whether the constructor starts a `ScheduledThreadPoolExecutor` running
+    // `ExpireSensorTask` every 30s (`:171-176`); it does not gate whether sensors
+    // *can* expire — Java's own `MetricsTest.testRemoveInactiveMetrics` builds a
+    // `Metrics` through the `enableExpiration = false` path (`:122` passes `false`)
+    // and drives the task by hand. This translation has no scheduler at all: it
+    // exposes the task as `expire_sensors()` (below) for the caller to drive, which
+    // is exactly that Java test's shape. So a Rust `enable_expiration` parameter
+    // would select nothing, and an ignored parameter is a worse contract than an
+    // absent overload.
+
+    /// Create a metrics repository with the supplied default config and clock,
+    /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
+    /// (`:101`).
+    pub fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
+        Self::with_default_config_reporters_time(default_config, Vec::new(), time)
+    }
+
+    /// Create a metrics repository with a default config, no reporters, and the
+    /// system clock. Mirrors Java's `Metrics()` (`Metrics.java:85`).
+    pub fn new() -> Self {
+        Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied default config.
-    pub fn with_config(default_config: Arc<MetricConfig>) -> Self {
-        Self::with_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
+    /// Mirrors Java's `Metrics(MetricConfig defaultConfig)` (`:111`).
+    pub fn with_default_config(default_config: Arc<MetricConfig>) -> Self {
+        Self::with_default_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied clock.
+    /// Mirrors Java's `Metrics(Time time)` (`:93`).
     pub fn with_time(time: Arc<dyn Time>) -> Self {
-        Self::with_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
+        Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
     }
 
     /// Create a metrics repository with a default config, reporters, and clock.
-    pub fn with_config_reporters_time(
+    /// Mirrors Java's
+    /// `Metrics(MetricConfig defaultConfig, List<MetricsReporter> reporters, Time time)`
+    /// (`:122`).
+    pub fn with_default_config_reporters_time(
         default_config: Arc<MetricConfig>,
         reporters: Vec<Arc<dyn MetricsReporter>>,
         time: Arc<dyn Time>,
@@ -136,8 +296,8 @@ impl Metrics {
             MetricValue::Double(n as f64)
         });
         metrics
-            .add_metric_with_provider(
-                metrics.metric_name(
+            .add_metric_config_provider(
+                metrics.metric_name_description_tags(
                     "count",
                     "kafka-metrics-count",
                     "total number of registered metrics",
@@ -150,10 +310,19 @@ impl Metrics {
         metrics
     }
 
+    // Java's five `metricName` overloads (`Metrics.java:194,208,218,231,243`)
+    // intersect on `{name, group}`, and `metricName(String name, String group)`
+    // (`:218`) is exactly that pair — so it keeps the plain name and the others
+    // are suffixed with their Rust parameters beyond it (CLAUDE.md §2).
+
     /// Create a `MetricName` with the given name, group, description and tags,
     /// plus default tags specified in the metric configuration. Tags in `tags`
     /// take precedence over default tags with the same key.
-    pub fn metric_name(
+    ///
+    /// Mirrors Java's
+    /// `metricName(String name, String group, String description, Map<String, String> tags)`
+    /// (`:194`).
+    pub fn metric_name_description_tags(
         &self,
         name: impl Into<String>,
         group: impl Into<String>,
@@ -165,22 +334,58 @@ impl Metrics {
         MetricName::new(name, group, description, combined)
     }
 
+    /// Create a `MetricName` with the given name, group and description, plus the
+    /// default tags specified in the metric configuration.
+    ///
+    /// Mirrors Java's `metricName(String name, String group, String description)`
+    /// (`:208`).
+    pub fn metric_name_description(
+        &self,
+        name: impl Into<String>,
+        group: impl Into<String>,
+        description: impl Into<String>,
+    ) -> MetricName {
+        self.metric_name_description_tags(name, group, description, BTreeMap::new())
+    }
+
+    /// Create a `MetricName` with the given name, group and tags, plus the default
+    /// tags specified in the metric configuration. Tags in `tags` take precedence
+    /// over default tags with the same key.
+    ///
+    /// Mirrors Java's
+    /// `metricName(String name, String group, Map<String, String> tags)` (`:243`).
+    pub fn metric_name_tags(
+        &self,
+        name: impl Into<String>,
+        group: impl Into<String>,
+        tags: BTreeMap<String, String>,
+    ) -> MetricName {
+        self.metric_name_description_tags(name, group, "", tags)
+    }
+
     /// Create a `MetricName` with name and group (empty description, default tags).
-    pub fn metric_name_group(&self, name: impl Into<String>, group: impl Into<String>) -> MetricName {
-        self.metric_name(name, group, "", BTreeMap::new())
+    ///
+    /// Mirrors Java's `metricName(String name, String group)` (`:218`), whose
+    /// parameters are the group's intersection — hence the plain name.
+    pub fn metric_name(&self, name: impl Into<String>, group: impl Into<String>) -> MetricName {
+        self.metric_name_description_tags(name, group, "", BTreeMap::new())
     }
 
     /// Create a `MetricName` from `key, value` tag pairs, plus default tags.
     /// Returns an error if the pairs are not in twos (Java
     /// `IllegalArgumentException`).
-    pub fn metric_name_key_value(
+    ///
+    /// Mirrors Java's
+    /// `metricName(String name, String group, String description, String... keyValue)`
+    /// (`:231`).
+    pub fn metric_name_description_key_value(
         &self,
         name: impl Into<String>,
         group: impl Into<String>,
         description: impl Into<String>,
         key_value: &[&str],
     ) -> Result<MetricName, Error> {
-        Ok(self.metric_name(name, group, description, metrics_utils::get_tags(key_value)?))
+        Ok(self.metric_name_description_tags(name, group, description, MetricsUtils::get_tags(key_value)?))
     }
 
     /// The default config of this registry.
@@ -193,31 +398,120 @@ impl Metrics {
         self.sensors.lock().expect("sensors mutex poisoned").get(name).cloned()
     }
 
+    // Java's eight `sensor` overloads (`Metrics.java:325,336,348,360,372,386,401,427`)
+    // intersect on `{name}`, and `sensor(String name)` (`:325`) is exactly that —
+    // so it keeps the plain name and the others carry their Rust parameters
+    // beyond it (CLAUDE.md §2). Only `:401` would need more than three parameters
+    // in its name, so it alone takes the `Options` shape: [`SensorOptions`] is
+    // that method's only parameter and carries every Java parameter including
+    // `name`, which is why its name is plain `sensor_options` with no parameter
+    // names at all. `:427` keeps four parameters spelled out because its name
+    // needs only three of them.
+
     /// Get or create a sensor with the given unique name and no parents at INFO
-    /// recording level.
+    /// recording level. Mirrors Java's `sensor(String name)` (`:325`).
     pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
-        self.sensor_full(name, None, i64::MAX, RecordingLevel::Info, &[])
+        self.sensor_options(SensorOptionsBuilder::new().set_name(name).build()?)
     }
 
     /// Get or create a sensor with the given name, recording level, and no parents.
-    pub fn sensor_with_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, Error> {
-        self.sensor_full(name, None, i64::MAX, recording_level, &[])
+    /// Mirrors Java's `sensor(String name, Sensor.RecordingLevel recordingLevel)` (`:336`).
+    pub fn sensor_recording_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, Error> {
+        self.sensor_options(
+            SensorOptionsBuilder::new()
+                .set_name(name)
+                .set_recording_level(recording_level)
+                .build()?,
+        )
     }
 
     /// Get or create a sensor with parents at INFO recording level.
-    pub fn sensor_with_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
-        self.sensor_full(name, None, i64::MAX, RecordingLevel::Info, parents)
+    /// Mirrors Java's `sensor(String name, Sensor... parents)` (`:348`).
+    pub fn sensor_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
+        self.sensor_options(SensorOptionsBuilder::new().set_name(name).set_parents(parents).build()?)
     }
 
-    /// Get or create a sensor with a config, expiration, recording level and parents.
-    pub fn sensor_full(
+    /// Get or create a sensor with the given name, recording level and parents.
+    /// Mirrors Java's
+    /// `sensor(String name, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
+    /// (`:360`).
+    pub fn sensor_recording_level_parents(
+        &self,
+        name: &str,
+        recording_level: RecordingLevel,
+        parents: &[Arc<Sensor>],
+    ) -> Result<Arc<Sensor>, Error> {
+        self.sensor_options(
+            SensorOptionsBuilder::new()
+                .set_name(name)
+                .set_recording_level(recording_level)
+                .set_parents(parents)
+                .build()?,
+        )
+    }
+
+    /// Get or create a sensor with a config and parents, at INFO recording level.
+    /// Mirrors Java's `sensor(String name, MetricConfig config, Sensor... parents)`
+    /// (`:372`).
+    pub fn sensor_config_parents(
+        &self,
+        name: &str,
+        config: Option<Arc<MetricConfig>>,
+        parents: &[Arc<Sensor>],
+    ) -> Result<Arc<Sensor>, Error> {
+        self.sensor_config_recording_level_parents(name, config, RecordingLevel::Info, parents)
+    }
+
+    /// Get or create a sensor with a config, recording level and parents.
+    /// Mirrors Java's
+    /// `sensor(String name, MetricConfig config, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
+    /// (`:386`).
+    pub fn sensor_config_recording_level_parents(
+        &self,
+        name: &str,
+        config: Option<Arc<MetricConfig>>,
+        recording_level: RecordingLevel,
+        parents: &[Arc<Sensor>],
+    ) -> Result<Arc<Sensor>, Error> {
+        self.sensor_options(
+            SensorOptionsBuilder::new()
+                .set_name(name)
+                .set_config(config)
+                .set_recording_level(recording_level)
+                .set_parents(parents)
+                .build()?,
+        )
+    }
+
+    /// Get or create a sensor with a config, expiration and parents, at INFO
+    /// recording level. Mirrors Java's
+    /// `sensor(String name, MetricConfig config, long inactiveSensorExpirationTimeSeconds, Sensor... parents)`
+    /// (`:427`).
+    pub fn sensor_config_inactive_sensor_expiration_time_seconds_parents(
         &self,
         name: &str,
         config: Option<Arc<MetricConfig>>,
         inactive_sensor_expiration_time_seconds: i64,
-        recording_level: RecordingLevel,
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
+        self.sensor_options(
+            SensorOptionsBuilder::new()
+                .set_name(name)
+                .set_config(config)
+                .set_inactive_sensor_expiration_time_seconds(inactive_sensor_expiration_time_seconds)
+                .set_parents(parents)
+                .build()?,
+        )
+    }
+
+    /// Get or create a sensor with a config, expiration, recording level and parents.
+    ///
+    /// Mirrors Java's
+    /// `sensor(String name, MetricConfig config, long inactiveSensorExpirationTimeSeconds, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
+    /// (`:401`). Every parameter, `name` included, is carried by
+    /// [`SensorOptions`] — see the note above this overload group.
+    pub fn sensor_options(&self, options: SensorOptions<'_>) -> Result<Arc<Sensor>, Error> {
+        let SensorOptions { name, config, inactive_sensor_expiration_time_seconds, recording_level, parents } = options;
         if let Some(existing) = self.get_sensor(name) {
             return Ok(existing);
         }
@@ -281,20 +575,36 @@ impl Metrics {
         }
     }
 
+    // Java's four `addMetric` overloads (`Metrics.java:470,485,498,518`) intersect
+    // on `{metricName}` alone, and no overload takes just a metric name — so
+    // under CLAUDE.md §2's strict reading NOBODY keeps the plain `add_metric`,
+    // and each translated form carries its Rust parameters beyond the metric
+    // name. `add_gauge` below is Rust-only (Java has no `addGauge`) and so is
+    // outside the rule.
+
     /// Add a metric to monitor a measurable. This metric won't be associated
-    /// with any sensor.
-    pub fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
-        self.add_metric_with_provider(metric_name, None, MetricValueProvider::Measurable(measurable))
+    /// with any sensor. Mirrors Java's
+    /// `addMetric(MetricName metricName, Measurable measurable)` (`:470`).
+    pub fn add_metric_measurable(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
+        self.add_metric_config_provider(metric_name, None, MetricValueProvider::Measurable(measurable))
     }
 
     /// Add a metric backed by a gauge. This metric won't be associated with any
     /// sensor.
+    ///
+    /// Rust-only convenience — Java has no `addGauge`; callers there pass a
+    /// `Gauge` through `addMetric(MetricName, MetricValueProvider)`.
     pub fn add_gauge(&self, metric_name: MetricName, gauge: Box<dyn Gauge>) -> Result<(), Error> {
-        self.add_metric_with_provider(metric_name, None, MetricValueProvider::Gauge(gauge))
+        self.add_metric_config_provider(metric_name, None, MetricValueProvider::Gauge(gauge))
     }
 
     /// Add a metric backed by a value provider with an optional config.
-    pub fn add_metric_with_provider(
+    ///
+    /// Mirrors Java's
+    /// `addMetric(MetricName metricName, MetricConfig config, MetricValueProvider<?> metricValueProvider)`
+    /// (`:498`); `config: None` covers the `(MetricName, MetricValueProvider)`
+    /// form (`:518`), which Java implements by passing `null`.
+    pub fn add_metric_config_provider(
         &self,
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
@@ -381,13 +691,23 @@ impl Metrics {
             .cloned()
     }
 
-    /// Create a `MetricName` from a template and tag pairs.
-    pub fn metric_instance(&self, template: &MetricNameTemplate, key_value: &[&str]) -> Result<MetricName, Error> {
-        self.metric_instance_with_tags(template, metrics_utils::get_tags(key_value)?)
+    // Java's two `metricInstance` overloads (`Metrics.java:651,655`) intersect on
+    // `{template}`, and neither takes just a template — so nobody keeps the plain
+    // `metric_instance` (CLAUDE.md §2, strict reading).
+
+    /// Create a `MetricName` from a template and tag pairs. Mirrors Java's
+    /// `metricInstance(MetricNameTemplate template, String... keyValue)` (`:651`).
+    pub fn metric_instance_key_value(
+        &self,
+        template: &MetricNameTemplate,
+        key_value: &[&str],
+    ) -> Result<MetricName, Error> {
+        self.metric_instance_tags(template, MetricsUtils::get_tags(key_value)?)
     }
 
-    /// Create a `MetricName` from a template and a tags map.
-    pub fn metric_instance_with_tags(
+    /// Create a `MetricName` from a template and a tags map. Mirrors Java's
+    /// `metricInstance(MetricNameTemplate template, Map<String, String> tags)` (`:655`).
+    pub fn metric_instance_tags(
         &self,
         template: &MetricNameTemplate,
         tags: BTreeMap<String, String>,
@@ -403,7 +723,7 @@ impl Metrics {
                 template.name()
             )));
         }
-        Ok(self.metric_name(template.name(), template.group(), template.description(), tags))
+        Ok(self.metric_name_description_tags(template.name(), template.group(), template.description(), tags))
     }
 
     /// Iterate over every sensor and remove the ones that have expired.
@@ -440,15 +760,15 @@ impl Default for Metrics {
 mod tests {
     use super::*;
     use crate::common::MetricValue;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{CumulativeCount, CumulativeSum, Value};
-    use crate::common::metrics::time::mock::MockTime;
 
     // Matches MetricsTest.EPS.
     const EPS: f64 = 0.000001;
 
     fn metrics_with_mock() -> (Metrics, Arc<MockTime>) {
         let time = Arc::new(MockTime::new());
-        let metrics = Metrics::with_config_reporters_time(
+        let metrics = Metrics::with_default_config_reporters_time(
             Arc::new(MetricConfig::new()),
             Vec::new(),
             Arc::clone(&time) as Arc<dyn Time>,
@@ -468,17 +788,17 @@ mod tests {
     fn test_metric_name() {
         let metrics = Metrics::new();
         let n1 = metrics
-            .metric_name_key_value("name", "group", "description", &["key1", "value1", "key2", "value2"])
+            .metric_name_description_key_value("name", "group", "description", &["key1", "value1", "key2", "value2"])
             .unwrap();
         let mut tags = BTreeMap::new();
         tags.insert("key1".to_string(), "value1".to_string());
         tags.insert("key2".to_string(), "value2".to_string());
-        let n2 = metrics.metric_name("name", "group", "description", tags);
+        let n2 = metrics.metric_name_description_tags("name", "group", "description", tags);
         assert_eq!(n1, n2, "metric names created in two different ways should be equal");
 
         // Creating a MetricName with an odd number of keyValue should fail.
         let err = metrics
-            .metric_name_key_value("name", "group", "description", &["key1"])
+            .metric_name_description_key_value("name", "group", "description", &["key1"])
             .unwrap_err();
         assert!(err.to_string().contains("keyValue needs to be specified in pairs"));
     }
@@ -509,19 +829,19 @@ mod tests {
 
         // The key/value-pair form and the tags-map form must agree.
         let n1 = metrics
-            .metric_instance(&metric1, &["key1", "value1", "key2", "value2"])
+            .metric_instance_key_value(&metric1, &["key1", "value1", "key2", "value2"])
             .expect("metric_instance from key/value pairs");
         let mut tags = BTreeMap::new();
         tags.insert("key1".to_string(), "value1".to_string());
         tags.insert("key2".to_string(), "value2".to_string());
         let n2 = metrics
-            .metric_instance_with_tags(&metric2, tags)
+            .metric_instance_tags(&metric2, tags)
             .expect("metric_instance from tags map");
         assert_eq!(n1, n2, "metric names created in two different ways should be equal");
 
         // An odd number of keyValue entries is rejected.
         let err = metrics
-            .metric_instance(&metric1, &["key1"])
+            .metric_instance_key_value(&metric1, &["key1"])
             .expect_err("odd number of keyValue should fail");
         assert!(
             err.to_string().contains("keyValue needs to be specified in pairs"),
@@ -535,7 +855,7 @@ mod tests {
         let mut child_tags = BTreeMap::new();
         child_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
 
-        let inherited = Metrics::with_config(Arc::new(MetricConfig::new().with_tags(parent_tags.clone())));
+        let inherited = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(parent_tags.clone())));
         let mut inherited_tag_names = IndexSet::new();
         inherited_tag_names.insert("parent-tag".to_string());
         inherited_tag_names.insert("child-tag".to_string());
@@ -543,7 +863,7 @@ mod tests {
             MetricNameTemplate::new("name", "group", "inherited-tags metric", inherited_tag_names);
 
         let inherited_metric = inherited
-            .metric_instance_with_tags(&metric_with_inherited_tags, child_tags)
+            .metric_instance_tags(&metric_with_inherited_tags, child_tags)
             .expect("metric_instance with inherited parent tag");
         let filled_out_tags = inherited_metric.tags();
         assert_eq!(
@@ -559,7 +879,7 @@ mod tests {
 
         // Supplying only the parent tag at runtime leaves child-tag undefined.
         let err = inherited
-            .metric_instance_with_tags(&metric_with_inherited_tags, parent_tags)
+            .metric_instance_tags(&metric_with_inherited_tags, parent_tags)
             .expect_err("child metric tags not defined at runtime should fail");
         assert!(
             err.to_string().contains("do not match the tags in the template"),
@@ -571,7 +891,7 @@ mod tests {
         runtime_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
         runtime_tags.insert("tag-not-in-template".to_string(), "unexpected-value".to_string());
         let err = inherited
-            .metric_instance_with_tags(&metric_with_inherited_tags, runtime_tags)
+            .metric_instance_tags(&metric_with_inherited_tags, runtime_tags)
             .expect_err("runtime tag not in template should fail");
         assert!(
             err.to_string().contains("do not match the tags in the template"),
@@ -587,31 +907,28 @@ mod tests {
 
         assert!(
             sensor
-                .add(metrics.metric_name_group("test-metric", "test-group"), Box::new(Value::new()))
+                .add_metric_name(metrics.metric_name("test-metric", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
 
         // Adding the same metric to the same sensor is a no-op (returns true).
         assert!(
             sensor
-                .add(metrics.metric_name_group("test-metric", "test-group"), Box::new(Value::new()))
+                .add_metric_name(metrics.metric_name("test-metric", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
 
         // Adding the same metric to a DIFFERENT sensor is an error.
         let another = metrics.sensor("another-sensor").unwrap();
         let err = another
-            .add(metrics.metric_name_group("test-metric", "test-group"), Box::new(Value::new()))
+            .add_metric_name(metrics.metric_name("test-metric", "test-group"), Box::new(Value::new()))
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
 
         // Adding a different metric with the same name is also a no-op.
         assert!(
             sensor
-                .add(
-                    metrics.metric_name_group("test-metric", "test-group"),
-                    Box::new(CumulativeSum::new())
-                )
+                .add_metric_name(metrics.metric_name("test-metric", "test-group"), Box::new(CumulativeSum::new()))
                 .unwrap()
         );
 
@@ -625,48 +942,48 @@ mod tests {
         let metrics = Metrics::new();
         let parent1 = metrics.sensor("test.parent1").unwrap();
         parent1
-            .add(
-                metrics.metric_name_group("test.parent1.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.parent1.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
         let parent2 = metrics.sensor("test.parent2").unwrap();
         parent2
-            .add(
-                metrics.metric_name_group("test.parent2.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.parent2.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
         let child1 = metrics
-            .sensor_with_parents("test.child1", &[Arc::clone(&parent1), Arc::clone(&parent2)])
+            .sensor_parents("test.child1", &[Arc::clone(&parent1), Arc::clone(&parent2)])
             .unwrap();
         child1
-            .add(
-                metrics.metric_name_group("test.child1.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.child1.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
-        let child2 = metrics.sensor_with_parents("test.child2", &[Arc::clone(&parent1)]).unwrap();
+        let child2 = metrics.sensor_parents("test.child2", &[Arc::clone(&parent1)]).unwrap();
         child2
-            .add(
-                metrics.metric_name_group("test.child2.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.child2.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
-        let grandchild = metrics.sensor_with_parents("test.grandchild", &[Arc::clone(&child1)]).unwrap();
+        let grandchild = metrics.sensor_parents("test.grandchild", &[Arc::clone(&child1)]).unwrap();
         grandchild
-            .add(
-                metrics.metric_name_group("test.grandchild.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.grandchild.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
 
         // Increment each sensor one time.
-        parent1.record_occurrence();
-        parent2.record_occurrence();
-        child1.record_occurrence();
-        child2.record_occurrence();
-        grandchild.record_occurrence();
+        parent1.record();
+        parent2.record();
+        child1.record();
+        child2.record();
+        grandchild.record();
 
         let p1 = double_value(&parent1.metrics()[0]);
         let p2 = double_value(&parent2.metrics()[0]);
@@ -696,9 +1013,9 @@ mod tests {
     fn test_bad_sensor_hierarchy() {
         let metrics = Metrics::new();
         let p = metrics.sensor("parent").unwrap();
-        let c1 = metrics.sensor_with_parents("child1", &[Arc::clone(&p)]).unwrap();
-        let c2 = metrics.sensor_with_parents("child2", &[Arc::clone(&p)]).unwrap();
-        match metrics.sensor_with_parents("gc", &[c1, c2]) {
+        let c1 = metrics.sensor_parents("child1", &[Arc::clone(&p)]).unwrap();
+        let c2 = metrics.sensor_parents("child2", &[Arc::clone(&p)]).unwrap();
+        match metrics.sensor_parents("gc", &[c1, c2]) {
             Ok(_) => panic!("expected circular dependency error"),
             Err(err) => assert!(err.to_string().contains("Circular dependency")),
         }
@@ -709,7 +1026,7 @@ mod tests {
     fn test_remove_child_sensor() {
         let metrics = Metrics::new();
         let parent = metrics.sensor("parent").unwrap();
-        let child = metrics.sensor_with_parents("child", &[Arc::clone(&parent)]).unwrap();
+        let child = metrics.sensor_parents("child", &[Arc::clone(&parent)]).unwrap();
 
         let children = metrics.children_sensors(&parent).unwrap();
         assert_eq!(children.len(), 1);
@@ -727,38 +1044,38 @@ mod tests {
         let size = metrics.metrics().len();
         let parent1 = metrics.sensor("test.parent1").unwrap();
         parent1
-            .add(
-                metrics.metric_name_group("test.parent1.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.parent1.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
         let parent2 = metrics.sensor("test.parent2").unwrap();
         parent2
-            .add(
-                metrics.metric_name_group("test.parent2.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.parent2.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
         let child1 = metrics
-            .sensor_with_parents("test.child1", &[Arc::clone(&parent1), Arc::clone(&parent2)])
+            .sensor_parents("test.child1", &[Arc::clone(&parent1), Arc::clone(&parent2)])
             .unwrap();
         child1
-            .add(
-                metrics.metric_name_group("test.child1.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.child1.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
-        let child2 = metrics.sensor_with_parents("test.child2", &[Arc::clone(&parent2)]).unwrap();
+        let child2 = metrics.sensor_parents("test.child2", &[Arc::clone(&parent2)]).unwrap();
         child2
-            .add(
-                metrics.metric_name_group("test.child2.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.child2.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
-        let gchild1 = metrics.sensor_with_parents("test.gchild2", &[Arc::clone(&child2)]).unwrap();
+        let gchild1 = metrics.sensor_parents("test.gchild2", &[Arc::clone(&child2)]).unwrap();
         gchild1
-            .add(
-                metrics.metric_name_group("test.gchild2.count", "grp1"),
+            .add_metric_name(
+                metrics.metric_name("test.gchild2.count", "grp1"),
                 Box::new(CumulativeCount::new()),
             )
             .unwrap();
@@ -766,49 +1083,29 @@ mod tests {
         assert!(metrics.get_sensor("test.parent1").is_some());
         metrics.remove_sensor("test.parent1");
         assert!(metrics.get_sensor("test.parent1").is_none());
-        assert!(
-            metrics
-                .metric(&metrics.metric_name_group("test.parent1.count", "grp1"))
-                .is_none()
-        );
+        assert!(metrics.metric(&metrics.metric_name("test.parent1.count", "grp1")).is_none());
         // child1's only path to removal is via parent1; it is removed too.
         assert!(metrics.get_sensor("test.child1").is_none());
         assert!(metrics.children_sensors(&parent1).is_none());
-        assert!(
-            metrics
-                .metric(&metrics.metric_name_group("test.child1.count", "grp1"))
-                .is_none()
-        );
+        assert!(metrics.metric(&metrics.metric_name("test.child1.count", "grp1")).is_none());
 
         assert!(metrics.get_sensor("test.gchild2").is_some());
         metrics.remove_sensor("test.gchild2");
         assert!(metrics.get_sensor("test.gchild2").is_none());
         assert!(metrics.children_sensors(&gchild1).is_none());
-        assert!(
-            metrics
-                .metric(&metrics.metric_name_group("test.gchild2.count", "grp1"))
-                .is_none()
-        );
+        assert!(metrics.metric(&metrics.metric_name("test.gchild2.count", "grp1")).is_none());
 
         assert!(metrics.get_sensor("test.child2").is_some());
         metrics.remove_sensor("test.child2");
         assert!(metrics.get_sensor("test.child2").is_none());
         assert!(metrics.children_sensors(&child2).is_none());
-        assert!(
-            metrics
-                .metric(&metrics.metric_name_group("test.child2.count", "grp1"))
-                .is_none()
-        );
+        assert!(metrics.metric(&metrics.metric_name("test.child2.count", "grp1")).is_none());
 
         assert!(metrics.get_sensor("test.parent2").is_some());
         metrics.remove_sensor("test.parent2");
         assert!(metrics.get_sensor("test.parent2").is_none());
         assert!(metrics.children_sensors(&parent2).is_none());
-        assert!(
-            metrics
-                .metric(&metrics.metric_name_group("test.parent2.count", "grp1"))
-                .is_none()
-        );
+        assert!(metrics.metric(&metrics.metric_name("test.parent2.count", "grp1")).is_none());
 
         assert_eq!(size, metrics.metrics().len());
     }
@@ -819,18 +1116,18 @@ mod tests {
         let metrics = Metrics::new();
         let size = metrics.metrics().len();
         metrics
-            .add_metric(metrics.metric_name_group("test1", "grp1"), Box::new(CumulativeCount::new()))
+            .add_metric_measurable(metrics.metric_name("test1", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
         metrics
-            .add_metric(metrics.metric_name_group("test2", "grp1"), Box::new(CumulativeCount::new()))
+            .add_metric_measurable(metrics.metric_name("test2", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
 
-        assert!(metrics.remove_metric(&metrics.metric_name_group("test1", "grp1")).is_some());
-        assert!(metrics.metric(&metrics.metric_name_group("test1", "grp1")).is_none());
-        assert!(metrics.metric(&metrics.metric_name_group("test2", "grp1")).is_some());
+        assert!(metrics.remove_metric(&metrics.metric_name("test1", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test1", "grp1")).is_none());
+        assert!(metrics.metric(&metrics.metric_name("test2", "grp1")).is_some());
 
-        assert!(metrics.remove_metric(&metrics.metric_name_group("test2", "grp1")).is_some());
-        assert!(metrics.metric(&metrics.metric_name_group("test2", "grp1")).is_none());
+        assert!(metrics.remove_metric(&metrics.metric_name("test2", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test2", "grp1")).is_none());
 
         assert_eq!(size, metrics.metrics().len());
     }
@@ -842,12 +1139,12 @@ mod tests {
         metrics
             .sensor("test")
             .unwrap()
-            .add(metrics.metric_name_group("test", "grp1"), Box::new(Value::new()))
+            .add_metric_name(metrics.metric_name("test", "grp1"), Box::new(Value::new()))
             .unwrap();
         let err = metrics
             .sensor("test2")
             .unwrap()
-            .add(metrics.metric_name_group("test", "grp1"), Box::new(CumulativeSum::new()))
+            .add_metric_name(metrics.metric_name("test", "grp1"), Box::new(CumulativeSum::new()))
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
@@ -857,25 +1154,35 @@ mod tests {
     fn test_remove_inactive_metrics() {
         let (metrics, time) = metrics_with_mock();
 
-        let s1 = metrics.sensor_full("test.s1", None, 1, RecordingLevel::Info, &[]).unwrap();
-        s1.add(
-            metrics.metric_name_group("test.s1.count", "grp1"),
-            Box::new(CumulativeCount::new()),
-        )
-        .unwrap();
+        let s1 = metrics
+            .sensor_options(
+                SensorOptionsBuilder::new()
+                    .set_name("test.s1")
+                    .set_inactive_sensor_expiration_time_seconds(1)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        s1.add_metric_name(metrics.metric_name("test.s1.count", "grp1"), Box::new(CumulativeCount::new()))
+            .unwrap();
 
-        let s2 = metrics.sensor_full("test.s2", None, 3, RecordingLevel::Info, &[]).unwrap();
-        s2.add(
-            metrics.metric_name_group("test.s2.count", "grp1"),
-            Box::new(CumulativeCount::new()),
-        )
-        .unwrap();
+        let s2 = metrics
+            .sensor_options(
+                SensorOptionsBuilder::new()
+                    .set_name("test.s2")
+                    .set_inactive_sensor_expiration_time_seconds(3)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        s2.add_metric_name(metrics.metric_name("test.s2.count", "grp1"), Box::new(CumulativeCount::new()))
+            .unwrap();
 
         metrics.expire_sensors();
         assert!(metrics.get_sensor("test.s1").is_some(), "Sensor test.s1 must be present");
-        assert!(metrics.metric(&metrics.metric_name_group("test.s1.count", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test.s1.count", "grp1")).is_some());
         assert!(metrics.get_sensor("test.s2").is_some(), "Sensor test.s2 must be present");
-        assert!(metrics.metric(&metrics.metric_name_group("test.s2.count", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test.s2.count", "grp1")).is_some());
 
         time.sleep(1001);
         metrics.expire_sensors();
@@ -883,16 +1190,16 @@ mod tests {
             metrics.get_sensor("test.s1").is_none(),
             "Sensor test.s1 should have been purged"
         );
-        assert!(metrics.metric(&metrics.metric_name_group("test.s1.count", "grp1")).is_none());
+        assert!(metrics.metric(&metrics.metric_name("test.s1.count", "grp1")).is_none());
         assert!(metrics.get_sensor("test.s2").is_some(), "Sensor test.s2 must be present");
-        assert!(metrics.metric(&metrics.metric_name_group("test.s2.count", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test.s2.count", "grp1")).is_some());
 
         // Record on s2; resets its clock so it is not purged at the 3s mark.
-        s2.record_occurrence();
+        s2.record();
         time.sleep(2000);
         metrics.expire_sensors();
         assert!(metrics.get_sensor("test.s2").is_some(), "Sensor test.s2 must be present");
-        assert!(metrics.metric(&metrics.metric_name_group("test.s2.count", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test.s2.count", "grp1")).is_some());
 
         // After another 1001ms, the metric should be purged.
         time.sleep(1001);
@@ -901,17 +1208,22 @@ mod tests {
             metrics.get_sensor("test.s2").is_none(),
             "Sensor test.s2 should have been purged"
         );
-        assert!(metrics.metric(&metrics.metric_name_group("test.s2.count", "grp1")).is_none());
+        assert!(metrics.metric(&metrics.metric_name("test.s2.count", "grp1")).is_none());
 
         // After purging, it should be possible to recreate a metric.
-        let s1 = metrics.sensor_full("test.s1", None, 1, RecordingLevel::Info, &[]).unwrap();
-        s1.add(
-            metrics.metric_name_group("test.s1.count", "grp1"),
-            Box::new(CumulativeCount::new()),
-        )
-        .unwrap();
+        let s1 = metrics
+            .sensor_options(
+                SensorOptionsBuilder::new()
+                    .set_name("test.s1")
+                    .set_inactive_sensor_expiration_time_seconds(1)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        s1.add_metric_name(metrics.metric_name("test.s1.count", "grp1"), Box::new(CumulativeCount::new()))
+            .unwrap();
         assert!(metrics.get_sensor("test.s1").is_some(), "Sensor test.s1 must be present");
-        assert!(metrics.metric(&metrics.metric_name_group("test.s1.count", "grp1")).is_some());
+        assert!(metrics.metric(&metrics.metric_name("test.s1.count", "grp1")).is_some());
     }
 
     // The M1-relevant part of MetricsTest.testSimpleStats: the CumulativeSum row.
@@ -919,28 +1231,25 @@ mod tests {
     fn test_simple_stats_cumulative() {
         let metrics = Metrics::new();
         let s2 = metrics.sensor("test.sensor2").unwrap();
-        s2.add(metrics.metric_name_group("s2.total", "grp1"), Box::new(CumulativeSum::new()))
+        s2.add_metric_name(metrics.metric_name("s2.total", "grp1"), Box::new(CumulativeSum::new()))
             .unwrap();
-        s2.record(5.0);
+        s2.record_value(5.0);
         assert_eq!(
             5.0,
-            double_value(&metrics.metric(&metrics.metric_name_group("s2.total", "grp1")).unwrap()),
+            double_value(&metrics.metric(&metrics.metric_name("s2.total", "grp1")).unwrap()),
             "s2 reflects the constant value"
         );
 
         // CumulativeCount counts invocations regardless of recorded value.
         let s = metrics.sensor("test.sensor").unwrap();
-        s.add(
-            metrics.metric_name_group("test.count", "grp1"),
-            Box::new(CumulativeCount::new()),
-        )
-        .unwrap();
+        s.add_metric_name(metrics.metric_name("test.count", "grp1"), Box::new(CumulativeCount::new()))
+            .unwrap();
         for i in 0..10 {
-            s.record(i as f64);
+            s.record_value(i as f64);
         }
         assert_eq!(
             10.0,
-            double_value(&metrics.metric(&metrics.metric_name_group("test.count", "grp1")).unwrap()),
+            double_value(&metrics.metric(&metrics.metric_name("test.count", "grp1")).unwrap()),
             "Count(0...9) = 10"
         );
     }
@@ -952,43 +1261,43 @@ mod tests {
     // Phase M2 PLAN Skips) and is therefore omitted.
     #[test]
     fn test_simple_stats() {
-        use crate::common::metrics::internals::metrics_utils::TimeUnit;
+        use crate::common::metrics::internals::TimeUnit;
         use crate::common::metrics::stats::{Avg, Max, Meter, Min, WindowedCount};
 
         let (metrics, time) = metrics_with_mock();
         let config = metrics.config().clone();
 
         let s = metrics.sensor("test.sensor").unwrap();
-        s.add(metrics.metric_name_group("test.avg", "grp1"), Box::new(Avg::new()))
+        s.add_metric_name(metrics.metric_name("test.avg", "grp1"), Box::new(Avg::new()))
             .unwrap();
-        s.add(metrics.metric_name_group("test.max", "grp1"), Box::new(Max::new()))
+        s.add_metric_name(metrics.metric_name("test.max", "grp1"), Box::new(Max::new()))
             .unwrap();
-        s.add(metrics.metric_name_group("test.min", "grp1"), Box::new(Min::new()))
+        s.add_metric_name(metrics.metric_name("test.min", "grp1"), Box::new(Min::new()))
             .unwrap();
-        s.add_compound(Box::new(Meter::with_unit(
+        s.add(Box::new(Meter::with_unit(
             TimeUnit::Seconds,
-            metrics.metric_name_group("test.rate", "grp1"),
-            metrics.metric_name_group("test.total", "grp1"),
+            metrics.metric_name("test.rate", "grp1"),
+            metrics.metric_name("test.total", "grp1"),
         )))
         .unwrap();
-        s.add_compound(Box::new(Meter::with_stat(
+        s.add(Box::new(Meter::with_rate_stat(
             std::sync::Arc::new(WindowedCount::new().into_sampled_stat()),
-            metrics.metric_name_group("test.occurrences", "grp1"),
-            metrics.metric_name_group("test.occurrences.total", "grp1"),
+            metrics.metric_name("test.occurrences", "grp1"),
+            metrics.metric_name("test.occurrences.total", "grp1"),
         )))
         .unwrap();
-        s.add(metrics.metric_name_group("test.count", "grp1"), Box::new(WindowedCount::new()))
+        s.add_metric_name(metrics.metric_name("test.count", "grp1"), Box::new(WindowedCount::new()))
             .unwrap();
 
         let s2 = metrics.sensor("test.sensor2").unwrap();
-        s2.add(metrics.metric_name_group("s2.total", "grp1"), Box::new(CumulativeSum::new()))
+        s2.add_metric_name(metrics.metric_name("s2.total", "grp1"), Box::new(CumulativeSum::new()))
             .unwrap();
-        s2.record(5.0);
+        s2.record_value(5.0);
 
         let mut sum = 0i64;
         let count = 10i64;
         for i in 0..count {
-            s.record(i as f64);
+            s.record_value(i as f64);
             sum += i;
         }
 
@@ -996,7 +1305,7 @@ mod tests {
         let mut elapsed_secs = (config.time_window_ms() * (config.samples() as i64 - 1)) as f64 / 1000.0;
         assert!(
             (count as f64 / elapsed_secs
-                - double_value(&metrics.metric(&metrics.metric_name_group("test.occurrences", "grp1")).unwrap()))
+                - double_value(&metrics.metric(&metrics.metric_name("test.occurrences", "grp1")).unwrap()))
             .abs()
                 <= EPS,
             "Occurrences(0...{count})"
@@ -1008,41 +1317,39 @@ mod tests {
         elapsed_secs += sleep_time_ms as f64;
 
         assert!(
-            (5.0 - double_value(&metrics.metric(&metrics.metric_name_group("s2.total", "grp1")).unwrap())).abs() <= EPS,
+            (5.0 - double_value(&metrics.metric(&metrics.metric_name("s2.total", "grp1")).unwrap())).abs() <= EPS,
             "s2 reflects the constant value"
         );
         assert!(
-            (4.5 - double_value(&metrics.metric(&metrics.metric_name_group("test.avg", "grp1")).unwrap())).abs() <= EPS,
+            (4.5 - double_value(&metrics.metric(&metrics.metric_name("test.avg", "grp1")).unwrap())).abs() <= EPS,
             "Avg(0...9) = 4.5"
         );
         assert!(
-            ((count - 1) as f64
-                - double_value(&metrics.metric(&metrics.metric_name_group("test.max", "grp1")).unwrap()))
-            .abs()
+            ((count - 1) as f64 - double_value(&metrics.metric(&metrics.metric_name("test.max", "grp1")).unwrap()))
+                .abs()
                 <= EPS,
             "Max(0...9) = 9"
         );
         assert!(
-            (0.0 - double_value(&metrics.metric(&metrics.metric_name_group("test.min", "grp1")).unwrap())).abs() <= EPS,
+            (0.0 - double_value(&metrics.metric(&metrics.metric_name("test.min", "grp1")).unwrap())).abs() <= EPS,
             "Min(0...9) = 0"
         );
         assert!(
             (sum as f64 / elapsed_secs
-                - double_value(&metrics.metric(&metrics.metric_name_group("test.rate", "grp1")).unwrap()))
+                - double_value(&metrics.metric(&metrics.metric_name("test.rate", "grp1")).unwrap()))
             .abs()
                 <= EPS,
             "Rate(0...9)"
         );
         assert!(
             (count as f64 / elapsed_secs
-                - double_value(&metrics.metric(&metrics.metric_name_group("test.occurrences", "grp1")).unwrap()))
+                - double_value(&metrics.metric(&metrics.metric_name("test.occurrences", "grp1")).unwrap()))
             .abs()
                 <= EPS,
             "Occurrences(0...{count})"
         );
         assert!(
-            (count as f64 - double_value(&metrics.metric(&metrics.metric_name_group("test.count", "grp1")).unwrap()))
-                .abs()
+            (count as f64 - double_value(&metrics.metric(&metrics.metric_name("test.count", "grp1")).unwrap())).abs()
                 <= EPS,
             "Count(0...9) = 10"
         );
@@ -1051,29 +1358,38 @@ mod tests {
     // MetricsTest.testRateWindowing
     #[test]
     fn test_rate_windowing() {
-        use crate::common::metrics::internals::metrics_utils::{TimeUnit, convert};
+        use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
         use crate::common::metrics::stats::{Meter, WindowedCount};
 
         let time = Arc::new(MockTime::new());
         // Use the default time window. Set 3 samples.
-        let cfg = Arc::new(MetricConfig::new().with_samples(3));
-        let metrics =
-            Metrics::with_config_reporters_time(Arc::clone(&cfg), Vec::new(), Arc::clone(&time) as Arc<dyn Time>);
+        let cfg = Arc::new(MetricConfig::new().set_samples(3));
+        let metrics = Metrics::with_default_config_reporters_time(
+            Arc::clone(&cfg),
+            Vec::new(),
+            Arc::clone(&time) as Arc<dyn Time>,
+        );
 
         let s = metrics
-            .sensor_full("test.sensor", Some(Arc::clone(&cfg)), i64::MAX, RecordingLevel::Info, &[])
+            .sensor_options(
+                SensorOptionsBuilder::new()
+                    .set_name("test.sensor")
+                    .set_config(Some(Arc::clone(&cfg)))
+                    .build()
+                    .unwrap(),
+            )
             .unwrap();
-        let rate_metric_name = metrics.metric_name_group("test.rate", "grp1");
-        let total_metric_name = metrics.metric_name_group("test.total", "grp1");
-        let count_rate_metric_name = metrics.metric_name_group("test.count.rate", "grp1");
-        let count_total_metric_name = metrics.metric_name_group("test.count.total", "grp1");
-        s.add_compound(Box::new(Meter::with_unit(
+        let rate_metric_name = metrics.metric_name("test.rate", "grp1");
+        let total_metric_name = metrics.metric_name("test.total", "grp1");
+        let count_rate_metric_name = metrics.metric_name("test.count.rate", "grp1");
+        let count_total_metric_name = metrics.metric_name("test.count.total", "grp1");
+        s.add(Box::new(Meter::with_unit(
             TimeUnit::Seconds,
             rate_metric_name.clone(),
             total_metric_name.clone(),
         )))
         .unwrap();
-        s.add_compound(Box::new(Meter::with_stat(
+        s.add(Box::new(Meter::with_rate_stat(
             Arc::new(WindowedCount::new().into_sampled_stat()),
             count_rate_metric_name.clone(),
             count_total_metric_name.clone(),
@@ -1086,7 +1402,7 @@ mod tests {
         let count = cfg.samples() as i64 - 1;
         // Advance 1 window after every record.
         for _ in 0..count {
-            s.record(100.0);
+            s.record_value(100.0);
             sum += 100;
             time.sleep(cfg.time_window_ms());
             assert!((sum as f64 - double_value(&total_metric)).abs() <= EPS);
@@ -1096,7 +1412,8 @@ mod tests {
         time.sleep(cfg.time_window_ms() / 2);
 
         // elapsedSecs = sampleWindowSize * (total samples - half of final sample)
-        let elapsed_secs = convert(cfg.time_window_ms(), TimeUnit::Seconds) * (cfg.samples() as f64 - 0.5);
+        let elapsed_secs =
+            MetricsUtils::convert(cfg.time_window_ms(), TimeUnit::Seconds) * (cfg.samples() as f64 - 0.5);
 
         let rate_metric = metrics.metrics().get(&rate_metric_name).unwrap().clone();
         let count_rate_metric = metrics.metrics().get(&count_rate_metric_name).unwrap().clone();
@@ -1132,7 +1449,7 @@ mod tests {
     #[test]
     fn count_metric_registered_on_construction() {
         let metrics = Metrics::new();
-        let count_name = metrics.metric_name(
+        let count_name = metrics.metric_name_description_tags(
             "count",
             "kafka-metrics-count",
             "total number of registered metrics",
@@ -1143,7 +1460,7 @@ mod tests {
         assert_eq!(double_value(&count_metric), 1.0);
         // Adding a metric increases the count.
         metrics
-            .add_metric(metrics.metric_name_group("extra", "grp1"), Box::new(Value::new()))
+            .add_metric_measurable(metrics.metric_name("extra", "grp1"), Box::new(Value::new()))
             .unwrap();
         assert_eq!(double_value(&count_metric), 2.0);
     }
@@ -1158,12 +1475,175 @@ mod tests {
         tag_names.insert("client-id".to_string());
         let template = MetricNameTemplate::new("name", "group", "desc", tag_names);
 
-        let name = metrics.metric_instance(&template, &["client-id", "client-1"]).unwrap();
+        let name = metrics
+            .metric_instance_key_value(&template, &["client-id", "client-1"])
+            .unwrap();
         assert_eq!(name.name(), "name");
         assert_eq!(name.tags().get("client-id").map(String::as_str), Some("client-1"));
 
         // Wrong tag keys → error.
-        let err = metrics.metric_instance(&template, &["wrong", "v"]).unwrap_err();
+        let err = metrics.metric_instance_key_value(&template, &["wrong", "v"]).unwrap_err();
         assert!(err.to_string().contains("do not match the tags in the template"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Java `default`-style forwarding overloads added to complete the groups
+    // (DoD #2). Each asserts the added form agrees, by value, with the form it
+    // forwards to — not merely that it returns.
+    // ---------------------------------------------------------------------
+
+    // Metrics(MetricConfig defaultConfig, Time time) -> Metrics.java:101
+    #[test]
+    fn test_new_default_config_time_forwards() {
+        let config = Arc::new(MetricConfig::new().set_samples(7));
+        let time = Arc::new(MockTime::new());
+        let metrics = Metrics::with_default_config_time(Arc::clone(&config), Arc::clone(&time) as Arc<dyn Time>);
+
+        // The default config is the one we passed, not a fresh one.
+        assert!(Arc::ptr_eq(metrics.config(), &config));
+        assert_eq!(metrics.config().samples(), 7);
+
+        // ...and the clock is ours, not `SystemTime`: a sensor with a 1s
+        // inactivity window expires only if the mock clock drives it.
+        let s = metrics
+            .sensor_config_inactive_sensor_expiration_time_seconds_parents("s", None, 1, &[])
+            .unwrap();
+        assert!(!s.has_expired());
+        time.sleep(2_000);
+        assert!(s.has_expired());
+    }
+
+    // metricName(String name, String group, String description) -> Metrics.java:208
+    #[test]
+    fn test_metric_name_description_forwards() {
+        let mut default_tags = BTreeMap::new();
+        default_tags.insert("client-id".to_string(), "c1".to_string());
+        let metrics = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
+
+        let added = metrics.metric_name_description("n", "g", "the description");
+        let forwarded = metrics.metric_name_description_tags("n", "g", "the description", BTreeMap::new());
+        assert_eq!(added, forwarded);
+        // `MetricName` equality deliberately ignores `description`, so assert it
+        // separately or this test would pass with the description dropped.
+        assert_eq!(added.description(), "the description");
+        assert_eq!(added.name(), "n");
+        assert_eq!(added.group(), "g");
+        assert_eq!(added.tags().get("client-id").map(String::as_str), Some("c1"));
+    }
+
+    // metricName(String name, String group, Map<String, String> tags) -> Metrics.java:243
+    #[test]
+    fn test_metric_name_tags_forwards() {
+        let mut default_tags = BTreeMap::new();
+        default_tags.insert("client-id".to_string(), "c1".to_string());
+        let metrics = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
+
+        let mut tags = BTreeMap::new();
+        tags.insert("node-id".to_string(), "n7".to_string());
+
+        let added = metrics.metric_name_tags("n", "g", tags.clone());
+        assert_eq!(added, metrics.metric_name_description_tags("n", "g", "", tags));
+        assert_eq!(added.description(), "");
+        // Supplied tags are merged on top of the configured default tags.
+        assert_eq!(added.tags().get("client-id").map(String::as_str), Some("c1"));
+        assert_eq!(added.tags().get("node-id").map(String::as_str), Some("n7"));
+    }
+
+    // The four forwarding `sensor` overloads:
+    //   :360 (name, recordingLevel, parents...)
+    //   :372 (name, config, parents...)
+    //   :386 (name, config, recordingLevel, parents...)
+    //   :427 (name, config, inactiveSensorExpirationTimeSeconds, parents...)
+    // Sensors are cached by name, so each form gets its own name and is compared
+    // against the canonical `sensor_options` form by observable state.
+    #[test]
+    fn test_sensor_forwarding_overloads() {
+        let (metrics, time) = metrics_with_mock();
+        let config = Arc::new(MetricConfig::new().set_samples(9));
+        let parent = metrics.sensor("parent").unwrap();
+
+        // :360 — recording level and parents, default config, no expiry.
+        let s = metrics
+            .sensor_recording_level_parents("a", RecordingLevel::Debug, std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(!s.should_record(), "DEBUG sensor must not record under the default INFO config");
+        assert_eq!(s.parents().len(), 1);
+        assert!(Arc::ptr_eq(&s.parents()[0], &parent));
+
+        // :372 — config and parents, INFO level (Java's stated default).
+        let s = metrics
+            .sensor_config_parents("b", Some(Arc::clone(&config)), std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(s.should_record());
+        assert!(Arc::ptr_eq(&s.parents()[0], &parent));
+        s.add_metric_name(metrics.metric_name("b.count", "grp"), Box::new(CumulativeCount::new()))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &metrics.metric(&metrics.metric_name("b.count", "grp")).unwrap().config(),
+            &config
+        ));
+
+        // :386 — config, recording level and parents.
+        let s = metrics
+            .sensor_config_recording_level_parents(
+                "c",
+                Some(Arc::clone(&config)),
+                RecordingLevel::Debug,
+                std::slice::from_ref(&parent),
+            )
+            .unwrap();
+        assert!(!s.should_record());
+        assert!(Arc::ptr_eq(&s.parents()[0], &parent));
+        s.add_metric_name(metrics.metric_name("c.count", "grp"), Box::new(CumulativeCount::new()))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &metrics.metric(&metrics.metric_name("c.count", "grp")).unwrap().config(),
+            &config
+        ));
+
+        // :427 — config, expiry and parents, INFO level.
+        let s = metrics
+            .sensor_config_inactive_sensor_expiration_time_seconds_parents(
+                "d",
+                Some(Arc::clone(&config)),
+                1,
+                std::slice::from_ref(&parent),
+            )
+            .unwrap();
+        assert!(s.should_record());
+        assert!(Arc::ptr_eq(&s.parents()[0], &parent));
+        assert!(!s.has_expired());
+        time.sleep(2_000);
+        assert!(s.has_expired(), "the 1s inactivity window must reach the underlying sensor");
+
+        // The canonical `sensor_options` form, given the same arguments, agrees.
+        let canonical = metrics
+            .sensor_options(
+                SensorOptionsBuilder::new()
+                    .set_name("e")
+                    .set_config(Some(Arc::clone(&config)))
+                    .set_inactive_sensor_expiration_time_seconds(1)
+                    .set_parents(std::slice::from_ref(&parent))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(canonical.should_record());
+        assert!(Arc::ptr_eq(&canonical.parents()[0], &parent));
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`SensorOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    fn sensor_options_builder_build_errors_when_no_mandatory_parameter_is_set() {
+        let Err(error) = SensorOptionsBuilder::new().build() else {
+            panic!("build must reject the unset mandatory parameter");
+        };
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "SensorOptionsBuilder::build: mandatory parameter `name` was not set"
+        );
     }
 }

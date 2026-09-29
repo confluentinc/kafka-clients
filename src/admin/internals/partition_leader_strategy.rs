@@ -20,17 +20,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, TopicPartition};
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_future::{AdminApiFuture, UNKNOWN_BROKER_ID};
-use super::admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};
-use super::api_request_scope::ApiRequestScope;
-use super::partition_leader_cache::PartitionLeaderCache;
-use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
+use super::ApiRequestScope;
+use super::PartitionLeaderCache;
+use super::{AdminApiFuture, UNKNOWN_BROKER_ID};
+use super::{AdminApiLookupStrategy, LookupResult};
+use crate::common::KafkaFuture;
+use crate::common::internals::KafkaFutureImpl;
 
 /// Base driver implementation for APIs which target partition leaders.
 ///
@@ -97,7 +98,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    Error::topic_authorization_with_message(
+                    Error::topic_authorization_message(
                         HashSet::from([topic_owned.clone()]),
                         format!("Failed to fetch metadata for partition {tp} due to topic authorization failure"),
                     )
@@ -111,7 +112,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    Error::invalid_topics_with_message(
+                    Error::invalid_topics_message(
                         HashSet::from([topic_owned.clone()]),
                         format!("Failed to fetch metadata for partition {tp} due to invalid topic `{topic_owned}`"),
                     )
@@ -209,7 +210,10 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
                 topics.push(tp.topic());
             }
         }
-        Box::new(MetadataRequestBuilder::new(Some(&topics), false))
+        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
+            Some(&topics),
+            false,
+        ))
     }
 
     fn handle_response(
@@ -336,9 +340,10 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<TopicPartition, V> for Par
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::ApiKeys;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::requests::MetadataResponse;
-    use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+    use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
     fn strategy() -> PartitionLeaderStrategy {
         PartitionLeaderStrategy::new(LogContext::new("[test] "))
@@ -381,7 +386,7 @@ mod tests {
             }
         }
         data.set_topics(topics);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn response_with_topic_error(topic: &str, error: Errors) -> ConcreteResponse {
@@ -390,7 +395,7 @@ mod tests {
         t.set_name(Some(topic.to_string()));
         t.set_error_code(error.code());
         data.set_topics(vec![t]);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn handle(keys: &[TopicPartition], response: &ConcreteResponse) -> LookupResult<TopicPartition> {

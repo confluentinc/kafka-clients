@@ -46,7 +46,7 @@ use log::debug;
 use tokio::sync::Notify;
 
 use crate::common::TopicPartition;
-use crate::consumer::internals::completed_fetch::CompletedFetch;
+use crate::consumer::internals::CompletedFetch;
 
 /// Thread-safe buffer of [`CompletedFetch`] entries returned by fetch
 /// responses, awaiting consumption by the application.

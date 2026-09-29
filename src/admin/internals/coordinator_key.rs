@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The key used by [`CoordinatorStrategy`](super::coordinator_strategy::CoordinatorStrategy)
+//! The key used by [`CoordinatorStrategy`](super::CoordinatorStrategy)
 //! to identify a group or transactional coordinator lookup.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.internals.CoordinatorKey`.

@@ -25,18 +25,51 @@ return a result struct holding one `KafkaFuture<T>` handle per key.
 
 The one exception is `close()`: Java's `close(Duration timeout)` blocks
 joining the background thread (CLAUDE.md §9.4: `thread.join()` → must
-actually `.await` in Rust), so `close()` is the only `async fn` on the
-`Admin` trait.
+actually `.await` in Rust), so `close()` / `close_with_timeout()` are the only
+`async fn`s on the `Admin` trait.
+
+Java declares each RPC as a pair — a `default xxx(args)` forwarding to
+`xxx(args, new XxxOptions())` — so each Rust RPC is a pair too, named per
+CLAUDE.md §2: the options-taking form carries the **`_with_options`** suffix
+(§2 mandates the `with` keyword before every discriminating parameter), and
+the no-options form keeps the plain name **when Java declares that overload**.
+The no-options form is a **trait default method** whose body passes
+`XxxOptions::default()`, exactly as Java's `default` body passes a fresh
+options instance, so an implementor writes only the `_with_options` form.
+
+Where Java has **several** non-options overloads there is no plain name to
+give away, and each form is discriminated by its own parameter — so
+`describeTopics(Collection<String>)` and `describeTopics(TopicCollection)`
+become `describe_topics_with_topic_names` and `describe_topics_with_topics`,
+each with its own `..._options` partner. `describe_topics` itself does not
+exist, because Java has no zero-argument `describeTopics`. The same shape
+applies to `listConsumerGroupOffsets`; conversely
+`describeUserScramCredentials` and `listPartitionReassignments` **do** have a
+zero-arg Java overload, so they keep the plain name.
 
 ```rust
 pub trait Admin: Send + Sync + 'static {
-    fn create_topics(&self, topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
-    fn delete_topics(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
-    fn list_topics(&self, options: ListTopicsOptions) -> ListTopicsResult;
-    fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
+    fn create_topics(&self, new_topics: &[NewTopic]) -> CreateTopicsResult {
+        self.create_topics_with_options(new_topics, CreateTopicsOptions::default())
+    }
+    fn create_topics_with_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
+
+    fn delete_topics(&self, topics: TopicCollection) -> DeleteTopicsResult { /* forwards */ }
+    fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
+
+    fn list_topics(&self) -> ListTopicsResult { /* forwards */ }
+    fn list_topics_with_options(&self, options: ListTopicsOptions) -> ListTopicsResult;
+
+    // No plain `describe_topics`: Java has no zero-arg overload, so both
+    // non-options forms are discriminated by their parameter (see above).
+    fn describe_topics_with_topic_names(&self, topic_names: &[String]) -> DescribeTopicsResult { /* forwards */ }
+    fn describe_topics_with_topic_names_options(&self, topic_names: &[String], options: DescribeTopicsOptions) -> DescribeTopicsResult { /* wraps the names in a TopicCollection */ }
+    fn describe_topics_with_topics(&self, topics: TopicCollection) -> DescribeTopicsResult { /* forwards */ }
+    fn describe_topics_with_topics_options(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
     // ... all other RPCs: sync, return a *Result holding KafkaFuture<T> per key ...
 
-    async fn close(&self, timeout: Duration);   // blocks in Java -> must await in Rust
+    async fn close(&self) { /* forwards to close_with_timeout(Long.MAX_VALUE ms) */ }
+    async fn close_with_timeout(&self, timeout: Duration);   // blocks in Java -> must await in Rust
 }
 ```
 
@@ -50,10 +83,11 @@ not "the method is `async`."
 **How to apply:**
 
   - Do NOT copy the consumer's `#[async_trait]`-everything shape (§2 of
-    `consumer-threading.md`). Only `close()` is `async fn` on `Admin`.
+    `consumer-threading.md`). Only `close()` / `close_with_timeout()` are
+    `async fn` on `Admin`.
   - The `#[async_trait]` attribute is acceptable on the trait solely to
-    make `close()` dispatchable through `Box<dyn Admin>`; it must NOT turn
-    the per-RPC methods into `async fn`.
+    make the two `close` methods dispatchable through `Box<dyn Admin>`; it
+    must NOT turn the per-RPC methods into `async fn`.
 
 ## 2. Dispatch engine: preserve Java's two-pattern split
 
@@ -123,7 +157,7 @@ needed by the four topic RPCs — note the deferral in the phase self-review.
 Admin's `*Result` types hold `KafkaFuture<T>` (the public, already-present
 `src/common/kafka_future.rs` type). But on the current branch that type is
 **pre-resolved-only** — it exposes `KafkaFuture::completed(result)`,
-`get`, `get_timeout`, `is_done`, and is `Clone`. It has NO completable
+`get`, `get_with_timeout`, `is_done`, and is `Clone`. It has NO completable
 handle, no `all_of`, no `then_apply`, no `when_complete`.
 
 The Admin client fundamentally needs completable-later futures: every RPC
@@ -134,17 +168,21 @@ optional nicety:
 
   - A crate-internal completable handle (Java's
     `common.internals.KafkaFutureImpl`; per CLAUDE.md `internal` package →
-    `pub(crate)`) with `complete(value)` / `complete_exceptionally(err)`
+    `pub(crate)`) with `complete(value)` / `complete_with_error(err)`
     and a `future()` accessor returning the public `KafkaFuture<T>` view.
     Both share one state via `Arc`, so completing the handle resolves every
-    outstanding `get()`.
+    outstanding `get()`. The error-completing method is **not** named after
+    Java's `completeExceptionally`: CLAUDE.md §2 forbids the word "exception"
+    in Rust code outside comments about the Java client.
   - `KafkaFuture::all_of(futures)` (Java `KafkaFuture.allOf`) — completes
     when all inputs complete; yields the first error if any failed.
   - `KafkaFuture::then_apply(f)` (Java `thenApply`) for infallible
     transforms, plus a fallible variant where the Java transform can throw
     (e.g. `CreateTopicsResult.TopicMetadataAndConfig` accessors call
     `ensureSuccess()`).
-  - `KafkaFuture::when_complete(action)` (Java `whenComplete`).
+  - `when_complete(action)` (Java `whenComplete`) — on the `pub(crate)`
+    `KafkaFutureImpl` handle rather than on the public `KafkaFuture`, since
+    its only callers are inside the crate.
 
 **Why `Arc<Mutex<Option<Result>>>` + `Notify`, not a `oneshot`:** the future
 is `Clone` and awaitable by multiple consumers and multiple times (Java
@@ -265,8 +303,8 @@ trait.
     skipping silently.
   - **DoD #11 (consumer trait surface check): does not apply** to Admin's
     trait, but its *spirit* does — verify per-RPC methods stay plain `fn`,
-    only `close()` is `async fn`, and no `#[async_trait]` bleeds into the
-    internal `Call`/driver types (§1, §2).
+    only `close()` / `close_with_timeout()` are `async fn`, and no
+    `#[async_trait]` bleeds into the internal `Call`/driver types (§1, §2).
   - All other DoD items apply in full: exact error-message assertions,
     byte-level wire encoding tests for the net-new request/response types,
     `@RepeatedTest`/`@ParameterizedTest` → loops with the exact Java bounds,

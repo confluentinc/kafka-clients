@@ -17,161 +17,161 @@
 //! Translates `org.apache.kafka.common.errors`. Each Java exception class is one
 //! struct in its own file, named with the `Exception` -> `Error` substitution of
 //! CLAUDE.md §2, and declares its `extends` chain through its
-//! [`ErrorHierarchy`](crate::common::kafka_error::ErrorHierarchy) impl rather
+//! [`ErrorHierarchy`](crate::common::error::ErrorHierarchy) impl rather
 //! than through a predicate that enumerates it from the outside.
 //!
 //! The error code for each class lives in its
-//! [`ErrorCode`](crate::common::kafka_error::ErrorCode) impl — Java keeps the
+//! [`ErrorCode`](crate::common::error::ErrorCode) impl — Java keeps the
 //! same association in `Errors`' `CLASS_TO_ERROR` map — while the default
-//! message strings stay in [`Errors`](crate::common::protocol::Errors), exactly
+//! message strings stay in [`Errors`](crate::common::Errors), exactly
 //! as Java stores them on the enum constant and passes them to the class's
 //! constructor.
 
-pub mod api_error;
-pub mod authentication_error;
-pub mod authorization_error;
-pub mod authorizer_not_ready_error;
-pub mod broker_id_not_registered_error;
-pub mod broker_not_available_error;
-pub mod cluster_authorization_error;
-pub mod concurrent_transactions_error;
-pub mod controller_moved_error;
-pub mod coordinator_load_in_progress_error;
-pub mod coordinator_not_available_error;
-pub mod corrupt_record_error;
-pub mod delegation_token_authorization_error;
-pub mod delegation_token_disabled_error;
-pub mod delegation_token_expired_error;
-pub mod delegation_token_not_found_error;
-pub mod delegation_token_owner_mismatch_error;
-pub mod disconnect_error;
-pub mod duplicate_broker_registration_error;
-pub mod duplicate_resource_error;
-pub mod duplicate_sequence_error;
-pub mod duplicate_voter_error;
-pub mod election_not_needed_error;
-pub mod eligible_leaders_not_available_error;
-pub mod feature_update_failed_error;
-pub mod fenced_instance_id_error;
-pub mod fenced_leader_epoch_error;
-pub mod fenced_member_epoch_error;
-pub mod fenced_state_epoch_error;
-pub mod fetch_session_id_not_found_error;
-pub mod fetch_session_topic_id_error;
-pub mod group_authorization_error;
-pub mod group_id_not_found_error;
-pub mod group_max_size_reached_error;
-pub mod group_not_empty_error;
-pub mod group_subscribed_to_topic_error;
-pub mod illegal_generation_error;
-pub mod illegal_sasl_state_error;
-pub mod inconsistent_cluster_id_error;
-pub mod inconsistent_group_protocol_error;
-pub mod inconsistent_topic_id_error;
-pub mod inconsistent_voter_set_error;
-pub mod ineligible_replica_error;
-pub mod interrupt_error;
-pub mod invalid_commit_offset_size_error;
-pub mod invalid_configuration_error;
-pub mod invalid_fetch_session_epoch_error;
-pub mod invalid_fetch_size_error;
-pub mod invalid_group_id_error;
-pub mod invalid_offset_error;
-pub mod invalid_partitions_error;
-pub mod invalid_pid_mapping_error;
-pub mod invalid_principal_type_error;
-pub mod invalid_producer_epoch_error;
-pub mod invalid_record_state_error;
-pub mod invalid_registration_error;
-pub mod invalid_regular_expression_error;
-pub mod invalid_replica_assignment_error;
-pub mod invalid_replication_factor_error;
-pub mod invalid_request_error;
-pub mod invalid_required_acks_error;
-pub mod invalid_session_timeout_error;
-pub mod invalid_share_session_epoch_error;
-pub mod invalid_timestamp_error;
-pub mod invalid_topic_error;
-pub mod invalid_txn_state_error;
-pub mod invalid_txn_timeout_error;
-pub mod invalid_update_version_error;
-pub mod invalid_voter_key_error;
-pub mod kafka_storage_error;
-pub mod leader_not_available_error;
-pub mod listener_not_found_error;
-pub mod log_dir_not_found_error;
-pub mod member_id_required_error;
-pub mod mismatched_endpoint_type_error;
-pub mod network_error;
-pub mod new_leader_elected_error;
-pub mod no_reassignment_in_progress_error;
-pub mod not_controller_error;
-pub mod not_coordinator_error;
-pub mod not_enough_replicas_after_append_error;
-pub mod not_enough_replicas_error;
-pub mod not_leader_or_follower_error;
-pub mod offset_metadata_too_large_error;
-pub mod offset_moved_to_tiered_storage_error;
-pub mod offset_not_available_error;
-pub mod offset_out_of_range_error;
-pub mod operation_not_attempted_error;
-pub mod out_of_order_sequence_error;
-pub mod policy_violation_error;
-pub mod position_out_of_range_error;
-pub mod preferred_leader_not_available_error;
-pub mod principal_deserialization_error;
-pub mod producer_fenced_error;
-pub mod reassignment_in_progress_error;
-pub mod rebalance_in_progress_error;
-pub mod rebootstrap_required_error;
-pub mod record_batch_too_large_error;
+mod api_error;
+mod authentication_error;
+mod authorization_error;
+mod authorizer_not_ready_error;
+mod broker_id_not_registered_error;
+mod broker_not_available_error;
+mod cluster_authorization_error;
+mod concurrent_transactions_error;
+mod controller_moved_error;
+mod coordinator_load_in_progress_error;
+mod coordinator_not_available_error;
+mod corrupt_record_error;
+mod delegation_token_authorization_error;
+mod delegation_token_disabled_error;
+mod delegation_token_expired_error;
+mod delegation_token_not_found_error;
+mod delegation_token_owner_mismatch_error;
+mod disconnect_error;
+mod duplicate_broker_registration_error;
+mod duplicate_resource_error;
+mod duplicate_sequence_error;
+mod duplicate_voter_error;
+mod election_not_needed_error;
+mod eligible_leaders_not_available_error;
+mod feature_update_failed_error;
+mod fenced_instance_id_error;
+mod fenced_leader_epoch_error;
+mod fenced_member_epoch_error;
+mod fenced_state_epoch_error;
+mod fetch_session_id_not_found_error;
+mod fetch_session_topic_id_error;
+mod group_authorization_error;
+mod group_id_not_found_error;
+mod group_max_size_reached_error;
+mod group_not_empty_error;
+mod group_subscribed_to_topic_error;
+mod illegal_generation_error;
+mod illegal_sasl_state_error;
+mod inconsistent_cluster_id_error;
+mod inconsistent_group_protocol_error;
+mod inconsistent_topic_id_error;
+mod inconsistent_voter_set_error;
+mod ineligible_replica_error;
+mod interrupt_error;
+mod invalid_commit_offset_size_error;
+mod invalid_configuration_error;
+mod invalid_fetch_session_epoch_error;
+mod invalid_fetch_size_error;
+mod invalid_group_id_error;
+mod invalid_offset_error;
+mod invalid_partitions_error;
+mod invalid_pid_mapping_error;
+mod invalid_principal_type_error;
+mod invalid_producer_epoch_error;
+mod invalid_record_state_error;
+mod invalid_registration_error;
+mod invalid_regular_expression_error;
+mod invalid_replica_assignment_error;
+mod invalid_replication_factor_error;
+mod invalid_request_error;
+mod invalid_required_acks_error;
+mod invalid_session_timeout_error;
+mod invalid_share_session_epoch_error;
+mod invalid_timestamp_error;
+mod invalid_topic_error;
+mod invalid_txn_state_error;
+mod invalid_txn_timeout_error;
+mod invalid_update_version_error;
+mod invalid_voter_key_error;
+mod kafka_storage_error;
+mod leader_not_available_error;
+mod listener_not_found_error;
+mod log_dir_not_found_error;
+mod member_id_required_error;
+mod mismatched_endpoint_type_error;
+mod network_error;
+mod new_leader_elected_error;
+mod no_reassignment_in_progress_error;
+mod not_controller_error;
+mod not_coordinator_error;
+mod not_enough_replicas_after_append_error;
+mod not_enough_replicas_error;
+mod not_leader_or_follower_error;
+mod offset_metadata_too_large_error;
+mod offset_moved_to_tiered_storage_error;
+mod offset_not_available_error;
+mod offset_out_of_range_error;
+mod operation_not_attempted_error;
+mod out_of_order_sequence_error;
+mod policy_violation_error;
+mod position_out_of_range_error;
+mod preferred_leader_not_available_error;
+mod principal_deserialization_error;
+mod producer_fenced_error;
+mod reassignment_in_progress_error;
+mod rebalance_in_progress_error;
+mod rebootstrap_required_error;
+mod record_batch_too_large_error;
 pub mod record_deserialization_error;
-pub mod record_too_large_error;
-pub mod replica_not_available_error;
-pub mod resource_not_found_error;
-pub mod sasl_authentication_error;
-pub mod security_disabled_error;
-pub mod serialization_error;
-pub mod share_session_limit_reached_error;
-pub mod share_session_not_found_error;
-pub mod snapshot_not_found_error;
-pub mod ssl_authentication_error;
-pub mod stale_broker_epoch_error;
-pub mod stale_member_epoch_error;
-pub mod streams_invalid_topology_epoch_error;
-pub mod streams_invalid_topology_error;
-pub mod streams_topology_fenced_error;
-pub mod telemetry_too_large_error;
-pub mod throttling_quota_exceeded_error;
-pub mod timeout_error;
-pub mod topic_authorization_error;
-pub mod topic_deletion_disabled_error;
-pub mod topic_exists_error;
-pub mod transaction_abortable_error;
-pub mod transaction_aborted_error;
-pub mod transaction_coordinator_fenced_error;
-pub mod transactional_id_authorization_error;
-pub mod transactional_id_not_found_error;
-pub mod unacceptable_credential_error;
-pub mod unknown_controller_id_error;
-pub mod unknown_leader_epoch_error;
-pub mod unknown_member_id_error;
-pub mod unknown_producer_id_error;
-pub mod unknown_server_error;
-pub mod unknown_subscription_id_error;
-pub mod unknown_topic_id_error;
-pub mod unknown_topic_or_partition_error;
-pub mod unreleased_instance_id_error;
-pub mod unstable_offset_commit_error;
-pub mod unsupported_assignor_error;
-pub mod unsupported_by_authentication_error;
-pub mod unsupported_compression_type_error;
-pub mod unsupported_endpoint_type_error;
-pub mod unsupported_for_message_format_error;
-pub mod unsupported_sasl_mechanism_error;
-pub mod unsupported_version_error;
-pub mod voter_not_found_error;
-pub mod wakeup_error;
+mod record_too_large_error;
+mod replica_not_available_error;
+mod resource_not_found_error;
+mod sasl_authentication_error;
+mod security_disabled_error;
+mod serialization_error;
+mod share_session_limit_reached_error;
+mod share_session_not_found_error;
+mod snapshot_not_found_error;
+mod ssl_authentication_error;
+mod stale_broker_epoch_error;
+mod stale_member_epoch_error;
+mod streams_invalid_topology_epoch_error;
+mod streams_invalid_topology_error;
+mod streams_topology_fenced_error;
+mod telemetry_too_large_error;
+mod throttling_quota_exceeded_error;
+mod timeout_error;
+mod topic_authorization_error;
+mod topic_deletion_disabled_error;
+mod topic_exists_error;
+mod transaction_abortable_error;
+mod transaction_aborted_error;
+mod transaction_coordinator_fenced_error;
+mod transactional_id_authorization_error;
+mod transactional_id_not_found_error;
+mod unacceptable_credential_error;
+mod unknown_controller_id_error;
+mod unknown_leader_epoch_error;
+mod unknown_member_id_error;
+mod unknown_producer_id_error;
+mod unknown_server_error;
+mod unknown_subscription_id_error;
+mod unknown_topic_id_error;
+mod unknown_topic_or_partition_error;
+mod unreleased_instance_id_error;
+mod unstable_offset_commit_error;
+mod unsupported_assignor_error;
+mod unsupported_by_authentication_error;
+mod unsupported_compression_type_error;
+mod unsupported_endpoint_type_error;
+mod unsupported_for_message_format_error;
+mod unsupported_sasl_mechanism_error;
+mod unsupported_version_error;
+mod voter_not_found_error;
+mod wakeup_error;
 
 /// Render a set of strings the way Java's `AbstractCollection.toString()` does —
 /// `[a, b]`, elements unquoted and comma-space separated — so the messages of
@@ -340,8 +340,8 @@ pub use wakeup_error::WakeupError;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_error::{ErrorCode, ErrorHierarchy};
-    use crate::common::protocol::Errors;
+    use crate::common::Errors;
+    use crate::common::error::{ErrorCode, ErrorHierarchy};
     use crate::producer::ProducerBufferExhaustedError;
 
     /// `BufferExhaustedException extends TimeoutException` and has no entry of its
@@ -363,7 +363,7 @@ mod tests {
     /// no entry and no coded superclass falls through `Errors.forException`'s
     /// walk to `UNKNOWN_SERVER_ERROR`.
     // Fatality is intentionally NOT checked here: it is not an `ErrorHierarchy`
-    // predicate but `request_utils::is_fatal_error` over an `Error`. The codeless
+    // predicate but `request_utils::RequestUtils::is_fatal_error` over an `Error`. The codeless
     // fatal classes are covered there instead.
     #[test]
     fn codeless_classes_state_their_own_ancestry() {

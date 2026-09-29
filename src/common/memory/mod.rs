@@ -14,7 +14,8 @@
 
 //! Memory pool for Kafka network I/O (org.apache.kafka.common.memory).
 
-pub(crate) mod buffer_supplier;
-pub mod memory_pool;
+mod buffer_supplier;
+mod memory_pool;
 
+pub(crate) use buffer_supplier::BufferSupplier;
 pub use memory_pool::{MemoryPool, NoopMemoryPool};

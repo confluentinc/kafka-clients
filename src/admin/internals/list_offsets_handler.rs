@@ -20,24 +20,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::list_offsets_result::ListOffsetsResultInfo;
-use crate::admin::options::ListOffsetsOptions;
+use crate::admin::ListOffsetsOptions;
+use crate::admin::ListOffsetsResultInfo;
+use crate::common::Errors;
 use crate::common::errors::ApiError;
-use crate::common::protocol::Errors;
-use crate::common::requests::list_offsets_request::{
-    EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, LATEST_TIERED_TIMESTAMP, MAX_TIMESTAMP,
+use crate::common::requests::{
+    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptionsBuilder,
+    ListOffsetsResponse, RequestBuilder,
 };
-use crate::common::requests::list_offsets_response::UNKNOWN_EPOCH;
-use crate::common::requests::{ConcreteResponse, ListOffsetsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_debug;
 use crate::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsTopic};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `listOffsets`.
 ///
@@ -107,25 +106,28 @@ impl ListOffsetsHandler {
 
         let supports_max_timestamp = keys
             .iter()
-            .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&MAX_TIMESTAMP));
-        let require_earliest_local_timestamp = keys
-            .iter()
-            .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&EARLIEST_LOCAL_TIMESTAMP));
-        let require_tiered_storage_timestamp = keys
-            .iter()
-            .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&LATEST_TIERED_TIMESTAMP));
-        let require_earliest_pending_upload_timestamp = keys
-            .iter()
-            .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&EARLIEST_PENDING_UPLOAD_TIMESTAMP));
+            .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&ListOffsetsRequest::MAX_TIMESTAMP));
+        let require_earliest_local_timestamp = keys.iter().any(|key| {
+            self.offset_timestamps_by_partition.get(key) == Some(&ListOffsetsRequest::EARLIEST_LOCAL_TIMESTAMP)
+        });
+        let require_tiered_storage_timestamp = keys.iter().any(|key| {
+            self.offset_timestamps_by_partition.get(key) == Some(&ListOffsetsRequest::LATEST_TIERED_TIMESTAMP)
+        });
+        let require_earliest_pending_upload_timestamp = keys.iter().any(|key| {
+            self.offset_timestamps_by_partition.get(key) == Some(&ListOffsetsRequest::EARLIEST_PENDING_UPLOAD_TIMESTAMP)
+        });
 
-        let timeout_ms = self.options.timeout().unwrap_or(self.default_api_timeout_ms);
-        let mut builder = ListOffsetsRequestBuilder::for_consumer_with_features(
-            true,
-            self.options.isolation_level(),
-            supports_max_timestamp,
-            require_earliest_local_timestamp,
-            require_tiered_storage_timestamp,
-            require_earliest_pending_upload_timestamp,
+        let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
+        let mut builder = ListOffsetsRequestBuilder::for_consumer_options(
+            ListOffsetsRequestBuilderOptionsBuilder::new()
+                .set_require_timestamp(true)
+                .set_isolation_level(self.options.isolation_level())
+                .set_require_max_timestamp(supports_max_timestamp)
+                .set_require_earliest_local_timestamp(require_earliest_local_timestamp)
+                .set_require_tiered_storage_timestamp(require_tiered_storage_timestamp)
+                .set_require_earliest_pending_upload_timestamp(require_earliest_pending_upload_timestamp)
+                .build()
+                .expect("ListOffsetsRequestBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         builder
             .set_target_times(topics_by_name.into_values().collect())
@@ -214,7 +216,7 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
                         topic_partition
                     );
                 } else if error == Errors::None {
-                    let leader_epoch = if partition.leader_epoch == UNKNOWN_EPOCH {
+                    let leader_epoch = if partition.leader_epoch == ListOffsetsResponse::UNKNOWN_EPOCH {
                         None
                     } else {
                         Some(partition.leader_epoch)
@@ -264,7 +266,7 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         // `handleUnsupportedVersionException`.
         let mut max_timestamp_partitions: HashMap<TopicPartition, Error> = HashMap::new();
         for topic_partition in keys {
-            if self.offset_timestamps_by_partition.get(topic_partition) == Some(&MAX_TIMESTAMP) {
+            if self.offset_timestamps_by_partition.get(topic_partition) == Some(&ListOffsetsRequest::MAX_TIMESTAMP) {
                 max_timestamp_partitions.insert(topic_partition.clone(), error.clone());
             }
         }
@@ -283,12 +285,11 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ListOffsetsResponseData;
     use crate::common::IsolationLevel;
-    use crate::common::requests::list_offsets_request::EARLIEST_TIMESTAMP;
+    use crate::common::requests::ListOffsetsRequest;
     use crate::common::requests::{ConcreteResponse, ListOffsetsResponse};
-    use crate::list_offsets_response_data::{
-        ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
-    };
+    use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 
     const DEFAULT_API_TIMEOUT_MS: i32 = 100;
 
@@ -302,14 +303,13 @@ mod tests {
 
     /// The six-partition offset-spec fixture from `ListOffsetsHandlerTest`.
     fn offset_timestamps() -> HashMap<TopicPartition, i64> {
-        use crate::common::requests::list_offsets_request::{LATEST_TIERED_TIMESTAMP, LATEST_TIMESTAMP};
         [
-            (tp("t0", 0), LATEST_TIMESTAMP),
-            (tp("t0", 1), EARLIEST_TIMESTAMP),
+            (tp("t0", 0), ListOffsetsRequest::LATEST_TIMESTAMP),
+            (tp("t0", 1), ListOffsetsRequest::EARLIEST_TIMESTAMP),
             (tp("t1", 0), 123),
-            (tp("t1", 1), MAX_TIMESTAMP),
-            (tp("t2", 0), EARLIEST_LOCAL_TIMESTAMP),
-            (tp("t2", 1), LATEST_TIERED_TIMESTAMP),
+            (tp("t1", 1), ListOffsetsRequest::MAX_TIMESTAMP),
+            (tp("t2", 0), ListOffsetsRequest::EARLIEST_LOCAL_TIMESTAMP),
+            (tp("t2", 1), ListOffsetsRequest::LATEST_TIERED_TIMESTAMP),
         ]
         .into_iter()
         .collect()
@@ -568,7 +568,7 @@ mod tests {
     /// Mirrors `testBuildRequestWithTimeoutMs`.
     #[test]
     fn build_request_with_timeout_ms() {
-        let handler = handler(ListOffsetsOptions::new().timeout_ms(Some(200)));
+        let handler = handler(ListOffsetsOptions::new().set_timeout_ms(Some(200)));
         let keys: HashSet<TopicPartition> = [tp("t0", 0), tp("t0", 1)].into_iter().collect();
         let builder = handler.build_batched_request(node().id(), &keys);
         assert_eq!(builder.data().timeout_ms, 200);

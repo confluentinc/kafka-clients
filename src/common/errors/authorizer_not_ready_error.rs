@@ -14,7 +14,7 @@
 
 //! Translated from `org.apache.kafka.common.errors.AuthorizerNotReadyException`.
 
-use crate::common::kafka_error::kafka_error_class;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// The authorizer is not ready to serve the request yet; retrying may

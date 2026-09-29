@@ -21,8 +21,8 @@ use std::io;
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::api_versions_request_data::ApiVersionsRequestData;
-use crate::api_versions_response_data::ApiVersionsResponseData;
+use crate::ApiVersionsRequestData;
+use crate::ApiVersionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::ApiVersionsResponse;
@@ -61,7 +61,7 @@ impl ApiVersionsRequest {
     }
 
     /// Creates a new `ApiVersionsRequest` with an optional unsupported request version.
-    pub fn with_unsupported_version(
+    pub fn with_unsupported_request_version(
         data: ApiVersionsRequestData,
         version: i16,
         unsupported_request_version: Option<i16>,
@@ -171,7 +171,7 @@ impl ApiVersionsRequestBuilder {
     }
 
     /// Creates a builder that targets a specific version.
-    pub fn for_version(version: i16) -> Self {
+    pub fn with_version(version: i16) -> Self {
         let mut builder = Self::new();
         builder.oldest_allowed_version = version;
         builder.latest_allowed_version = version;
@@ -179,7 +179,11 @@ impl ApiVersionsRequestBuilder {
     }
 
     /// Creates a builder from custom data and version range.
-    pub fn from_data(data: ApiVersionsRequestData, oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
+    pub fn with_data_oldest_allowed_version_latest_allowed_version(
+        data: ApiVersionsRequestData,
+        oldest_allowed_version: i16,
+        latest_allowed_version: i16,
+    ) -> Self {
         Self { data, oldest_allowed_version, latest_allowed_version }
     }
 }
@@ -258,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_for_version() {
-        let builder = ApiVersionsRequestBuilder::for_version(2);
+    fn test_builder_new_version() {
+        let builder = ApiVersionsRequestBuilder::with_version(2);
         assert_eq!(builder.oldest_allowed_version(), 2);
         assert_eq!(builder.latest_allowed_version(), 2);
     }
@@ -270,7 +274,7 @@ mod tests {
         let request = ApiVersionsRequest::new(data.clone(), 0);
         assert!(!request.has_unsupported_request_version());
 
-        let request = ApiVersionsRequest::with_unsupported_version(data, 0, Some(99));
+        let request = ApiVersionsRequest::with_unsupported_request_version(data, 0, Some(99));
         assert!(request.has_unsupported_request_version());
     }
 

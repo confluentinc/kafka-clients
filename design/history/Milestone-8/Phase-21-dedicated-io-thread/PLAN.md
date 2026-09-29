@@ -62,7 +62,7 @@ let thread_handle = std::thread::Builder::new()
         let _ = done_tx.send(());
     })
     .expect("spawn consumer io thread");
-let network_thread_close = NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+let network_thread_close = NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
 ```
 
 `NetworkThreadCloseHandle` gets an internal enum so it supports BOTH the existing

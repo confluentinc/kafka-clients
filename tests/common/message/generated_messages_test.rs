@@ -21,24 +21,24 @@ mod tests {
     #[test]
     fn test_generated_messages_accessible() {
         // Test that generated message types are accessible
-        let _produce_req = produce_request_data::ProduceRequestData::new();
-        let _fetch_req = fetch_request_data::FetchRequestData::new();
-        let _metadata_req = metadata_request_data::MetadataRequestData::new();
+        let _produce_req = ProduceRequestData::new();
+        let _fetch_req = FetchRequestData::new();
+        let _metadata_req = MetadataRequestData::new();
     }
 
     #[test]
     fn test_produce_request_instantiation() {
-        let req = produce_request_data::ProduceRequestData::new();
+        let req = ProduceRequestData::new();
         // Verify the struct can be created
         assert!(format!("{:?}", req).contains("ProduceRequestData"));
-        assert_eq!(produce_request_data::ProduceRequestData::API_KEY, 0);
+        assert_eq!(ProduceRequestData::API_KEY, 0);
     }
 
     #[test]
     fn test_fetch_request_instantiation() {
-        let req = fetch_request_data::FetchRequestData::new();
+        let req = FetchRequestData::new();
         assert!(format!("{:?}", req).contains("FetchRequestData"));
-        assert_eq!(fetch_request_data::FetchRequestData::API_KEY, 1);
+        assert_eq!(FetchRequestData::API_KEY, 1);
     }
 
     #[test]

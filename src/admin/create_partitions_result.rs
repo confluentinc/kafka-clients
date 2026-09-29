@@ -50,7 +50,7 @@ impl CreatePartitionsResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {

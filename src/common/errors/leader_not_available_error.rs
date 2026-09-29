@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.LeaderNotAvailableException`.
 
-use crate::common::kafka_error::kafka_error_class;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// There is no leader for this topic-partition as we are in the middle of a

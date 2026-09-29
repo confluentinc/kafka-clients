@@ -19,11 +19,10 @@
 
 use std::io;
 
+use crate::ListPartitionReassignmentsRequestData;
+use crate::ListPartitionReassignmentsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
-use crate::list_partition_reassignments_response_data::{
-    ListPartitionReassignmentsResponseData, OngoingPartitionReassignment, OngoingTopicReassignment,
-};
+use crate::list_partition_reassignments_response_data::{OngoingPartitionReassignment, OngoingTopicReassignment};
 
 use super::{ConcreteRequest, ConcreteResponse, ListPartitionReassignmentsResponse, RequestBuilder};
 
@@ -128,7 +127,7 @@ pub struct ListPartitionReassignmentsRequestBuilder {
 
 impl ListPartitionReassignmentsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: ListPartitionReassignmentsRequestData) -> Self {
+    pub fn new(data: ListPartitionReassignmentsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::LIST_PARTITION_REASSIGNMENTS.oldest_version(),
@@ -194,7 +193,7 @@ mod tests {
         data.set_topics(Some(vec![topic("A", vec![0, 2])]));
         let mut request = ConcreteRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListPartitionReassignmentsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().timeout_ms, 30000);
         let topics = parsed.data().topics.as_ref().unwrap();

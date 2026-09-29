@@ -264,7 +264,7 @@ async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory
     // that mangled the int32 list shows up here rather than as a silently smaller
     // set.
     let with_operations = admin
-        .describe_cluster(DescribeClusterOptions::new().include_authorized_operations(true))
+        .describe_cluster(DescribeClusterOptions::new().set_include_authorized_operations(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe cluster with operations: {e}"));
     let operations = with_operations
@@ -477,7 +477,9 @@ async fn describe_configs_reports_synonyms_and_documentation<F: AdminBackendFact
     let described = admin
         .describe_configs(
             std::slice::from_ref(&resource),
-            DescribeConfigsOptions::new().include_synonyms(true).include_documentation(true),
+            DescribeConfigsOptions::new()
+                .set_include_synonyms(true)
+                .set_include_documentation(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe configs: {e}"));

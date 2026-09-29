@@ -16,34 +16,35 @@
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils` (static
-//! helpers + per-request state) and
-//! `org.apache.kafka.clients.consumer.internals.PositionsValidator`
-//! (validation-on-metadata-change driver). The classic-consumer
-//! `OffsetFetcher` is out of scope per `consumer-threading.md` §20.
+//! helpers + per-request state). The validation-on-metadata-change driver
+//! it delegates to lives in
+//! [`PositionsValidator`](super::PositionsValidator), as in Java. The
+//! classic-consumer `OffsetFetcher` is out of scope per
+//! `consumer-threading.md` §20.
 
 #![allow(dead_code)]
 
 use crate::consumer::ConsumerNoOffsetForPartitionError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::api_versions::ApiVersions;
+use crate::ApiVersions;
 use crate::common::IsolationLevel;
 use crate::common::errors::TopicAuthorizationError;
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::ListOffsetsResponse;
-use crate::common::requests::list_offsets_response::{UNKNOWN_EPOCH, UNKNOWN_OFFSET};
-use crate::common::requests::offsets_for_leader_epoch_request::supports_topic_permission;
+
+use crate::NodeApiVersions;
+use crate::common::requests::OffsetsForLeaderEpochRequest;
 use crate::common::{Error, Node, TopicPartition};
 use crate::list_offsets_request_data::ListOffsetsPartition;
-use crate::node_api_versions::NodeApiVersions;
 
-use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-use super::consumer_metadata::ConsumerMetadata;
-use super::offset_and_timestamp_internal::OffsetAndTimestampInternal;
-use super::offsets_for_leader_epoch_client::OffsetForEpochResult;
-use super::subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
+use super::AutoOffsetResetStrategy;
+use super::ConsumerMetadata;
+use super::OffsetAndTimestampInternal;
+use super::OffsetForEpochResult;
+use super::PositionsValidator;
+use super::{FetchPosition, LogTruncation, SubscriptionState};
 
 /// Data about an offset returned by a broker for a single partition.
 ///
@@ -86,112 +87,10 @@ impl ListOffsetResult {
     }
 }
 
-/// Returns `true` if the broker's `OffsetForLeaderEpoch` API supports
-/// topic-level permission (v3+).
-///
-/// Translated from `OffsetFetcherUtils.hasUsableOffsetForLeaderEpochVersion`.
-pub(crate) fn has_usable_offset_for_leader_epoch_version(node_api_versions: &NodeApiVersions) -> bool {
-    match node_api_versions.api_version(&ApiKeys::OFFSET_FOR_LEADER_EPOCH) {
-        Some(version) => supports_topic_permission(version.max_version),
-        None => false,
-    }
-}
-
-/// Groups partition entries by the current leader from
-/// [`FetchPosition::current_leader`], dropping entries without a leader.
-///
-/// Translated from `OffsetFetcherUtils.regroupFetchPositionsByLeader`.
-pub(crate) fn regroup_fetch_positions_by_leader(
-    partition_map: &HashMap<TopicPartition, FetchPosition>,
-) -> HashMap<Node, HashMap<TopicPartition, FetchPosition>> {
-    let mut result: HashMap<Node, HashMap<TopicPartition, FetchPosition>> = HashMap::new();
-    for (tp, position) in partition_map {
-        if let Some(leader) = &position.current_leader.leader {
-            result.entry(leader.clone()).or_default().insert(tp.clone(), position.clone());
-        }
-    }
-    result
-}
-
-/// Returns the set of topics referenced by the given partition iterator.
-///
-/// Translated from `OffsetFetcherUtils.topicsForPartitions`.
-pub(crate) fn topics_for_partitions<'a, I>(partitions: I) -> HashSet<String>
-where
-    I: IntoIterator<Item = &'a TopicPartition>,
-{
-    partitions.into_iter().map(|tp| tp.topic().to_string()).collect()
-}
-
-/// Aggregates a `(TopicPartition, T)` map by leader node.
-///
-/// Returns a map from `Node` to the sub-map of entries whose current leader
-/// is that node. Partitions for which the metadata does not yet have a
-/// leader are dropped (matching Java's `groupingBy` over `leaderFor` which
-/// would NPE on null).
-///
-/// Translated from `OffsetFetcherUtils.regroupPartitionMapByNode`.
-pub(crate) fn regroup_partition_map_by_node<T: Clone>(
-    metadata: &ConsumerMetadata,
-    partition_map: &HashMap<TopicPartition, T>,
-) -> HashMap<Node, HashMap<TopicPartition, T>> {
-    let cluster = metadata.metadata_arc().fetch();
-    let mut result: HashMap<Node, HashMap<TopicPartition, T>> = HashMap::new();
-    for (tp, value) in partition_map {
-        if let Some(node) = cluster.leader_for(tp) {
-            result.entry(node.clone()).or_default().insert(tp.clone(), value.clone());
-        }
-    }
-    result
-}
-
-/// Builds an `OffsetAndTimestampInternal` result map from a
-/// `timestamps_to_search` input plus per-partition fetched offsets.
-///
-/// Each input partition appears in the output (as `None` when no offset
-/// was returned for it; `Some(_)` otherwise — including the
-/// `endOffsets`/`beginningOffsets` case where the broker returns
-/// `timestamp == -1` as the "no timestamp" sentinel).
-///
-/// Translates Java's `OffsetFetcherUtils.buildOffsetsForTimeInternalResult`
-/// (NOT the public-class `buildOffsetsForTimesResult`): the result is
-/// the internal `OffsetAndTimestampInternal` so it can carry the broker's
-/// negative-timestamp sentinel without failing validation. The
-/// `offsetsForTimes` public API converts to [`OffsetAndTimestamp`] at
-/// its boundary; `endOffsets`/`beginningOffsets` reads `.offset()`
-/// directly.
-///
-/// Mirrors COMMENTS.DONE.1.md Issue 6: a previous translation used the
-/// public-class constructor here and silently produced `None` for every
-/// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
-/// rejected `timestamp == -1`.
-pub(crate) fn build_offsets_for_times_result(
-    timestamps_to_search: &HashMap<TopicPartition, i64>,
-    fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
-) -> HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> {
-    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> =
-        HashMap::with_capacity(timestamps_to_search.len());
-    for tp in timestamps_to_search.keys() {
-        result.insert(tp.clone(), None);
-    }
-    for (tp, offset_data) in fetched_offsets {
-        let oat = OffsetAndTimestampInternal::new(
-            offset_data.offset,
-            offset_data.timestamp.unwrap_or(-1),
-            offset_data.leader_epoch,
-        );
-        result.insert(tp.clone(), Some(oat));
-    }
-    result
-}
-
-/// Per-instance state for the `OffsetFetcherUtils` translation.
-///
-/// The Rust translation collapses Java's `OffsetFetcherUtils` and
-/// `PositionsValidator` instance state — neither holds enough independent
-/// behaviour to warrant a separate type at the Rust call sites — and
-/// exposes the union of their methods.
-pub(crate) struct OffsetFetcherUtilsState {
+/// Translates `org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils`:
+/// its static helpers are associated functions, its instance fields are the
+/// struct's fields.
+pub(crate) struct OffsetFetcherUtils {
     /// `Arc` clone shared with the `OffsetsRequestManager`. Held so that
     /// Java's instance methods that read/write `metadata` and
     /// `subscriptionState` translate 1:1 without callers having to pass
@@ -201,16 +100,139 @@ pub(crate) struct OffsetFetcherUtilsState {
     pub(crate) api_versions: std::sync::Arc<ApiVersions>,
     pub(crate) retry_backoff_ms: i64,
     cached_reset_positions_error: Mutex<Option<Error>>,
-    cached_validate_positions_error: Mutex<Option<Error>>,
-    metadata_update_version: AtomicI32,
+    /// Java: `private final PositionsValidator positionsValidator`
+    /// (`OffsetFetcherUtils.java:63`). Shared — not owned: the same
+    /// instance is held by `AsyncKafkaConsumer` so the application task can
+    /// consult it on the `poll()` critical path.
+    positions_validator: std::sync::Arc<PositionsValidator>,
 }
 
-impl OffsetFetcherUtilsState {
+impl OffsetFetcherUtils {
+    /// Returns `true` if the broker's `OffsetForLeaderEpoch` API supports
+    /// topic-level permission (v3+).
+    ///
+    /// Translated from `OffsetFetcherUtils.hasUsableOffsetForLeaderEpochVersion`.
+    pub(crate) fn has_usable_offset_for_leader_epoch_version(node_api_versions: &NodeApiVersions) -> bool {
+        match node_api_versions.api_version(&ApiKeys::OFFSET_FOR_LEADER_EPOCH) {
+            Some(version) => OffsetsForLeaderEpochRequest::supports_topic_permission(version.max_version),
+            None => false,
+        }
+    }
+
+    /// Groups partition entries by the current leader from
+    /// [`FetchPosition::current_leader`], dropping entries without a leader.
+    ///
+    /// Translated from `OffsetFetcherUtils.regroupFetchPositionsByLeader`.
+    pub(crate) fn regroup_fetch_positions_by_leader(
+        partition_map: &HashMap<TopicPartition, FetchPosition>,
+    ) -> HashMap<Node, HashMap<TopicPartition, FetchPosition>> {
+        let mut result: HashMap<Node, HashMap<TopicPartition, FetchPosition>> = HashMap::new();
+        for (tp, position) in partition_map {
+            if let Some(leader) = &position.current_leader.leader {
+                result.entry(leader.clone()).or_default().insert(tp.clone(), position.clone());
+            }
+        }
+        result
+    }
+
+    /// Returns the set of topics referenced by the given partition iterator.
+    ///
+    /// Translated from `OffsetFetcherUtils.topicsForPartitions`.
+    pub(crate) fn topics_for_partitions<'a, I>(partitions: I) -> HashSet<String>
+    where
+        I: IntoIterator<Item = &'a TopicPartition>,
+    {
+        partitions.into_iter().map(|tp| tp.topic().to_string()).collect()
+    }
+
+    /// Aggregates a `(TopicPartition, T)` map by leader node.
+    ///
+    /// Returns a map from `Node` to the sub-map of entries whose current leader
+    /// is that node. Partitions for which the metadata does not yet have a
+    /// leader are dropped (matching Java's `groupingBy` over `leaderFor` which
+    /// would NPE on null).
+    ///
+    /// Translated from `OffsetFetcherUtils.regroupPartitionMapByNode`.
+    pub(crate) fn regroup_partition_map_by_node<T: Clone>(
+        metadata: &ConsumerMetadata,
+        partition_map: &HashMap<TopicPartition, T>,
+    ) -> HashMap<Node, HashMap<TopicPartition, T>> {
+        let cluster = metadata.metadata_arc().fetch();
+        let mut result: HashMap<Node, HashMap<TopicPartition, T>> = HashMap::new();
+        for (tp, value) in partition_map {
+            if let Some(node) = cluster.leader_for(tp) {
+                result.entry(node.clone()).or_default().insert(tp.clone(), value.clone());
+            }
+        }
+        result
+    }
+
+    /// Builds an `OffsetAndTimestampInternal` result map from a
+    /// `timestamps_to_search` input plus per-partition fetched offsets.
+    ///
+    /// Each input partition appears in the output (as `None` when no offset
+    /// was returned for it; `Some(_)` otherwise — including the
+    /// `endOffsets`/`beginningOffsets` case where the broker returns
+    /// `timestamp == -1` as the "no timestamp" sentinel).
+    ///
+    /// Translates Java's `OffsetFetcherUtils.buildOffsetsForTimeInternalResult`
+    /// (NOT the public-class `buildOffsetsForTimesResult`): the result is
+    /// the internal `OffsetAndTimestampInternal` so it can carry the broker's
+    /// negative-timestamp sentinel without failing validation. The
+    /// `offsetsForTimes` public API converts to [`OffsetAndTimestamp`] at
+    /// its boundary; `endOffsets`/`beginningOffsets` reads `.offset()`
+    /// directly.
+    ///
+    /// Mirrors COMMENTS.DONE.1.md Issue 6: a previous translation used the
+    /// public-class constructor here and silently produced `None` for every
+    /// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
+    /// rejected `timestamp == -1`.
+    pub(crate) fn build_offsets_for_times_result(
+        timestamps_to_search: &HashMap<TopicPartition, i64>,
+        fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
+    ) -> HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> {
+        let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> =
+            HashMap::with_capacity(timestamps_to_search.len());
+        for tp in timestamps_to_search.keys() {
+            result.insert(tp.clone(), None);
+        }
+        for (tp, offset_data) in fetched_offsets {
+            let oat = OffsetAndTimestampInternal::new(
+                offset_data.offset,
+                offset_data.timestamp.unwrap_or(-1),
+                offset_data.leader_epoch,
+            );
+            result.insert(tp.clone(), Some(oat));
+        }
+        result
+    }
+
+    /// Java: the six-argument
+    /// `OffsetFetcherUtils(LogContext, ConsumerMetadata, SubscriptionState, Time, long, ApiVersions)`
+    /// (`OffsetFetcherUtils.java:73`), which constructs its own
+    /// [`PositionsValidator`].
     pub(crate) fn new(
         metadata: std::sync::Arc<ConsumerMetadata>,
         subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
         api_versions: std::sync::Arc<ApiVersions>,
         retry_backoff_ms: i64,
+    ) -> Self {
+        let positions_validator = std::sync::Arc::new(PositionsValidator::new(
+            std::sync::Arc::clone(&subscriptions),
+            std::sync::Arc::clone(&metadata),
+        ));
+        Self::with_positions_validator(metadata, subscriptions, api_versions, retry_backoff_ms, positions_validator)
+    }
+
+    /// Java: the seven-argument overload taking the shared
+    /// `PositionsValidator` (`OffsetFetcherUtils.java:83`). Per CLAUDE.md §2
+    /// the overload carrying the extra parameter is named after it.
+    pub(crate) fn with_positions_validator(
+        metadata: std::sync::Arc<ConsumerMetadata>,
+        subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
+        api_versions: std::sync::Arc<ApiVersions>,
+        retry_backoff_ms: i64,
+        positions_validator: std::sync::Arc<PositionsValidator>,
     ) -> Self {
         Self {
             metadata,
@@ -218,9 +240,14 @@ impl OffsetFetcherUtilsState {
             api_versions,
             retry_backoff_ms,
             cached_reset_positions_error: Mutex::new(None),
-            cached_validate_positions_error: Mutex::new(None),
-            metadata_update_version: AtomicI32::new(-1),
+            positions_validator,
         }
+    }
+
+    /// The shared [`PositionsValidator`], so callers that hold only the
+    /// `OffsetFetcherUtils` can reach it (Java reads the field directly).
+    pub(crate) fn positions_validator(&self) -> &std::sync::Arc<PositionsValidator> {
+        &self.positions_validator
     }
 
     /// Processes a successful `ListOffsets` response and returns the
@@ -246,8 +273,8 @@ impl OffsetFetcherUtilsState {
                 let error = Errors::for_code(partition.error_code);
                 match error {
                     Errors::None => {
-                        if partition.offset != UNKNOWN_OFFSET {
-                            let leader_epoch = if partition.leader_epoch == UNKNOWN_EPOCH {
+                        if partition.offset != ListOffsetsResponse::UNKNOWN_OFFSET {
+                            let leader_epoch = if partition.leader_epoch == ListOffsetsResponse::UNKNOWN_EPOCH {
                                 None
                             } else {
                                 Some(partition.leader_epoch)
@@ -272,7 +299,7 @@ impl OffsetFetcherUtilsState {
                     // NOT TRANSLATED: this type has no logger. Java's
                     // `OffsetFetcherUtils` takes a `LogContext`
                     // (`OffsetFetcherUtils.java:73`, `:84`); adding one here means
-                    // threading it through `OffsetFetcherUtilsState::new` AND
+                    // threading it through `OffsetFetcherUtils::new` AND
                     // `OffsetsRequestManager::new` (11 call sites, none of which
                     // has one in scope). Deferred deliberately rather than
                     // bundled here: it is log-only — the four statements change no
@@ -398,15 +425,12 @@ impl OffsetFetcherUtilsState {
         }
     }
 
-    /// Stores `error` for later propagation on the next call to
-    /// `refresh_and_get_partitions_to_validate`. Idempotent.
+    /// Java: `positionsValidator.maybeSetError(..)`
+    /// (`OffsetFetcherUtils.java:380,390`). Stores `error` for later
+    /// propagation on the next call to
+    /// [`Self::refresh_and_get_partitions_to_validate`].
     pub(crate) fn maybe_set_validate_error(&self, error: Error) {
-        let mut guard = self.cached_validate_positions_error.lock().expect("validate cache poisoned");
-        if guard.is_none() {
-            *guard = Some(error);
-        } else {
-            log::error!("Discarding error validating positions because another error is pending");
-        }
+        self.positions_validator.maybe_set_error(error);
     }
 
     /// Returns the next reset-strategy-per-partition map for partitions
@@ -445,10 +469,9 @@ impl OffsetFetcherUtilsState {
         Ok(result)
     }
 
-    /// Runs the `PositionsValidator` reset-positions path: returns the
-    /// partition map needing validation against the current metadata.
-    ///
-    /// Mirrors `PositionsValidator.refreshAndGetPartitionsToValidate`.
+    /// Java: `OffsetFetcherUtils.refreshAndGetPartitionsToValidate()`
+    /// (`:175`) — a one-line delegation that supplies the `apiVersions`
+    /// field the validator does not hold.
     ///
     /// # Errors
     ///
@@ -458,40 +481,17 @@ impl OffsetFetcherUtilsState {
         &self,
         now_ms: i64,
     ) -> Result<HashMap<TopicPartition, FetchPosition>, Error> {
-        if let Some(err) = self
-            .cached_validate_positions_error
-            .lock()
-            .expect("validate cache poisoned")
-            .take()
-        {
-            return Err(err);
-        }
-        self.validate_positions_on_metadata_change();
-        let subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-        Ok(subs.partitions_needing_validation(now_ms))
+        self.positions_validator
+            .refresh_and_get_partitions_to_validate(&self.api_versions, now_ms)
     }
 
-    /// Validates positions whenever the metadata snapshot has advanced.
+    /// If we have seen new metadata, check that all the assignments have a
+    /// valid position.
     ///
-    /// Mirrors `PositionsValidator.validatePositionsOnMetadataChange`.
+    /// Java: `OffsetFetcherUtils.validatePositionsOnMetadataChange()` (`:183`).
     pub(crate) fn validate_positions_on_metadata_change(&self) {
-        let metadata_arc = self.metadata.metadata_arc();
-        let new_version = metadata_arc.update_version();
-        if self.metadata_update_version.swap(new_version, Ordering::Relaxed) == new_version {
-            return;
-        }
-        // Snapshot assigned partitions to avoid double-locking the mutex
-        // while invoking maybe_validate_position_for_current_leader (which
-        // also locks).
-        let assigned: Vec<TopicPartition> = {
-            let subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            subs.assigned_partitions().into_iter().collect()
-        };
-        for tp in &assigned {
-            let leader_and_epoch = metadata_arc.current_leader(tp);
-            let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            subs.maybe_validate_position_for_current_leader(&self.api_versions, tp, &leader_and_epoch);
-        }
+        self.positions_validator
+            .validate_positions_on_metadata_change(&self.api_versions);
     }
 
     /// Resets a partition's position to the offset returned by a
@@ -614,6 +614,7 @@ impl OffsetFetcherUtilsState {
 mod tests {
     use super::*;
     use crate::common::Node;
+    use crate::common::requests::OffsetsForLeaderEpochResponse;
     use crate::metadata::LeaderAndEpoch;
 
     /// Verifies that `topics_for_partitions` collects topic names.
@@ -624,7 +625,7 @@ mod tests {
             TopicPartition::new("a".to_string(), 1),
             TopicPartition::new("b".to_string(), 0),
         ];
-        let topics = topics_for_partitions(parts.iter());
+        let topics = OffsetFetcherUtils::topics_for_partitions(parts.iter());
         assert_eq!(topics.len(), 2);
         assert!(topics.contains("a"));
         assert!(topics.contains("b"));
@@ -655,7 +656,7 @@ mod tests {
             FetchPosition::with_leader(0, None, LeaderAndEpoch::no_leader_or_epoch()),
         );
 
-        let grouped = regroup_fetch_positions_by_leader(&map);
+        let grouped = OffsetFetcherUtils::regroup_fetch_positions_by_leader(&map);
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped.get(&node1).unwrap().len(), 2);
         assert_eq!(grouped.get(&node2).unwrap().len(), 1);
@@ -675,7 +676,7 @@ mod tests {
         let mut fetched = HashMap::new();
         fetched.insert(tp_a.clone(), ListOffsetData::new(100, Some(1234), Some(5)));
 
-        let result = build_offsets_for_times_result(&search, &fetched);
+        let result = OffsetFetcherUtils::build_offsets_for_times_result(&search, &fetched);
         assert_eq!(result.len(), 2);
         let entry_a = result.get(&tp_a).unwrap().as_ref().expect("fetched entry has offset");
         assert_eq!(entry_a.offset(), 100);
@@ -724,7 +725,7 @@ mod tests {
     use crate::consumer::ConsumerConfig;
     use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
-    /// Build an `OffsetFetcherUtilsState` with `tp` assigned and seeked
+    /// Build an `OffsetFetcherUtils` with `tp` assigned and seeked
     /// (unvalidated) to `offset`/`epoch` — i.e. AWAITING_VALIDATION with a
     /// known leader. `reset_strategy` controls the subscription's default
     /// reset policy (EARLIEST → reset on truncation; NONE → LogTruncation).
@@ -733,14 +734,14 @@ mod tests {
         offset: i64,
         epoch: i32,
         reset_strategy: AutoOffsetResetStrategy,
-    ) -> (OffsetFetcherUtilsState, std::sync::Arc<Mutex<SubscriptionState>>) {
-        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+    ) -> (OffsetFetcherUtils, std::sync::Arc<Mutex<SubscriptionState>>) {
+        let config = ConsumerConfig::new(&std::collections::HashMap::from([
             ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
             ("group.id".to_string(), "g".to_string()),
         ]))
         .expect("config");
         let subscriptions = std::sync::Arc::new(Mutex::new(SubscriptionState::new(reset_strategy)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             subscriptions.clone(),
             ClusterResourceListeners::new(),
@@ -754,7 +755,7 @@ mod tests {
             subs.seek_unvalidated(tp, position).expect("seek");
         }
         let state =
-            OffsetFetcherUtilsState::new(metadata, subscriptions.clone(), std::sync::Arc::new(ApiVersions::new()), 500);
+            OffsetFetcherUtils::new(metadata, subscriptions.clone(), std::sync::Arc::new(ApiVersions::new()), 500);
         (state, subscriptions)
     }
 
@@ -778,13 +779,15 @@ mod tests {
     /// and the partition leaves AWAITING_VALIDATION.
     #[test]
     fn validation_undefined_with_defined_reset_policy_resets() {
-        use crate::common::requests::offsets_for_leader_epoch_response::{UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET};
         let initial_offset = 5i64;
         let initial_epoch = 1i32;
         // (leader_epoch, end_offset) cases mirroring Java:
         //   testOffsetValidationresetPositionForUndefinedEpochWithDefinedResetPolicy:  (UNDEFINED_EPOCH, 0)
         //   testOffsetValidationresetPositionForUndefinedOffsetWithDefinedResetPolicy: (2, UNDEFINED_EPOCH_OFFSET)
-        for (leader_epoch, end_offset) in [(UNDEFINED_EPOCH, 0i64), (2, UNDEFINED_EPOCH_OFFSET)] {
+        for (leader_epoch, end_offset) in [
+            (OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH, 0i64),
+            (2, OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH_OFFSET),
+        ] {
             let tp = TopicPartition::new("t1".to_string(), 0);
             let (state, subscriptions) = fetcher_utils_awaiting_validation(
                 &tp,
@@ -826,10 +829,12 @@ mod tests {
     /// `divergentOffsets`. The partition stays AWAITING_VALIDATION.
     #[test]
     fn validation_undefined_with_undefined_reset_policy_log_truncation() {
-        use crate::common::requests::offsets_for_leader_epoch_response::{UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET};
         let initial_offset = 5i64;
         let initial_epoch = 1i32;
-        for (leader_epoch, end_offset) in [(UNDEFINED_EPOCH, 0i64), (2, UNDEFINED_EPOCH_OFFSET)] {
+        for (leader_epoch, end_offset) in [
+            (OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH, 0i64),
+            (2, OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH_OFFSET),
+        ] {
             let tp = TopicPartition::new("t1".to_string(), 0);
             let (state, subscriptions) =
                 fetcher_utils_awaiting_validation(&tp, initial_offset, initial_epoch, AutoOffsetResetStrategy::NONE);

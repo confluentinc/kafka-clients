@@ -22,21 +22,21 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::admin::internals::admin_utils::valid_acl_operations;
+use crate::DescribeGroupsRequestData;
+use crate::admin::internals::AdminUtils;
 use crate::admin::{ClassicGroupDescription, MemberAssignment, MemberDescription};
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeGroupsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{ClassicGroupState, Error, Node, TopicPartition};
-use crate::consumer::internals::consumer_protocol::{ConsumerProtocol, PROTOCOL_TYPE};
-use crate::describe_groups_request_data::DescribeGroupsRequestData;
+use crate::consumer::internals::ConsumerProtocol;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The `describeClassicGroups` handler.
 ///
@@ -173,9 +173,9 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
                 continue;
             }
 
-            let authorized_operations = valid_acl_operations(described_group.authorized_operations);
+            let authorized_operations = AdminUtils::valid_acl_operations(described_group.authorized_operations);
             let protocol_type = &described_group.protocol_type;
-            let is_consumer_group = protocol_type == PROTOCOL_TYPE || protocol_type.is_empty();
+            let is_consumer_group = protocol_type == ConsumerProtocol::PROTOCOL_TYPE || protocol_type.is_empty();
             let mut member_descriptions = Vec::with_capacity(described_group.members.len());
             let mut deserialize_error = None;
             for group_member in &described_group.members {

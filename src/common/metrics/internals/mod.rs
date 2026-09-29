@@ -14,4 +14,6 @@
 
 //! Metrics internals (`org.apache.kafka.common.metrics.internals`).
 
-pub mod metrics_utils;
+mod metrics_utils;
+pub(crate) use metrics_utils::MetricsUtils;
+pub(crate) use metrics_utils::TimeUnit;

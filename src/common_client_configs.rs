@@ -18,14 +18,23 @@
 //! Only the constants needed by the Metadata class are included here;
 //! full configuration support will be added as needed.
 
-/// Config key: `bootstrap.servers`
-pub const BOOTSTRAP_SERVERS_CONFIG: &str = "bootstrap.servers";
+/// Configuration keys shared by producer, consumer and admin clients.
+///
+/// Translates the Java static-utility class
+/// `org.apache.kafka.clients.CommonClientConfigs`, which has no instance state,
+/// so it becomes a unit struct hosting its statics as associated items.
+pub struct CommonClientConfigs;
 
-/// Config key: `security.protocol`
-pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
+impl CommonClientConfigs {
+    /// Config key: `bootstrap.servers`
+    pub const BOOTSTRAP_SERVERS_CONFIG: &str = "bootstrap.servers";
 
-/// The base for exponential retry backoff.
-pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
+    /// Config key: `security.protocol`
+    pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
-/// The jitter factor for retry backoff.
-pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+    /// The base for exponential retry backoff.
+    pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
+
+    /// The jitter factor for retry backoff.
+    pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+}

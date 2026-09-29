@@ -16,14 +16,14 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`.
 
-use crate::common::requests::UNKNOWN_MEMBER_ID;
+use crate::common::requests::JoinGroupRequest;
 use crate::leave_group_request_data::MemberIdentity;
 
 /// A struct containing information about the member to be removed.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`. Members are
 /// identified by their `group.instance.id` (static membership); the member id
-/// is left as [`UNKNOWN_MEMBER_ID`] so the broker resolves it by instance id.
+/// is left as [`JoinGroupRequest::UNKNOWN_MEMBER_ID`] so the broker resolves it by instance id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MemberToRemove {
     group_instance_id: String,
@@ -41,7 +41,7 @@ impl MemberToRemove {
         let mut identity = MemberIdentity::new();
         identity
             .set_group_instance_id(Some(self.group_instance_id.clone()))
-            .set_member_id(UNKNOWN_MEMBER_ID.to_string());
+            .set_member_id(JoinGroupRequest::UNKNOWN_MEMBER_ID.to_string());
         identity
     }
 
@@ -65,6 +65,6 @@ mod tests {
     fn to_member_identity_sets_instance_and_unknown_member_id() {
         let identity = MemberToRemove::new("instance-1").to_member_identity();
         assert_eq!(identity.group_instance_id.as_deref(), Some("instance-1"));
-        assert_eq!(identity.member_id, UNKNOWN_MEMBER_ID);
+        assert_eq!(identity.member_id, JoinGroupRequest::UNKNOWN_MEMBER_ID);
     }
 }

@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use super::request_state::RequestState;
+use super::RequestState;
 
 /// State for a heartbeat request, including a heartbeat-interval timer
 /// composed alongside [`RequestState`]'s exponential-backoff machinery.

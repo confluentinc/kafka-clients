@@ -48,7 +48,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{AlterClientQuotasOptions, DescribeClientQuotasOptions};
-use confluent_kafka::common::quota::client_quota_entity::{CLIENT_ID, USER};
 use confluent_kafka::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op,
 };
@@ -72,12 +71,18 @@ const PRODUCER_BYTE_RATE: &str = "producer_byte_rate";
 
 /// Constructs a client-id quota entity.
 fn client_id_entity(name: &str) -> ClientQuotaEntity {
-    ClientQuotaEntity::new(HashMap::from([(CLIENT_ID.to_string(), Some(name.to_string()))]))
+    ClientQuotaEntity::new(HashMap::from([(
+        ClientQuotaEntity::CLIENT_ID.to_string(),
+        Some(name.to_string()),
+    )]))
 }
 
 /// A `contains` filter selecting exactly one client id.
 fn client_id_filter(name: &str) -> ClientQuotaFilter {
-    ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(CLIENT_ID, name)])
+    ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(
+        ClientQuotaEntity::CLIENT_ID,
+        name,
+    )])
 }
 
 /// Applies one alteration and asserts the entity was accepted.
@@ -306,9 +311,10 @@ async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactor
     )
     .await;
 
-    // A filter on the CLIENT_ID entity *type* — `ClientQuotaMatch::Any`, Java's
+    // A filter on the ClientQuotaEntity::CLIENT_ID entity *type* — `ClientQuotaMatch::Any`, Java's
     // null name — must return our entity and only client-id entities.
-    let by_type = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
+    let by_type =
+        ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::CLIENT_ID)]);
     wait_until_true_with_timeout(
         || async {
             reported_quotas(&admin, &by_type, &entity)
@@ -327,7 +333,7 @@ async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactor
         .unwrap_or_else(|e| panic!("{backend} backend: describe client quotas: {e}"));
     for reported in described.keys() {
         assert!(
-            reported.entries().contains_key(CLIENT_ID),
+            reported.entries().contains_key(ClientQuotaEntity::CLIENT_ID),
             "{backend} backend: every entity reported by a client-id type filter must have a client-id component, \
              got {reported}"
         );
@@ -338,8 +344,8 @@ async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactor
     // strict filter below must not (it has a second component the filter does not
     // name).
     let pair = ClientQuotaEntity::new(HashMap::from([
-        (USER.to_string(), Some(ctx.group_id("quota_user_typed"))),
-        (CLIENT_ID.to_string(), Some(format!("{name}_paired"))),
+        (ClientQuotaEntity::USER.to_string(), Some(ctx.group_id("quota_user_typed"))),
+        (ClientQuotaEntity::CLIENT_ID.to_string(), Some(format!("{name}_paired"))),
     ]));
     alter(
         &admin,
@@ -357,7 +363,9 @@ async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactor
     .await;
 
     // `contains_only` is the same components with `strict` set.
-    let strict = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
+    let strict = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_entity_type(
+        ClientQuotaEntity::CLIENT_ID,
+    )]);
     let strictly_described = admin
         .describe_client_quotas(&strict, DescribeClientQuotasOptions::new())
         .await

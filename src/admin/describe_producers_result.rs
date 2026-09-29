@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::admin::producer_state::ProducerState;
+use crate::admin::ProducerState;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The producer state of a single partition.
@@ -88,7 +88,7 @@ impl DescribeProducersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn state(producer_id: i64) -> PartitionProducerState {
         PartitionProducerState::new(vec![ProducerState::new(producer_id, 1, 0, 0, None, None)])

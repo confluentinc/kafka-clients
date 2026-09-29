@@ -17,31 +17,32 @@
 
 pub mod admin;
 pub mod api_versions;
-pub mod client_request;
-pub mod client_response;
-pub(crate) mod client_utils;
-pub mod cluster_connection_states;
+mod client_request;
+mod client_response;
+mod client_utils;
+mod cluster_connection_states;
 pub mod common;
-pub(crate) mod common_client_configs;
-pub mod connection_state;
+mod common_client_configs;
+mod connection_state;
 pub mod consumer;
+mod default_host_resolver;
 pub mod fetch_session_handler;
-pub mod host_resolver;
-pub mod in_flight_requests;
-pub mod kafka_client;
-pub mod least_loaded_node;
+mod host_resolver;
+mod in_flight_requests;
+mod kafka_client;
+mod least_loaded_node;
 pub mod metadata;
-pub mod metadata_recovery_strategy;
-pub mod metadata_snapshot;
-pub mod metadata_updater;
+mod metadata_recovery_strategy;
+mod metadata_snapshot;
+mod metadata_updater;
 #[cfg(test)]
-pub(crate) mod mock_client;
-pub(crate) mod network_client;
-pub(crate) mod network_client_utils;
-pub mod node_api_versions;
+mod mock_client;
+mod network_client;
+mod network_client_utils;
+mod node_api_versions;
 pub mod producer;
 #[cfg(test)]
-pub(crate) mod test_alloc_tracker;
+mod test_alloc_tracker;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -59,9 +60,12 @@ pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientR
 pub use api_versions::ApiVersions;
 pub use client_request::ClientRequest;
 pub use client_response::ClientResponse;
+pub(crate) use client_utils::ClientUtils;
 pub use cluster_connection_states::ClusterConnectionStates;
+pub(crate) use common_client_configs::CommonClientConfigs;
 pub use connection_state::ConnectionState;
-pub use host_resolver::{DefaultHostResolver, HostResolver};
+pub use default_host_resolver::DefaultHostResolver;
+pub use host_resolver::HostResolver;
 pub use in_flight_requests::{InFlightRequest, InFlightRequests};
 pub use kafka_client::KafkaClient;
 pub use least_loaded_node::LeastLoadedNode;
@@ -70,6 +74,17 @@ pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
 pub use metadata_snapshot::MetadataSnapshot;
 pub use metadata_updater::MetadataUpdater;
 pub use node_api_versions::NodeApiVersions;
+// Only the outer class is re-exported: `FetchRequestData` (Rust
+// `FetchSessionRequestData`) and `Builder` are Java nested classes
+// (`FetchSessionHandler.java:95,231`), so per CLAUDE.md §2 they keep the
+// file-module path that plays the outer-class qualifier.
+pub use fetch_session_handler::FetchSessionHandler;
+#[cfg(test)]
+pub(crate) use mock_client::{MockClient, RequestMatcher};
+pub(crate) use network_client::{NetworkClient, NetworkClientStatics};
+pub(crate) use network_client_utils::NetworkClientUtils;
+#[cfg(test)]
+pub(crate) use test_alloc_tracker::AllocTrackingGuard;
 
 // Include generated message definitions
 #[allow(dead_code, clippy::all)]

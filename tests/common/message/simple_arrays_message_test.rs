@@ -19,7 +19,7 @@
 //! Translated from org.apache.kafka.common.message.SimpleArraysMessageTest
 
 use crate::common::simple_arrays_message_data::SimpleArraysMessageData;
-use confluent_kafka::common::protocol::ByteBufferAccessor;
+use confluent_kafka::common::ByteBufferAccessor;
 
 #[test]
 fn test_array_bounds_checking() {
@@ -28,7 +28,7 @@ fn test_array_bounds_checking() {
         0x7f, // Set size of first array to 126 which is larger than the size of this buffer
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    let mut accessor = ByteBufferAccessor::from_bytes(buf);
+    let mut accessor = ByteBufferAccessor::new(buf);
     let result = SimpleArraysMessageData::read(&mut accessor, 2);
     assert!(result.is_err());
     assert_eq!(
@@ -45,7 +45,7 @@ fn test_array_bounds_checking_other_array() {
         0x7e, // Set size of second array to 125 which is larger than the size of this buffer
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    let mut accessor = ByteBufferAccessor::from_bytes(buf);
+    let mut accessor = ByteBufferAccessor::new(buf);
     let result = SimpleArraysMessageData::read(&mut accessor, 2);
     assert!(result.is_err());
     assert_eq!(

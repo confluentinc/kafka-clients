@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::list_consumer_group_offsets`.
+//! The result of `Admin::list_consumer_group_offsets_with_group_specs`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult`.
 
@@ -26,7 +26,7 @@ use crate::consumer::OffsetAndMetadata;
 /// (Java's `null` value in the map).
 pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
-/// The result of `Admin::list_consumer_group_offsets`.
+/// The result of `Admin::list_consumer_group_offsets_with_group_specs`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
@@ -98,7 +98,7 @@ impl ListConsumerGroupOffsetsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn offsets(offset: i64) -> GroupOffsets {
         HashMap::from([(TopicPartition::new("t", 0), Some(OffsetAndMetadata::new(offset).unwrap()))])

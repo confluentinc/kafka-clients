@@ -25,7 +25,7 @@
 //! (Phase 7a `AbstractFetch` precedent). Because Share / Streams subclasses
 //! are out of scope per `consumer-threading.md` §20, the response type is
 //! hard-wired to [`ConsumerGroupHeartbeatResponse`]; the composing
-//! [`crate::consumer::internals::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager`]
+//! [`crate::consumer::internals::ConsumerHeartbeatRequestManager`]
 //! supplies request building and error classification through plain method
 //! calls on the wrapping struct rather than generic dispatch.
 //!
@@ -37,24 +37,17 @@
 use std::sync::Arc;
 
 use crate::common::Error;
+use crate::common::Errors;
+use crate::common::error::ErrorMessage;
 use crate::common::errors::GroupAuthorizationError;
-use crate::common::kafka_error::ErrorMessage;
-use crate::common::protocol::Errors;
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
 
-use super::coordinator_request_manager::CoordinatorRequestManager;
-use super::heartbeat_metrics_manager::HeartbeatMetricsManager;
-use super::heartbeat_request_state::HeartbeatRequestState;
-use super::network_client_delegate::{PollResult, UnsentRequest};
-
-/// Java's abstract `heartbeatRequestName()`. Hard-wired to the single
-/// implementation (`ConsumerHeartbeatRequestManager.java:180-182`) because the
-/// Share / Streams subclasses that supply the other names are out of scope
-/// (`consumer-threading.md` §20), the same reason the response type is
-/// hard-wired to [`ConsumerGroupHeartbeatResponse`].
-pub(crate) const HEARTBEAT_REQUEST_NAME: &str = "ConsumerGroupHeartbeatRequest";
+use super::CoordinatorRequestManager;
+use super::HeartbeatMetricsManager;
+use super::HeartbeatRequestState;
+use super::{PollResult, UnsentRequest};
 
 /// Java's `Errors.exception(String message)` (`Errors.java:462-469`): a null
 /// broker-supplied message yields the code's own default message, a non-null
@@ -77,21 +70,8 @@ fn error_or_default_message(error: Errors, message: Option<&str>) -> Error {
     }
 }
 
-/// Exponent base used by `RequestState`'s exponential-backoff machinery.
-/// Mirrors Java's `RequestState.RETRY_BACKOFF_JITTER` (0.2 jitter; the
-/// exp-base is fixed at 2 inside Java).
-pub(crate) const RETRY_BACKOFF_JITTER: f64 = 0.2;
-
-/// Message logged when the broker reports `UnsupportedVersion` on the
-/// `ConsumerGroupHeartbeat` API.
-///
-/// Java: `AbstractHeartbeatRequestManager.CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`.
-pub(crate) const CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG: &str = "The cluster does not support the new CONSUMER group protocol. \
-     Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol \
-     until the cluster is upgraded.";
-
 /// Shared heartbeat lifecycle state composed by
-/// [`super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager`].
+/// [`super::ConsumerHeartbeatRequestManager`].
 ///
 /// All fields are `pub(crate)` so the composing manager (single subclass
 /// in scope) can mutate them directly. This matches Java's `protected`
@@ -149,6 +129,53 @@ pub(crate) struct AbstractHeartbeatRequestManager {
 }
 
 impl AbstractHeartbeatRequestManager {
+    /// Helper used by the composing consumer manager to assemble a
+    /// `PollResult` carrying a heartbeat request. Mirrors the
+    /// `makeHeartbeatRequest(currentTimeMs, ignoreResponse)` side-effects:
+    ///
+    /// - Bookkeeping: record send attempt, reset timer.
+    /// - Caller still constructs the `UnsentRequest` (because the request
+    ///   payload depends on the membership manager's current state, which
+    ///   is owned by the composing consumer manager).
+    ///
+    /// Java's `makeHeartbeatRequest(currentTimeMs, ignoreResponse)` returns
+    /// a `PollResult` with the heartbeat interval as the wait hint and the
+    /// supplied request inside.
+    pub(crate) fn make_heartbeat_poll_result(
+        request: UnsentRequest,
+        state: &mut AbstractHeartbeatRequestManager,
+        current_time_ms: i64,
+    ) -> PollResult {
+        state.heartbeat_request_state.on_send_attempt(current_time_ms);
+        // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
+        // (`AbstractHeartbeatRequestManager.java:285`).
+        if let Some(metrics_manager) = state.metrics_manager.as_ref() {
+            metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+        }
+        state.heartbeat_request_state.reset_timer();
+        PollResult::new(state.heartbeat_request_state.heartbeat_interval_ms(), vec![request])
+    }
+
+    /// Java's abstract `heartbeatRequestName()`. Hard-wired to the single
+    /// implementation (`ConsumerHeartbeatRequestManager.java:180-182`) because the
+    /// Share / Streams subclasses that supply the other names are out of scope
+    /// (`consumer-threading.md` §20), the same reason the response type is
+    /// hard-wired to [`ConsumerGroupHeartbeatResponse`].
+    pub(crate) const HEARTBEAT_REQUEST_NAME: &str = "ConsumerGroupHeartbeatRequest";
+
+    /// Exponent base used by `RequestState`'s exponential-backoff machinery.
+    /// Mirrors Java's `RequestState.RETRY_BACKOFF_JITTER` (0.2 jitter; the
+    /// exp-base is fixed at 2 inside Java).
+    pub(crate) const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+    /// Message logged when the broker reports `UnsupportedVersion` on the
+    /// `ConsumerGroupHeartbeat` API.
+    ///
+    /// Java: `AbstractHeartbeatRequestManager.CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`.
+    pub(crate) const CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG: &str = "The cluster does not support the new CONSUMER group protocol. \
+         Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol \
+         until the cluster is upgraded.";
+
     /// Constructs a new instance starting from the supplied wall-clock
     /// time. The poll timer starts running immediately with a duration
     /// of `max.poll.interval.ms`.
@@ -175,7 +202,7 @@ impl AbstractHeartbeatRequestManager {
             0,
             retry_backoff_ms,
             retry_backoff_max_ms,
-            RETRY_BACKOFF_JITTER,
+            AbstractHeartbeatRequestManager::RETRY_BACKOFF_JITTER,
         );
         Self {
             max_poll_interval_ms,
@@ -348,7 +375,7 @@ impl AbstractHeartbeatRequestManager {
                 let auth_error = GroupAuthorizationError::for_group_id(group_id);
                 log::error!(
                     "{} failed due to group authorization failure: {}",
-                    HEARTBEAT_REQUEST_NAME,
+                    AbstractHeartbeatRequestManager::HEARTBEAT_REQUEST_NAME,
                     auth_error.message()
                 );
                 HeartbeatErrorAction::Fatal(Error::with_message(
@@ -370,7 +397,7 @@ impl AbstractHeartbeatRequestManager {
                 // deliberate in Java, so it is reproduced rather than tidied.
                 log::error!(
                     "{} failed due to {:?}: {}",
-                    HEARTBEAT_REQUEST_NAME,
+                    AbstractHeartbeatRequestManager::HEARTBEAT_REQUEST_NAME,
                     error,
                     error_message.unwrap_or_default()
                 );
@@ -382,7 +409,7 @@ impl AbstractHeartbeatRequestManager {
             Errors::InvalidRequest | Errors::GroupMaxSizeReached | Errors::UnsupportedAssignor => {
                 log::error!(
                     "{} failed due to {:?}: {}",
-                    HEARTBEAT_REQUEST_NAME,
+                    AbstractHeartbeatRequestManager::HEARTBEAT_REQUEST_NAME,
                     error,
                     error_message.unwrap_or_default()
                 );
@@ -396,7 +423,7 @@ impl AbstractHeartbeatRequestManager {
             Errors::InvalidRegularExpression => {
                 log::error!(
                     "{} failed due to {:?}: {}",
-                    HEARTBEAT_REQUEST_NAME,
+                    AbstractHeartbeatRequestManager::HEARTBEAT_REQUEST_NAME,
                     error,
                     error_message.unwrap_or_default()
                 );
@@ -484,33 +511,6 @@ pub(crate) enum HeartbeatFailureAction {
     NonRetriable,
 }
 
-/// Helper used by the composing consumer manager to assemble a
-/// `PollResult` carrying a heartbeat request. Mirrors the
-/// `makeHeartbeatRequest(currentTimeMs, ignoreResponse)` side-effects:
-///
-/// - Bookkeeping: record send attempt, reset timer.
-/// - Caller still constructs the `UnsentRequest` (because the request
-///   payload depends on the membership manager's current state, which
-///   is owned by the composing consumer manager).
-///
-/// Java's `makeHeartbeatRequest(currentTimeMs, ignoreResponse)` returns
-/// a `PollResult` with the heartbeat interval as the wait hint and the
-/// supplied request inside.
-pub(crate) fn make_heartbeat_poll_result(
-    request: UnsentRequest,
-    state: &mut AbstractHeartbeatRequestManager,
-    current_time_ms: i64,
-) -> PollResult {
-    state.heartbeat_request_state.on_send_attempt(current_time_ms);
-    // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
-    // (`AbstractHeartbeatRequestManager.java:285`).
-    if let Some(metrics_manager) = state.metrics_manager.as_ref() {
-        metrics_manager.record_heartbeat_sent_ms(current_time_ms);
-    }
-    state.heartbeat_request_state.reset_timer();
-    PollResult::new(state.heartbeat_request_state.heartbeat_interval_ms(), vec![request])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,7 +518,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn make_state(now: i64) -> AbstractHeartbeatRequestManager {
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
@@ -633,9 +633,9 @@ mod tests {
         now: i64,
     ) -> (
         AbstractHeartbeatRequestManager,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));

@@ -41,8 +41,7 @@ use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
-use super::authentication_error::is_authentication_error;
-use super::selectable::USE_DEFAULT_BUFFER_SIZE;
+use super::is_authentication_error;
 use super::{ChannelState, channel_state};
 
 use indexmap::IndexMap;
@@ -59,9 +58,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Instant;
-
-/// Value indicating no idle timeout.
-pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
 
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
 ///
@@ -287,6 +283,9 @@ pub struct Selector {
 }
 
 impl Selector {
+    /// Value indicating no idle timeout.
+    pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
+
     /// Create a new selector.
     ///
     /// # Arguments
@@ -294,7 +293,7 @@ impl Selector {
     /// * `max_receive_size` - Max size in bytes of a single network receive
     ///   (use `UNLIMITED` for no limit)
     /// * `connection_max_idle_ms` - Max idle connection time
-    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    ///   (use [`Self::NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     pub fn new(max_receive_size: i32, connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::with_log_context(max_receive_size, connection_max_idle_ms, channel_builder, LogContext::empty())
@@ -307,7 +306,7 @@ impl Selector {
     /// * `max_receive_size` - Max size in bytes of a single network receive
     ///   (use `UNLIMITED` for no limit)
     /// * `connection_max_idle_ms` - Max idle connection time
-    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    ///   (use [`Self::NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     /// * `log_context` - Contextual log message prefix
     pub fn with_log_context(
@@ -350,7 +349,7 @@ impl Selector {
 
     /// Convenience constructor matching the common Java pattern.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
-        Self::new(super::network_receive::UNLIMITED, connection_max_idle_ms, channel_builder)
+        Self::new(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder)
     }
 
     /// Create a new selector with default max receive size and a `LogContext`.
@@ -359,12 +358,7 @@ impl Selector {
         channel_builder: Box<dyn ChannelBuilder>,
         log_context: LogContext,
     ) -> Self {
-        Self::with_log_context(
-            super::network_receive::UNLIMITED,
-            connection_max_idle_ms,
-            channel_builder,
-            log_context,
-        )
+        Self::with_log_context(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder, log_context)
     }
 
     /// Returns the interned `Arc<str>` key for `id` from the active channels
@@ -522,7 +516,7 @@ impl Selector {
 
         for channel_id in &self.failed_sends {
             self.disconnected
-                .insert(channel_id.to_string(), channel_state::FAILED_SEND.clone());
+                .insert(channel_id.to_string(), ChannelState::FAILED_SEND.clone());
         }
         self.failed_sends.clear();
         self.made_read_progress_last_poll = false;
@@ -878,7 +872,7 @@ impl Selector {
                 connection_id
             );
             if let Some(channel) = self.channels.get_mut(connection_id.as_str()) {
-                channel.set_state(channel_state::EXPIRED.clone());
+                channel.set_state(ChannelState::EXPIRED.clone());
             }
             // Use graceful close to process any buffered receives before
             // fully closing the channel, matching the Java implementation.
@@ -1129,10 +1123,10 @@ impl Selectable for Selector {
 
         // Configure socket
         socket.set_keepalive(true)?;
-        if send_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if send_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
             socket.set_send_buffer_size(send_buffer_size as u32)?;
         }
-        if receive_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if receive_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
             socket.set_recv_buffer_size(receive_buffer_size as u32)?;
         }
         socket.set_nodelay(true)?;
@@ -1201,7 +1195,7 @@ impl Selectable for Selector {
     async fn close_channel(&mut self, id: &str) {
         if self.channels.contains_key(id) {
             if let Some(channel) = self.channels.get_mut(id) {
-                channel.set_state(channel_state::LOCAL_CLOSE.clone());
+                channel.set_state(ChannelState::LOCAL_CLOSE.clone());
             }
             self.close_channel_internal(id, CloseMode::DiscardNoNotify).await;
         } else if let Some(closing_channel) = self.closing_channels.remove(id) {
@@ -1232,7 +1226,7 @@ impl Selectable for Selector {
                 },
                 Err(e) => {
                     // Update the state for consistency
-                    channel.set_state(channel_state::FAILED_SEND.clone());
+                    channel.set_state(ChannelState::FAILED_SEND.clone());
                     // Error path only (matches Java allocating here); a fresh
                     // `Arc<str>` is fine since the channel is about to be removed.
                     self.failed_sends.push(Arc::from(connection_id.as_str()));
@@ -1935,11 +1929,7 @@ mod tests {
 
     async fn create_selector() -> Selector {
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        )
+        Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder)
     }
 
     async fn blocking_connect(selector: &mut Selector, node: &str, port: u16) {
@@ -2190,11 +2180,7 @@ mod tests {
     async fn test_close_oldest_connection() {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         selector
@@ -2221,7 +2207,7 @@ mod tests {
             selector.disconnected().contains_key("0"),
             "The idle connection should have been closed"
         );
-        assert_eq!(channel_state::EXPIRED, *selector.disconnected().get("0").unwrap());
+        assert_eq!(ChannelState::EXPIRED, *selector.disconnected().get("0").unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2275,7 +2261,7 @@ mod tests {
 
         selector.poll(0).await.unwrap();
         assert!(selector.disconnected().contains_key("0"), "Channel not closed");
-        assert_eq!(channel_state::FAILED_SEND, *selector.disconnected().get("0").unwrap());
+        assert_eq!(ChannelState::FAILED_SEND, *selector.disconnected().get("0").unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2512,11 +2498,7 @@ mod tests {
     async fn test_lowest_priority_channel() {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
 
         let conns = 5;
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
@@ -2648,7 +2630,7 @@ mod tests {
             "Channel not removed from closingChannels"
         );
         assert!(selector.disconnected().contains_key(&id), "Disconnect not notified");
-        assert_eq!(channel_state::EXPIRED, *selector.disconnected().get(&id).unwrap());
+        assert_eq!(ChannelState::EXPIRED, *selector.disconnected().get(&id).unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2978,11 +2960,7 @@ mod tests {
     async fn create_counting_selector() -> (Selector, TryReadCounts) {
         let counts: TryReadCounts = Arc::new(StdMutex::new(HashMap::new()));
         let channel_builder = Box::new(CountingChannelBuilder { counts: counts.clone() });
-        let selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
         (selector, counts)
     }
 

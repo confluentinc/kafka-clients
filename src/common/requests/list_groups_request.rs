@@ -23,10 +23,10 @@
 
 use std::io;
 
+use crate::ListGroupsRequestData;
+use crate::ListGroupsResponseData;
 use crate::common::GroupType;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_groups_request_data::ListGroupsRequestData;
-use crate::list_groups_response_data::ListGroupsResponseData;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;

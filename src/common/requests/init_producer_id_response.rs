@@ -28,10 +28,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::InitProducerIdResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An `InitProducerId` response.
 ///
@@ -87,7 +87,7 @@ impl InitProducerIdResponse {
     /// Returns error counts by [`Errors`].
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, self.error());
+        AbstractResponse::update_error_counts(&mut counts, self.error());
         counts
     }
 

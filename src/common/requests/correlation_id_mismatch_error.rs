@@ -18,7 +18,7 @@ use std::fmt;
 use std::io;
 
 use crate::common::Error;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// Raised if the correlation id in a response header does not match the
 /// expected value from the request header.
@@ -54,6 +54,35 @@ pub struct CorrelationIdMismatchError {
 }
 
 impl CorrelationIdMismatchError {
+    /// Carries a [`CorrelationIdMismatchError`] across an [`io::Result`] boundary,
+    /// as the payload of an [`io::Error`].
+    ///
+    /// `AbstractResponse.parseResponse` *throws* the exception
+    /// (`AbstractResponse.java:105`) and `NetworkClient.parseResponse` catches it by
+    /// **type** (`NetworkClient.java:829`). This crate's response readers report
+    /// through [`io::Error`], whose [`io::ErrorKind`] cannot express "the
+    /// correlation ids disagreed" — so the typed value travels inside the payload
+    /// and the caller recovers it with [`Self::correlation_id_mismatch`], mirroring
+    /// Java's `catch`. Same mechanism, and same reason, as
+    /// [`auth_io_error`](crate::common::network::auth_io_error).
+    ///
+    /// The kind is [`io::ErrorKind::Other`]: classification downstream is driven by
+    /// the payload, never by the kind.
+    pub fn correlation_id_mismatch_io_error(error: CorrelationIdMismatchError) -> io::Error {
+        io::Error::other(error)
+    }
+
+    /// Recovers the [`CorrelationIdMismatchError`] `e` carries, if any — the Rust
+    /// equivalent of Java's `catch (CorrelationIdMismatchException e)` in
+    /// `NetworkClient.parseResponse` (`NetworkClient.java:829`).
+    ///
+    /// Returns the whole payload rather than its message because the `catch` clause
+    /// reads [`response_correlation_id`](CorrelationIdMismatchError::response_correlation_id)
+    /// to decide whether the response is unrelated to a SASL request.
+    pub fn correlation_id_mismatch(e: &io::Error) -> Option<&CorrelationIdMismatchError> {
+        e.get_ref().and_then(|inner| inner.downcast_ref::<CorrelationIdMismatchError>())
+    }
+
     /// Create the error, mirroring Java's
     /// `CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)`.
     pub fn new(message: impl Into<String>, request_correlation_id: i32, response_correlation_id: i32) -> Self {
@@ -120,35 +149,6 @@ impl std::error::Error for CorrelationIdMismatchError {
     }
 }
 
-/// Carries a [`CorrelationIdMismatchError`] across an [`io::Result`] boundary,
-/// as the payload of an [`io::Error`].
-///
-/// `AbstractResponse.parseResponse` *throws* the exception
-/// (`AbstractResponse.java:105`) and `NetworkClient.parseResponse` catches it by
-/// **type** (`NetworkClient.java:829`). This crate's response readers report
-/// through [`io::Error`], whose [`io::ErrorKind`] cannot express "the
-/// correlation ids disagreed" — so the typed value travels inside the payload
-/// and the caller recovers it with [`correlation_id_mismatch`], mirroring
-/// Java's `catch`. Same mechanism, and same reason, as
-/// [`auth_io_error`](crate::common::network::auth_io_error).
-///
-/// The kind is [`io::ErrorKind::Other`]: classification downstream is driven by
-/// the payload, never by the kind.
-pub fn correlation_id_mismatch_io_error(error: CorrelationIdMismatchError) -> io::Error {
-    io::Error::other(error)
-}
-
-/// Recovers the [`CorrelationIdMismatchError`] `e` carries, if any — the Rust
-/// equivalent of Java's `catch (CorrelationIdMismatchException e)` in
-/// `NetworkClient.parseResponse` (`NetworkClient.java:829`).
-///
-/// Returns the whole payload rather than its message because the `catch` clause
-/// reads [`response_correlation_id`](CorrelationIdMismatchError::response_correlation_id)
-/// to decide whether the response is unrelated to a SASL request.
-pub fn correlation_id_mismatch(e: &io::Error) -> Option<&CorrelationIdMismatchError> {
-    e.get_ref().and_then(|inner| inner.downcast_ref::<CorrelationIdMismatchError>())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,8 +158,13 @@ mod tests {
     /// discrimination in `NetworkClient.parseResponse` reads.
     #[test]
     fn round_trips_through_an_io_error() {
-        let io_error = correlation_id_mismatch_io_error(CorrelationIdMismatchError::new("ids disagree", 7, 9));
-        let recovered = correlation_id_mismatch(&io_error).expect("payload must be recoverable");
+        let io_error = CorrelationIdMismatchError::correlation_id_mismatch_io_error(CorrelationIdMismatchError::new(
+            "ids disagree",
+            7,
+            9,
+        ));
+        let recovered =
+            CorrelationIdMismatchError::correlation_id_mismatch(&io_error).expect("payload must be recoverable");
         assert_eq!(recovered.message(), "ids disagree");
         assert_eq!(recovered.request_correlation_id(), 7);
         assert_eq!(recovered.response_correlation_id(), 9);
@@ -173,9 +178,9 @@ mod tests {
     /// mismatch — including one whose kind is also `Other`.
     #[test]
     fn unrelated_io_errors_are_not_mismatches() {
-        assert!(correlation_id_mismatch(&io::Error::other("boom")).is_none());
+        assert!(CorrelationIdMismatchError::correlation_id_mismatch(&io::Error::other("boom")).is_none());
         assert!(
-            correlation_id_mismatch(&io::Error::new(
+            CorrelationIdMismatchError::correlation_id_mismatch(&io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Error reading byte array of 4 byte(s): only 1 byte(s) available"
             ))
@@ -194,11 +199,11 @@ mod tests {
         assert!(!error.is_retriable_error());
         assert!(!error.is_authentication_error());
         assert!(!error.is_authorization_error());
-        assert!(!crate::common::requests::request_utils::is_fatal_error(&error));
+        assert!(!crate::common::requests::RequestUtils::is_fatal_error(&error));
         assert_eq!(error.message(), "ids disagree");
         assert_eq!(error.to_string(), "CorrelationIdMismatchError: ids disagree");
         // No entry in `Errors.java` and no coded superclass, so Java's
         // `Errors.forException` walk falls through to UNKNOWN_SERVER_ERROR.
-        assert_eq!(error.error(), crate::common::protocol::Errors::UnknownServerError);
+        assert_eq!(error.error(), crate::common::Errors::UnknownServerError);
     }
 }

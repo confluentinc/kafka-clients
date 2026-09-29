@@ -39,14 +39,14 @@
 
 use std::sync::Arc;
 
-use super::commit_request_manager::CommitRequestManager;
-use super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
-use super::consumer_membership_manager::ConsumerMembershipManager;
-use super::coordinator_request_manager::CoordinatorRequestManager;
-use super::fetch_request_manager::FetchRequestManager;
-use super::offsets_request_manager::OffsetsRequestManager;
-use super::request_manager::RequestManager;
-use super::topic_metadata_request_manager::TopicMetadataRequestManager;
+use super::CommitRequestManager;
+use super::ConsumerHeartbeatRequestManager;
+use super::ConsumerMembershipManager;
+use super::CoordinatorRequestManager;
+use super::FetchRequestManager;
+use super::OffsetsRequestManager;
+use super::RequestManager;
+use super::TopicMetadataRequestManager;
 
 /// Container holding all consumer request managers. The bg task
 /// iterates over its [`Self::entries`] to poll each manager in
@@ -322,30 +322,36 @@ mod tests {
     // registered managers in deterministic order.
 
     use super::*;
-    use crate::api_versions::ApiVersions;
+    use crate::ApiVersions;
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::common::memory::buffer_supplier::BufferSupplier;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-    use crate::consumer::internals::fetch_buffer::FetchBuffer;
-    use crate::consumer::internals::fetch_config::FetchConfig;
-    use crate::consumer::internals::fetch_request_manager::{always_available, no_auth_failure};
-    use crate::consumer::internals::subscription_state::SubscriptionState;
+    use crate::common::memory::BufferSupplier;
+    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::ConsumerMetadata;
+    use crate::consumer::internals::FetchBuffer;
+    use crate::consumer::internals::FetchConfig;
+    use crate::consumer::internals::FetchRequestManager;
+    use crate::consumer::internals::SubscriptionState;
 
     fn coord_manager() -> Arc<CoordinatorRequestManager> {
         Arc::new(CoordinatorRequestManager::new(100, 1_000, "group-1"))
     }
 
     fn topic_metadata_manager() -> TopicMetadataRequestManager {
-        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..Default::default()
+        };
         TopicMetadataRequestManager::new(&config)
     }
 
     fn commit_manager() -> Arc<CommitRequestManager> {
-        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..Default::default()
+        };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             std::sync::Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -356,18 +362,25 @@ mod tests {
             subs,
             "g",
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
             0,
         ))
     }
 
     fn offsets_manager() -> OffsetsRequestManager {
-        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..Default::default()
+        };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
+        ));
+        let positions_validator = std::sync::Arc::new(crate::consumer::internals::PositionsValidator::new(
+            subs.clone(),
+            metadata.clone(),
         ));
         OffsetsRequestManager::new(
             subs,
@@ -378,6 +391,7 @@ mod tests {
             60_000,
             std::sync::Arc::new(ApiVersions::new()),
             None,
+            positions_validator,
         )
     }
 
@@ -408,10 +422,10 @@ mod tests {
             fetch_config,
             std::sync::Arc::new(FetchBuffer::new()),
             std::sync::Arc::new(BufferSupplier::create()),
-            always_available(),
-            no_auth_failure(),
-            std::sync::Arc::new(crate::api_versions::ApiVersions::new()),
-            crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager::for_test(),
+            FetchRequestManager::always_available(),
+            FetchRequestManager::no_auth_failure(),
+            std::sync::Arc::new(crate::ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
         )
     }
 

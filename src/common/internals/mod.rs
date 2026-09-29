@@ -14,11 +14,13 @@
 
 //! Internal types (org.apache.kafka.common.internals)
 
-pub(crate) mod cluster_resource_listeners;
-pub(crate) mod partition_states;
-pub(crate) mod topic;
+mod cluster_resource_listeners;
+mod kafka_future_impl;
+mod partition_states;
+mod topic;
 
 pub(crate) use cluster_resource_listeners::ClusterResourceListeners;
+pub(crate) use kafka_future_impl::KafkaFutureImpl;
 // Re-exported per CLAUDE.md §2: internal imports of the struct must reach it
 // via the parent module re-export, not the file module path. Phase 4's
 // `SubscriptionState` is the first user; until later phases land, an

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.clients.producer.BufferExhaustedException`.
 
-use crate::common::kafka_error::kafka_error_class;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// The producer cannot allocate memory for a record because the buffer pool

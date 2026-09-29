@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ListPartitionReassignmentsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_partition_reassignments_response_data::ListPartitionReassignmentsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A ListPartitionReassignments response.
 ///
@@ -71,7 +71,7 @@ impl ListPartitionReassignmentsResponse {
     /// Mirrors `ListPartitionReassignmentsResponse.errorCounts`.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         counts
     }
 

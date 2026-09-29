@@ -26,11 +26,12 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::FindCoordinatorResponseData;
 use crate::common::Node;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::find_coordinator_response_data::{Coordinator, FindCoordinatorResponseData};
+use crate::find_coordinator_response_data::Coordinator;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `FindCoordinator` response.
 ///
@@ -139,10 +140,10 @@ impl FindCoordinatorResponse {
         let mut counts = HashMap::new();
         if !self.data.coordinators.is_empty() {
             for coordinator in &self.data.coordinators {
-                update_error_counts(&mut counts, Errors::for_code(coordinator.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(coordinator.error_code));
             }
         } else {
-            update_error_counts(&mut counts, self.error());
+            AbstractResponse::update_error_counts(&mut counts, self.error());
         }
         counts
     }

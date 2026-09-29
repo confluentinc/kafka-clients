@@ -1,10 +1,12 @@
-# example-confluent-kafka-rust
+# Rust-Based Kafka Clients
 
-A high-fidelity, architecture-preserving Rust transpilation of the Apache Kafka Java client (client only), generated instruction-by-instruction from the original Java sources. This project aims to provide a native Rust Kafka client with the same API, structure, and semantics as the official Java client, following Rust idioms and conventions where appropriate.
+A high-fidelity, architecture-preserving Rust translation of the Apache Kafka Java client (client only), generated instruction-by-instruction from the original Java sources. This project aims to provide a native Rust Kafka client with the same API, structure, and semantics as the official Java client, following Rust idioms and conventions where appropriate.
+
+It also contains bindings for multiple languages, automatically generated following translation rules, optimized and reviewed for performance as well.
 
 ## Project Overview
 
-- **Source:** Transpiled from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1)
+- **Source:** Translated from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1)
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
 - **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions
@@ -50,7 +52,7 @@ tests/
 
 ## Building the Project
 
-This project uses a pure Rust workflow with no shell scripts. All automation is handled via [xtask](https://github.com/matklad/cargo-xtask) commands.
+All automation is handled via [xtask](https://github.com/matklad/cargo-xtask) commands.
 
 **Note:** The project is configured with `#![deny(warnings)]` to treat all compiler warnings as errors, ensuring code quality and maintainability.
 

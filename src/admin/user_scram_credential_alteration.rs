@@ -69,9 +69,12 @@ mod tests {
 
     #[test]
     fn user_accessor_delegates_to_variant() {
-        let upsertion: UserScramCredentialAlteration =
-            UserScramCredentialUpsertion::new("u1", ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4096), "pw")
-                .into();
+        let upsertion: UserScramCredentialAlteration = UserScramCredentialUpsertion::with_str(
+            "u1",
+            ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4096),
+            "pw",
+        )
+        .into();
         assert_eq!(upsertion.user(), "u1");
 
         let deletion: UserScramCredentialAlteration =

@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions, UpgradeType};
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -161,7 +161,7 @@ async fn update_features_above_max_is_rejected<F: AdminBackendFactory>(ctx: &mut
         FeatureUpdate::new(9999, UpgradeType::Upgrade).expect("valid feature update"),
     )]);
     let outcomes = admin
-        .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+        .update_features(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: update_features should enqueue the call: {e}"));
 
@@ -275,7 +275,7 @@ async fn update_features_on_the_mock_client<F: AdminBackendFactory>(_ctx: &mut T
         FeatureUpdate::new(0, UpgradeType::SafeDowngrade).expect("valid feature update"),
     )]);
     let outcomes = admin
-        .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+        .update_features(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: update features on the mock: {e}"));
     let outcome = outcomes.get(METADATA_VERSION_FEATURE).unwrap_or_else(|| {

@@ -21,6 +21,7 @@
 //! The accumulator uses a bounded amount of memory and append calls will block
 //! when that memory is exhausted, unless this behavior is explicitly disabled.
 
+use crate::producer::RecordMetadata;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,21 +29,21 @@ use std::sync::{Arc, Mutex};
 use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
 
+use crate::MetadataSnapshot;
 use crate::common::Cluster;
 use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::metrics::{ClosureMeasurable, Metrics};
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionRatioEstimator;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::RecordBatch;
-use crate::common::record::internal::abstract_records;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
-use crate::metadata_snapshot::MetadataSnapshot;
 use crate::producer::Callback;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
@@ -50,7 +51,6 @@ use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::IncompleteBatches;
 use crate::producer::internals::ProducerBatch;
 use crate::producer::internals::{InFlightBatchPool, TransactionManager};
-use crate::producer::record_metadata;
 
 /// Partitioner configuration for the built-in partitioner.
 ///
@@ -141,7 +141,7 @@ pub struct RecordAppendResult {
     /// `transactionManager.maybeAddPartition` (`:1045`). The Rust `append` takes a
     /// plain completion `Callback` rather than an `AppendCallbacks` trait object, so
     /// it is reported here instead. Its partition is never
-    /// `record_metadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1038`.
+    /// `RecordMetadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1038`.
     ///
     /// # Why the whole `TopicPartition` and not just the index
     ///
@@ -440,9 +440,9 @@ impl RecordAccumulator {
     ) -> Self {
         let retry_backoff = ExponentialBackoff::new(
             retry_backoff_ms,
-            crate::common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            crate::CommonClientConfigs::RETRY_BACKOFF_EXP_BASE,
             retry_backoff_max_ms,
-            crate::common_client_configs::RETRY_BACKOFF_JITTER,
+            crate::CommonClientConfigs::RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
 
@@ -481,8 +481,8 @@ impl RecordAccumulator {
     fn register_metrics(free: &Arc<BufferPool>, metrics: &Arc<Metrics>, metric_grp_name: &str) {
         let free_waiting = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "waiting-threads",
                     metric_grp_name,
                     "The number of user threads blocked waiting for buffer memory to enqueue their records",
@@ -494,8 +494,8 @@ impl RecordAccumulator {
 
         let free_total = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "buffer-total-bytes",
                     metric_grp_name,
                     "The maximum amount of buffer memory the client can use (whether or not it is currently used).",
@@ -507,8 +507,8 @@ impl RecordAccumulator {
 
         let free_available = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "buffer-available-bytes",
                     metric_grp_name,
                     "The total amount of buffer memory that is not being used (either unallocated or in the free list).",
@@ -625,7 +625,7 @@ impl RecordAccumulator {
 
         loop {
             // Determine the effective partition.
-            let effective_partition = if partition == record_metadata::UNKNOWN_PARTITION {
+            let effective_partition = if partition == RecordMetadata::UNKNOWN_PARTITION {
                 let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
                 partitioner.peek_current_partition_info(cluster).partition()
             } else {
@@ -646,8 +646,7 @@ impl RecordAccumulator {
                 let mut deque = dq_ref.lock().unwrap();
 
                 // Check if we need to complete a previously disabled partition switch.
-                if partition == record_metadata::UNKNOWN_PARTITION
-                    && self.partition_changed(topic_info, &deque, cluster)
+                if partition == RecordMetadata::UNKNOWN_PARTITION && self.partition_changed(topic_info, &deque, cluster)
                 {
                     continue;
                 }
@@ -664,7 +663,7 @@ impl RecordAccumulator {
                     now_ms,
                 )?;
                 if let Some(result) = result {
-                    if partition == record_metadata::UNKNOWN_PARTITION {
+                    if partition == RecordMetadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
                         let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
                         partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
@@ -679,7 +678,7 @@ impl RecordAccumulator {
             // `finally` guard — Java's `ByteBuffer buffer = null` local — not in a
             // plain local, so the pool gets it back however this function exits.
             if guard.buffer.is_none() {
-                let estimated = abstract_records::estimate_size_in_bytes_upper_bound(
+                let estimated = AbstractRecords::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     self.compression.compression_type(),
                     key,
@@ -718,8 +717,7 @@ impl RecordAccumulator {
                 let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
                 let mut deque = dq_ref.lock().unwrap();
 
-                if partition == record_metadata::UNKNOWN_PARTITION
-                    && self.partition_changed(topic_info, &deque, cluster)
+                if partition == RecordMetadata::UNKNOWN_PARTITION && self.partition_changed(topic_info, &deque, cluster)
                 {
                     continue;
                 }
@@ -741,7 +739,7 @@ impl RecordAccumulator {
                     // still non-null (`newBatchCreated == false`), so
                     // `free.deallocate(buffer)` returns it. The guard does the same
                     // when it drops, so nothing is released early here.
-                    if partition == record_metadata::UNKNOWN_PARTITION {
+                    if partition == RecordMetadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
                         let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
                         partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
@@ -766,7 +764,7 @@ impl RecordAccumulator {
                     now_ms,
                 );
 
-                if partition == record_metadata::UNKNOWN_PARTITION {
+                if partition == RecordMetadata::UNKNOWN_PARTITION {
                     let enable_switch = Self::all_batches_full(&deque);
                     let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
                     partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
@@ -792,7 +790,7 @@ impl RecordAccumulator {
         buffer: Vec<u8>,
         now_ms: i64,
     ) -> RecordAppendResult {
-        debug_assert!(partition != record_metadata::UNKNOWN_PARTITION);
+        debug_assert!(partition != RecordMetadata::UNKNOWN_PARTITION);
 
         let records_builder = self.records_builder(buffer);
         // Both the batch and the append result carry this; `TopicPartition` holds an
@@ -820,7 +818,7 @@ impl RecordAccumulator {
     }
 
     fn records_builder(&self, buffer: Vec<u8>) -> MemoryRecordsBuilder {
-        MemoryRecords::builder_with_buffer(
+        MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             self.compression.clone(),
@@ -889,7 +887,7 @@ impl RecordAccumulator {
             // accumulator — that decides whether an error fires it. The
             // `Box<dyn FnOnce>` cannot be cloned, so handing it back is the only way.
             return Err(AppendFailure::boxed(
-                Error::kafka("Producer closed while send in progress"),
+                Error::kafka_message("Producer closed while send in progress"),
                 callback,
             ));
         }
@@ -1728,7 +1726,7 @@ impl RecordAccumulator {
     /// for the batches the accumulator cannot reach — see
     /// `Sender::abort_in_flight_batches`.
     pub(crate) fn producer_closed_forcefully_error() -> Error {
-        Error::kafka("Producer is closed forcefully.")
+        Error::kafka_message("Producer is closed forcefully.")
     }
 
     /// Abort all incomplete batches (whether they have been sent or not).
@@ -2137,9 +2135,9 @@ impl RecordAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
     use crate::common::Node;
     use crate::common::compress::Compression;
-    use crate::common::protocol::Errors;
     use crate::common::record::internal::CompressionType;
     use crate::common::record::internal::DefaultRecord;
     use crate::common::record::internal::RecordBatch;
@@ -2219,8 +2217,8 @@ mod tests {
     /// the pending `InitProducerId` is dequeued and its response fed straight back,
     /// exactly as `Sender.java:472` and `NetworkClient.poll` would.
     fn idempotent_transaction_manager(producer_id: i64, epoch: i16) -> Arc<Mutex<TransactionManager>> {
+        use crate::InitProducerIdResponseData;
         use crate::common::requests::InitProducerIdResponse;
-        use crate::init_producer_id_response_data::InitProducerIdResponseData;
         use crate::producer::internals::{Caller, CoordinatorNodes, InFlightBatchPool, PendingRequests};
 
         let mut manager = TransactionManager::new(
@@ -2305,7 +2303,8 @@ mod tests {
         );
 
         let gauge = |name: &str| {
-            let mn = metrics.metric_name(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn =
+                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
             metrics
                 .metric(&mn)
                 .unwrap_or_else(|| panic!("{name} should be registered"))
@@ -2810,7 +2809,7 @@ mod tests {
 
         // Partition 0 can be drained after retry backoff
         let upper_bound_backoff_ms =
-            (retry_backoff_ms as f64 * (1.0 + crate::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+            (retry_backoff_ms as f64 * (1.0 + crate::CommonClientConfigs::RETRY_BACKOFF_JITTER)) as i64;
         let result = accum.ready(&metadata, now + upper_bound_backoff_ms + 1);
         assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
         let batches = accum
@@ -3243,7 +3242,7 @@ mod tests {
         let k = key();
 
         let builder_buffer = vec![0u8; small_batch_size as usize];
-        let mut builder = MemoryRecords::builder_with_buffer(
+        let mut builder = MemoryRecords::builder_with_buffer_magic(
             builder_buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -3444,8 +3443,8 @@ mod tests {
         let batches = drain_and_check_batch_amount(&metadata, &n1, &accum, now + linger_ms as i64 + 1, 1).unwrap();
         let mut batch = batches.into_values().next().unwrap().into_iter().next().unwrap();
         let mut current_retry_backoff_ms: i64 = 0;
-        let jitter = crate::common_client_configs::RETRY_BACKOFF_JITTER;
-        let exp_base = crate::common_client_configs::RETRY_BACKOFF_EXP_BASE;
+        let jitter = crate::CommonClientConfigs::RETRY_BACKOFF_JITTER;
+        let exp_base = crate::CommonClientConfigs::RETRY_BACKOFF_EXP_BASE;
 
         let mut i = 0;
         while (current_retry_backoff_ms as f64) < retry_backoff_max_ms as f64 * (1.0 - jitter) {
@@ -3474,8 +3473,8 @@ mod tests {
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
         let n1 = node1();
         let n2 = node2();
-        let jitter = crate::common_client_configs::RETRY_BACKOFF_JITTER;
-        let exp_base = crate::common_client_configs::RETRY_BACKOFF_EXP_BASE;
+        let jitter = crate::CommonClientConfigs::RETRY_BACKOFF_JITTER;
+        let exp_base = crate::CommonClientConfigs::RETRY_BACKOFF_EXP_BASE;
 
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         let accum = RecordAccumulator::new_for_test(
@@ -3608,7 +3607,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = Error::kafka("Producer is closed forcefully.");
+                let reason = Error::kafka_message("Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }
@@ -3693,14 +3692,14 @@ mod tests {
 
         // Create a big batch manually
         let buffer = vec![0u8; 4096];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut batch = ProducerBatch::with_split(tp1(), builder, now, true);
 
         let v = vec![0u8; 1024];
         let acked = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -3886,14 +3885,14 @@ mod tests {
 
         // Create an oversized batch manually that will need splitting
         let buffer = vec![0u8; 4096];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, 0, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, 0, true);
 
         // Append enough records to fill the batch
         for _ in 0..20 {
@@ -3915,9 +3914,9 @@ mod tests {
             let num_split = accum.split_and_reenqueue(
                 // We need to consume the batch, but drain returns owned ProducerBatch
                 // We'll just verify the split mechanics work.
-                ProducerBatch::new_with_split(
+                ProducerBatch::with_split(
                     tp1(),
-                    MemoryRecords::builder_with_buffer(
+                    MemoryRecords::builder_with_buffer_magic(
                         vec![0u8; 2048],
                         RecordBatch::CURRENT_MAGIC_VALUE,
                         Compression::none(),
@@ -3964,7 +3963,7 @@ mod tests {
                 accum
                     .append(
                         TOPIC,
-                        crate::producer::record_metadata::UNKNOWN_PARTITION,
+                        crate::producer::RecordMetadata::UNKNOWN_PARTITION,
                         0,
                         None,
                         Some(&v),
@@ -4015,14 +4014,14 @@ mod tests {
 
         // Create a large producer batch manually
         let buffer = vec![0u8; batch_size as usize];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, now, true);
 
         // Populate with 100 records of 1KB each
         let large_value = vec![0u8; 1024];
@@ -4370,14 +4369,14 @@ mod tests {
         // sub-batch. The producer state is assigned as the drain would
         // (`RecordAccumulator.java:918`), which is the precondition
         // `assignProducerStateToBatches` needs.
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 4096],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, now, true);
         let payload = vec![0u8; 1024];
         for _ in 0..2 {
             assert!(
@@ -4440,7 +4439,7 @@ mod tests {
     /// refactors. Comparing a 1-record drain against a 16-record drain isolates
     /// exactly the per-record component, which must be zero.
     ///
-    /// Uses the same [`crate::test_alloc_tracker::AllocTrackingGuard`] as the
+    /// Uses the same [`crate::AllocTrackingGuard`] as the
     /// consumer's §27 receive-path budget tests.
     #[tokio::test]
     async fn test_drain_allocations_do_not_scale_with_the_record_count() {
@@ -4454,10 +4453,10 @@ mod tests {
             }
             let result = accum.ready(&metadata, now);
             {
-                let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
-                crate::test_alloc_tracker::AllocTrackingGuard::reset();
+                let _guard = crate::AllocTrackingGuard::new();
+                crate::AllocTrackingGuard::reset();
                 let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
-                let count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+                let count = crate::AllocTrackingGuard::count();
                 assert!(count > 0, "the tracker must actually be measuring");
                 // Assert outside the measured region would need the guard dropped, so
                 // capture what is needed first.
@@ -4823,7 +4822,7 @@ mod tests {
                 accum
                     .append(
                         TOPIC,
-                        record_metadata::UNKNOWN_PARTITION,
+                        RecordMetadata::UNKNOWN_PARTITION,
                         0,
                         Some(&k),
                         Some(&big),

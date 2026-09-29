@@ -16,6 +16,7 @@
 //!
 //! Corresponds to org.apache.kafka.common.protocol.Readable
 
+use super::RawTaggedField;
 use crate::common::Uuid;
 use std::io;
 
@@ -108,37 +109,5 @@ pub trait Readable {
         let data = self.read_array(size as usize)?;
         unknowns.push(RawTaggedField::new(tag, data));
         Ok(unknowns)
-    }
-}
-
-/// Raw tagged field for forward compatibility.
-/// Stores unknown tagged fields that can be passed through.
-///
-/// Corresponds to org.apache.kafka.common.protocol.types.RawTaggedField
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RawTaggedField {
-    tag: u32,
-    data: Vec<u8>,
-}
-
-impl RawTaggedField {
-    /// Create a new raw tagged field.
-    pub fn new(tag: u32, data: Vec<u8>) -> Self {
-        RawTaggedField { tag, data }
-    }
-
-    /// Get the tag number.
-    pub fn tag(&self) -> u32 {
-        self.tag
-    }
-
-    /// Get the data bytes.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Get the size of the data.
-    pub fn size(&self) -> usize {
-        self.data.len()
     }
 }

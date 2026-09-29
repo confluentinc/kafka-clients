@@ -19,11 +19,12 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeClientQuotasResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::ClientQuotaEntity;
-use crate::describe_client_quotas_response_data::{DescribeClientQuotasResponseData, EntityData, EntryData, ValueData};
+use crate::describe_client_quotas_response_data::{EntityData, EntryData, ValueData};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DescribeClientQuotas response.
 ///
@@ -105,7 +106,7 @@ impl DescribeClientQuotasResponse {
     /// Returns the error counts aggregated for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         counts
     }
 
@@ -173,7 +174,6 @@ impl std::fmt::Display for DescribeClientQuotasResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::{CLIENT_ID, USER};
 
     fn entity(pairs: &[(&str, &str)]) -> ClientQuotaEntity {
         ClientQuotaEntity::new(pairs.iter().map(|(k, v)| ((*k).to_string(), Some((*v).to_string()))).collect())
@@ -181,13 +181,19 @@ mod tests {
 
     /// The built-in default entity: a `None` (wire-null) name.
     fn default_entity() -> ClientQuotaEntity {
-        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]))
+        ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), None)]))
     }
 
     #[test]
     fn from_quota_entities_round_trips_to_entities() {
-        let e1 = entity(&[(USER, "user-1"), (CLIENT_ID, "value")]);
-        let e2 = entity(&[(USER, "user-2"), (CLIENT_ID, "value")]);
+        let e1 = entity(&[
+            (ClientQuotaEntity::USER, "user-1"),
+            (ClientQuotaEntity::CLIENT_ID, "value"),
+        ]);
+        let e2 = entity(&[
+            (ClientQuotaEntity::USER, "user-2"),
+            (ClientQuotaEntity::CLIENT_ID, "value"),
+        ]);
         let mut data = HashMap::new();
         data.insert(e1.clone(), HashMap::from([("consumer_byte_rate".to_string(), 10000.0)]));
         data.insert(e2.clone(), HashMap::from([("producer_byte_rate".to_string(), 20000.0)]));
@@ -208,7 +214,7 @@ mod tests {
         let mut data = HashMap::new();
         data.insert(default_entity(), HashMap::from([("consumer_byte_rate".to_string(), 10000.0)]));
         data.insert(
-            entity(&[(USER, "")]),
+            entity(&[(ClientQuotaEntity::USER, "")]),
             HashMap::from([("producer_byte_rate".to_string(), 20000.0)]),
         );
 
@@ -216,10 +222,13 @@ mod tests {
         let entities = response.entities();
         assert_eq!(entities.len(), 2);
         assert_eq!(entities[&default_entity()].get("consumer_byte_rate"), Some(&10000.0));
-        assert_eq!(entities[&entity(&[(USER, "")])].get("producer_byte_rate"), Some(&20000.0));
+        assert_eq!(
+            entities[&entity(&[(ClientQuotaEntity::USER, "")])].get("producer_byte_rate"),
+            Some(&20000.0)
+        );
         // The default entity's name decodes to `None`, distinct from `Some("")`.
         assert!(entities.contains_key(&default_entity()));
-        assert_ne!(default_entity(), entity(&[(USER, "")]));
+        assert_ne!(default_entity(), entity(&[(ClientQuotaEntity::USER, "")]));
     }
 
     #[test]

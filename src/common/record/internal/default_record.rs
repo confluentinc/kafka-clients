@@ -44,18 +44,11 @@ use std::io::{self, Read, Write};
 
 use crate::common::InvalidRecordError;
 use crate::common::header::Header;
-use crate::common::header::internals::RecordHeader;
-use crate::common::protocol::varint;
+use crate::common::header::RecordHeader;
+use crate::common::protocol::ByteUtils;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::RecordBatch;
-
-/// Maximum overhead of a default record, excluding key, value, and headers.
-///
-/// 5 bytes (length varint) + 10 bytes (timestamp varlong) + 5 bytes (offset varint) + 1 byte (attributes) = 21.
-pub const MAX_RECORD_OVERHEAD: i32 = 21;
-
-/// Size of varint-encoded -1 (null marker).
-const NULL_VARINT_SIZE_BYTES: i32 = varint::size_of_varint(-1);
 
 /// The default (v2) record format for Kafka.
 ///
@@ -73,6 +66,131 @@ pub struct DefaultRecord {
 }
 
 impl DefaultRecord {
+    /// Compute the size of the record body in bytes (excluding the length prefix).
+    ///
+    /// Corresponds to Java's `DefaultRecord.sizeOfBodyInBytes(int, long, int, int, Header[])`.
+    pub fn size_of_body_in_bytes(
+        offset_delta: i32,
+        timestamp_delta: i64,
+        key_size: i32,
+        value_size: i32,
+        headers: &[RecordHeader],
+    ) -> i32 {
+        let mut size = 1i32; // always one byte for attributes
+        size += ByteUtils::size_of_varint(offset_delta);
+        size += ByteUtils::size_of_varlong(timestamp_delta);
+        size += Self::size_of_key_value_headers(key_size, value_size, headers);
+        size
+    }
+
+    /// Compute the size of key, value, and headers fields.
+    fn size_of_key_value_headers(key_size: i32, value_size: i32, headers: &[RecordHeader]) -> i32 {
+        let mut size = 0i32;
+
+        if key_size < 0 {
+            size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
+        } else {
+            size += ByteUtils::size_of_varint(key_size) + key_size;
+        }
+
+        if value_size < 0 {
+            size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
+        } else {
+            size += ByteUtils::size_of_varint(value_size) + value_size;
+        }
+
+        size += ByteUtils::size_of_varint(headers.len() as i32);
+
+        for header in headers {
+            let header_key = header.key();
+            let header_key_size = header_key.len() as i32;
+            size += ByteUtils::size_of_varint(header_key_size) + header_key_size;
+
+            match header.value() {
+                None => {
+                    size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
+                },
+                Some(header_value) => {
+                    let hv_size = header_value.len() as i32;
+                    size += ByteUtils::size_of_varint(hv_size) + hv_size;
+                },
+            }
+        }
+
+        size
+    }
+
+    /// Borrow `size` bytes from `buffer` at `*pos`, advancing the cursor. If
+    /// `size` is negative (null marker), returns `None`. Zero-copy: returns a
+    /// slice into `buffer`, never a fresh allocation.
+    fn slice_bytes<'a>(buffer: &'a [u8], pos: &mut usize, size: i32) -> Result<Option<&'a [u8]>, InvalidRecordError> {
+        if size < 0 {
+            return Ok(None);
+        }
+        let size = size as usize;
+        if *pos + size > buffer.len() {
+            return Err(InvalidRecordError::new("Found invalid record structure"));
+        }
+        let data = &buffer[*pos..*pos + size];
+        *pos += size;
+        Ok(Some(data))
+    }
+
+    /// Parse a single header `[HeaderKeyLength HeaderKey HeaderValueLength
+    /// HeaderValue]` from `buffer` at `*pos`, advancing the cursor. Returns the
+    /// key bytes (borrowed) and the optional value bytes (borrowed). The header
+    /// key may not be null.
+    fn parse_one_header<'a>(
+        buffer: &'a [u8],
+        pos: &mut usize,
+    ) -> Result<(&'a [u8], Option<&'a [u8]>), InvalidRecordError> {
+        let (header_key_size, consumed) = ByteUtils::read_varint(&buffer[*pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        *pos += consumed;
+
+        if header_key_size < 0 {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid negative header key size {}",
+                header_key_size
+            )));
+        }
+
+        let header_key = Self::slice_bytes(buffer, pos, header_key_size)?
+            .ok_or_else(|| InvalidRecordError::new("Header key cannot be null"))?;
+
+        let (header_value_size, consumed) = ByteUtils::read_varint(&buffer[*pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        *pos += consumed;
+
+        let header_value = Self::slice_bytes(buffer, pos, header_value_size)?;
+
+        Ok((header_key, header_value))
+    }
+
+    /// Read up to `buf.len()` bytes from `reader`, returning the number of bytes read.
+    ///
+    /// Corresponds to Java's `Utils.readFully(InputStream, ByteBuffer)`.
+    fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, InvalidRecordError> {
+        let mut total = 0;
+        while total < buf.len() {
+            match reader.read(&mut buf[total..]) {
+                Ok(0) => break, // EOF
+                Ok(n) => total += n,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(InvalidRecordError::new(e.to_string())),
+            }
+        }
+        Ok(total)
+    }
+
+    /// Maximum overhead of a default record, excluding key, value, and headers.
+    ///
+    /// 5 bytes (length varint) + 10 bytes (timestamp varlong) + 5 bytes (offset varint) + 1 byte (attributes) = 21.
+    pub const MAX_RECORD_OVERHEAD: i32 = 21;
+
+    /// Size of varint-encoded -1 (null marker).
+    const NULL_VARINT_SIZE_BYTES: i32 = ByteUtils::size_of_varint(-1);
+
     /// Create a new `DefaultRecord` with all fields.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -110,23 +228,24 @@ impl DefaultRecord {
     ) -> io::Result<i32> {
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
-        let size_of_body = size_of_body_in_bytes(offset_delta, timestamp_delta, key_size, value_size, headers);
+        let size_of_body =
+            DefaultRecord::size_of_body_in_bytes(offset_delta, timestamp_delta, key_size, value_size, headers);
 
-        varint::write_varint(size_of_body, out)?;
+        ByteUtils::write_varint(size_of_body, out)?;
 
         // attributes: currently unused, always 0
         out.write_all(&[0u8])?;
 
-        varint::write_varlong(timestamp_delta, out)?;
-        varint::write_varint(offset_delta, out)?;
+        ByteUtils::write_varlong(timestamp_delta, out)?;
+        ByteUtils::write_varint(offset_delta, out)?;
 
         // key
         match key {
             None => {
-                varint::write_varint(-1, out)?;
+                ByteUtils::write_varint(-1, out)?;
             },
             Some(k) => {
-                varint::write_varint(k.len() as i32, out)?;
+                ByteUtils::write_varint(k.len() as i32, out)?;
                 out.write_all(k)?;
             },
         }
@@ -134,35 +253,35 @@ impl DefaultRecord {
         // value
         match value {
             None => {
-                varint::write_varint(-1, out)?;
+                ByteUtils::write_varint(-1, out)?;
             },
             Some(v) => {
-                varint::write_varint(v.len() as i32, out)?;
+                ByteUtils::write_varint(v.len() as i32, out)?;
                 out.write_all(v)?;
             },
         }
 
         // headers
-        varint::write_varint(headers.len() as i32, out)?;
+        ByteUtils::write_varint(headers.len() as i32, out)?;
 
         for header in headers {
             let header_key = header.key();
             let utf8_bytes = header_key.as_bytes();
-            varint::write_varint(utf8_bytes.len() as i32, out)?;
+            ByteUtils::write_varint(utf8_bytes.len() as i32, out)?;
             out.write_all(utf8_bytes)?;
 
             match header.value() {
                 None => {
-                    varint::write_varint(-1, out)?;
+                    ByteUtils::write_varint(-1, out)?;
                 },
                 Some(header_value) => {
-                    varint::write_varint(header_value.len() as i32, out)?;
+                    ByteUtils::write_varint(header_value.len() as i32, out)?;
                     out.write_all(header_value)?;
                 },
             }
         }
 
-        Ok(varint::size_of_varint(size_of_body) + size_of_body)
+        Ok(ByteUtils::size_of_varint(size_of_body) + size_of_body)
     }
 
     /// Read a `DefaultRecord` from a byte buffer.
@@ -178,7 +297,7 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<(DefaultRecord, usize), InvalidRecordError> {
-        let (size_of_body, varint_size) = varint::read_varint(buffer)
+        let (size_of_body, varint_size) = ByteUtils::read_varint(buffer)
             .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
 
         if size_of_body < 0 {
@@ -224,7 +343,7 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<DefaultRecord, InvalidRecordError> {
-        let size_of_body = varint::read_varint_reader(input)
+        let size_of_body = ByteUtils::read_varint_reader(input)
             .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
 
         if size_of_body < 0 {
@@ -235,7 +354,7 @@ impl DefaultRecord {
         }
 
         let mut record_buffer = vec![0u8; size_of_body as usize];
-        let bytes_read = read_fully(input, &mut record_buffer)?;
+        let bytes_read = DefaultRecord::read_fully(input, &mut record_buffer)?;
         if bytes_read != size_of_body as usize {
             return Err(InvalidRecordError::new(format!(
                 "Invalid record size: expected {} bytes in record payload, but the record payload reached EOF.",
@@ -296,7 +415,7 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<(DefaultRecordRef<'_>, usize), InvalidRecordError> {
-        let (size_of_body, varint_size) = varint::read_varint(buffer)
+        let (size_of_body, varint_size) = ByteUtils::read_varint(buffer)
             .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
 
         if size_of_body < 0 {
@@ -341,8 +460,9 @@ impl DefaultRecord {
         value_size: i32,
         headers: &[RecordHeader],
     ) -> i32 {
-        let body_size = size_of_body_in_bytes(offset_delta, timestamp_delta, key_size, value_size, headers);
-        body_size + varint::size_of_varint(body_size)
+        let body_size =
+            DefaultRecord::size_of_body_in_bytes(offset_delta, timestamp_delta, key_size, value_size, headers);
+        body_size + ByteUtils::size_of_varint(body_size)
     }
 
     /// Compute the total serialized size from key/value slices.
@@ -364,78 +484,8 @@ impl DefaultRecord {
     pub fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
-        MAX_RECORD_OVERHEAD + size_of_key_value_headers(key_size, value_size, headers)
+        DefaultRecord::MAX_RECORD_OVERHEAD + DefaultRecord::size_of_key_value_headers(key_size, value_size, headers)
     }
-}
-
-/// Compute the size of the record body in bytes (excluding the length prefix).
-///
-/// Corresponds to Java's `DefaultRecord.sizeOfBodyInBytes(int, long, int, int, Header[])`.
-pub fn size_of_body_in_bytes(
-    offset_delta: i32,
-    timestamp_delta: i64,
-    key_size: i32,
-    value_size: i32,
-    headers: &[RecordHeader],
-) -> i32 {
-    let mut size = 1i32; // always one byte for attributes
-    size += varint::size_of_varint(offset_delta);
-    size += varint::size_of_varlong(timestamp_delta);
-    size += size_of_key_value_headers(key_size, value_size, headers);
-    size
-}
-
-/// Compute the size of key, value, and headers fields.
-fn size_of_key_value_headers(key_size: i32, value_size: i32, headers: &[RecordHeader]) -> i32 {
-    let mut size = 0i32;
-
-    if key_size < 0 {
-        size += NULL_VARINT_SIZE_BYTES;
-    } else {
-        size += varint::size_of_varint(key_size) + key_size;
-    }
-
-    if value_size < 0 {
-        size += NULL_VARINT_SIZE_BYTES;
-    } else {
-        size += varint::size_of_varint(value_size) + value_size;
-    }
-
-    size += varint::size_of_varint(headers.len() as i32);
-
-    for header in headers {
-        let header_key = header.key();
-        let header_key_size = header_key.len() as i32;
-        size += varint::size_of_varint(header_key_size) + header_key_size;
-
-        match header.value() {
-            None => {
-                size += NULL_VARINT_SIZE_BYTES;
-            },
-            Some(header_value) => {
-                let hv_size = header_value.len() as i32;
-                size += varint::size_of_varint(hv_size) + hv_size;
-            },
-        }
-    }
-
-    size
-}
-
-/// Borrow `size` bytes from `buffer` at `*pos`, advancing the cursor. If
-/// `size` is negative (null marker), returns `None`. Zero-copy: returns a
-/// slice into `buffer`, never a fresh allocation.
-fn slice_bytes<'a>(buffer: &'a [u8], pos: &mut usize, size: i32) -> Result<Option<&'a [u8]>, InvalidRecordError> {
-    if size < 0 {
-        return Ok(None);
-    }
-    let size = size as usize;
-    if *pos + size > buffer.len() {
-        return Err(InvalidRecordError::new("Found invalid record structure"));
-    }
-    let data = &buffer[*pos..*pos + size];
-    *pos += size;
-    Ok(Some(data))
 }
 
 /// A borrowing view of a single v2 record, parsed from a batch buffer without
@@ -497,7 +547,7 @@ impl<'a> DefaultRecordRef<'a> {
         pos += 1;
 
         // timestamp delta
-        let (timestamp_delta, consumed) = varint::read_varlong(&body[pos..])
+        let (timestamp_delta, consumed) = ByteUtils::read_varlong(&body[pos..])
             .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
         pos += consumed;
 
@@ -507,34 +557,34 @@ impl<'a> DefaultRecordRef<'a> {
         }
 
         // offset delta
-        let (offset_delta, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        let (offset_delta, consumed) = ByteUtils::read_varint(&body[pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
         pos += consumed;
 
         let offset = base_offset + offset_delta as i64;
         let sequence = if base_sequence >= 0 {
-            increment_sequence(base_sequence, offset_delta)
+            DefaultRecordBatch::increment_sequence(base_sequence, offset_delta)
         } else {
             RecordBatch::NO_SEQUENCE
         };
 
         // key
-        let (key_size, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        let (key_size, consumed) = ByteUtils::read_varint(&body[pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
         pos += consumed;
 
-        let key = slice_bytes(body, &mut pos, key_size)?;
+        let key = DefaultRecord::slice_bytes(body, &mut pos, key_size)?;
 
         // value
-        let (value_size, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        let (value_size, consumed) = ByteUtils::read_varint(&body[pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
         pos += consumed;
 
-        let value = slice_bytes(body, &mut pos, value_size)?;
+        let value = DefaultRecord::slice_bytes(body, &mut pos, value_size)?;
 
         // headers
-        let (num_headers, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        let (num_headers, consumed) = ByteUtils::read_varint(&body[pos..])
+            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
         pos += consumed;
 
         if num_headers < 0 {
@@ -559,7 +609,7 @@ impl<'a> DefaultRecordRef<'a> {
         let headers_start = pos;
         let mut header_pos = pos;
         for _ in 0..num_headers {
-            parse_one_header(body, &mut header_pos)?;
+            DefaultRecord::parse_one_header(body, &mut header_pos)?;
         }
         let headers_bytes = &body[headers_start..header_pos];
 
@@ -571,7 +621,7 @@ impl<'a> DefaultRecordRef<'a> {
             )));
         }
 
-        let total_size_in_bytes = varint::size_of_varint(size_of_body) + size_of_body;
+        let total_size_in_bytes = ByteUtils::size_of_varint(size_of_body) + size_of_body;
         Ok(DefaultRecordRef {
             size_in_bytes: total_size_in_bytes,
             attributes,
@@ -652,7 +702,7 @@ impl<'a> DefaultRecordRef<'a> {
         let mut headers = Vec::with_capacity(self.num_headers as usize);
         let mut pos = 0;
         for _ in 0..self.num_headers {
-            let (header_key, header_value) = parse_one_header(self.headers_bytes, &mut pos)?;
+            let (header_key, header_value) = DefaultRecord::parse_one_header(self.headers_bytes, &mut pos)?;
             let header_key =
                 std::str::from_utf8(header_key).map_err(|_| InvalidRecordError::new("Invalid UTF-8 in header key"))?;
             headers.push(RecordHeader::new(header_key.to_string(), header_value.map(|v| v.to_vec())));
@@ -679,62 +729,7 @@ impl<'a> DefaultRecordRef<'a> {
     }
 }
 
-/// Parse a single header `[HeaderKeyLength HeaderKey HeaderValueLength
-/// HeaderValue]` from `buffer` at `*pos`, advancing the cursor. Returns the
-/// key bytes (borrowed) and the optional value bytes (borrowed). The header
-/// key may not be null.
-fn parse_one_header<'a>(buffer: &'a [u8], pos: &mut usize) -> Result<(&'a [u8], Option<&'a [u8]>), InvalidRecordError> {
-    let (header_key_size, consumed) =
-        varint::read_varint(&buffer[*pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-    *pos += consumed;
-
-    if header_key_size < 0 {
-        return Err(InvalidRecordError::new(format!(
-            "Invalid negative header key size {}",
-            header_key_size
-        )));
-    }
-
-    let header_key = slice_bytes(buffer, pos, header_key_size)?
-        .ok_or_else(|| InvalidRecordError::new("Header key cannot be null"))?;
-
-    let (header_value_size, consumed) =
-        varint::read_varint(&buffer[*pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-    *pos += consumed;
-
-    let header_value = slice_bytes(buffer, pos, header_value_size)?;
-
-    Ok((header_key, header_value))
-}
-
-/// Read up to `buf.len()` bytes from `reader`, returning the number of bytes read.
-///
-/// Corresponds to Java's `Utils.readFully(InputStream, ByteBuffer)`.
-fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, InvalidRecordError> {
-    let mut total = 0;
-    while total < buf.len() {
-        match reader.read(&mut buf[total..]) {
-            Ok(0) => break, // EOF
-            Ok(n) => total += n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(InvalidRecordError::new(e.to_string())),
-        }
-    }
-    Ok(total)
-}
-
-/// Increment a sequence number, wrapping around at `i32::MAX`.
-///
-/// Corresponds to Java's `DefaultRecordBatch.incrementSequence(int, int)`.
-pub fn increment_sequence(sequence: i32, increment: i32) -> i32 {
-    if sequence > i32::MAX - increment {
-        increment - (i32::MAX - sequence) - 1
-    } else {
-        sequence + increment
-    }
-}
-
-impl super::record_trait::Record for DefaultRecord {
+impl super::Record for DefaultRecord {
     fn offset(&self) -> i64 {
         self.offset
     }
@@ -846,20 +841,7 @@ mod tests {
     #[test]
     fn test_max_record_overhead() {
         // 5 bytes length + 10 bytes timestamp + 5 bytes offset + 1 byte attributes = 21
-        assert_eq!(MAX_RECORD_OVERHEAD, 21);
-    }
-
-    #[test]
-    fn test_increment_sequence_no_wrap() {
-        assert_eq!(increment_sequence(10, 5), 15);
-        assert_eq!(increment_sequence(0, 0), 0);
-    }
-
-    #[test]
-    fn test_increment_sequence_wrap() {
-        assert_eq!(increment_sequence(i32::MAX, 1), 0);
-        assert_eq!(increment_sequence(i32::MAX - 1, 2), 0);
-        assert_eq!(increment_sequence(i32::MAX - 5, 10), 4);
+        assert_eq!(DefaultRecord::MAX_RECORD_OVERHEAD, 21);
     }
 
     #[test]
@@ -970,9 +952,9 @@ mod tests {
 
     /// Helper to build an invalid record buffer for testing error cases.
     fn build_invalid_record_buf(size_of_body: i32, writer: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
-        let mut buf = vec![0u8; (size_of_body + varint::size_of_varint(size_of_body)) as usize];
+        let mut buf = vec![0u8; (size_of_body + ByteUtils::size_of_varint(size_of_body)) as usize];
         let mut pos = Vec::new();
-        varint::write_varint(size_of_body, &mut pos).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut pos).unwrap();
         buf[..pos.len()].copy_from_slice(&pos);
 
         // Use a separate buffer for the body
@@ -1008,9 +990,9 @@ mod tests {
 
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(key_size, body).unwrap();
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(key_size, body).unwrap();
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1026,10 +1008,10 @@ mod tests {
 
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(value_size, body).unwrap();
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(value_size, body).unwrap();
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1045,11 +1027,11 @@ mod tests {
         // negative num headers
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(-1, body).unwrap(); // null value
-            varint::write_varint(-1, body).unwrap(); // -1 num.headers, not allowed
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(-1, body).unwrap(); // null value
+            ByteUtils::write_varint(-1, body).unwrap(); // -1 num.headers, not allowed
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1057,11 +1039,11 @@ mod tests {
         // num headers larger than remaining buffer
         let buf2 = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(-1, body).unwrap(); // null value
-            varint::write_varint(size_of_body, body).unwrap(); // more headers than remaining
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(-1, body).unwrap(); // null value
+            ByteUtils::write_varint(size_of_body, body).unwrap(); // more headers than remaining
         });
 
         assert_decoding_from_buffer_throws(&buf2);
@@ -1076,12 +1058,12 @@ mod tests {
 
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(-1, body).unwrap(); // null value
-            varint::write_varint(1, body).unwrap(); // 1 header
-            varint::write_varint(105, body).unwrap(); // header key too long
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(-1, body).unwrap(); // null value
+            ByteUtils::write_varint(1, body).unwrap(); // 1 header
+            ByteUtils::write_varint(105, body).unwrap(); // header key too long
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1096,12 +1078,12 @@ mod tests {
 
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(-1, body).unwrap(); // null value
-            varint::write_varint(1, body).unwrap(); // 1 header
-            varint::write_varint(-1, body).unwrap(); // null header key not allowed
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(-1, body).unwrap(); // null value
+            ByteUtils::write_varint(1, body).unwrap(); // 1 header
+            ByteUtils::write_varint(-1, body).unwrap(); // null header key not allowed
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1116,14 +1098,14 @@ mod tests {
 
         let buf = build_invalid_record_buf(size_of_body, |body| {
             body.push(attributes);
-            varint::write_varlong(timestamp_delta, body).unwrap();
-            varint::write_varint(offset_delta, body).unwrap();
-            varint::write_varint(-1, body).unwrap(); // null key
-            varint::write_varint(-1, body).unwrap(); // null value
-            varint::write_varint(1, body).unwrap(); // 1 header
-            varint::write_varint(1, body).unwrap(); // header key len = 1
+            ByteUtils::write_varlong(timestamp_delta, body).unwrap();
+            ByteUtils::write_varint(offset_delta, body).unwrap();
+            ByteUtils::write_varint(-1, body).unwrap(); // null key
+            ByteUtils::write_varint(-1, body).unwrap(); // null value
+            ByteUtils::write_varint(1, body).unwrap(); // 1 header
+            ByteUtils::write_varint(1, body).unwrap(); // header key len = 1
             body.push(1); // header key byte
-            varint::write_varint(105, body).unwrap(); // header value too long
+            ByteUtils::write_varint(105, body).unwrap(); // header value too long
         });
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1133,9 +1115,9 @@ mod tests {
     fn test_underflow_reading_timestamp() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 1;
-        let mut buf = vec![0u8; (size_of_body + varint::size_of_varint(size_of_body)) as usize];
+        let mut buf = vec![0u8; (size_of_body + ByteUtils::size_of_varint(size_of_body)) as usize];
         let mut prefix = Vec::new();
-        varint::write_varint(size_of_body, &mut prefix).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut prefix).unwrap();
         buf[..prefix.len()].copy_from_slice(&prefix);
         buf[prefix.len()] = attributes;
 
@@ -1146,16 +1128,16 @@ mod tests {
     fn test_underflow_reading_varlong() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 2; // one byte for attributes, one byte for partial timestamp
-        let total_size = (size_of_body + varint::size_of_varint(size_of_body)) as usize;
+        let total_size = (size_of_body + ByteUtils::size_of_varint(size_of_body)) as usize;
         let mut buf = vec![0u8; total_size];
         let mut prefix = Vec::new();
-        varint::write_varint(size_of_body, &mut prefix).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut prefix).unwrap();
         buf[..prefix.len()].copy_from_slice(&prefix);
         let body_start = prefix.len();
         buf[body_start] = attributes;
         // Write a varlong that needs 2 bytes but only provide 1 byte of space
         let mut varlong_buf = Vec::new();
-        varint::write_varlong(156, &mut varlong_buf).unwrap();
+        ByteUtils::write_varlong(156, &mut varlong_buf).unwrap();
         // Only copy the first byte (incomplete varlong)
         if body_start + 1 < buf.len() {
             buf[body_start + 1] = varlong_buf[0];
@@ -1168,17 +1150,17 @@ mod tests {
     fn test_invalid_varlong() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 11; // one byte for attributes, 10 bytes for max timestamp
-        let total_size = (size_of_body + varint::size_of_varint(size_of_body)) as usize;
+        let total_size = (size_of_body + ByteUtils::size_of_varint(size_of_body)) as usize;
         let mut buf = vec![0u8; total_size];
         let mut prefix = Vec::new();
-        varint::write_varint(size_of_body, &mut prefix).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut prefix).unwrap();
         buf[..prefix.len()].copy_from_slice(&prefix);
         let body_start = prefix.len();
         buf[body_start] = attributes;
 
         // Write a valid varlong that takes 10 bytes (i64::MAX)
         let mut varlong_buf = Vec::new();
-        varint::write_varlong(i64::MAX, &mut varlong_buf).unwrap();
+        ByteUtils::write_varlong(i64::MAX, &mut varlong_buf).unwrap();
         for (i, &b) in varlong_buf.iter().enumerate() {
             if body_start + 1 + i < buf.len() {
                 buf[body_start + 1 + i] = b;
@@ -1220,7 +1202,7 @@ mod tests {
         let size_of_body: i32 = 10;
         let mut buf = vec![0u8; 5];
         let mut prefix = Vec::new();
-        varint::write_varint(size_of_body, &mut prefix).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut prefix).unwrap();
         buf[..prefix.len()].copy_from_slice(&prefix);
 
         assert_decoding_from_buffer_throws(&buf);
@@ -1231,7 +1213,7 @@ mod tests {
         // A negative size_of_body should return InvalidRecordError, not panic.
         let size_of_body: i32 = -1;
         let mut buf = Vec::new();
-        varint::write_varint(size_of_body, &mut buf).unwrap();
+        ByteUtils::write_varint(size_of_body, &mut buf).unwrap();
 
         assert_decoding_from_buffer_throws(&buf);
     }

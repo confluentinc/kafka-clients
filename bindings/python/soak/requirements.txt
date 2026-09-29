@@ -4,11 +4,6 @@
 # Process RSS/CPU sampling, used by soak_metrics.py's MemoryBucket/CPUBucket.
 psutil>=5.9
 
-# librdkafka's AdminClient, used ONLY to create the soak topic if it is absent:
-# this binding exposes no admin API to Python. It is not on the produce or
-# consume path — the soak drives the Rust client for both.
-confluent-kafka>=2.13.0
-
 # Unit tests (bindings/python/soak/test).
 pytest>=7.0
 

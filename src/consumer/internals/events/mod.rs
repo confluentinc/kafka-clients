@@ -31,11 +31,20 @@
 
 #![allow(dead_code)]
 
-pub(crate) mod application_event;
-pub(crate) mod application_event_handler;
-pub(crate) mod application_event_processor;
-pub(crate) mod background_event;
-pub(crate) mod background_event_handler;
-pub(crate) mod completable_event;
-pub(crate) mod completable_event_reaper;
-pub(crate) mod event_processor;
+mod application_event;
+mod application_event_handler;
+mod application_event_processor;
+mod background_event;
+mod background_event_handler;
+mod completable_event;
+mod completable_event_reaper;
+mod event_processor;
+
+pub(crate) use application_event::{ApplicationEvent, ApplicationEventEnvelope, AsyncPollState};
+pub(crate) use application_event_handler::ApplicationEventHandler;
+pub(crate) use application_event_processor::ApplicationEventProcessor;
+pub(crate) use background_event::{BackgroundEvent, BackgroundEventEnvelope};
+pub(crate) use background_event_handler::BackgroundEventHandler;
+pub(crate) use completable_event::{CompletableEvent, CompletableEventErasedHandle, CompletableEventHandle};
+pub(crate) use completable_event_reaper::CompletableEventReaper;
+pub(crate) use event_processor::EventProcessor;

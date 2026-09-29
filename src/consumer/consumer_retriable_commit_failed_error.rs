@@ -17,17 +17,7 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
-
-/// Default message for `RetriableCommitFailedException(Throwable)`, reworded.
-///
-/// Java's text is "Offset commit failed with a retriable **exception**. You
-/// should retry committing the latest consumed offsets."
-/// (`RetriableCommitFailedException.java:26`). CLAUDE.md §2 bars the word
-/// "exception" from Rust code including message text, so this says "error"
-/// instead. The two strings differ by that one word and nothing else.
-pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
-    "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// An offset commit failed with a retriable error; committing the latest
 /// consumed offsets again may succeed.
@@ -40,7 +30,7 @@ pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
 ///   `ApiException` -> `KafkaException`
 ///
 /// Being its own class is what makes it retriable. The previous mapping routed
-/// it through [`Errors::RequestTimedOut`](crate::common::protocol::Errors::RequestTimedOut)
+/// it through [`Errors::RequestTimedOut`](crate::common::Errors::RequestTimedOut)
 /// solely to borrow that code's retriability, which also made it
 /// indistinguishable from a real `TimeoutException`.
 ///
@@ -55,6 +45,16 @@ pub struct ConsumerRetriableCommitFailedError {
 }
 
 impl ConsumerRetriableCommitFailedError {
+    /// Default message for `RetriableCommitFailedException(Throwable)`, reworded.
+    ///
+    /// Java's text is "Offset commit failed with a retriable **exception**. You
+    /// should retry committing the latest consumed offsets."
+    /// (`RetriableCommitFailedException.java:26`). CLAUDE.md §2 bars the word
+    /// "exception" from Rust code including message text, so this says "error"
+    /// instead. The two strings differ by that one word and nothing else.
+    pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
+        "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
+
     /// Create the error with the given message —
     /// `RetriableCommitFailedException(String)`.
     pub fn new(message: impl Into<String>) -> Self {
@@ -63,7 +63,7 @@ impl ConsumerRetriableCommitFailedError {
 
     /// Create the error with Java's default message.
     pub fn with_default_message() -> Self {
-        Self::new(CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE)
+        Self::new(ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE)
     }
 
     /// `RetriableCommitFailedException(Throwable t)` — uses the default message.
@@ -72,7 +72,7 @@ impl ConsumerRetriableCommitFailedError {
     /// [`Error::cause`], matching Java's `getCause()`.
     pub fn with_source(source: Error) -> Self {
         Self {
-            message: CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE.to_string(),
+            message: ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE.to_string(),
             source: Some(Box::new(source)),
         }
     }
@@ -140,10 +140,16 @@ mod tests {
     fn test_retriable_commit_failed_default_message() {
         let cause = Error::local_illegal_state("inner");
         let e = ConsumerRetriableCommitFailedError::with_source(cause);
-        assert_eq!(e.message(), CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE);
+        assert_eq!(
+            e.message(),
+            ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE
+        );
         assert_eq!(
             e.to_string(),
-            format!("ConsumerRetriableCommitFailedError: {CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE}")
+            format!(
+                "ConsumerRetriableCommitFailedError: {}",
+                ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE
+            )
         );
         // Java's `getCause()`.
         assert_eq!(e.source().expect("cause is kept").message(), "inner");

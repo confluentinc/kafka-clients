@@ -54,13 +54,13 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// Sets an optional reason.
     ///
     /// Mirrors Java's `reason(String)`.
-    pub fn reason(&mut self, reason: impl Into<String>) {
+    pub fn set_reason(&mut self, reason: impl Into<String>) {
         self.reason = Some(reason.into());
     }
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
@@ -75,7 +75,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// The optional reason.
     ///
     /// Mirrors Java's `reason()`.
-    pub fn reason_value(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
 
@@ -88,7 +88,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -115,16 +115,16 @@ mod tests {
     fn default_is_remove_all() {
         let options = RemoveMembersFromConsumerGroupOptions::default();
         assert!(options.remove_all());
-        assert_eq!(options.reason_value(), None);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.reason(), None);
+        assert_eq!(options.timeout_ms(), None);
     }
 
     #[test]
     fn reason_and_timeout_setters() {
         let mut options = RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("i")]).unwrap();
-        options.reason("because");
-        let options = options.timeout_ms(Some(50));
-        assert_eq!(options.reason_value(), Some("because"));
-        assert_eq!(options.timeout(), Some(50));
+        options.set_reason("because");
+        let options = options.set_timeout_ms(Some(50));
+        assert_eq!(options.reason(), Some("because"));
+        assert_eq!(options.timeout_ms(), Some(50));
     }
 }

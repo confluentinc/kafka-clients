@@ -35,38 +35,38 @@ impl DescribeConfigsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether to return configuration synonyms in the response.
     #[must_use]
-    pub fn include_synonyms(mut self, include_synonyms: bool) -> Self {
+    pub fn set_include_synonyms(mut self, include_synonyms: bool) -> Self {
         self.include_synonyms = include_synonyms;
         self
     }
 
     /// Whether to return configuration synonyms in the response.
-    pub fn should_include_synonyms(&self) -> bool {
+    pub fn include_synonyms(&self) -> bool {
         self.include_synonyms
     }
 
     /// Set whether to return configuration documentation in the response.
     #[must_use]
-    pub fn include_documentation(mut self, include_documentation: bool) -> Self {
+    pub fn set_include_documentation(mut self, include_documentation: bool) -> Self {
         self.include_documentation = include_documentation;
         self
     }
 
     /// Whether to return configuration documentation in the response.
-    pub fn should_include_documentation(&self) -> bool {
+    pub fn include_documentation(&self) -> bool {
         self.include_documentation
     }
 }
@@ -78,15 +78,17 @@ mod tests {
     #[test]
     fn defaults_match_java() {
         let options = DescribeConfigsOptions::new();
-        assert_eq!(options.timeout(), None);
-        assert!(!options.should_include_synonyms());
-        assert!(!options.should_include_documentation());
+        assert_eq!(options.timeout_ms(), None);
+        assert!(!options.include_synonyms());
+        assert!(!options.include_documentation());
     }
 
     #[test]
     fn fluent_setters() {
-        let options = DescribeConfigsOptions::new().include_synonyms(true).include_documentation(true);
-        assert!(options.should_include_synonyms());
-        assert!(options.should_include_documentation());
+        let options = DescribeConfigsOptions::new()
+            .set_include_synonyms(true)
+            .set_include_documentation(true);
+        assert!(options.include_synonyms());
+        assert!(options.include_documentation());
     }
 }

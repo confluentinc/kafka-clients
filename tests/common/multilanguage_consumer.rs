@@ -21,15 +21,17 @@
 //! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
 //! the non-blocking state reads, wakeup, close).
 //!
-//! The callback-taking trait methods (`subscribe_with_listener`,
+//! The callback-taking trait methods (`subscribe_with_topics_listener`,
 //! `commit_async_*_with_callback`) return an `illegal_state` error, and
 //! deliberately keep doing so even though the bindings *do* bridge those
 //! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
 //! cannot be handed to a server in another one. Callback coverage for the gRPC
 //! backends goes through [`crate::common::callback_log::ConsumerCallbackLog`]
 //! instead, which asks the server to register a listener built by its own
-//! binding and reads back what it observed. Regex pattern subscription remains
-//! unbridged entirely; tests needing it are native-Rust-only.
+//! binding and reads back what it observed. Client-side regex subscription has
+//! nothing to bridge: Java's `subscribe(Pattern ...)` overloads are not
+//! implemented in Rust at all (see `Consumer`), so the only pattern form that
+//! crosses this bridge is `subscribe_with_pattern`.
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
@@ -50,7 +52,8 @@ use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
+    ConsumerRecordOptionsBuilder, ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp,
+    OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -378,28 +381,28 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     // ── subscription / assignment ──
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
+    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.subscribe_rpc(topics).await
     }
 
-    async fn subscribe_with_listener(
+    async fn subscribe_with_topics_listener(
         &mut self,
         _topics: Vec<String>,
         _listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_with_listener"))
+        Err(self.unsupported("subscribe_with_topics_listener"))
     }
 
-    async fn subscribe_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_pattern"))
+    async fn subscribe_with_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
+        Err(self.unsupported("subscribe_with_pattern"))
     }
 
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_with_pattern_listener(
         &mut self,
         _pattern: SubscriptionPattern,
         _listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_pattern_with_listener"))
+        Err(self.unsupported("subscribe_with_pattern_listener"))
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
@@ -422,15 +425,18 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_sync_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
+    async fn commit_sync_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
+    async fn commit_sync_with_offsets(
+        &mut self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), Error> {
         self.commit_rpc(offset_map_to_proto(&offsets)).await
     }
 
-    async fn commit_sync_offsets_timeout(
+    async fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _timeout: Duration,
@@ -449,16 +455,16 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         Err(self.unsupported("commit_async_with_callback"))
     }
 
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_with_offsets_callback(
         &mut self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _callback: Arc<dyn OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("commit_async_offsets_with_callback"))
+        Err(self.unsupported("commit_async_with_offsets_callback"))
     }
 
     // ── seek ──
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
@@ -470,7 +476,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.status_rpc(client.seek(req)).await
     }
 
-    async fn seek_with_metadata(
+    async fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -499,7 +505,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.position_rpc(partition).await
     }
 
-    async fn position_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
+    async fn position_with_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
         self.position_rpc(partition).await
     }
 
@@ -510,7 +516,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.committed_rpc(partitions).await
     }
 
-    async fn committed_timeout(
+    async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -523,7 +529,11 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.partitions_for_rpc(topic).await
     }
 
-    async fn partitions_for_timeout(&mut self, topic: &str, _timeout: Duration) -> Result<Vec<PartitionInfo>, Error> {
+    async fn partitions_for_with_timeout(
+        &mut self,
+        topic: &str,
+        _timeout: Duration,
+    ) -> Result<Vec<PartitionInfo>, Error> {
         self.partitions_for_rpc(topic).await
     }
 
@@ -541,7 +551,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         }
     }
 
-    async fn list_topics_timeout(&mut self, _timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
+    async fn list_topics_with_timeout(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
         self.list_topics().await
     }
 
@@ -570,7 +583,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         }
     }
 
-    async fn offsets_for_times_timeout(
+    async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         _timeout: Duration,
@@ -585,7 +598,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.long_offsets_rpc(partitions, false).await
     }
 
-    async fn beginning_offsets_timeout(
+    async fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -597,7 +610,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.long_offsets_rpc(partitions, true).await
     }
 
-    async fn end_offsets_timeout(
+    async fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -614,8 +627,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.tp_list_rpc(partitions, TpListOp::Resume).await
     }
 
-    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
+    async fn enforce_rebalance(&mut self) -> Result<(), Error> {
         Err(self.unsupported("enforce_rebalance"))
+    }
+
+    async fn enforce_rebalance_with_reason(&mut self, _reason: &str) -> Result<(), Error> {
+        Err(self.unsupported("enforce_rebalance_with_reason"))
     }
 
     // ── lifecycle ──
@@ -625,9 +642,19 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             .await
     }
 
+    #[allow(deprecated)]
+    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        let mut client = self.client.clone();
+        let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        self.status_rpc(
+            client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: Some(timeout_ms) }),
+        )
+        .await
+    }
+
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // CloseOptions has no public timeout getter, and the server's close
-        // ignores per-call timeouts anyway, so map to a plain close.
+        // The server-side close ignores per-call timeouts, so `CloseOptions::timeout`
+        // is deliberately not forwarded and this maps to a plain close.
         let mut client = self.client.clone();
         self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: None }))
             .await
@@ -651,7 +678,7 @@ fn tp_from_proto(tp: proto::TopicPartition) -> TopicPartition {
 }
 
 fn offset_and_metadata_from_proto(o: proto::OffsetAndMetadata) -> OffsetAndMetadata {
-    OffsetAndMetadata::with_leader_epoch(o.offset, o.leader_epoch, o.metadata)
+    OffsetAndMetadata::with_leader_epoch_metadata(o.offset, o.leader_epoch, o.metadata)
         .expect("invalid OffsetAndMetadata from backend")
 }
 
@@ -752,23 +779,25 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 }
 
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
-    let headers = RecordHeaders::from_headers(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
+    let headers =
+        RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
-    ConsumerRecord::with_all(
-        r.topic,
-        r.partition,
-        r.offset,
-        r.timestamp,
-        timestamp_type_from_id(r.timestamp_type),
-        serialized_key_size,
-        serialized_value_size,
-        r.key,
-        r.value,
-        headers,
-        r.leader_epoch,
-        None,
-    )
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(r.topic)
+        .set_partition(r.partition)
+        .set_offset(r.offset)
+        .set_key(r.key)
+        .set_value(r.value)
+        .set_timestamp(r.timestamp)
+        .set_timestamp_type(timestamp_type_from_id(r.timestamp_type))
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers)
+        .set_leader_epoch(r.leader_epoch)
+        .build()
+        .unwrap();
+    ConsumerRecord::with_options(options)
 }
 
 /// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.
@@ -790,5 +819,5 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
             next_offsets.insert(tp.clone(), oam);
         }
     }
-    ConsumerRecords::new(by_partition, next_offsets)
+    ConsumerRecords::with_next_offsets(by_partition, next_offsets)
 }

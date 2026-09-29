@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use crate::admin::transaction_listing::TransactionListing;
+use crate::admin::TransactionListing;
 use crate::common::Error;
-use crate::common::kafka_future::{KafkaFuture, KafkaFutureOps};
+use crate::common::{KafkaFuture, KafkaFutureOps};
 
 /// The (top-level) future value: a map from broker id to that broker's listing
 /// future, produced once the broker list is discovered.
@@ -108,7 +108,7 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
         })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: std::time::Duration,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, Error>> + Send + '_>>
@@ -140,9 +140,9 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::transaction_state::TransactionState;
+    use crate::admin::TransactionState;
     use crate::common::Error;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
     use std::collections::HashSet;
 
     fn listing(id: &str, producer_id: i64, state: TransactionState) -> TransactionListing {
@@ -154,7 +154,7 @@ mod tests {
     async fn all_futures_fail_if_lookup_fails() {
         let top: KafkaFutureImpl<BrokerFutures> = KafkaFutureImpl::new();
         let result = ListTransactionsResult::new(top.future());
-        top.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
+        top.complete_with_error(Error::new(crate::common::Errors::UnknownServerError));
         assert!(result.all().get().await.is_err());
         assert!(result.all_by_broker_id().get().await.is_err());
         assert!(result.by_broker_id().get().await.is_err());
@@ -208,7 +208,7 @@ mod tests {
 
         let broker1 = vec![listing("foo", 12345, TransactionState::Ongoing)];
         f1.complete(broker1.clone());
-        f2.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
+        f2.complete_with_error(Error::new(crate::common::Errors::UnknownServerError));
 
         let by_broker = result.by_broker_id().get().await.unwrap();
         assert_eq!(by_broker.keys().copied().collect::<HashSet<_>>(), HashSet::from([1, 2]));

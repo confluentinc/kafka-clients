@@ -14,7 +14,7 @@
 
 //! A simple incremental rate (`org.apache.kafka.common.metrics.stats.SimpleRate`).
 
-use crate::common::metrics::internals::metrics_utils::{TimeUnit, convert};
+use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
 use crate::common::metrics::stats::Rate;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
@@ -66,15 +66,15 @@ impl Measurable for SimpleRate {
         // Rate.measure: value / convert(windowSize, unit). The unit is SECONDS
         // for the default SimpleRate constructor (matching Java).
         let value = self.rate.stat().measure(config, now);
-        value / convert(self.window_size(config, now), TimeUnit::Seconds)
+        value / MetricsUtils::convert(self.window_size(config, now), TimeUnit::Seconds)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::time::mock::MockTime;
 
     fn record(rate: &SimpleRate, config: &MetricConfig, time: &MockTime, value: f64) {
         rate.record(config, value, time.milliseconds());
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn test_simple_rate() {
         let rate = SimpleRate::new();
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(10);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(10);
         let time = MockTime::new();
 
         // In the first window the rate is a fraction of the whole (1s) window.

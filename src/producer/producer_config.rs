@@ -25,13 +25,11 @@ use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
+use crate::CommonClientConfigs;
 use crate::common::Error;
-use crate::common::config::sasl_configs;
-use crate::common::config::ssl_configs;
-use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
-use crate::common_client_configs;
 use crate::producer::internals::KeyHasher;
 use crate::producer::{Partitioner, RoundRobinPartitioner};
 
@@ -209,7 +207,7 @@ pub struct ProducerConfig {
     /// [`Partitioner`](crate::producer::Partitioner) is instead passed as an
     /// instance through
     /// [`KafkaProducer`](crate::producer::KafkaProducer)'s
-    /// `from_config_with_partitioner` constructor. Unlike Java, this Rust
+    /// `with_partitioner` constructor. Unlike Java, this Rust
     /// client's default key hash is CRC-32, not murmur2 — see
     /// `design/current/partitioner.md`.
     pub(crate) partitioner_class: Option<String>,
@@ -315,11 +313,6 @@ impl Default for ProducerConfig {
 }
 
 impl ProducerConfig {
-    /// Creates a new `ProducerConfig` with default values.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Maximum number of in-flight requests per connection when idempotence is enabled.
     pub const MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE: i32 = MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE;
 
@@ -381,10 +374,10 @@ impl ProducerConfig {
     /// Config key: `partitioner.class`
     pub const PARTITIONER_CLASS_CONFIG: &'static str = "partitioner.class";
     /// Accepted `partitioner.class` value selecting the CRC-32 key hash
-    /// ([`KeyHasher::Crc32`]) — the default, librdkafka `consistent_random` parity.
+    /// (the crate-internal `KeyHasher::Crc32`) — the default, librdkafka `consistent_random` parity.
     pub const CONSISTENT_RANDOM_PARTITIONER: &'static str = "ConsistentRandomPartitioner";
     /// Accepted `partitioner.class` value selecting the murmur2 key hash
-    /// ([`KeyHasher::Murmur2`]) — exact Java-client parity.
+    /// (the crate-internal `KeyHasher::Murmur2`) — exact Java-client parity.
     pub const MURMUR2_RANDOM_PARTITIONER: &'static str = "Murmur2RandomPartitioner";
     /// Accepted `partitioner.class` value selecting the
     /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner).
@@ -408,11 +401,11 @@ impl ProducerConfig {
     /// Config key: `transaction.two.phase.commit.enable`
     pub const TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG: &'static str = "transaction.two.phase.commit.enable";
     /// Config key: `security.protocol`
-    pub const SECURITY_PROTOCOL_CONFIG: &'static str = common_client_configs::SECURITY_PROTOCOL_CONFIG;
+    pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
     /// Config key: `sasl.mechanism`
-    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// Config key: `sasl.jaas.config`
-    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
+    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Creates a `ProducerConfig` from a map of string key-value pairs.
     ///
@@ -426,7 +419,7 @@ impl ProducerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
+    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // Java's `AbstractConfig.originals()` is the user-supplied map captured
         // verbatim, before any derived default (e.g. a generated `client.id`) is
         // computed. Clone it up front, before `maybe_override_client_id` runs.
@@ -483,7 +476,7 @@ impl ProducerConfig {
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
                     config.compression_type = CompressionType::for_name(value).map_err(|_| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             key,
                             value,
                             format!("String must be one of: {}", CompressionType::names().join(", ")),
@@ -540,7 +533,7 @@ impl ProducerConfig {
                         && value != Self::MURMUR2_RANDOM_PARTITIONER
                         && !Self::is_round_robin_partitioner(value)
                     {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::PARTITIONER_CLASS_CONFIG,
                             value,
                             format!("Class {value} could not be found."),
@@ -563,7 +556,7 @@ impl ProducerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = Self::parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -572,7 +565,7 @@ impl ProducerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = Self::parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
@@ -583,7 +576,7 @@ impl ProducerConfig {
                     // membership check, throwing `ConfigException` for any other value
                     // (including lower/mixed case such as `debug`).
                     if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
                             value,
                             "String must be one of: INFO, DEBUG, TRACE",
@@ -596,7 +589,7 @@ impl ProducerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             key,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
@@ -614,7 +607,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
@@ -687,7 +680,7 @@ impl ProducerConfig {
     ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
     ///
     /// A user-supplied `Partitioner` is instead passed as an instance through
-    /// [`KafkaProducer::from_config_with_partitioner`](crate::producer::KafkaProducer::from_config_with_partitioner).
+    /// [`KafkaProducer::with_partitioner`](crate::producer::KafkaProducer::with_partitioner).
     ///
     /// `from_properties` has already rejected any value that is neither a
     /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
@@ -726,7 +719,7 @@ impl ProducerConfig {
         if idempotence_enabled {
             if self.retries == 0 {
                 if user_configured_idempotence {
-                    return Err(Error::config(format!(
+                    return Err(Error::config_message(format!(
                         "Must set {} to non-zero when using the idempotent producer.",
                         Self::RETRIES_CONFIG
                     )));
@@ -737,7 +730,7 @@ impl ProducerConfig {
 
             if self.acks != -1 {
                 if user_configured_idempotence {
-                    return Err(Error::config(format!(
+                    return Err(Error::config_message(format!(
                         "Must set {} to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.",
                         Self::ACKS_CONFIG
                     )));
@@ -753,7 +746,7 @@ impl ProducerConfig {
             // Unlike the two above, this is always an error — never a silent
             // disable — regardless of whether the user asked for idempotence.
             if Self::MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
-                return Err(Error::config(format!(
+                return Err(Error::config_message(format!(
                     "To use the idempotent producer, {} must be set to at most 5. Current value is {}.",
                     Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
                     self.max_in_flight_requests_per_connection
@@ -769,7 +762,7 @@ impl ProducerConfig {
         // Validated after the idempotence-dependent configs because
         // `enable.idempotence` may have just been overridden above.
         if !idempotence_enabled && self.user_configured(Self::TRANSACTIONAL_ID_CONFIG) {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Cannot set a {} without also enabling idempotence.",
                 Self::TRANSACTIONAL_ID_CONFIG
             )));
@@ -780,7 +773,7 @@ impl ProducerConfig {
         // time. With two-phase commit an external coordinator decides when to
         // finalize, so broker-side timeouts do not apply. Disallow using both.
         if self.two_phase_commit_enable && self.user_configured(Self::TRANSACTION_TIMEOUT_CONFIG) {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Cannot set {} when {} is set to true. Transactions will not expire with two-phase commit enabled.",
                 Self::TRANSACTION_TIMEOUT_CONFIG,
                 Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
@@ -811,12 +804,12 @@ impl ProducerConfig {
 
     /// Parses a string value as `i32`.
     fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-        value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+        value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
     }
 
     /// Parses a string value as `i64`.
     fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-        value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+        value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
     }
 
     /// Parses a string value as `bool`.
@@ -824,7 +817,7 @@ impl ProducerConfig {
         match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(Error::config_value(key, value)),
+            _ => Err(Error::config_name_value(key, value)),
         }
     }
 
@@ -842,7 +835,7 @@ impl ProducerConfig {
         } else {
             trimmed
                 .parse::<i16>()
-                .map_err(|_| Error::config(format!("Invalid configuration value for 'acks': {acks_string}")))
+                .map_err(|_| Error::config_message(format!("Invalid configuration value for 'acks': {acks_string}")))
         }
     }
 }
@@ -897,12 +890,12 @@ mod tests {
     fn test_metrics_num_samples_validator() {
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "3".to_string());
-        let c = ProducerConfig::from_properties(&props).unwrap();
+        let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_num_samples, 3);
 
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "0".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("metrics.num.samples") && msg.contains("at least 1"),
@@ -911,7 +904,7 @@ mod tests {
 
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
-        assert!(ProducerConfig::from_properties(&props).is_err());
+        assert!(ProducerConfig::new(&props).is_err());
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ProducerConfig /
@@ -920,17 +913,17 @@ mod tests {
     fn test_metrics_sample_window_ms_validator() {
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
-        let c = ProducerConfig::from_properties(&props).unwrap();
+        let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 0);
 
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
-        let c = ProducerConfig::from_properties(&props).unwrap();
+        let c = ProducerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 60_000);
 
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("metrics.sample.window.ms") && msg.contains("at least 0"),
@@ -949,7 +942,7 @@ mod tests {
         for level in ["INFO", "DEBUG", "TRACE"] {
             let mut props = HashMap::new();
             props.insert("metrics.recording.level".to_string(), level.to_string());
-            let c = ProducerConfig::from_properties(&props).unwrap();
+            let c = ProducerConfig::new(&props).unwrap();
             assert_eq!(c.metrics_recording_level, level);
         }
 
@@ -957,7 +950,7 @@ mod tests {
         // `ConfigException` wording.
         let mut props = HashMap::new();
         props.insert("metrics.recording.level".to_string(), "debug".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         assert!(
             err.to_string().ends_with(
                 "Invalid value debug for configuration metrics.recording.level: \
@@ -969,7 +962,7 @@ mod tests {
         // A wholly unknown value is likewise rejected with the same wording.
         let mut props = HashMap::new();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         assert!(
             err.to_string().ends_with(
                 "Invalid value bogus for configuration metrics.recording.level: \
@@ -980,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_properties_basic() {
+    fn test_new_basic() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093".to_string());
         props.insert("client.id".to_string(), "my-producer".to_string());
@@ -990,7 +983,7 @@ mod tests {
         props.insert("compression.type".to_string(), "gzip".to_string());
         props.insert("enable.idempotence".to_string(), "false".to_string());
 
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_servers, vec!["host1:9092", "host2:9093"]);
         assert_eq!(config.client_id, "my-producer");
         assert_eq!(config.batch_size, 32768);
@@ -1001,9 +994,9 @@ mod tests {
     }
 
     #[test]
-    fn test_from_properties_defaults_for_missing() {
+    fn test_new_defaults_for_missing() {
         let props = HashMap::new();
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         // All fields should have default values
         assert_eq!(config.batch_size, 16384);
         assert_eq!(config.linger_ms, 5);
@@ -1011,19 +1004,19 @@ mod tests {
     }
 
     #[test]
-    fn test_from_properties_invalid_value() {
+    fn test_new_invalid_value() {
         let mut props = HashMap::new();
         props.insert("batch.size".to_string(), "not-a-number".to_string());
-        let result = ProducerConfig::from_properties(&props);
+        let result = ProducerConfig::new(&props);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_from_properties_unknown_key_ignored() {
+    fn test_new_unknown_key_ignored() {
         let mut props = HashMap::new();
         props.insert("unknown.key".to_string(), "value".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_servers, vec!["localhost:9092"]);
     }
 
@@ -1033,7 +1026,7 @@ mod tests {
     fn test_partitioner_class_consistent_random() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "ConsistentRandomPartitioner".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("ConsistentRandomPartitioner"));
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
     }
@@ -1044,7 +1037,7 @@ mod tests {
     fn test_partitioner_class_murmur2_random() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("Murmur2RandomPartitioner"));
         assert_eq!(config.key_hasher(), KeyHasher::Murmur2);
     }
@@ -1055,7 +1048,7 @@ mod tests {
     fn test_partitioner_class_unknown_rejected_with_exact_message() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "com.example.MyPartitioner".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         // `err.to_string()` prepends the variant tag, so assert on the exact
         // inner `ConfigException` text with `ends_with`, matching
         // `test_metrics_recording_level_validator` above.
@@ -1075,7 +1068,7 @@ mod tests {
     fn test_partitioner_class_round_robin_simple_name() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.partitioner_class.as_deref(), Some("RoundRobinPartitioner"));
         assert_eq!(
             config.partitioner_class.as_deref(),
@@ -1095,7 +1088,7 @@ mod tests {
             "partitioner.class".to_string(),
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
         );
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(
             config.partitioner_class.as_deref(),
             Some("org.apache.kafka.clients.producer.RoundRobinPartitioner")
@@ -1115,7 +1108,7 @@ mod tests {
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().is_some());
     }
 
@@ -1128,7 +1121,7 @@ mod tests {
             "partitioner.class".to_string(),
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
         );
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().is_some());
     }
 
@@ -1137,7 +1130,7 @@ mod tests {
     /// instance.
     #[test]
     fn test_resolve_partitioner_default_none() {
-        let config = ProducerConfig::from_properties(&HashMap::new()).unwrap();
+        let config = ProducerConfig::new(&HashMap::new()).unwrap();
         assert!(config.partitioner_class.is_none());
         assert!(config.resolve_partitioner::<String, String>().is_none());
     }
@@ -1152,7 +1145,7 @@ mod tests {
         for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
             let mut props = HashMap::new();
             props.insert("partitioner.class".to_string(), name.to_string());
-            let config = ProducerConfig::from_properties(&props).unwrap();
+            let config = ProducerConfig::new(&props).unwrap();
             assert!(
                 config.resolve_partitioner::<String, String>().is_none(),
                 "{name} must not resolve to a Partitioner instance"
@@ -1166,7 +1159,7 @@ mod tests {
     #[test]
     fn test_originals_kept_verbatim_without_generated_client_id() {
         let props = props_with(&[("partitioner.class", "RoundRobinPartitioner"), ("acks", "all")]);
-        let config = ProducerConfig::from_properties(&props).expect("valid");
+        let config = ProducerConfig::new(&props).expect("valid");
 
         // Verbatim: originals equals the input map exactly (keys and values).
         assert_eq!(config.originals, props);
@@ -1191,23 +1184,23 @@ mod tests {
     #[test]
     fn test_originals_includes_user_set_client_id() {
         let props = props_with(&[("client.id", "my-client")]);
-        let config = ProducerConfig::from_properties(&props).expect("valid");
+        let config = ProducerConfig::new(&props).expect("valid");
 
         assert_eq!(config.originals.get("client.id").map(String::as_str), Some("my-client"));
         assert_eq!(config.client_id, "my-client");
     }
 
     #[test]
-    fn test_from_properties_transactional_id() {
+    fn test_new_transactional_id() {
         let mut props = HashMap::new();
         props.insert("transactional.id".to_string(), "my-txn".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
         // Empty string -> None
         let mut props = HashMap::new();
         props.insert("transactional.id".to_string(), String::new());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.transactional_id, None);
     }
 
@@ -1277,7 +1270,7 @@ mod tests {
         ];
 
         for (props, expected_message) in cases {
-            let error = ProducerConfig::from_properties(&props_with(props)).expect_err("expected a config error");
+            let error = ProducerConfig::new(&props_with(props)).expect_err("expected a config error");
             assert_eq!(error.message(), expected_message, "for {props:?}");
             assert!(
                 matches!(error, Error::Config(_)),
@@ -1293,7 +1286,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "abc".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let err = ProducerConfig::new(&props).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("security.protocol"),
@@ -1312,7 +1305,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("compression.type".to_string(), "gzipp".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let err = ProducerConfig::from_properties(&props).expect_err("gzipp is not a compression type");
+        let err = ProducerConfig::new(&props).expect_err("gzipp is not a compression type");
         assert_eq!(
             err.message(),
             "Invalid value gzipp for configuration compression.type: \
@@ -1331,7 +1324,7 @@ mod tests {
             let mut props = HashMap::new();
             props.insert("compression.type".to_string(), name.to_string());
             props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-            let config = ProducerConfig::from_properties(&props)
+            let config = ProducerConfig::new(&props)
                 .unwrap_or_else(|e| panic!("compression.type={name} should be valid: {e:?}"));
             assert_eq!(config.compression_type.name(), name);
         }
@@ -1343,7 +1336,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.security_protocol, SecurityProtocol::SaslSsl);
     }
 
@@ -1357,7 +1350,7 @@ mod tests {
                 .to_string(),
         );
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.sasl_config.mechanism, "PLAIN");
         assert_eq!(config.sasl_config.resolve_username(), Some("alice"));
         assert_eq!(config.sasl_config.resolve_password(), Some("secret"));
@@ -1370,7 +1363,7 @@ mod tests {
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(
             config.ssl_config.truststore_location.as_deref(),
             Some("/path/to/truststore.pem")
@@ -1403,7 +1396,7 @@ mod tests {
     #[test]
     fn test_overwrite_acks_and_retries_for_idempotent_producers() {
         let props = props_with(&[("transactional.id", "transactionalId")]);
-        let config = ProducerConfig::from_properties(&props).expect("config should be valid");
+        let config = ProducerConfig::new(&props).expect("config should be valid");
 
         assert!(config.enable_idempotence);
         assert_eq!(config.acks, -1);
@@ -1416,26 +1409,25 @@ mod tests {
     #[test]
     fn test_acks_and_idempotence_for_idempotent_producers() {
         // Valid: acks=0 with idempotence explicitly off.
-        let config = ProducerConfig::from_properties(&props_with(&[("acks", "0"), ("enable.idempotence", "false")]))
-            .expect("valid");
+        let config =
+            ProducerConfig::new(&props_with(&[("acks", "0"), ("enable.idempotence", "false")])).expect("valid");
         assert!(!config.enable_idempotence, "idempotence should be overwritten");
         assert_eq!(config.acks, 0, "acks should be overwritten");
 
         // Valid: transactional.id alone leaves the idempotence/acks defaults.
-        let config =
-            ProducerConfig::from_properties(&props_with(&[("transactional.id", "transactionalId")])).expect("valid");
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", "transactionalId")])).expect("valid");
         assert!(config.enable_idempotence, "idempotence should be set with the default value");
         assert_eq!(config.acks, -1, "acks should be set with the default value");
 
         // Valid: acks=all with idempotence explicitly off.
-        let config = ProducerConfig::from_properties(&props_with(&[("acks", "all"), ("enable.idempotence", "false")]))
-            .expect("valid");
+        let config =
+            ProducerConfig::new(&props_with(&[("acks", "all"), ("enable.idempotence", "false")])).expect("valid");
         assert!(!config.enable_idempotence, "idempotence should be overwritten");
         assert_eq!(config.acks, -1, "acks should be overwritten");
 
         // Valid: acks=0 with idempotence UNSET silently disables idempotence.
         // This is the path that keeps existing configurations working.
-        let config = ProducerConfig::from_properties(&props_with(&[("acks", "0")])).expect("valid");
+        let config = ProducerConfig::new(&props_with(&[("acks", "0")])).expect("valid");
         assert!(
             !config.enable_idempotence,
             "idempotence should be disabled when acks not set to all and `enable.idempotence` is unset"
@@ -1443,12 +1435,12 @@ mod tests {
         assert_eq!(config.acks, 0, "acks should be set with overridden value");
 
         // Same for acks=1.
-        let config = ProducerConfig::from_properties(&props_with(&[("acks", "1")])).expect("valid");
+        let config = ProducerConfig::new(&props_with(&[("acks", "1")])).expect("valid");
         assert!(!config.enable_idempotence);
         assert_eq!(config.acks, 1);
 
         // Invalid: transactional.id without idempotence.
-        let error = ProducerConfig::from_properties(&props_with(&[
+        let error = ProducerConfig::new(&props_with(&[
             ("acks", "0"),
             ("enable.idempotence", "false"),
             ("transactional.id", "transactionalId"),
@@ -1461,7 +1453,7 @@ mod tests {
 
         // Invalid: explicitly enabling idempotence with acks=1 still errors,
         // rather than silently disabling.
-        let error = ProducerConfig::from_properties(&props_with(&[("acks", "1"), ("enable.idempotence", "true")]))
+        let error = ProducerConfig::new(&props_with(&[("acks", "1"), ("enable.idempotence", "true")]))
             .expect_err("explicit idempotence with acks!=all must error");
         assert_eq!(
             error.message(),
@@ -1470,9 +1462,8 @@ mod tests {
 
         // Invalid: acks=0 with a transactional id — idempotence is silently
         // disabled by the acks arm, and the transactional.id check then fails.
-        let error =
-            ProducerConfig::from_properties(&props_with(&[("acks", "0"), ("transactional.id", "transactionalId")]))
-                .expect_err("transactional producer requires acks=all");
+        let error = ProducerConfig::new(&props_with(&[("acks", "0"), ("transactional.id", "transactionalId")]))
+            .expect_err("transactional producer requires acks=all");
         assert_eq!(
             error.message(),
             "Cannot set a transactional.id without also enabling idempotence."
@@ -1483,13 +1474,13 @@ mod tests {
     #[test]
     fn test_retries_and_idempotence_for_idempotent_producers() {
         // Valid: retries=0 with idempotence explicitly off.
-        let config = ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("enable.idempotence", "false")]))
-            .expect("valid");
+        let config =
+            ProducerConfig::new(&props_with(&[("retries", "0"), ("enable.idempotence", "false")])).expect("valid");
         assert!(!config.enable_idempotence, "idempotence should be overwritten");
         assert_eq!(config.retries, 0, "retries should be overwritten");
 
         // Valid: retries=0 with idempotence UNSET silently disables idempotence.
-        let config = ProducerConfig::from_properties(&props_with(&[("retries", "0")])).expect("valid");
+        let config = ProducerConfig::new(&props_with(&[("retries", "0")])).expect("valid");
         assert!(
             !config.enable_idempotence,
             "idempotence should be disabled when retries set to 0 and `enable.idempotence` is unset"
@@ -1497,7 +1488,7 @@ mod tests {
         assert_eq!(config.retries, 0, "retries should be set with overridden value");
 
         // Invalid: transactional.id without idempotence.
-        let error = ProducerConfig::from_properties(&props_with(&[
+        let error = ProducerConfig::new(&props_with(&[
             ("retries", "0"),
             ("enable.idempotence", "false"),
             ("transactional.id", "transactionalId"),
@@ -1509,7 +1500,7 @@ mod tests {
         );
 
         // Invalid: explicitly enabling idempotence with retries=0.
-        let error = ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("enable.idempotence", "true")]))
+        let error = ProducerConfig::new(&props_with(&[("retries", "0"), ("enable.idempotence", "true")]))
             .expect_err("explicit idempotence with retries=0 must error");
         assert_eq!(
             error.message(),
@@ -1517,9 +1508,8 @@ mod tests {
         );
 
         // Invalid: retries=0 with a transactional id.
-        let error =
-            ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("transactional.id", "transactionalId")]))
-                .expect_err("transactional producer requires non-zero retries");
+        let error = ProducerConfig::new(&props_with(&[("retries", "0"), ("transactional.id", "transactionalId")]))
+            .expect_err("transactional producer requires non-zero retries");
         assert_eq!(
             error.message(),
             "Cannot set a transactional.id without also enabling idempotence."
@@ -1530,7 +1520,7 @@ mod tests {
     #[test]
     fn test_inflight_requests_and_idempotence_for_idempotent_producers() {
         // Valid: in-flight above the cap is fine when idempotence is off.
-        let config = ProducerConfig::from_properties(&props_with(&[
+        let config = ProducerConfig::new(&props_with(&[
             ("max.in.flight.requests.per.connection", "6"),
             ("enable.idempotence", "false"),
         ]))
@@ -1540,7 +1530,7 @@ mod tests {
 
         // Invalid: with idempotence on (by default), exceeding the cap is ALWAYS
         // an error — this arm never silently disables, unlike acks and retries.
-        let error = ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
+        let error = ProducerConfig::new(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
             .expect_err("in-flight above 5 must error");
         assert_eq!(
             error.message(),
@@ -1551,7 +1541,7 @@ mod tests {
         // id set. Pins that the in-flight arm does not mask the transactional-id
         // arm — the in-flight value is legal here, so the error must come from
         // the transactional-id check.
-        let error = ProducerConfig::from_properties(&props_with(&[
+        let error = ProducerConfig::new(&props_with(&[
             ("max.in.flight.requests.per.connection", "5"),
             ("enable.idempotence", "false"),
             ("transactional.id", "transactionalId"),
@@ -1564,7 +1554,7 @@ mod tests {
 
         // Invalid: above the cap with idempotence explicitly on. Pins that the
         // in-flight arm fires regardless of how idempotence came to be enabled.
-        let error = ProducerConfig::from_properties(&props_with(&[
+        let error = ProducerConfig::new(&props_with(&[
             ("max.in.flight.requests.per.connection", "6"),
             ("enable.idempotence", "true"),
         ]))
@@ -1576,7 +1566,7 @@ mod tests {
 
         // Invalid: above the cap with a transactional id. Pins that the in-flight
         // arm fires ahead of the transactional-id arm.
-        let error = ProducerConfig::from_properties(&props_with(&[
+        let error = ProducerConfig::new(&props_with(&[
             ("max.in.flight.requests.per.connection", "6"),
             ("transactional.id", "transactionalId"),
         ]))
@@ -1590,7 +1580,7 @@ mod tests {
     /// Translated from `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence`.
     #[test]
     fn test_upperbound_check_of_enable_idempotence() {
-        let error = ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
+        let error = ProducerConfig::new(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
             .expect_err("6 exceeds the cap");
         assert_eq!(
             error.message(),
@@ -1598,7 +1588,7 @@ mod tests {
         );
 
         // Exactly at the cap is allowed.
-        ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "5")]))
+        ProducerConfig::new(&props_with(&[("max.in.flight.requests.per.connection", "5")]))
             .expect("5 is at the cap and must be accepted");
     }
 
@@ -1611,7 +1601,7 @@ mod tests {
             ("transaction.two.phase.commit.enable", "true"),
             ("transaction.timeout.ms", "60000"),
         ]);
-        let error = ProducerConfig::from_properties(&both).expect_err("2PC and timeout conflict");
+        let error = ProducerConfig::new(&both).expect_err("2PC and timeout conflict");
         assert!(error.message().contains(ProducerConfig::TRANSACTION_TIMEOUT_CONFIG));
         assert!(
             error
@@ -1625,7 +1615,7 @@ mod tests {
             ("transactional.id", "test-txn-id"),
             ("transaction.two.phase.commit.enable", "true"),
         ]);
-        ProducerConfig::from_properties(&only_2pc).expect("2PC alone is valid");
+        ProducerConfig::new(&only_2pc).expect("2PC alone is valid");
 
         let only_timeout = props_with(&[
             ("enable.idempotence", "true"),
@@ -1633,7 +1623,7 @@ mod tests {
             ("transaction.two.phase.commit.enable", "false"),
             ("transaction.timeout.ms", "60000"),
         ]);
-        ProducerConfig::from_properties(&only_timeout).expect("timeout alone is valid");
+        ProducerConfig::new(&only_timeout).expect("timeout alone is valid");
     }
 
     // -- client.id derivation ------------------------------------------------
@@ -1641,7 +1631,7 @@ mod tests {
     /// Java's `maybeOverrideClientId`: an explicit client.id is preserved.
     #[test]
     fn test_explicit_client_id_is_preserved() {
-        let config = ProducerConfig::from_properties(&props_with(&[("client.id", "my-client")])).expect("valid");
+        let config = ProducerConfig::new(&props_with(&[("client.id", "my-client")])).expect("valid");
         assert_eq!(config.client_id, "my-client");
     }
 
@@ -1649,8 +1639,8 @@ mod tests {
     /// `producer-<n>` from the process-wide counter.
     #[test]
     fn test_client_id_derived_from_sequence() {
-        let first = ProducerConfig::from_properties(&base_properties()).expect("valid");
-        let second = ProducerConfig::from_properties(&base_properties()).expect("valid");
+        let first = ProducerConfig::new(&base_properties()).expect("valid");
+        let second = ProducerConfig::new(&base_properties()).expect("valid");
 
         assert!(
             first.client_id.starts_with("producer-"),

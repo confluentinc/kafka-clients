@@ -18,11 +18,11 @@
 
 use std::io;
 
+use crate::WriteTxnMarkersRequestData;
+use crate::WriteTxnMarkersResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::write_txn_markers_request_data::WriteTxnMarkersRequestData;
 use crate::write_txn_markers_response_data::{
     WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
-    WriteTxnMarkersResponseData,
 };
 
 use super::{ConcreteRequest, ConcreteResponse, RequestBuilder, WriteTxnMarkersResponse};
@@ -189,7 +189,7 @@ mod tests {
         let mut builder = WriteTxnMarkersRequestBuilder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = WriteTxnMarkersRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().markers.len(), 1);
         assert_eq!(parsed.data().markers[0].producer_id, 42);

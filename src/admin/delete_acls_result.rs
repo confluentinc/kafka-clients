@@ -21,8 +21,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::KafkaFutureOps;
 use crate::common::acl::{AclBinding, AclBindingFilter};
-use crate::common::kafka_future::KafkaFutureOps;
 use crate::common::{Error, KafkaFuture};
 
 /// A class containing either the deleted ACL binding or an exception if the
@@ -139,7 +139,7 @@ impl KafkaFutureOps<Vec<AclBinding>> for AclBindingsFuture {
         Box::pin(self.collect())
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         _timeout: Duration,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, Error>> + Send + '_>> {

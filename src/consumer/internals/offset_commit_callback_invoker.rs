@@ -37,9 +37,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::offset_commit_callback::OffsetCommitCallback;
+use crate::consumer::OffsetCommitCallback;
 
-use super::consumer_interceptors::ConsumerInterceptors;
+use super::ConsumerInterceptors;
 
 /// One queued task in the invoker. Java: nested
 /// `OffsetCommitCallbackInvoker.OffsetCommitCallbackTask`.
@@ -65,7 +65,7 @@ struct PendingCallback {
 
 /// Utility that helps the application thread (Rust: caller task) invoke
 /// user-registered [`OffsetCommitCallback`] and
-/// [`ConsumerInterceptor`](crate::consumer::interceptor::ConsumerInterceptor)
+/// [`ConsumerInterceptor`](crate::consumer::ConsumerInterceptor)
 /// instances when a commit response arrives on the BG task.
 ///
 /// Translated from `OffsetCommitCallbackInvoker`.
@@ -247,7 +247,7 @@ mod tests {
     //! framework needed.
 
     use super::*;
-    use crate::consumer::interceptor::ConsumerInterceptor;
+    use crate::consumer::ConsumerInterceptor;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};

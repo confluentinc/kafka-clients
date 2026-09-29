@@ -13,17 +13,6 @@
  * limitations under the License.
  *
  * ---------------------------------------------------------------------------
- * FAITHFUL PORT of the librdkafka path from
- *   example-confluent-kafka-native-java @ test_consumer_benchmark_c_sync
- *   c/tests/benchmark_e2e_latency.c
- *
- * This is the "exact translation" baseline requested for the consumer perf
- * comparison: the measurement methodology is preserved verbatim so we can
- * later evaluate, change by change, what to modify. The ONLY deviation from
- * the upstream file is that the GraalVM `kafkanative` consumer arm has been
- * removed, because its headers (kafkanative.h, consumer.h, ...) do not exist
- * in this repository. `--client` is still accepted; anything other than
- * `librdkafka` errors out.
  *
  * Methodology kept AS-IS from upstream (intentionally NOT "improved" yet):
  *   - Percentiles via Welford (mean/stdev) + a decimated reservoir, NOT an
@@ -1161,13 +1150,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* This port only carries the librdkafka arm (the GraalVM kafkanative arm
-     * was removed because its headers are not present in this repository). */
     if (strcmp(config.client_type, "librdkafka") != 0) {
         fprintf(stderr,
                 "ERROR: client_type '%s' is not available in this port. "
-                "Only --client librdkafka is supported here "
-                "(the GraalVM arm requires kafkanative headers not in this repo).\n",
+                "Only --client librdkafka is supported here\n",
                 config.client_type);
         return 2;
     }

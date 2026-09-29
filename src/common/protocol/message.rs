@@ -92,20 +92,10 @@ pub trait Message: Clone {
     }
 }
 
-/// Trait for top-level Kafka API messages.
-///
-/// An ApiMessage is a Message which is part of the top-level Kafka API,
-/// identified by an API key.
-///
-/// Corresponds to org.apache.kafka.common.protocol.ApiMessage
-pub trait ApiMessage: Message {
-    /// Returns the API key of this message, or -1 if there is none.
-    fn api_key(&self) -> i16;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::ApiMessage;
 
     /// A minimal test message to verify the trait works correctly.
     #[derive(Debug, Clone, PartialEq)]
@@ -248,19 +238,19 @@ mod tests {
 
     #[test]
     fn test_message_write_and_read() {
-        use crate::common::protocol::ByteBufferAccessor;
+        use crate::common::ByteBufferAccessor;
 
         let mut msg = TestMessage::new(42);
         let mut cache = ObjectSerializationCache::new();
         let size = msg.size(&mut cache, 0).unwrap();
 
         // Write
-        let mut accessor = ByteBufferAccessor::new(size as usize);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         msg.write(&mut accessor, &cache, 0).unwrap();
 
         // Read
         let buf = accessor.buffer().to_vec();
-        let mut read_accessor = ByteBufferAccessor::from_bytes(buf);
+        let mut read_accessor = ByteBufferAccessor::new(buf);
         let mut read_msg = TestMessage::new(0);
         read_msg.read(&mut read_accessor, 0).unwrap();
 

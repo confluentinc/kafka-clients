@@ -14,18 +14,18 @@
 
 //! Concrete statistics (`org.apache.kafka.common.metrics.stats`).
 
-pub mod avg;
-pub mod cumulative_count;
-pub mod cumulative_sum;
-pub mod max;
-pub mod meter;
-pub mod min;
-pub mod rate;
+mod avg;
+mod cumulative_count;
+mod cumulative_sum;
+mod max;
+mod meter;
+mod min;
+mod rate;
 pub mod sampled_stat;
-pub mod simple_rate;
-pub mod value;
-pub mod windowed_count;
-pub mod windowed_sum;
+mod simple_rate;
+mod value;
+mod windowed_count;
+mod windowed_sum;
 
 pub use avg::Avg;
 pub use cumulative_count::CumulativeCount;
@@ -39,3 +39,4 @@ pub use simple_rate::SimpleRate;
 pub use value::Value;
 pub use windowed_count::WindowedCount;
 pub use windowed_sum::WindowedSum;
+pub(crate) use windowed_sum::WindowedSumKind;

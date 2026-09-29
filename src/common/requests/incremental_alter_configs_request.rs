@@ -18,11 +18,10 @@
 
 use std::io;
 
+use crate::IncrementalAlterConfigsRequestData;
+use crate::IncrementalAlterConfigsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
-use crate::incremental_alter_configs_response_data::{
-    AlterConfigsResourceResponse, IncrementalAlterConfigsResponseData,
-};
+use crate::incremental_alter_configs_response_data::AlterConfigsResourceResponse;
 
 use super::{ConcreteRequest, ConcreteResponse, IncrementalAlterConfigsResponse, RequestBuilder};
 
@@ -129,7 +128,7 @@ pub struct IncrementalAlterConfigsRequestBuilder {
 
 impl IncrementalAlterConfigsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: IncrementalAlterConfigsRequestData) -> Self {
+    pub fn with_data(data: IncrementalAlterConfigsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::INCREMENTAL_ALTER_CONFIGS.oldest_version(),
@@ -210,7 +209,7 @@ mod tests {
         data.set_validate_only(true);
         let mut request = ConcreteRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = IncrementalAlterConfigsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "t");

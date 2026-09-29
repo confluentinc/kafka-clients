@@ -27,7 +27,7 @@ use std::num::NonZeroU32;
 
 use aws_lc_rs::pbkdf2;
 
-use super::scram_mechanism::ScramMechanism;
+use super::ScramMechanism;
 
 /// SCRAM salt/hash helper bound to a specific [`ScramMechanism`].
 ///
