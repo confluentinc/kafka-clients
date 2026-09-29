@@ -57,6 +57,14 @@
 > observation (c), CP4 observation (i)), and R9 points at it instead of counting
 > them. D15's file-forward list gains items 22-25.
 
+> **Amended at the CP5 review (2026-09-29).** Corrections from the CP5 reviews, each
+> marked in place. X11 and D8's `sentOffsets()` row name `Clear()` as a reset of the
+> mock helpers' state (Critic findings 84.22 and 84.27). §5.1 principle 3 adds S12's
+> poll of the closed handle (Critic finding 84.24) and S9's `DriveUntilResolved`
+> loop. S3's snapshot bullet
+> records how the snapshot is witnessed (CP5 observation (f)). RD4 no longer calls
+> `ConsumerGroupMetadata` the first adopter of `[Obsolete]`.
+
 **Requirement (verbatim):** "Make sure we implement all the public producer
 transaction and idempotency apis for .NET."
 
@@ -763,7 +771,7 @@ synchronous, and all take the `SafeProducerHandle` as the P/Invoke parameter
 | Java | .NET | Contract |
 |---|---|---|
 | `public RuntimeException commitTransactionException` (`MockProducer.java:82`); `commitTransaction` throws it while it is set (`:204-213`) | `void SetCommitTransactionError(int code, string? message = null)` and `void ClearCommitTransactionError()` | A Java public mutable field becomes a setter plus a clearer (Q8). Pre-validate what the ABI would reject (h:16541-16556): `code == 0` -> `ArgumentOutOfRangeException(nameof(code), code, "The commit-transaction error code must be non-zero; 0 is Errors.NONE.")`; `code` outside `short` -> `ArgumentOutOfRangeException(nameof(code), code, "The commit-transaction error code must fit in a 16-bit signed integer.")`. A `false` return after validation is unreachable on a mock handle; guard it with `InvalidOperationException` and document it as unreachable. A `null` message means the code's default message (the ABI's null convention; pinned call-scoped as in `MockErrorNext`). The hook stays installed until cleared, as the Java field does. The xmldoc states the ABI's **setup-only** rule verbatim in substance: it must not overlap a control call on the same producer (h:16562-16569). The binding adds no guard for it (R11). |
-| `sentOffsets()` (`:456`) | `bool SentOffsets()` | A **method**, not a property — the `HistoryCount()` FDG precedent (`MockProducer.cs:208-218`): it P/Invokes and can throw `ObjectDisposedException`. Semantics are the core's: reset only by `BeginTransaction`, not by commit (MPT 464). |
+| `sentOffsets()` (`:456`) | `bool SentOffsets()` | A **method**, not a property — the `HistoryCount()` FDG precedent (`MockProducer.cs:208-218`): it P/Invokes and can throw `ObjectDisposedException`. Semantics are the core's: reset by `BeginTransaction` and by `Clear()`, not by commit (⚠ amended at the CP5 review, Critic finding 84.27) (MPT 464). |
 | `consumerGroupOffsetsHistory()` (`:479`), single-entry projection only (T12, B6) | `OffsetAndMetadata? CommittedOffset(string groupId, TopicPartition partition)` | `groupId` null -> `ArgumentNullException`; `partition.Topic` null (a `default` `TopicPartition`, `TopicPartition.cs:37` is a struct) -> `ArgumentException("Topic names must not be null.", nameof(partition))`. Not found -> `null`. Leader epoch `-1` -> `null` (h:16606-16607). The metadata grow rule is below. |
 
 **The metadata grow rule (Q9).** The ABI truncates metadata at a UTF-8 character
@@ -1065,7 +1073,7 @@ Manager-drafted rules, which the **user** applies or signs off (Q12):
 | RD1 | `bindings/dotnet/CLAUDE.md:58-59` | "Admin / transactions are **not** exposed yet." -> "Admin (M15) and producer transactions (M17/P1) are exposed; `begin_transaction_async` is deliberately unbound (§4 **Stays sync**)." |
 | RD2 | `CLAUDE.md:154-158` (§3 sketch) | The `KafkaException` sketch lists `IsFatal`, which has never shipped (`KafkaException.cs:47-54`). Replace it with the five predicates and a note that fatality is not exposed. This corrects **pre-existing** drift and needs explicit sign-off. |
 | RD3 | `CLAUDE.md:478` and `:480` (idiom map) | Row 478: add the four `Task` transaction methods to the producer examples. Row 480: `Code`/`IsRetriable` plus the five hierarchy predicates, citing root `CLAUDE.md` §10.4 and D6. |
-| RD4 | `CLAUDE.md` §3 idiom map, new row | Java `@Deprecated(forRemoval = true)` -> C# `[Obsolete("<Java's deprecation text, adapted>")]`, warning level (never `error: true`). Internal construction goes through a non-obsolete factory, and tests and servicers suppress `CS0618` locally. First adopter: `ConsumerGroupMetadata` (D2). |
+| RD4 | `CLAUDE.md` §3 idiom map, new row | Java `@Deprecated(forRemoval = true)` -> C# `[Obsolete("<Java's deprecation text, adapted>")]`, warning level (never `error: true`). Internal construction goes through a non-obsolete factory, and tests and servicers suppress `CS0618` locally. `ConsumerGroupMetadata`'s two constructors (D2) are the binding's first `[Obsolete]` constructors; `[Obsolete]` itself appears in 12 source files, 11 of them before this phase (`command grep -rln 'Obsolete(' --include='*.cs' bindings/dotnet/src`, measured at CP5: 10 under `Admin/`, `ConsumerGroupState.cs`, `ConsumerGroupMetadata.cs`) (⚠ corrected at the CP5 review). |
 | RD5 | `CLAUDE.md:575` (§4 **Stays sync**, producer) | `BeginTransaction()` -> "(**shipped M17/P1** on both interfaces; drains the binding's send accumulator with a bounded wait first, D3)". Also list the four mock helpers. |
 | RD6 | `CLAUDE.md` §4, new divergence note | A note carrying the file's existing warning marker: "§4 divergence — transaction control drains the send accumulator and orders completions (M17/P1)", covering the D3 drain, the D4 barrier and the D5 cancellation table, with pointers here. |
 | RD7 | `.claude/rules/ffi-marshalling.md` Part A | §A2: the transient owned input handle category (D12). §A5 table (`:754`): the five predicate rows, plus correcting `_is_fatal`/`IsFatal` for the producer part. §A7: control operations over `SubmitVoidOperation`, the drain-before-control rule and the completion barrier (D3, D4). |
@@ -1553,7 +1561,13 @@ All paths below are relative to `bindings/dotnet/tests/Confluent.Kafka.UnitTests
      observation, as `SendAccumulatorTests`' `PollUntil` does: S5's commit test polls
      `MockHistoryCount()` (the mock gives no signal that the native commit is done),
      and S6's row-4 test polls the fake submit's count (the drain runs on a pool
-     continuation). Their `Task.Delay` is a poll step, not synchronization.
+     continuation). Their `Task.Delay` is a poll step, not synchronization. (⚠ added
+     at the CP5 review, Critic finding 84.24) S12's async teardown test polls
+     `handle.IsClosed` the same way: the dispatcher releases the last handle reference
+     after the `Task` has faulted, so an immediate check races it;
+   - S9's `DriveUntilResolved` loop (⚠ added at the CP5 review): a 2 ms
+     `Thread.Sleep` step bounded by `s_deadline` (30 s), stopping as soon as a pending
+     send has been driven. Its sleep is a poll step, not synchronization.
 4. **Seams, not the environment.** Determinism comes from D3's internal seams —
    `NativeProducer.CreateMock(bool, SendAccumulatorSettings)`, the internal
    `AsyncMockProducer` settings overload, the `XxxWithAccumulatorDrainBound(TimeSpan)`
@@ -1690,9 +1704,12 @@ CP5 half (`PublicProducerSendOffsetsToTransactionTests.cs`, all four unless note
 - On both mocks the same metadata is **accepted** inside a transaction — Java's
   `MockProducer.sendOffsetsToTransaction` has no generation check
   (`MockProducer.java:184-196`), and the core mock mirrors it.
-- Snapshot semantics: mutating the caller's dictionary after the call returns —
-  including while the async call is still held in a D3 drain — does not change what
-  `CommittedOffset` reports after commit (42 stays 42).
+- Snapshot semantics: mutating the caller's dictionary after the call returns
+  does not change what `CommittedOffset` reports after commit (42 stays 42).
+  (⚠ amended at the CP5 review, CP5 observation (f), Critic finding 84.28) The
+  snapshot is witnessed after the call returns and at the submit seam — not while
+  held in a D3 drain: the drain forces the batch thread at once and cannot be held
+  without closing the core.
 - Python 1395 analogue (`test_group_metadata_handle_lifecycle`): 5000
   `SendOffsetsToTransaction` calls inside one transaction on each mock, each building
   and destroying a transient native `ConsumerGroupMetadata_t` (D12). No crash, and
@@ -2083,7 +2100,7 @@ emitted.
 | X8 | The Q24 divergences of D2 (the managed closed check precedes the core's checks; `ArgumentNullException` where Java's mock throws NPE). | interface remarks | the `SendOffsetsToTransaction` exception lists |
 | X9 | Each predicate cites the Java class it translates, lists the codes it covers (root `CLAUDE.md` §10.4), and states its polarity (not complements: 29 / 53 are both Authorization and InvalidConfiguration; 45 / 59 both OutOfOrderSequence; 48 none). The class remarks state that fatality is not exposed (no `IsFatal`) and that `ProducerFencedException` is `Code == 90` (a leaf). | each property; `KafkaException` remarks | X2 |
 | X10 | `ConsumerGroupMetadata` constructors: `[Obsolete]` with D2's message, the defaults of the one-argument form, and the null rules. | the constructors | — |
-| X11 | The mock helpers: setup-only (must not overlap a control call — the ABI's rule, h:16562-16569), the hook sticky until cleared, `SentOffsets` reset only by `BeginTransaction`, `CommittedOffset`'s newest-wins / epoch -1 -> `null` / embedded-NUL / over-1-MiB rules; and which Java helpers are **absent** (B1-B7, "not exported at the C ABI"). | `MockProducer` / `AsyncMockProducer` remarks and members | — |
+| X11 | The mock helpers: setup-only (must not overlap a control call — the ABI's rule, h:16562-16569), the hook sticky until cleared, `SentOffsets` reset by `BeginTransaction` and by `Clear()` (which also empties what `CommittedOffset` reports; ⚠ amended at the CP5 review, Critic finding 84.22), `CommittedOffset`'s newest-wins / epoch -1 -> `null` / embedded-NUL / over-1-MiB rules; and which Java helpers are **absent** (B1-B7, "not exported at the C ABI"). | `MockProducer` / `AsyncMockProducer` remarks and members | — |
 | X12 | `AsyncMockProducer.Clear()` on a manual mock with sends pending strands those sends (Java-faithful), **and** every later send and barrier behind them, **and** makes `Dispose` hang (the binding's amplification, file-forward item 10). Stated as a precondition: complete or fail pending sends before `Clear()`. | `AsyncMockProducer.Clear()` | X5 (R-a) |
 | X13 | Idempotence is configured through the config dictionary (Java has no API): `enable.idempotence` defaults on; `transactional.id` requires it. | `KafkaProducer` / `AsyncKafkaProducer` class remarks | — |
 | X14 | The servicers' class-summary RPC counts. | `ProducerServiceImpl` / `AsyncProducerServiceImpl` | — |
