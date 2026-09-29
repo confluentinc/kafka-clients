@@ -42,3 +42,15 @@ Gotchas worth reusing:
 - Also run `ctest` for ALL targets, not just `-R admin`, when touching a
   `kafka_common_*` symbol: test_mock_producer.c pinned GroupAuthorization's
   `""` group id.
+- **Normalising a callback key in the FFI breaks the Python lookup.** Python
+  keys its futures by the caller's own objects (AclBinding accepts any int);
+  when the FFI delivers the Java-normalised key (undefined enum code ->
+  UNKNOWN), `futures[key]` raises KeyError inside the callback (printed and
+  swallowed) and the Future hangs. Fix in admin.py: normalise the lookup key
+  the same way, group caller keys by normalised form, and send normalised rows
+  so the C incref count matches (C70-1). Before claiming "Python only passes
+  X", check what the Python constructor actually accepts.
+- `git commit --fixup=amend:<c>` with `GIT_EDITOR="cp <msgfile>"` rewrites a
+  commit message non-interactively; `--fixup` and `-F` can't combine, so
+  plain fixups are written as `-F` with a `fixup! <subject>` first line.
+  Dry-run `rebase -i --autosquash` in a throwaway worktree to prove it applies.
