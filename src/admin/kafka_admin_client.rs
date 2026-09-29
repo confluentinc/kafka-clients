@@ -5225,6 +5225,7 @@ impl KafkaAdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::mock_admin_client;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -7640,8 +7641,9 @@ mod tests {
     /// The mock's `delete_records` returns an empty result for an empty request.
     #[tokio::test]
     async fn test_mock_delete_records_empty() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.delete_records_with_options(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
     }
@@ -7849,8 +7851,9 @@ mod tests {
     /// The mock's `describe_producers` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_describe_producers_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let tp = TopicPartition::new("foo", 0);
         let result = mock.describe_producers_with_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
@@ -7860,8 +7863,9 @@ mod tests {
     /// The mock's `abort_transaction` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_abort_transaction_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
         let result = mock.abort_transaction_with_options(spec, AbortTransactionOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
@@ -8036,8 +8040,9 @@ mod tests {
     /// The mock's `describe_transactions` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_describe_transactions_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.describe_transactions_with_options(&["t".to_string()], DescribeTransactionsOptions::new());
         assert_eq!(
             result.description("t").unwrap().get().await.unwrap_err().error(),
@@ -8048,8 +8053,9 @@ mod tests {
     /// The mock's `fence_producers` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_fence_producers_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.fence_producers_with_options(&["t".to_string()], FenceProducersOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -8166,8 +8172,9 @@ mod tests {
     /// The mock's `list_transactions` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_list_transactions_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.list_transactions_with_options(ListTransactionsOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -8175,8 +8182,9 @@ mod tests {
     /// The mock's `force_terminate_transaction` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_force_terminate_transaction_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.force_terminate_transaction_with_options("t", TerminateTransactionOptions::new());
         assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -8784,9 +8792,7 @@ mod tests {
 
     use crate::AlterReplicaLogDirsResponseData;
     use crate::DescribeLogDirsResponseData;
-    use crate::admin::{
-        AlterReplicaLogDirsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, MockAdminClient,
-    };
+    use crate::admin::{AlterReplicaLogDirsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions};
     use crate::alter_replica_log_dirs_response_data::{
         AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
     };
@@ -9401,7 +9407,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_describe_log_dirs_reports_topic_replicas() {
-        let mock = MockAdminClient::create(2).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .set_num_brokers(2)
+            .and_then(mock_admin_client::Builder::build)
+            .expect("num_brokers is at least 1");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         let replicas = vec![
             Node::new(0, "localhost".to_string(), 1000),
@@ -9426,7 +9435,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
             .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
@@ -9459,7 +9470,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_offline_dir() {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -9478,7 +9491,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_negative_partition_does_not_panic() {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
             .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
@@ -9503,7 +9518,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_describe_replica_log_dirs_negative_partition_does_not_panic() {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
             .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
@@ -10548,8 +10565,9 @@ mod tests {
     /// timestamp specs.
     #[tokio::test]
     async fn test_mock_list_offsets() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let earliest = TopicPartition::new("t", 0);
         let latest = TopicPartition::new("t", 1);
         let ts = TopicPartition::new("t", 2);
@@ -10569,8 +10587,10 @@ mod tests {
     /// track reassignments against added topics.
     #[tokio::test]
     async fn test_mock_partition_reassignments() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(3).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .set_num_brokers(3)
+            .and_then(mock_admin_client::Builder::build)
+            .expect("num_brokers is at least 1");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         let replicas = vec![
             Node::new(0, "localhost".to_string(), 1000),
@@ -10600,8 +10620,9 @@ mod tests {
     /// The mock's `elect_leaders` mirrors Java's `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_elect_leaders_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.elect_leaders_with_options(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -11440,8 +11461,9 @@ mod tests {
     /// group config (mirrors Java's mock).
     #[tokio::test]
     async fn test_mock_list_groups() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         seed_mock_group(&mock, "g1").await;
         let result = mock.list_groups_with_options(ListGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
@@ -11455,8 +11477,9 @@ mod tests {
     #[tokio::test]
     #[allow(deprecated)]
     async fn test_mock_list_consumer_groups() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         seed_mock_group(&mock, "g1").await;
         let result = mock.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
@@ -11469,8 +11492,9 @@ mod tests {
     /// `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_describe_consumer_groups_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result =
             mock.describe_consumer_groups_with_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
@@ -11481,8 +11505,9 @@ mod tests {
     /// `UnsupportedOperationException`.
     #[tokio::test]
     async fn test_mock_describe_classic_groups_unsupported() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         let result =
             mock.describe_classic_groups_with_options(&["g1".to_string()], DescribeClassicGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();

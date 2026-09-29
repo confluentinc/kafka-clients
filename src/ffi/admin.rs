@@ -132,6 +132,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::config_entry::{ConfigSource, ConfigType};
+use crate::admin::mock_admin_client::Builder;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
@@ -512,14 +513,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// here is that throw expressed in the FFI's idiom — a Rust panic must not
 /// unwind across the C boundary (CLAUDE.md §10.1).
 ///
-/// The rejection itself lives in [`MockAdminClient::create`], which returns
-/// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
-/// so there is one source of truth for the bound rather than a check here that
-/// could drift from the core's.
+/// The mock is built through [`Builder`] exactly as Java's
+/// `MockAdminClient.create().numBrokers(n).build()`, and the rejection lives
+/// there: `set_num_brokers` fails for a negative count and `build` fails for
+/// zero brokers. This entry point only maps that `Err` to null, so there is one
+/// source of truth for the bound rather than a check here that could drift from
+/// the core's.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
-    let mock = match MockAdminClient::create(num_brokers) {
+    let mock = match Builder::new().set_num_brokers(num_brokers).and_then(Builder::build) {
         Ok(mock) => mock,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -19820,11 +19823,12 @@ mod tests {
 
     // -- MockAdminClient_new ------------------------------------------------
 
-    /// Java's `MockAdminClient.Builder.build()` reads `brokers.get(0)` for the
-    /// controller (`MockAdminClient.java:210`), so a zero or negative broker
-    /// count throws rather than yielding a mock. Here that throw is a null
-    /// handle, and it must come from [`MockAdminClient::create`]'s `Err` — a
-    /// panic would unwind out of `extern "C"` and abort the process.
+    /// Java's `MockAdminClient.Builder` throws for a zero broker count
+    /// (`build()` reads `brokers.get(0)`, `MockAdminClient.java:210`) and for a
+    /// negative one (`numBrokers` calls `brokers.subList(0, n)`, `:152`), rather
+    /// than yielding a mock. Here that throw is a null handle, and it must come
+    /// from the [`Builder`]'s `Err`: a panic would unwind out of `extern "C"`
+    /// and abort the process.
     #[test]
     fn mock_admin_client_new_returns_null_for_a_non_positive_broker_count() {
         assert!(kafka_admin_MockAdminClient_new(0).is_null());
