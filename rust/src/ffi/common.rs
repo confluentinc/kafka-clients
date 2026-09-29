@@ -1557,8 +1557,11 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization(
     }
 }
 
-/// Returns the offending group id as an owned, NUL-terminated C string. The
-/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
+/// Returns the offending group id as an owned, NUL-terminated C string, or
+/// null where Java's `GroupAuthorizationException.groupId()` is null — the
+/// group is not known where the error was raised, e.g. an error built from a
+/// broker's `GROUP_AUTHORIZATION_FAILED` code. A non-null result must be freed
+/// with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
@@ -1577,7 +1580,10 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     // (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
     // `Per-variant payload accessors` comment).
     let e = unsafe { &*(handle as *const crate::common::errors::GroupAuthorizationError) };
-    CString::new(e.group_id()).unwrap_or_default().into_raw()
+    match e.group_id() {
+        Some(group_id) => CString::new(group_id).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// `InvalidTopicException` -> `kafka_common_InvalidTopicError_t`.
@@ -3450,6 +3456,21 @@ mod tests {
             let other = box_error(other_error());
             assert!(kafka_common_Error_group_authorization(other).is_null());
             kafka_common_Error_destroy(other);
+
+            // Java's `groupId()` is null for the `Errors` builder's error, so
+            // C gets null, not "".
+            for error in [
+                Error::GroupAuthorization(GroupAuthorizationError::with_default_message()),
+                Errors::GroupAuthorizationFailed
+                    .error_with_message("denied")
+                    .expect("a real code"),
+            ] {
+                let error = box_error(error);
+                let handle = kafka_common_Error_group_authorization(error);
+                assert!(!handle.is_null());
+                assert!(kafka_common_GroupAuthorizationError_group_id(handle).is_null());
+                kafka_common_Error_destroy(error);
+            }
         }
     }
 
