@@ -277,6 +277,20 @@ blocks:
           commands:
             - make doc-check
 
+  - name: "Check crate package (Linux amd64)"
+    # Packages `confluent-kafka` as it would be published, fails if the
+    # compressed `.crate` is above 3 MiB, and builds a fresh project that
+    # depends on it (`cargo xtask package-check`).
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "package-check (Linux amd64)"
+          commands:
+            - make package-check
+
 promotions:
   - name: Start translation plan
     pipeline_file: start-translation-plan.yml
