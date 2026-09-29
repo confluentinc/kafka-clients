@@ -251,7 +251,7 @@ pub async fn create_topic_with_configs(
         Some(replication_factor),
     );
     if !configs.is_empty() {
-        new_topic = new_topic.set_configs(configs);
+        new_topic = new_topic.set_configs(configs.into_iter().map(|(k, v)| (k, Some(v))).collect());
     }
     admin
         .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
