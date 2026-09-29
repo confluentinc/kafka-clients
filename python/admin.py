@@ -1731,8 +1731,13 @@ class DeletedAcl:
     """One ACL a :meth:`Admin.delete_acls` filter matched (Java
     ``DeleteAclsResult.FilterResult``).
 
-    Exactly one of the two is set: ``binding`` when the ACL was deleted,
-    ``error`` when the filter matched it but deleting it failed.
+    ``binding`` is the ACL the filter matched, and ``error`` is set when
+    deleting it failed. The two are **not** exclusive: Java builds each entry
+    as ``new FilterResult(aclBinding, aclError.exception(message))``
+    (``KafkaAdminClient.java:2705-2708``), so a failed deletion carries both
+    the matched binding and the error. Test ``error``, not ``binding``, to
+    tell a deleted ACL from a failed one. ``binding`` is ``None`` only if the
+    broker's binding could not be decoded.
     """
 
     __slots__ = ("binding", "error")
@@ -3534,8 +3539,10 @@ class _AdminBase:
         Java's mock fails the whole ``listTransactions`` call, so none of these
         is observable end to end -- hence the dedicated unit test. ``None`` and
         ``[]`` collapse for the two collections (Java's own default is an empty
-        set, meaning "no filter"), but ``None`` and ``""`` do **not** collapse
-        for the pattern: an empty pattern is a legal value the broker evaluates.
+        set, meaning "no filter"), but ``None`` and ``""`` are passed on as
+        given for the pattern, as Java's option stores them (Java's
+        ``ListTransactionsHandler`` then drops an empty pattern from the
+        request, so neither filters anything).
         A negative ``duration_ms`` is Java's own -1 "no duration filter".
         """
         return ([TransactionState.parse(str(s)) for s in (states or [])],
