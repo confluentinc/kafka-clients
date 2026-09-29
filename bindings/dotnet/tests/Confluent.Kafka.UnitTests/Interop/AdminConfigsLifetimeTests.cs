@@ -35,6 +35,9 @@ public sealed class AdminConfigsLifetimeTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
+    /// <summary><c>Errors::UnsupportedVersion</c>'s wire code, which the core's <c>unsupported_version</c> carries.</summary>
+    private const int UnsupportedVersionCode = 35;
+
     private static readonly ConfigResource s_resource =
         new ConfigResource(ConfigResourceType.Topic, "cfg-lifetime-topic");
 
@@ -170,34 +173,28 @@ public sealed class AdminConfigsLifetimeTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>M15/P9 CP6 INVERTED the zero-op resource's outcome on a submit failure, and
-    /// this test is the record of it.</b> A submit failure now fans out only over the
-    /// resources the request <em>named</em> — which a zero-op resource is not among — so it
-    /// completes <b>successfully</b> while every named resource faults.
+    /// ⚠⚠ <b>A submit failure faults EVERY resource, a zero-op one included</b> (M15/P13.2,
+    /// finding F1) — Java's outcome, restored. This test used to pin the opposite: M15/P9
+    /// CP6 completed a zero-op resource locally, so it resolved successfully while the named
+    /// resources faulted.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A resource mapped to an empty operation collection is completed <em>locally</em>
-    /// (<c>VoidKeyedAdminOperation.CompleteKeysWithNoRequest</c>), because the row-flattened
-    /// request cannot carry it. Under the aggregate callback that local completion ran on
-    /// the success path only, so a whole-call <c>FailAll</c> reached the zero-op key too and
-    /// faulted it with the rest — matching Java, whose <c>handleFailure</c> calls
-    /// <c>completeAllExceptionally(futures.values(), throwable)</c> over a map keyed on the
-    /// resource collection it sends (<c>KafkaAdminClient.java:2893-2895</c>, <c>:2902</c>,
-    /// <c>:2922-2924</c>).
+    /// Java keys its futures on the resource collection it sends and fails them all on a
+    /// whole-call failure: <c>handleFailure</c> calls
+    /// <c>completeAllExceptionally(futures.values(), throwable)</c>
+    /// (<c>KafkaAdminClient.java:2889-2896</c>, <c>:2902</c>, <c>:2922-2924</c>). A zero-op
+    /// resource is now <em>sent</em> — as one sentinel row, a NULL config name — so the ABI
+    /// names it and answers it with its own callback, and the submit-failure fan-out reaches
+    /// it like any other.
     /// </para>
     /// <para>
-    /// The per-key ABI has no whole-call channel: <c>n</c> is the count of
-    /// <em>distinct named</em> resources, and <c>CompleteKeysWithNoRequest</c> runs
-    /// unconditionally at countdown zero. So the zero-op key resolves successfully however
-    /// the named ones ended. This is the fourth item on the divergence list recorded at
-    /// <c>NativeAdminClient.IncrementalAlterConfigs</c>; the named resource is asserted
-    /// alongside it as the control, and <c>All()</c> still faults, which is what keeps the
-    /// call's overall outcome honest.
+    /// Both callbacks are fired, with the same code and message, and both keys are asserted
+    /// with both — the zero-op key is not special in any way the caller can see.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ASubmitFailure_FaultsEveryNamedResource_AndLeavesAZeroOpResourceSuccessful()
+    public async Task ASubmitFailure_FaultsEveryResource_IncludingAZeroOpOne()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -215,27 +212,84 @@ public sealed class AdminConfigsLifetimeTests
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
                 validateOnly, callback, captured) => userData = captured);
 
-        // Only the one resource contributed a row; the other is the zero-op case.
         Assert.NotEqual(IntPtr.Zero, userData);
 
-        // The submit-failure path, fanned out per named resource — one callback, because
-        // exactly one resource was named.
-        using (Utf8Marshal.PinnedUtf8String named = Utf8Marshal.Pin(withOps.Name))
+        // The submit-failure path, fanned out per resource: two resources, two callbacks.
+        foreach (ConfigResource resource in new[] { withOps, zeroOps })
         {
+            using Utf8Marshal.PinnedUtf8String named = Utf8Marshal.Pin(resource.Name);
             AdminCallbacks.IncrementalAlterConfigs(
-                (int)withOps.Type, named.Pointer, MakeError(61, "submit failed"), userData);
+                (int)resource.Type, named.Pointer, MakeError(61, "submit failed"), userData);
         }
 
-        KafkaException carrying = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[withOps]), s_deadline);
-        Assert.Equal(61, carrying.Code);
-        Assert.Equal("submit failed", carrying.Message);
+        foreach (ConfigResource resource in new[] { withOps, zeroOps })
+        {
+            KafkaException carrying = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<KafkaException>(() => result.Values[resource]), s_deadline);
+            Assert.Equal(61, carrying.Code);
+            Assert.Equal("submit failed", carrying.Message);
+        }
 
-        // ⚠ THE ASSERTION THIS TEST EXISTS FOR — the inverted one.
-        await TestTimeout.Run(() => result.Values[zeroOps], s_deadline);
+        KafkaException all = await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        Assert.Equal(61, all.Code);
+        Assert.Equal("submit failed", all.Message);
+    }
 
-        // …and All() still faults, because the named resource did.
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+    /// <summary>
+    /// ⚠ <b>An undefined resource type and <see cref="ConfigResourceType.Unknown"/> are one
+    /// resource end to end</b> (M15/P13.2, finding G2-1): through the <em>real</em> ABI,
+    /// both config RPCs settle, fault with the mock's own answer for an <c>UNKNOWN</c>
+    /// resource, and release the operation and the client exactly once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Before G2-1 the <c>describeConfigs</c> half hung: the binding kept the undefined type
+    /// as a second key, the ABI folded both to <c>UNKNOWN</c>, collapsed them and answered
+    /// once, and the countdown waited for an answer that never came — rooting the
+    /// <c>GCHandle</c> and the client reference forever. <c>IsClosed</c> after
+    /// <c>Dispose</c> is what proves both were released.
+    /// </para>
+    /// <para>
+    /// The <c>incrementalAlterConfigs</c> half goes through a map, where the two keys are
+    /// one entry as soon as they are equal; it is sent with no ops, so it also exercises
+    /// F1's sentinel row against the real ABI. Both answers are the core's
+    /// <c>unsupported_version("Not implemented yet")</c> for a type it has no arm for
+    /// (<c>mock_admin_client.rs:599</c>, <c>:656</c>).
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AnUndefinedTypeCollidingWithUnknown_SettlesAndReleases_ThroughTheRealAbi()
+    {
+        ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
+        ConfigResource unknown = new ConfigResource(ConfigResourceType.Unknown, "x");
+
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        DescribeConfigsResult described = admin.DescribeConfigs(new[] { undefined, unknown }, options: null);
+        Assert.Single(described.Values);
+
+        KafkaException describeFailure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => described.Values[unknown]), s_deadline);
+        Assert.Equal(UnsupportedVersionCode, describeFailure.Code);
+        Assert.Equal("Not implemented yet", describeFailure.Message);
+
+        AlterConfigsResult altered = admin.IncrementalAlterConfigs(
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
+            {
+                [undefined] = Array.Empty<AlterConfigOp>(),
+                [unknown] = Array.Empty<AlterConfigOp>(),
+            },
+            options: null);
+        Assert.Single(altered.Values);
+
+        KafkaException alterFailure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => altered.Values[undefined]), s_deadline);
+        Assert.Equal(UnsupportedVersionCode, alterFailure.Code);
+        Assert.Equal("Not implemented yet", alterFailure.Message);
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        Assert.True(handle.IsClosed, "both operations must have released their GCHandle and client reference");
     }
 
     /// <summary>

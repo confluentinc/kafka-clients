@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Internal;
@@ -47,6 +48,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </remarks>
 public sealed class AdminConfigsSubmitArgumentTests
 {
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
     private static readonly ConfigResource s_topicResource =
         new ConfigResource(ConfigResourceType.Topic, "cfg-topic");
 
@@ -192,27 +195,28 @@ public sealed class AdminConfigsSubmitArgumentTests
     }
 
     /// <summary>
-    /// A resource with an <b>empty</b> operation collection contributes <b>no row</b> to the
-    /// request, while still getting a per-key awaitable — Java keys the result on the map.
+    /// ⚠ A resource with an <b>empty</b> operation collection contributes <b>exactly one
+    /// sentinel row</b> — its type and name, a NULL config name, a NULL config value and op
+    /// type <c>-1</c> — and its awaitable then waits for that resource's own callback
+    /// (M15/P13.2, finding F1).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>This asserts the request SHAPE.</b> An earlier version completed the operation
-    /// through the <em>submit-failure</em> path and then asserted the awaitable had faulted
-    /// — which every awaitable did on that path, so it passed while the outcome was in fact
-    /// wrong (M15/P3 round 3, finding 69.6). The end-to-end outcome has its own success-path
-    /// test, <c>PublicAdminConfigsTests.IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully</c>,
-    /// driven through the mock with nothing injected.
+    /// ⚠ <b>This asserts the request SHAPE and the countdown together.</b> The row is the
+    /// header's "non-NULL resource name but a NULL config name" encoding; the NULL is
+    /// asserted on the <em>pointer</em>, since a pointer to <c>""</c> would be a real
+    /// operation on a config named <c>""</c>. The key is <b>not</b> completed when the submit
+    /// returns — the local completion this test used to pin is gone — and firing the one
+    /// callback the ABI owes for it is what resolves it.
     /// </para>
     /// <para>
-    /// ⚠ <b>M15/P9 CP6 also makes this the <c>n == 0</c> submit-boundary test.</b> With no
-    /// row there is no named resource, so the whole countdown is the submit token and the
-    /// operation settles inside the injected submit's caller — the key resolving without any
-    /// callback at all is now asserted here, and no completion is (or may be) fired.
+    /// The <c>n == 0</c> submit-boundary assertion this test used to carry lives in
+    /// <see cref="IncrementalAlterConfigs_AnEmptyMap_SettlesAtTheSubmitBoundary"/>: a
+    /// zero-op resource is no longer an <c>n == 0</c> case.
     /// </para>
     /// </remarks>
     [Fact]
-    public void IncrementalAlterConfigs_AResourceWithNoOps_ContributesNoRow()
+    public void IncrementalAlterConfigs_AResourceWithNoOps_ContributesOneSentinelRow()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -225,15 +229,187 @@ public sealed class AdminConfigsSubmitArgumentTests
             options: null,
             captured.RecordAlter);
 
-        Assert.Equal(0, captured.Count);
-        Assert.True(result.Values.ContainsKey(s_topicResource));
+        Assert.Equal(1, captured.Count);
+        Assert.Equal(new[] { 2 }, captured.ResourceTypes);
+        Assert.Equal(new[] { "cfg-topic" }, captured.ResourceNames);
+        Assert.Equal(new string?[] { null }, captured.ConfigNames);
+        Assert.Equal(new[] { IntPtr.Zero }, captured.ConfigNamePointers);
+        Assert.Equal(new[] { IntPtr.Zero }, captured.ConfigValuePointers);
+        Assert.Equal(new[] { -1 }, captured.OpTypes);
 
-        // ⚠ M15/P9 CP6: no row means no NAMED resource, so n == 0 and the submit token is
-        // the whole countdown — the operation settles, frees its GCHandle and releases its
-        // span-the-op reference before this call returns. Firing a callback here would be a
-        // use-after-free, and the key is already resolved without one.
-        Assert.True(result.Values[s_topicResource].IsCompleted);
-        Assert.Null(result.Values[s_topicResource].Exception);
+        // Pending on its callback — not completed locally.
+        Task pending = result.Values[s_topicResource];
+        Assert.False(pending.IsCompleted, "a zero-op resource must wait for the callback the ABI owes it");
+
+        FireAlter(s_topicResource, IntPtr.Zero, captured.UserData);
+
+        Assert.True(pending.IsCompleted);
+        Assert.Null(pending.Exception);
+    }
+
+    /// <summary>
+    /// ⚠ <b>The equivalent-mutant guard for F1's countdown.</b> Resource A (two ops), B (no
+    /// ops) and C (one op) flatten to rows <c>[A, A, B, C]</c>, and the operation waits for
+    /// <b>three</b> callbacks: after two, the third key is still pending and the operation
+    /// still holds the client past its <see cref="NativeAdminClient.Dispose"/>.
+    /// </summary>
+    /// <remarks>
+    /// A countdown left at "keys minus the zero-op ones" (two here) is invisible to any test
+    /// that fires every callback: it reaches zero on the last one either way. It is visible
+    /// only here, where one callback is withheld — that countdown would reach zero after two,
+    /// settle the withheld key without an answer, and release the client early (the M15/P13.1
+    /// lesson, <c>ffi-marshalling.md</c> §B6). The withheld key is the zero-op one, so the
+    /// same assertion also rules out completing it locally.
+    /// </remarks>
+    [Fact]
+    public void IncrementalAlterConfigs_MixedOps_RowShapeAndCallbackCount()
+    {
+        ConfigResource a = new ConfigResource(ConfigResourceType.Topic, "cfg-a");
+        ConfigResource b = new ConfigResource(ConfigResourceType.Topic, "cfg-b");
+        ConfigResource c = new ConfigResource(ConfigResourceType.Broker, "0");
+
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        Captured captured = new Captured();
+        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
+            {
+                [a] = new[]
+                {
+                    new AlterConfigOp(new ConfigEntry("a1", "1"), AlterConfigOpType.Set),
+                    new AlterConfigOp(new ConfigEntry("a2", null), AlterConfigOpType.Delete),
+                },
+                [b] = Array.Empty<AlterConfigOp>(),
+                [c] = new[] { new AlterConfigOp(new ConfigEntry("c1", "3"), AlterConfigOpType.Append) },
+            },
+            options: null,
+            captured.RecordAlter);
+
+        // ---- The row shape: grouped, in caller order, with B's sentinel in its place. ----
+        Assert.Equal(4, captured.Count);
+        Assert.Equal(new[] { "cfg-a", "cfg-a", "cfg-b", "0" }, captured.ResourceNames);
+        Assert.Equal(new[] { 2, 2, 2, 4 }, captured.ResourceTypes);
+        Assert.Equal(new[] { "a1", "a2", null, "c1" }, captured.ConfigNames);
+        Assert.Equal(IntPtr.Zero, captured.ConfigNamePointers[2]);
+        Assert.Equal(IntPtr.Zero, captured.ConfigValuePointers[2]);
+        Assert.Equal(new[] { 0, 1, -1, 2 }, captured.OpTypes);
+
+        // ---- Two of the three callbacks: the third key is still pending. ----
+        FireAlter(a, IntPtr.Zero, captured.UserData);
+        FireAlter(c, IntPtr.Zero, captured.UserData);
+
+        Assert.True(result.Values[a].IsCompleted);
+        Assert.True(result.Values[c].IsCompleted);
+        Assert.False(result.Values[b].IsCompleted, "the countdown must wait for the zero-op key's own callback");
+
+        // …and the operation still holds the client: Dispose must defer the native destroy.
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        Assert.False(handle.IsClosed, "the operation is still in flight, so the client must stay alive");
+
+        // ---- The third callback resolves the last key and releases the client. ----
+        FireAlter(b, IntPtr.Zero, captured.UserData);
+
+        Assert.True(handle.IsClosed, "the last callback must run the deferred release");
+        foreach (KeyValuePair<ConfigResource, Task> entry in result.Values)
+        {
+            Assert.True(entry.Value.IsCompleted);
+            Assert.Null(entry.Value.Exception);
+        }
+    }
+
+    /// <summary>
+    /// A zero-op resource under <see cref="AlterConfigsOptions.ValidateOnly"/> — "validate
+    /// this resource, change nothing" — is <b>sent</b>: the submit carries
+    /// <c>validate_only</c> and the resource's sentinel row, and the resource is answered
+    /// by its callback.
+    /// </summary>
+    /// <remarks>
+    /// Only the request is asserted: the Rust mock ignores <c>validate_only</c>
+    /// (<c>_options</c>), so what a broker would answer is not observable without one.
+    /// </remarks>
+    [Fact]
+    public void IncrementalAlterConfigs_ZeroOpsWithValidateOnly_IsSentAndAnswered()
+    {
+        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+
+        Captured captured = new Captured();
+        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
+            {
+                [s_topicResource] = Array.Empty<AlterConfigOp>(),
+            },
+            new AlterConfigsOptions { ValidateOnly = true },
+            captured.RecordAlter);
+
+        Assert.True(captured.ValidateOnly);
+        Assert.Equal(1, captured.Count);
+        Assert.Equal(new[] { "cfg-topic" }, captured.ResourceNames);
+        Assert.Equal(new[] { IntPtr.Zero }, captured.ConfigNamePointers);
+        Assert.Equal(new[] { -1 }, captured.OpTypes);
+        Assert.False(result.Values[s_topicResource].IsCompleted);
+
+        FireAlter(s_topicResource, CapturedError(), captured.UserData);
+
+        KafkaException answer = Assert.IsType<KafkaException>(
+            Assert.Single(result.Values[s_topicResource].Exception!.InnerExceptions));
+        Assert.Equal(1, answer.Code);
+        Assert.Equal("captured", answer.Message);
+    }
+
+    /// <summary>
+    /// ⚠ <b>The <c>n == 0</c> submit boundary</b>: an EMPTY map submits no row, names no
+    /// resource, and so settles inside the submit's caller — the submit token is the whole
+    /// countdown, and the operation releases the client before the call returns.
+    /// </summary>
+    /// <remarks>
+    /// Moved here from the zero-op test when F1 gave a zero-op resource its sentinel row: an
+    /// empty map is now the only way to reach <c>n == 0</c>. No callback is (or may be)
+    /// fired — the <c>GCHandle</c> is already freed.
+    /// </remarks>
+    [Fact]
+    public void IncrementalAlterConfigs_AnEmptyMap_SettlesAtTheSubmitBoundary()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        Captured captured = new Captured();
+        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(),
+            options: null,
+            captured.RecordAlter);
+
+        Assert.Equal(0, captured.Count);
+        Assert.Empty(result.Values);
+        Assert.True(result.All().IsCompleted);
+        Assert.Null(result.All().Exception);
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        Assert.True(handle.IsClosed, "an n == 0 operation must have released the client at the submit boundary");
+    }
+
+    /// <summary>
+    /// ⚠ <b>An undefined resource type and <see cref="ConfigResourceType.Unknown"/> name the
+    /// same resource</b>, so <c>describeConfigs</c> submits it once, as <c>UNKNOWN</c>'s id
+    /// (M15/P13.2, finding G2-1).
+    /// </summary>
+    /// <remarks>
+    /// The ABI folds the undefined id to <c>UNKNOWN</c> and collapses duplicate resources,
+    /// so it answers these two keys with <b>one</b> callback. Before G2-1 the binding sent
+    /// both and armed two, so the operation never settled. <c>CaptureDescribe</c> fires the
+    /// one callback and asserts the awaitable settled.
+    /// </remarks>
+    [Fact]
+    public void DescribeConfigs_AnUndefinedTypeAndUnknown_SubmitOneResource()
+    {
+        Captured captured = CaptureDescribe(
+            options: null,
+            new ConfigResource((ConfigResourceType)64, "x"),
+            new ConfigResource(ConfigResourceType.Unknown, "x"));
+
+        Assert.Equal(1, captured.Count);
+        Assert.Equal(new[] { 0 }, captured.ResourceTypes);
+        Assert.Equal(new[] { "x" }, captured.ResourceNames);
     }
 
     /// <summary>A repeated resource is one entry, because Java's result is a map.</summary>
@@ -269,7 +445,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         }
 
         // Values[] hands back the bridge's own task, so this read is synchronous.
-        foreach (KeyValuePair<ConfigResource, System.Threading.Tasks.Task<Config>> entry in result.Values)
+        foreach (KeyValuePair<ConfigResource, Task<Config>> entry in result.Values)
         {
             Assert.NotNull(entry.Value.Exception);
         }
@@ -300,34 +476,31 @@ public sealed class AdminConfigsSubmitArgumentTests
         Captured captured = new Captured();
         AlterConfigsResult result = admin.IncrementalAlterConfigs(configs, options, captured.RecordAlter);
 
-        // One callback per NAMED resource (M15/P9 CP6): a zero-op resource contributes no
-        // row, so the per-key ABI never names it and it is completed locally instead.
-        foreach (KeyValuePair<ConfigResource, IReadOnlyCollection<AlterConfigOp>> entry in configs)
+        // One callback per resource — a zero-op one included, since its sentinel row names
+        // it (M15/P13.2, finding F1) — so every key is answered, and faulted, the same way.
+        foreach (ConfigResource resource in configs.Keys)
         {
-            if (entry.Value.Count == 0)
-            {
-                continue;
-            }
-
-            using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(entry.Key.Name);
-            AdminCallbacks.IncrementalAlterConfigs(
-                (int)entry.Key.Type, name.Pointer, CapturedError(), captured.UserData);
+            FireAlter(resource, CapturedError(), captured.UserData);
         }
 
-        foreach (KeyValuePair<ConfigResource, System.Threading.Tasks.Task> entry in result.Values)
+        foreach (KeyValuePair<ConfigResource, Task> entry in result.Values)
         {
-            if (configs[entry.Key].Count == 0)
-            {
-                Assert.True(entry.Value.IsCompleted);
-                Assert.Null(entry.Value.Exception);
-            }
-            else
-            {
-                Assert.NotNull(entry.Value.Exception);
-            }
+            Assert.NotNull(entry.Value.Exception);
         }
 
         return captured;
+    }
+
+    /// <summary>
+    /// Fires the <b>production</b> <c>incrementalAlterConfigs</c> trampoline for one
+    /// resource, as native would: the resource's composite key and an owned (or null)
+    /// error. The name is pinned only for the call, which is all the trampoline borrows it
+    /// for.
+    /// </summary>
+    private static void FireAlter(ConfigResource resource, IntPtr error, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(resource.Name);
+        AdminCallbacks.IncrementalAlterConfigs((int)resource.Type, name.Pointer, error, userData);
     }
 
     /// <summary>
@@ -367,6 +540,8 @@ public sealed class AdminConfigsSubmitArgumentTests
         internal string?[] ConfigNames { get; private set; } = Array.Empty<string>();
 
         internal string?[] ConfigValues { get; private set; } = Array.Empty<string>();
+
+        internal IntPtr[] ConfigNamePointers { get; private set; } = Array.Empty<IntPtr>();
 
         internal IntPtr[] ConfigValuePointers { get; private set; } = Array.Empty<IntPtr>();
 
@@ -411,6 +586,7 @@ public sealed class AdminConfigsSubmitArgumentTests
             ResourceTypes = Take(resourceTypes, count);
             ResourceNames = ReadStrings(resourceNames, count);
             ConfigNames = ReadStrings(configNames, count);
+            ConfigNamePointers = TakePointers(configNames, count);
             ConfigValues = ReadStrings(configValues, count);
             ConfigValuePointers = TakePointers(configValues, count);
             OpTypes = Take(opTypes, count);

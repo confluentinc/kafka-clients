@@ -50,19 +50,14 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="ConfigSource"/>, so the two can no longer disagree by construction.
 /// </para>
 /// <para>
-/// ⚠ <b>Recorded gap (<c>definition-of-done.md</c> §2), raised rather than decided.</b>
-/// Java has a second <b>public</b> constructor — the 8-argument
+/// <b>Both of Java's public constructors are public here.</b> Java's 8-argument
 /// <c>ConfigEntry(name, value, source, isSensitive, isReadOnly, synonyms, type,
-/// documentation)</c> (<c>ConfigEntry.java:59</c>) — which today's ABI would finally make
-/// expressible. It is <b>not</b> published here, because
-/// <c>PublicAdminShapeParityTests.ConfigEntry_PublishesOnlyTheConstructorJavaHas</c>
-/// asserts exactly one public constructor and that assertion is a ratified P1 boundary
-/// condition. Publishing the overload is a public-surface decision for the maintainer, not
-/// an Actor's to take mid-stage; the equivalent constructor is
-/// <see langword="internal"/> so the result marshaller can build a complete entry. Nothing
-/// in Stage 2's input path needs the public form — <c>incrementalAlterConfigs</c> sends
-/// only <c>(name, value, opType)</c>, which the shipped 2-argument constructor covers, as
-/// Java's own <c>AlterConfigOp</c> javadoc example shows.
+/// documentation)</c> (<c>ConfigEntry.java:59</c>) was published in M15/P13.2 by
+/// maintainer decision (2026-09-29, finding G2-4), alongside the 2-argument form. It lets
+/// a caller build a complete entry — for a test double or a fabricated result — exactly as
+/// in Java. <see cref="ConfigSynonym"/>'s constructor stays <see langword="internal"/>,
+/// because Java's is package-private (<c>ConfigEntry.java:243</c>): a caller passes an
+/// empty synonym list, as a Java caller outside the package must.
 /// </para>
 /// <para>
 /// <b>Value equality mirrors Java's</b> (<c>:144</c>, <c>:163</c>) and is <em>not</em>
@@ -132,22 +127,35 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// Initializes a complete entry — the shape of Java's 8-argument constructor
-    /// (<c>:59</c>), <see langword="internal"/> here per the recorded gap in the type
-    /// remarks.
+    /// Initializes a complete entry — Java's public 8-argument
+    /// <c>ConfigEntry(String name, String value, ConfigSource source, boolean isSensitive,
+    /// boolean isReadOnly, List&lt;ConfigSynonym&gt; synonyms, ConfigType type,
+    /// String documentation)</c> (<c>:59</c>), published in M15/P13.2 by maintainer
+    /// decision (2026-09-29).
     /// </summary>
+    /// <remarks>
+    /// <see cref="IsDefault"/> is not a parameter, as in Java: it derives from
+    /// <paramref name="source"/> (<see cref="ConfigSource.DefaultConfig"/> → true).
+    /// ⚠ <b>Recorded deviation — a null <paramref name="synonyms"/> is rejected</b>, where
+    /// Java stores it and its <c>synonyms()</c> then returns null. <see cref="Synonyms"/> is
+    /// non-nullable here, so accepting a null would either break that annotation or require
+    /// silently turning it into an empty list, which changes equality relative to Java's
+    /// <c>Objects.equals(null, [])</c>. Pass an empty list for "no synonyms".
+    /// </remarks>
     /// <param name="name">The configuration key.</param>
     /// <param name="value">The configuration value, or <see langword="null"/>.</param>
     /// <param name="source">Where the value came from.</param>
-    /// <param name="isSensitive">Whether the value is sensitive and therefore redacted.</param>
-    /// <param name="isReadOnly">Whether the entry cannot be changed.</param>
-    /// <param name="synonyms">The synonyms, in Java's precedence order.</param>
+    /// <param name="isSensitive">
+    /// Whether the value is sensitive, in which case the broker never returns it.
+    /// </param>
+    /// <param name="isReadOnly">Whether the entry is read-only and cannot be updated.</param>
+    /// <param name="synonyms">The synonyms, in Java's order of precedence.</param>
     /// <param name="type">The value's data type.</param>
     /// <param name="documentation">The documentation, or <see langword="null"/>.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="synonyms"/> is null.
     /// </exception>
-    internal ConfigEntry(
+    public ConfigEntry(
         string name,
         string? value,
         ConfigSource source,

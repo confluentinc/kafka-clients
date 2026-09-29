@@ -62,6 +62,14 @@ internal sealed class NativeAdminClient : IDisposable
     private const int UnsetTimeoutMs = -1;
 
     /// <summary>
+    /// The <c>op_types</c> entry of an <c>incrementalAlterConfigs</c> zero-op sentinel row
+    /// (a NULL config name). The ABI does not read the op type on such a row, so this is a
+    /// placeholder rather than an <c>AlterConfigOp.OpType.id()</c> code — the value the
+    /// Python binding sends in the same slot.
+    /// </summary>
+    private const int ZeroOpSentinelOpType = -1;
+
+    /// <summary>
     /// Java's own <c>DescribeTopicsOptions.partitionSizeLimitPerResponse</c> default
     /// (<c>DescribeTopicsOptions.java:28</c>), used when the caller passes no options at
     /// all so that <c>options: null</c> behaves exactly like a fresh instance.
@@ -2021,64 +2029,26 @@ internal sealed class NativeAdminClient : IDisposable
     /// absent value are different requests.
     /// </para>
     /// <para>
-    /// ⚠ <b>A null resource name or config name is rejected here</b>, because the ABI
-    /// <em>silently skips</em> such a row — the caller would be left holding a
-    /// <see cref="Task"/> for a resource the broker was never asked about
-    /// (<c>FailUncompleted</c> would fault it, but with a far less useful message).
+    /// ⚠ <b>A null resource name is rejected</b>, because the ABI <em>silently skips</em>
+    /// such a row — the caller would be left holding a <see cref="Task"/> for a resource
+    /// the broker was never asked about (<c>FailUncompleted</c> would fault it, but with a
+    /// far less useful message). ⚠ A null <b>config</b> name is not skipped: it is the
+    /// zero-op sentinel below, so a real operation must never produce one — an operation
+    /// that did would silently become "no operation".
     /// </para>
     /// <para>
-    /// ⚠⚠ <b>A resource mapped to an EMPTY operation collection completes successfully
-    /// LOCALLY, and that is a recorded divergence — not a full fix</b>
-    /// (<c>definition-of-done.md</c> §7; M15/P3 round 3, finding 69.6). Java keys its
-    /// futures on the <em>resource collection</em>, which it sends alongside the ops map
-    /// (<c>KafkaAdminClient.java:2889-2896</c>, <c>:2902</c>), so the broker <b>does</b> hear
-    /// about a zero-op resource and answers for it. The ABI request is
-    /// <b>row-flattened</b> — one row per operation — so a zero-op resource contributes no
-    /// row and is <b>absent from the request entirely</b>
-    /// (<c>src/ffi/admin.rs:4233-4260</c> builds the resource map from rows alone). There is
-    /// no encoding for it: a row with a null config name is <em>skipped</em> by the ABI, and
-    /// any non-null config name would be a real operation.
-    /// </para>
-    /// <para>
-    /// <b>The root of the divergence is single and stated once: the resource is never
-    /// sent, so any answer the broker would have given for it is lost.</b> Local completion
-    /// therefore reproduces Java's outcome for a resource that exists and is authorized.
-    /// Four instances where it does not, each independently checkable — this is a list of
-    /// what was found, not a claim that nothing else follows from the root:
-    /// </para>
-    /// <list type="number">
-    /// <item>
-    /// <b>The resource does not exist.</b> Java's future fails; here it succeeds. Evidence
-    /// that this is a real answer rather than a hypothetical: the Rust core checks the
-    /// resource <em>before</em> applying any operation — <c>mock_admin_client.rs:630-636</c>
-    /// resolves the topic and returns <c>UnknownTopicOrPartition</c> "No such topic as {name}"
-    /// on the way to a no-op <c>apply_alter_ops</c> — so with a zero-op list the core would
-    /// still fail it, exactly as Java does. Only the FFI encoding loses it.
-    /// </item>
-    /// <item>
-    /// <b>Authorization fails for the resource.</b> Java sends it and surfaces the broker's
-    /// per-resource authorization error; here nothing is asked, so it succeeds.
-    /// </item>
-    /// <item>
-    /// <b><see cref="AlterConfigsOptions.ValidateOnly"/> is set.</b> This is the case a
-    /// caller most plausibly reaches with an empty collection — "validate this resource,
-    /// change nothing" — and it is the case local completion answers without validating
-    /// anything.
-    /// </item>
-    /// <item>
-    /// <b>The call itself cannot be submitted</b> (M15/P9 CP6). The per-key ABI fans a
-    /// submit failure out over the resources it named, which a zero-op resource is not
-    /// among — so it completes successfully while every other key faults. Under the
-    /// aggregate callback this key faulted with the rest.
-    /// </item>
-    /// </list>
-    /// <para>
-    /// Closing the root needs a way to express a zero-operation resource in the request,
-    /// which is a <b>Rust-core (Mode-B) dependency</b> and is escalated as such rather than worked around further. The core
-    /// already behaves correctly; only the row encoding cannot carry it. Faulting the
-    /// awaitable instead was the shipped behaviour and was worse — it reported a defect for
-    /// a call Java accepts — and rejecting the input outright is not open, because Java
-    /// accepts it too.
+    /// ⚠ <b>A resource mapped to an EMPTY operation collection is sent as one sentinel
+    /// row</b> — resource type and name set, config name <b>NULL</b>, config value NULL,
+    /// op type <c>-1</c> (M15/P13.2, finding F1). The header defines exactly that row:
+    /// "a row with a non-NULL resource name but a NULL config name registers that resource
+    /// with <b>no</b> op from this row — the way to include a resource whose Java
+    /// <c>Collection&lt;AlterConfigOp&gt;</c> is empty". The op-type slot is not read on such
+    /// a row (<c>read_alter_config_ops</c>), so <c>-1</c> is a placeholder, not a code; it is
+    /// the value the Python binding sends (<c>_incremental_alter_configs_keys_and_spec</c>).
+    /// Java keys its futures on the resource collection it sends alongside the ops map
+    /// (<c>KafkaAdminClient.java:2889-2896</c>, <c>:2902</c>), so the core and the broker
+    /// answer a zero-op resource like any other: an absent or unauthorized one faults, and
+    /// <see cref="AlterConfigsOptions.ValidateOnly"/> validates it.
     /// </para>
     /// </remarks>
     internal AlterConfigsResult IncrementalAlterConfigs(
@@ -2102,14 +2072,11 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Flatten the map to one row per operation, grouped by resource ----
+        // A null entry in `rowOps` is the zero-op sentinel row (see the remarks): every key
+        // therefore contributes at least one row, so every key is named in the request.
         List<ConfigResource> keys = new List<ConfigResource>(configs.Count);
         List<ConfigResource> rowResources = new List<ConfigResource>();
-        List<AlterConfigOp> rowOps = new List<AlterConfigOp>();
-
-        // ⚠ Resources the ABI request cannot carry. `configs` is a map, so each key appears
-        // once, and every operation becomes exactly one row — so "the collection is empty"
-        // IS "contributes no row". See the divergence note on this method.
-        List<ConfigResource> keysWithNoRequest = new List<ConfigResource>();
+        List<AlterConfigOp?> rowOps = new List<AlterConfigOp?>();
         foreach (KeyValuePair<ConfigResource, IReadOnlyCollection<AlterConfigOp>> entry in configs)
         {
             if (entry.Key is null)
@@ -2124,15 +2091,19 @@ internal sealed class NativeAdminClient : IDisposable
                     $"The operations for '{entry.Key}' must not be null.", nameof(configs));
             }
 
-            // The header skips a row whose resource name or config name is NULL. Neither
-            // can be null here: ConfigResource's and ConfigEntry's constructors both reject
-            // a null name, so the guard lives there rather than being restated per row —
-            // a second check would only shadow the one that actually runs.
+            // The header skips a row whose RESOURCE name is NULL, and reads a row whose
+            // CONFIG name is NULL as the zero-op sentinel. The caller's data can produce
+            // neither: ConfigResource's and ConfigEntry's constructors both reject a null
+            // name, so the guard lives there rather than being restated per row — a second
+            // check would only shadow the one that actually runs. A NULL config name
+            // therefore reaches the ABI only as this method's own sentinel row.
 
             keys.Add(entry.Key);
             if (entry.Value.Count == 0)
             {
-                keysWithNoRequest.Add(entry.Key);
+                rowResources.Add(entry.Key);
+                rowOps.Add(null);
+                continue;
             }
 
             foreach (AlterConfigOp op in entry.Value)
@@ -2154,16 +2125,13 @@ internal sealed class NativeAdminClient : IDisposable
         for (int i = 0; i < rowCount; i++)
         {
             resourceTypes[i] = (int)rowResources[i].Type;
-            opTypes[i] = (int)rowOps[i].OpType;
+            AlterConfigOp? op = rowOps[i];
+            opTypes[i] = op is null ? ZeroOpSentinelOpType : (int)op.OpType;
         }
 
         VoidKeyedAdminOperation<ConfigResource> operation =
             new VoidKeyedAdminOperation<ConfigResource>(
                 "incrementalAlterConfigs", keys, s_configResourceComparer);
-
-        // Registering these makes the completion resolve them successfully instead of
-        // letting FailUncompleted fault them — see the divergence note above this method.
-        operation.SetKeysWithNoRequest(keysWithNoRequest);
 
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -2189,13 +2157,23 @@ internal sealed class NativeAdminClient : IDisposable
                 pinned.Add(resourceName);
                 resourceNames[i] = resourceName.Pointer;
 
-                Utf8Marshal.PinnedUtf8String configName = Utf8Marshal.Pin(rowOps[i].ConfigEntry.Name);
+                AlterConfigOp? op = rowOps[i];
+                if (op is null)
+                {
+                    // The zero-op sentinel row: a NULL config name is what the header reads
+                    // as "register this resource, contribute no op" (see the remarks).
+                    configNames[i] = IntPtr.Zero;
+                    configValues[i] = IntPtr.Zero;
+                    continue;
+                }
+
+                Utf8Marshal.PinnedUtf8String configName = Utf8Marshal.Pin(op.ConfigEntry.Name);
                 pinned.Add(configName);
                 configNames[i] = configName.Pointer;
 
                 // ⚠ A null value stays a NULL POINTER — it is DELETE's null value, and the
                 // ABI documents it as such. No `?? string.Empty` here, ever.
-                string? value = rowOps[i].ConfigEntry.Value;
+                string? value = op.ConfigEntry.Value;
                 if (value is null)
                 {
                     configValues[i] = IntPtr.Zero;
@@ -2208,13 +2186,11 @@ internal sealed class NativeAdminClient : IDisposable
                 }
             }
 
-            // ⚠ Shape 4b, and the ONE RPC in the phase whose callback count is neither the
-            // key count nor the row count: the ABI fires once per DISTINCT RESOURCE NAMED
-            // ACROSS THE ROWS (`distinct_config_resources`). Every resource is named by at
-            // least one row except the zero-op ones, which contribute none — so the count
-            // is exactly the keys minus those, and they are resolved locally at countdown
-            // zero (VoidKeyedAdminOperation.OnAllCallbacksComplete) instead.
-            operation.SetPendingCallbacks(keys.Count - keysWithNoRequest.Count);
+            // ⚠ Shape 4b, counted from the ABI doc, not from the rows: the ABI fires once per
+            // DISTINCT RESOURCE NAMED ACROSS THE ROWS (`distinct_config_resources`, which
+            // counts a sentinel row too). Every key is named by at least one row — its ops,
+            // or its sentinel — and the keys are a map's, so the count is the key count.
+            operation.SetPendingCallbacks(keys.Count);
 
             submit(
                 _handle.DangerousGetHandle(),
@@ -2508,9 +2484,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// (<c>src/admin/mock_admin_client.rs:1352-1355</c>), so a broker-less test can reach
     /// the missing-key path. There <c>FailUncompleted</c> faults that key with a message
     /// naming it. That is deliberately <b>not</b> smoothed over by completing locally with a
-    /// default: unlike the Stage-2 zero-op case, the key here is genuinely sent and the
-    /// answer genuinely absent, so fabricating an "empty" description would report data the
-    /// binding does not have.
+    /// default: the key here is genuinely sent and the answer genuinely absent, so
+    /// fabricating an "empty" description would report data the binding does not have.
     /// </para>
     /// </remarks>
     internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(

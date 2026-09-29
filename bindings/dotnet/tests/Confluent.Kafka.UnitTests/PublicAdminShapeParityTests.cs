@@ -95,25 +95,114 @@ public sealed class PublicAdminShapeParityTests
     }
 
     /// <summary>
-    /// Java's <c>ConfigEntry</c> has exactly two public constructors and <b>neither takes
-    /// <c>isDefault</c></b> — it is derived from <c>source</c>
-    /// (<c>ConfigEntry.java:102-104</c>). Only the 2-argument form is expressible over
-    /// today's flattened ABI, so that is the only public one here; the flag-taking form
-    /// is <see langword="internal"/>, for the result marshaller alone. Publishing it
-    /// would let a caller build an entry whose <c>IsDefault</c> contradicts the
-    /// <c>Source</c> a later phase adds — a state Java cannot represent.
+    /// ⚠ Java's <c>ConfigEntry</c> has exactly two public constructors — the 2-argument
+    /// <c>(name, value)</c> (<c>ConfigEntry.java:44</c>) and the 8-argument one
+    /// (<c>:59</c>) — and <b>both are public here</b>, with Java's parameter types, names
+    /// and order (M15/P13.2, finding G2-4). Neither takes <c>isDefault</c>: it derives from
+    /// <c>source</c> (<c>:102-104</c>).
     /// </summary>
+    /// <remarks>
+    /// The flag-taking form the result marshaller uses stays <see langword="internal"/>, and
+    /// so does <see cref="ConfigEntry.ConfigSynonym"/>'s constructor, because Java's is
+    /// package-private (<c>:243</c>). This replaces a test that pinned the 2-argument form
+    /// as the only public one, from before the maintainer's decision to publish the second.
+    /// </remarks>
     [Fact]
-    public void ConfigEntry_PublishesOnlyTheConstructorJavaHas()
+    public void ConfigEntry_PublishesBothConstructorsJavaHas()
     {
         ConstructorInfo[] publicCtors = typeof(ConfigEntry).GetConstructors();
+        Assert.Equal(2, publicCtors.Length);
 
-        ConstructorInfo only = Assert.Single(publicCtors);
-        ParameterInfo[] parameters = only.GetParameters();
+        ConstructorInfo twoArg = Assert.Single(publicCtors, ctor => ctor.GetParameters().Length == 2);
+        AssertParameters(
+            twoArg,
+            (typeof(string), "name"),
+            (typeof(string), "value"));
 
-        Assert.Equal(2, parameters.Length);
-        Assert.Equal(typeof(string), parameters[0].ParameterType);
-        Assert.Equal(typeof(string), parameters[1].ParameterType);
+        ConstructorInfo eightArg = Assert.Single(publicCtors, ctor => ctor.GetParameters().Length == 8);
+        AssertParameters(
+            eightArg,
+            (typeof(string), "name"),
+            (typeof(string), "value"),
+            (typeof(ConfigEntry.ConfigSource), "source"),
+            (typeof(bool), "isSensitive"),
+            (typeof(bool), "isReadOnly"),
+            (typeof(IReadOnlyList<ConfigEntry.ConfigSynonym>), "synonyms"),
+            (typeof(ConfigEntry.ConfigType), "type"),
+            (typeof(string), "documentation"));
+
+        Assert.Empty(typeof(ConfigEntry.ConfigSynonym).GetConstructors());
+    }
+
+    /// <summary>
+    /// The published 8-argument constructor's behaviour: <c>IsDefault</c> derives from the
+    /// source, the entry has value equality, and the two reference parameters it rejects are
+    /// rejected with their own names.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A null <c>synonyms</c> is rejected where Java stores it — the recorded deviation
+    /// on the constructor. The message is the runtime's own for the parameter (it differs
+    /// between .NET Framework and .NET), so it is asserted against the runtime's rendering
+    /// rather than a literal.
+    /// </remarks>
+    [Fact]
+    public void ConfigEntry_TheEightArgumentConstructor_DerivesIsDefault_AndHasValueEquality()
+    {
+        ConfigEntry defaulted = Full(ConfigEntry.ConfigSource.DefaultConfig);
+        Assert.True(defaulted.IsDefault);
+        Assert.Equal(ConfigEntry.ConfigSource.DefaultConfig, defaulted.Source);
+        Assert.Equal("k", defaulted.Name);
+        Assert.Equal("v", defaulted.Value);
+        Assert.True(defaulted.IsSensitive);
+        Assert.False(defaulted.IsReadOnly);
+        Assert.Empty(defaulted.Synonyms);
+        Assert.Equal(ConfigEntry.ConfigType.String, defaulted.Type);
+        Assert.Equal("doc", defaulted.Documentation);
+
+        foreach (ConfigEntry.ConfigSource source in
+            (ConfigEntry.ConfigSource[])Enum.GetValues(typeof(ConfigEntry.ConfigSource)))
+        {
+            Assert.Equal(source == ConfigEntry.ConfigSource.DefaultConfig, Full(source).IsDefault);
+        }
+
+        ConfigEntry same = Full(ConfigEntry.ConfigSource.DefaultConfig);
+        Assert.Equal(defaulted, same);
+        Assert.Equal(defaulted.GetHashCode(), same.GetHashCode());
+        Assert.NotEqual(defaulted, Full(ConfigEntry.ConfigSource.StaticBrokerConfig));
+
+        ArgumentNullException nullName = Assert.Throws<ArgumentNullException>(() => new ConfigEntry(
+            null!, "v", ConfigEntry.ConfigSource.DefaultConfig, false, false,
+            Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.String, null));
+        Assert.Equal("name", nullName.ParamName);
+        Assert.Equal(new ArgumentNullException("name").Message, nullName.Message);
+
+        ArgumentNullException nullSynonyms = Assert.Throws<ArgumentNullException>(() => new ConfigEntry(
+            "k", "v", ConfigEntry.ConfigSource.DefaultConfig, false, false,
+            null!, ConfigEntry.ConfigType.String, null));
+        Assert.Equal("synonyms", nullSynonyms.ParamName);
+        Assert.Equal(new ArgumentNullException("synonyms").Message, nullSynonyms.Message);
+    }
+
+    private static ConfigEntry Full(ConfigEntry.ConfigSource source) =>
+        new ConfigEntry(
+            "k",
+            "v",
+            source,
+            isSensitive: true,
+            isReadOnly: false,
+            Array.Empty<ConfigEntry.ConfigSynonym>(),
+            ConfigEntry.ConfigType.String,
+            "doc");
+
+    private static void AssertParameters(ConstructorInfo ctor, params (Type Type, string Name)[] expected)
+    {
+        ParameterInfo[] parameters = ctor.GetParameters();
+        Assert.Equal(expected.Length, parameters.Length);
+        for (int index = 0; index < expected.Length; index++)
+        {
+            Assert.Equal(expected[index].Type, parameters[index].ParameterType);
+            Assert.Equal(expected[index].Name, parameters[index].Name);
+        }
     }
 
     /// <summary>

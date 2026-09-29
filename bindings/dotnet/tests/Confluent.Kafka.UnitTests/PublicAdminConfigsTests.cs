@@ -34,6 +34,9 @@ public sealed class PublicAdminConfigsTests
 
     private const string Topic = "public-cfg-topic";
 
+    /// <summary>Java's <c>Errors.UNSUPPORTED_VERSION</c> code, which the core mock's "Not implemented yet" carries.</summary>
+    private const int UnsupportedVersionCode = 35;
+
     /// <summary>
     /// <c>describeConfigs</c> reports the configuration a topic was created with, keyed by
     /// the resource.
@@ -216,17 +219,18 @@ public sealed class PublicAdminConfigsTests
     }
 
     /// <summary>
-    /// ⚠ <b>A resource mapped to an EMPTY operation collection completes SUCCESSFULLY</b> —
-    /// Java's outcome, and the fix for M15/P3 round 3's finding 69.6.
+    /// ⚠ <b>A resource that exists, mapped to an EMPTY operation collection, completes
+    /// SUCCESSFULLY</b> — Java's outcome, and now the <b>core's</b> answer.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>This drives the SUCCESS path end to end through the mock, which is the whole
-    /// point.</b> The test this replaces completed the operation through the
-    /// <em>submit-failure</em> path, under which every awaitable faults regardless — so it
-    /// passed while the behaviour was wrong. Here nothing is injected: the real ABI runs,
-    /// the real callback fires, and the assertion is that the zero-op resource's awaitable
-    /// <b>completes</b>.
+    /// ⚠ <b>The success comes from the core, not from the binding</b> (M15/P13.2, finding
+    /// F1). The zero-op resource reaches the ABI as its sentinel row, the Rust mock applies
+    /// an empty operation list to the existing topic, and the real callback reports that
+    /// outcome — there is no local completion left for it to ride on. That the same shape
+    /// against an <em>absent</em> topic faults is asserted by
+    /// <see cref="IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne"/>,
+    /// which is what shows the success here is an answer rather than a default.
     /// </para>
     /// <para>
     /// The mixed case is asserted alongside it so the zero-op key cannot be riding on a
@@ -271,7 +275,8 @@ public sealed class PublicAdminConfigsTests
 
     /// <summary>
     /// A map consisting only of zero-op resources completes successfully — the degenerate
-    /// case, where the ABI request carries <b>no rows at all</b>.
+    /// case, where the ABI request carries <b>one sentinel row per resource</b> and no
+    /// operation at all, and the core still answers each resource.
     /// </summary>
     [Fact]
     public async Task IncrementalAlterConfigs_OnlyZeroOpResources_CompletesSuccessfully()
@@ -293,42 +298,36 @@ public sealed class PublicAdminConfigsTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>PINS A KNOWN DIVERGENCE, not desired behaviour.</b> A zero-op resource that
-    /// <b>does not exist</b> completes successfully here, where Java's future would fail —
-    /// because the ABI request is row-flattened, so the resource is never sent and the
-    /// broker is never asked.
+    /// ⚠ <b>A zero-op resource that does not exist FAULTS, exactly like the same resource
+    /// with an operation</b> — Java's outcome, because Java sends the resource and the broker
+    /// answers it (M15/P13.2, finding F1).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The A/B is the evidence: the <em>same absent resource</em> with a <b>non-empty</b>
-    /// operation list <b>does</b> fault, with the core's own message — so the difference is
-    /// caused purely by the resource dropping out of the request, not by anything about the
-    /// resource itself. The Rust core checks the resource before applying operations
-    /// (<c>mock_admin_client.rs:630-636</c>), so it would fail this too if the FFI could
-    /// carry a zero-operation resource.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>This test is expected to go RED when that Mode-B gap is closed</b>, and that is
-    /// the point of pinning it: the divergence is recorded where a reader meets it, and
-    /// closing the gap cannot pass unnoticed. See the divergence note on
-    /// <c>NativeAdminClient.IncrementalAlterConfigs</c> for the three cases and their
-    /// evidence.
+    /// The A/B is the evidence: the <em>same absent resource</em> faults with the core's
+    /// own message whether its operation list is empty (A) or not (B). The Rust core checks
+    /// the resource before applying operations (<c>mock_admin_client.rs:627-630</c>), so
+    /// the zero-op case can only fault this way if the resource really reached it — as the
+    /// sentinel row. Before F1 the binding completed (A) locally and it <em>succeeded</em>;
+    /// this test is that pin, inverted.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_SucceedsLocally_AKnownDivergence()
+    public async Task IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne()
     {
         using MockAdminClient admin = new MockAdminClient();
 
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "public-cfg-never-created");
 
-        // (A) zero ops — never sent, so it succeeds locally.
+        // (A) zero ops — sent as the sentinel row, so the core answers and rejects it.
         AlterConfigsResult zeroOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
-        await TestTimeout.Run(() => zeroOps.Values[absent], s_deadline);
+        KafkaException zeroOpsFailure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent]), s_deadline);
+        Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // (B) the SAME absent resource with one op — sent, so the core rejects it.
         AlterConfigsResult withOps = admin.IncrementalAlterConfigs(
@@ -339,6 +338,39 @@ public sealed class PublicAdminConfigsTests
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent]), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
+    }
+
+    /// <summary>
+    /// ⚠ <b>A resource of an UNDEFINED type is answered as an <see cref="ConfigResourceType.Unknown"/>
+    /// one</b> — the key survives the round trip, and its awaitable faults with the core
+    /// mock's own answer for that type (M15/P13.2, finding G2-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The ABI folds the undefined id to <c>UNKNOWN</c> and names the resource that way on
+    /// the callback. Before G2-1 the key kept its raw value, so the callback's key matched
+    /// nothing and the awaitable faulted with the bridge's own "result contained no entry"
+    /// message instead of the core's answer. That message is what this test rules out: the
+    /// assertion is the Rust mock's <c>get_resource_description</c> <c>_ =&gt;</c> arm,
+    /// <c>unsupported_version("Not implemented yet")</c> (<c>mock_admin_client.rs:599</c>).
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task DescribeConfigs_OfAnUndefinedType_IsAnsweredAsUnknown()
+    {
+        using MockAdminClient admin = new MockAdminClient();
+
+        ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
+        DescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
+
+        ConfigResource key = Assert.Single(result.Values.Keys);
+        Assert.Equal(ConfigResourceType.Unknown, key.Type);
+        Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.Unknown, "x")));
+
+        KafkaException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[undefined]), s_deadline);
+        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        Assert.Equal("Not implemented yet", failure.Message);
     }
 
     /// <summary>

@@ -329,6 +329,75 @@ public sealed class PublicAdminP3ShapeParityTests
     }
 
     /// <summary>
+    /// ⚠ <b>A value that is not a defined <see cref="ConfigResourceType"/> member is stored
+    /// as <see cref="ConfigResourceType.Unknown"/></b> (M15/P13.2, finding G2-1) — Java's
+    /// <c>Type.forId</c> fallback (<c>ConfigResource.java:57-59</c>), and what the ABI's
+    /// <c>ConfigResourceType::for_id</c> does to the id before it names the resource back.
+    /// </summary>
+    /// <remarks>
+    /// The rows cover an id past every member (<c>64</c>), ids <em>between</em> members
+    /// (<c>1</c>, <c>3</c>, <c>5</c>), a negative one, one that fits a byte but not a member
+    /// (<c>255</c>), and the extreme.
+    /// </remarks>
+    /// <param name="undefinedId">An <c>int</c> no <see cref="ConfigResourceType"/> member has.</param>
+    [Theory]
+    [InlineData(64)]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(-1)]
+    [InlineData(255)]
+    [InlineData(int.MaxValue)]
+    public void ConfigResource_AnUndefinedType_IsStoredAsUnknown(int undefinedId)
+    {
+        Assert.False(Enum.IsDefined(typeof(ConfigResourceType), (ConfigResourceType)undefinedId));
+
+        ConfigResource resource = new ConfigResource((ConfigResourceType)undefinedId, "x");
+
+        Assert.Equal(ConfigResourceType.Unknown, resource.Type);
+        Assert.Equal("x", resource.Name);
+    }
+
+    /// <summary>
+    /// Every <b>defined</b> member is kept as it is — the normalization touches undefined
+    /// values only, <see cref="ConfigResourceType.Unknown"/> itself included.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_EveryDefinedType_IsPreserved()
+    {
+        ConfigResourceType[] defined = (ConfigResourceType[])Enum.GetValues(typeof(ConfigResourceType));
+        Assert.Equal(6, defined.Length);
+
+        foreach (ConfigResourceType type in defined)
+        {
+            Assert.Equal(type, new ConfigResource(type, "x").Type);
+        }
+    }
+
+    /// <summary>
+    /// ⚠ An undefined type and <see cref="ConfigResourceType.Unknown"/> name the <b>same</b>
+    /// resource — equal, with equal hashes, so one dictionary key — and render as
+    /// <c>Unknown</c>, since the stored type is what <c>ToString</c> prints.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_AnUndefinedType_EqualsAndRendersAsUnknown()
+    {
+        ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
+        ConfigResource unknown = new ConfigResource(ConfigResourceType.Unknown, "x");
+
+        Assert.Equal(unknown, undefined);
+        Assert.Equal(unknown.GetHashCode(), undefined.GetHashCode());
+        Assert.Equal("ConfigResource(type=Unknown, name='x')", undefined.ToString());
+
+        Dictionary<ConfigResource, int> byResource = new Dictionary<ConfigResource, int>
+        {
+            [undefined] = 1,
+            [unknown] = 2,
+        };
+        Assert.Equal(2, Assert.Single(byResource).Value);
+    }
+
+    /// <summary>
     /// <see cref="ClientMetricsResourceListing"/> mirrors Java's constructor, its one
     /// accessor and its value equality.
     /// </summary>

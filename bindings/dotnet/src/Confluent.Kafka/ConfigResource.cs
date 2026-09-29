@@ -68,11 +68,30 @@ public sealed class ConfigResource
     /// Creates a config resource — Java's
     /// <c>ConfigResource(Type type, String name)</c> (<c>:71</c>).
     /// </summary>
-    /// <param name="type">The resource type.</param>
+    /// <param name="type">
+    /// The resource type. ⚠ A value that is not a defined <see cref="ConfigResourceType"/>
+    /// member — reachable only through an unchecked <c>int</c> cast — is stored as
+    /// <see cref="ConfigResourceType.Unknown"/>, exactly as Java's <c>Type.forId</c> maps an
+    /// id it has no member for (<c>ConfigResource.java:57-59</c>).
+    /// </param>
     /// <param name="name">
     /// The resource name; empty means "the default resource of this type"
     /// (see <see cref="IsDefault"/>).
     /// </param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Why the undefined type is normalized here, in the one constructor</b> (M15/P13.2,
+    /// finding G2-1). A Java <c>Type</c> cannot hold an undefined id at all, so there is
+    /// nothing to mirror directly; the id reaches the ABI as a bare <c>int32_t</c>, and the
+    /// ABI reads it through <c>ConfigResourceType::for_id</c>, which folds every undefined id
+    /// to <c>UNKNOWN</c> and echoes that back on the callback. Storing the raw value would key
+    /// the result on a resource the answer can never name — the awaitable would fault as
+    /// unanswered, and two keys the ABI sees as one resource would expect two answers where
+    /// one arrives. Normalizing here serves the request key and the callback key alike,
+    /// because both are built by this constructor; the Python binding does the same in its
+    /// own constructor.
+    /// </para>
+    /// </remarks>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> is null — Java's
     /// <c>Objects.requireNonNull(name, "name should not be null")</c> (<c>:73</c>).
@@ -80,7 +99,7 @@ public sealed class ConfigResource
     public ConfigResource(ConfigResourceType type, string name)
     {
         // Java also requireNonNull's the type; a C# enum has no null to reject.
-        Type = type;
+        Type = DefinedOrUnknown(type);
         Name = name ?? throw new ArgumentNullException(nameof(name));
     }
 
@@ -124,4 +143,12 @@ public sealed class ConfigResource
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", Type, Name);
+
+    /// <summary>
+    /// Java's <c>Type.forId</c> fallback applied to an enum value: a defined member is
+    /// kept, anything else becomes <see cref="ConfigResourceType.Unknown"/> — the same test
+    /// <c>ConfigResourceMarshal.TypeFromId</c> applies to an id the ABI hands back.
+    /// </summary>
+    private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
+        Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.Unknown;
 }

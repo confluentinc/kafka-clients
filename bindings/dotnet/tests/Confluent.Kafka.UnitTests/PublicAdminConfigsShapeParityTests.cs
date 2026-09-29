@@ -126,9 +126,10 @@ public sealed class PublicAdminConfigsShapeParityTests
     /// <remarks>
     /// The boundary condition for reopening P1's foundation: this asserts the shipped five
     /// by name, type and nullability, so a widening or a rename during the extension turns
-    /// it red. P1's own
-    /// <c>PublicAdminShapeParityTests.ConfigEntry_PublishesOnlyTheConstructorJavaHas</c>
-    /// still passes <b>unmodified</b> and is deliberately not duplicated here.
+    /// it red. The constructor surface is pinned separately, by
+    /// <c>PublicAdminShapeParityTests.ConfigEntry_PublishesBothConstructorsJavaHas</c>
+    /// (rewritten in M15/P13.2 when the 8-argument constructor was published), and is
+    /// deliberately not duplicated here.
     /// </remarks>
     [Fact]
     public void ConfigEntry_KeepsP1sFiveMembers_AndGainsJavasFour()

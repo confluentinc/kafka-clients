@@ -157,29 +157,36 @@ public sealed class AdminP9CountdownTests
     }
 
     /// <summary>
-    /// The void specialization resolves its no-request keys at countdown zero too — before
-    /// <c>FailUncompleted</c> sees them, so a key that contributed no request row succeeds
-    /// rather than reporting a defect Java never reports.
+    /// The void specialization faults an unanswered key at countdown zero exactly as the
+    /// value-carrying one does — it has no keys it resolves on its own.
     /// </summary>
+    /// <remarks>
+    /// This replaces a test of the local completion M15/P9 CP6 gave keys that contributed no
+    /// request row. M15/P13.2 (finding F1) sends such a key as a sentinel row, so every key
+    /// of an <c>incrementalAlterConfigs</c> is answered by a callback and the void bridge
+    /// lost its special case; a key the callbacks leave unanswered is now a defect report
+    /// like any other, and pending until countdown zero like any other.
+    /// </remarks>
     [Fact]
-    public async Task VoidCountdown_ResolvesNoRequestKeysAtZero()
+    public async Task VoidCountdown_FaultsAnUnansweredKeyAtZero()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-            "incrementalAlterConfigs", new[] { "with-rows", "no-rows" }, StringComparer.Ordinal);
-        operation.SetKeysWithNoRequest(new[] { "no-rows" });
+            "incrementalAlterConfigs", new[] { "answered", "unanswered" }, StringComparer.Ordinal);
         Arm(operation, handle, callbacks: 1);
 
-        KeyedResultMarshal.CompleteKey(operation, "with-rows", IntPtr.Zero);
+        KeyedResultMarshal.CompleteKey(operation, "answered", IntPtr.Zero);
         operation.ReleaseOne();
-        Assert.False(operation.Tasks["no-rows"].IsCompleted, "still before countdown zero");
+        Assert.False(operation.Tasks["unanswered"].IsCompleted, "still before countdown zero");
 
         operation.ReleaseSubmitToken();
 
-        await operation.Tasks["with-rows"];
-        await operation.Tasks["no-rows"];
+        await operation.Tasks["answered"];
+        KafkaException unaccounted = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => operation.Tasks["unanswered"]), s_deadline);
+        Assert.Equal("The incrementalAlterConfigs result contained no entry for 'unanswered'.", unaccounted.Message);
     }
 
     /// <summary>
