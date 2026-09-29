@@ -315,12 +315,15 @@ RPCs, Rust core + unit tests + real-broker integration tests, all green.
 - **Wire wrappers**: `CreateTopics`/`DeleteTopics` request+response (new
   `ConcreteRequest`/`ConcreteResponse` enum variants; `Metadata` reused for
   list/describe).
+- **`describe_topics`**: by name, `describeCluster` for the node map, then the
+  paginated KIP-966 `DescribeTopicPartitions` call (following `NextCursor`,
+  honouring `partition_size_limit_per_response`, filling ELR / last-known ELR),
+  falling back to the Metadata API on `UnsupportedVersionException` — as Java
+  4.3.1 does. By id, the Metadata API, as in Java. (Until the admin
+  Java-parity D1 fix, by name used the Metadata API directly, so `elr()` was
+  always `None` and the partition limit was never read.)
 
 ### Accepted deviations (documented, Critic-approved)
-- `describe_topics` uses the **Metadata-API fallback** (Java's
-  `generateDescribeTopicsCallWithMetadataApi` / `handleDescribeTopicsByIds`),
-  not `DescribeTopicPartitions` cursor pagination — behavior-faithful for both
-  by-name and by-id.
 - `TopicDescription`'s `PartialEq` excludes `topic_id` — matches Java's `equals`.
 - id-XOR-name modeled as a closed enum (`TopicCollection`) — Java's input is
   already a sealed id-XOR-name type; no lost behavior.
