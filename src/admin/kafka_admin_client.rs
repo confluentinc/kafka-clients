@@ -451,15 +451,6 @@ impl KafkaAdminClient {
         (self.shared.time_provider)()
     }
 
-    /// `describeCluster`, also returning the completable handle behind
-    /// `DescribeClusterResult.nodes()`.
-    ///
-    /// `describeTopics` by name chains its `DescribeTopicPartitions` call on
-    /// `describeCluster(..).nodes().whenComplete(..)`
-    /// (`KafkaAdminClient.java:2350-2364`). Java's public `KafkaFuture` has
-    /// `whenComplete`; the Rust one does not (`admin-client.md` §4 keeps it on the
-    /// crate-internal `KafkaFutureImpl`), so the handle is returned alongside the
-    /// public result.
     /// `describeTopics` by name: describes the cluster for the node map, then
     /// issues the paginated `describeTopicPartitions` call (KIP-966), which falls
     /// back to the Metadata API on an older broker. Names that cannot be
@@ -530,6 +521,15 @@ impl KafkaAdminClient {
         public
     }
 
+    /// `describeCluster`, also returning the completable handle behind
+    /// `DescribeClusterResult.nodes()`.
+    ///
+    /// `describeTopics` by name chains its `DescribeTopicPartitions` call on
+    /// `describeCluster(..).nodes().whenComplete(..)`
+    /// (`KafkaAdminClient.java:2350-2364`). Java's public `KafkaFuture` has
+    /// `whenComplete`; the Rust one does not (`admin-client.md` §4 keeps it on the
+    /// crate-internal `KafkaFutureImpl`), so the handle is returned alongside the
+    /// public result.
     fn describe_cluster_with_nodes_handle(
         &self,
         options: DescribeClusterOptions,
@@ -5187,6 +5187,10 @@ struct DescribeTopicPartitionsState {
     /// Java's `partiallyFinishedTopicDescription`: the cursor topic of the
     /// previous page, whose partitions continue in the next one.
     partially_finished_topic_description: Option<TopicDescription>,
+    /// Whether `handleUnsupportedVersionException` has issued the Metadata-API
+    /// fallback. The failure hook may leave the futures to that call only once it
+    /// has been issued; see the failure hook for why it can be missing.
+    metadata_fallback_issued: bool,
 }
 
 /// Builds the paginated `describeTopicPartitions` [`Call`] for
@@ -5224,6 +5228,7 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
     let state = Arc::new(Mutex::new(DescribeTopicPartitionsState {
         topics_requests: topic_names_list.iter().cloned().collect(),
         partially_finished_topic_description: None,
+        metadata_fallback_issued: false,
     }));
 
     let req_state = Arc::clone(&state);
@@ -5346,28 +5351,56 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
+    // `handleUnsupportedVersionException`'s body (`KafkaAdminClient.java:2312-2316`):
+    // issue the Metadata-API call through `runnable.call`, and record that it was.
+    let issue_metadata_fallback = {
+        let state = Arc::clone(&state);
+        let topic_futures = Arc::clone(&topic_futures);
+        move || {
+            state.lock().unwrap().metadata_fallback_issued = true;
+            let now = (ctx.time_provider)();
+            ctx.call(get_describe_topics_by_names_call(
+                Arc::clone(&topic_futures),
+                topic_names_list.clone(),
+                include_authorized_operations,
+                calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
+            ));
+        }
+    };
+    let issue_metadata_fallback = Arc::new(issue_metadata_fallback);
+
+    let fail_state = Arc::clone(&state);
     let fail_futures = Arc::clone(&topic_futures);
+    let fail_issue_metadata_fallback = Arc::clone(&issue_metadata_fallback);
     let handle_failure = Box::new(move |error: &Error| {
         // An UnsupportedVersionException is not the user's failure: the
-        // Metadata-API call issued by the hook below completes the futures.
-        // Detected by code, because `Error::unsupported_version` builds the
-        // generic code-35 error, as `AdminClientRunnable::fail_call` does.
-        if error.error() != Errors::UnsupportedVersion {
-            for future in fail_futures.values() {
-                future.complete_with_error(error.clone());
+        // Metadata-API call issued by the hook below completes the futures
+        // (`KafkaAdminClient.java:2319-2323`). Detected by code, because
+        // `Error::unsupported_version` builds the generic code-35 error, as
+        // `AdminClientRunnable::fail_call` does.
+        if error.error() == Errors::UnsupportedVersion {
+            // In Java this failure is only reached after
+            // `handleUnsupportedVersionException` issued the fallback: `Call.fail`
+            // skips that hook only once `runnable.closing` is set, which happens
+            // when the I/O thread exits and no response is handled any more. Rust
+            // sets `ShutdownSignal::closing` as soon as `close()` starts (audit item
+            // A5), so during the close grace period `fail_call` comes straight here.
+            // Issue the fallback then, as Java's hook would have: the closing gate
+            // rejects it with "Cannot accept new calls when AdminClient is
+            // closing.", which fails every future instead of leaving them pending.
+            let issued = fail_state.lock().unwrap().metadata_fallback_issued;
+            if !issued {
+                fail_issue_metadata_fallback();
             }
+            return;
+        }
+        for future in fail_futures.values() {
+            future.complete_with_error(error.clone());
         }
     });
 
-    let uv_futures = Arc::clone(&topic_futures);
     let handle_uv = Box::new(move || {
-        let now = (ctx.time_provider)();
-        ctx.call(get_describe_topics_by_names_call(
-            Arc::clone(&uv_futures),
-            topic_names_list.clone(),
-            include_authorized_operations,
-            calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
-        ));
+        issue_metadata_fallback();
         false
     });
 
@@ -7860,6 +7893,49 @@ mod tests {
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
         assert_eq!(err.message(), "Topic nope not found.");
         assert!(!runnable.client_mut().has_pending_responses());
+    }
+
+    /// Regression for COMMENTS.66 Issue 6: an `UnsupportedVersionException` for
+    /// `describeTopicPartitions` during the `close(timeout)` grace period.
+    ///
+    /// In Java `Call.fail` still reaches `handleUnsupportedVersionException`
+    /// then (`runnable.closing` is only set once the I/O thread exits), which
+    /// issues the Metadata fallback through `runnable.call`; `call()` rejects it
+    /// because the hard-shutdown deadline is set, and every topic future fails
+    /// with `IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")` (`KafkaAdminClient.java:904-920`, `:2311-2323`, `:1598-1601`).
+    /// Rust's `fail_call` skips the hook while closing (audit item A5), so the
+    /// failure hook issues the fallback itself; before that it swallowed the
+    /// code-35 error and the futures never completed.
+    #[tokio::test]
+    async fn an_unsupported_version_during_close_fails_the_by_name_describe() {
+        let (admin, mut runnable, _time, nodes) = env();
+        prepare_describe_cluster(&mut runnable, &nodes, MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED);
+        let result = admin.describe_topics_with_topic_names_options(&["t".to_string()], DescribeTopicsOptions::new());
+        let future = result.topic_name_values().unwrap()["t"].clone();
+        // describeCluster is answered, which queues describeTopicPartitions.
+        pump_until(&mut runnable, 20, |r| !r.client_mut().has_pending_responses()).await;
+        assert!(!future.is_done());
+
+        // `close(30s)` with describeTopicPartitions queued. No task was spawned,
+        // so this only publishes the deadline and the closing flag.
+        admin.close_with_timeout(Duration::from_secs(30)).await;
+        // The broker does not support DescribeTopicPartitions.
+        runnable.client_mut().prepare_unsupported_version_response();
+        pump(&mut runnable, 10).await;
+        assert!(
+            !runnable.client_mut().has_pending_responses(),
+            "the UnsupportedVersion response was consumed"
+        );
+
+        let error = tokio::time::timeout(Duration::from_secs(1), future.get())
+            .await
+            .expect("the topic future must complete, not hang")
+            .expect_err("the rejected fallback fails the topic");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        assert!(!runnable.has_active_external_calls_for_test());
+        assert_eq!(runnable.client_mut().request_count(), 0, "no Metadata fallback was sent");
     }
 
     /// A failed `describeCluster` fails every topic future with its error
