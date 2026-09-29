@@ -265,7 +265,10 @@ impl SslConfig {
                 // false)` (`SslConfigs.java:129`), so a value Java rejects is
                 // rejected here too before the key is ignored.
                 ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                log::warn!("Unknown SSL configuration key: {}", key);
+                log::warn!(
+                    "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
+                    key
+                );
             },
             _ => {
                 log::warn!("Unknown SSL configuration key: {}", key);
