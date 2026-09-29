@@ -129,6 +129,30 @@
     `create_acls_async_reports_the_real_unsupported_error_per_binding`.
   - The new test asserts `assert_eq!(message.as_deref(), Some("Not implemented yet"))`.
 
+## C70-6 — Python `DeletedAcl` docstring contradicts what `delete_acls` delivers
+- **Severity**: Doc (Low). The public docstring is wrong, but the code is right.
+- **Commit to fix up**: `d6269abd`, the doc-correction commit. It fixed the same claim in the FFI rustdoc
+  and in `admin.py`'s txn docstring, but missed this one. The docstring itself predates this round.
+- **File**: `bindings/python/admin.py:1783-1784`. It reads: "Exactly one of the two is set: `binding` when
+  the ACL was deleted, `error` when the filter matched it but deleting it failed."
+- **Java reference**: `KafkaAdminClient.java:2705-2708` builds
+  `new FilterResult(aclBinding, aclError.exception(message))`. The Rust core does the same
+  (`kafka_admin_client.rs:1776-1782`, `FilterResult::new(binding, error)`, where `binding` is always
+  decoded). `py_DeleteAclsFilterResults_drain` copies both fields.
+- **Description**: a failed deletion therefore reaches Python as `DeletedAcl(binding=<the matched ACL>,
+  error=<KafkaError>)`, with **both** fields set. `binding` is `None` only if the broker's binding cannot be
+  decoded. A caller who trusts the docstring would treat any non-`None` `binding` as "deleted" and miss the
+  failure.
+- **Fix**: say that `binding` is the ACL the filter matched, and that `error` is set (in addition to
+  `binding`) when deleting it failed. This mirrors the corrected FFI doc. It is docstring-only, so the
+  interface and return shape do not change.
+
+- **Resolution** (FIXED, fixup `5b2abb87` -> `d6269abd`): the `DeletedAcl`
+  docstring now says that `binding` is the ACL the filter matched and that `error` is set when deleting it
+  failed. It states that the two are not exclusive, citing `KafkaAdminClient.java:2705-2708`, tells callers
+  to test `error` to tell a deleted ACL from a failed one, and notes that `binding` is `None` only if the
+  broker's binding could not be decoded. This mirrors the FFI doc corrected in d6269abd.
+
 ## Not acted on (the user's decision)
 
 - A synchronous NumberFormatException for describeConfigs / incrementalAlterConfigs. This would need both
