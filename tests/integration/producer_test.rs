@@ -856,6 +856,93 @@ async fn test_close_with_zero_timeout_aborts_pending() {
     }
 }
 
+/// The borrowed byte-slice `send` (`KafkaProducer<Vec<u8>, Vec<u8>>::send`,
+/// which the C FFI's `send_batch` and single-record sends call, so every C and
+/// Python `KafkaProducer` record) delivers the record's headers to the broker,
+/// as Java's `doSend` appends them (`KafkaProducer.java:1020`, `:1029-1030`):
+/// in order, an empty value and a null value kept apart. It used to append
+/// none. Rust-only: the gRPC producer proto has no headers.
+#[cfg(feature = "integration-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_borrowed_send_delivers_the_record_headers() {
+    use confluent_kafka::common::TopicPartition;
+    use confluent_kafka::common::header::{Header, Headers, RecordHeaders};
+    use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
+    use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
+    use confluent_kafka::producer::{KafkaProducer, ProducerConfig};
+
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("borrowed_headers");
+    let group_id = ctx.group_id("borrowed_headers");
+
+    let props = make_config(ctx.bootstrap_servers());
+    let producer = KafkaProducer::new(
+        ProducerConfig::new(&props).expect("Invalid test config"),
+        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer),
+    )
+    .expect("Failed to create producer");
+    let mut headers = RecordHeaders::new();
+    headers.add_key_value("trace", Some(b"abc")).expect("add header");
+    headers.add_key_value("empty", Some(b"")).expect("add header");
+    headers.add_key_value("null", None).expect("add header");
+    let record = ProducerRecord::with_partition_key_headers(
+        topic.clone(),
+        Some(0),
+        Some(b"key".as_slice()),
+        Some(b"value".as_slice()),
+        headers,
+    )
+    .expect("record creation should succeed");
+    // The inherent borrowed send, not the trait's typed one.
+    let future = producer.send(record, None).await.expect("send should accept the record");
+    future
+        .get_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("send should be acknowledged");
+    Producer::close(&producer).await.expect("close should succeed");
+
+    let consumer_props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("group.id".to_string(), group_id),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&consumer_props).expect("invalid consumer config"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    consumer.seek_with_offset(tp, 0).await.expect("seek should succeed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut received: Option<Vec<(String, Option<Vec<u8>>)>> = None;
+    while received.is_none() && std::time::Instant::now() < deadline {
+        let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
+        if let Some(record) = records.into_iter().next() {
+            received = Some(
+                record
+                    .headers()
+                    .iter()
+                    .map(|h| (h.key().to_string(), h.value().map(<[u8]>::to_vec)))
+                    .collect(),
+            );
+        }
+    }
+    consumer.close().await.expect("consumer close");
+    assert_eq!(
+        received.expect("the record should be consumed"),
+        vec![
+            ("trace".to_string(), Some(b"abc".to_vec())),
+            ("empty".to_string(), Some(Vec::new())),
+            ("null".to_string(), None),
+        ]
+    );
+}
+
 /// Translated from `PlaintextProducerSendTest.testWrongSerializer`.
 /// A serializer that always errors causes send to surface a
 /// `Error::Serialization`. The Producer trait wraps the serializer
