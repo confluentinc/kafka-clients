@@ -422,6 +422,18 @@ impl MockAdminClient {
         Ok(())
     }
 
+    /// The mock's brokers, in broker-id order.
+    ///
+    /// No Java counterpart: a Java test holds the `List<Node>` it handed to
+    /// `MockAdminClient(brokers, controller)` / `Builder.brokers`, but
+    /// [`create`](Self::create) builds the brokers itself, so a caller needs
+    /// this to obtain `Node`s equal to them — for example the leader, replica
+    /// and ISR nodes [`add_topic`](Self::add_topic) validates against the broker
+    /// list.
+    pub fn brokers(&self) -> Vec<Node> {
+        self.state.lock().unwrap().brokers.clone()
+    }
+
     /// Causes the next `number_of_requests` operations to fail with a timeout.
     pub fn timeout_next_request(&self, number_of_requests: i32) {
         self.state.lock().unwrap().timeout_next_requests = number_of_requests;
