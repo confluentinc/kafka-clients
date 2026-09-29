@@ -1813,7 +1813,8 @@ where
         // Java lines 416-417 — `addresses =
         // ClientUtils.parseAndValidateAddresses(config)`,
         // `metadata.bootstrap(addresses)`.
-        let addresses = ClientUtils::parse_and_validate_addresses(config.bootstrap_servers())?;
+        let addresses =
+            ClientUtils::parse_and_validate_addresses(config.bootstrap_servers(), config.client_dns_lookup())?;
         metadata.bootstrap(addresses);
 
         // Java line 420 — `fetchConfig = new FetchConfig(config)`.

@@ -307,7 +307,7 @@ impl KafkaAdminClient {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
-        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap)?;
+        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
 
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
             std::time::SystemTime::now()

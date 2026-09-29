@@ -633,6 +633,9 @@ impl ProducerConfig {
         config.post_process_and_validate_idempotence_configs()?;
         config.maybe_override_client_id();
 
+        config
+            .client_dns_lookup
+            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
 

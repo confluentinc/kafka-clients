@@ -918,7 +918,7 @@ impl<K, V> KafkaProducer<K, V> {
         kafka_trace!(log_context, "Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
-        let addresses = ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers)?;
+        let addresses = ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers, config.client_dns_lookup)?;
 
         // 2. Validate delivery timeout configuration
         //    Translated from KafkaProducer.configureDeliveryTimeout().
