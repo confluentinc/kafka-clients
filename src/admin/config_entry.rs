@@ -174,10 +174,17 @@ impl std::fmt::Display for ConfigSynonym {
     }
 }
 
+/// What Java's `ConfigEntry.toString()` prints in place of a sensitive value
+/// (`ConfigEntry.java:186`).
+const REDACTED: &str = "Redacted";
+
 /// A configuration entry containing name, value and additional metadata.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ConfigEntry`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` renders what `Display` renders: the value of a sensitive entry is
+/// shown as `Redacted`, as Java's `toString()` shows it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfigEntry {
     name: String,
     value: Option<String>,
@@ -204,8 +211,11 @@ pub struct ConfigEntry {
 /// Java-derived default, and a synthesised empty name would produce an entry
 /// naming no config at all. Construct it with [`ConfigEntryOptionsBuilder::new`]
 /// and set them: [`ConfigEntryOptionsBuilder::build`] returns an error if any of `name`, `value` was not set.
+///
+/// `Debug` renders a sensitive `value` as `"Redacted"`, as the [`ConfigEntry`]
+/// built from it renders it.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
     pub name: String,
@@ -230,6 +240,46 @@ pub struct ConfigEntryOptions {
     /// The config documentation. Java's `documentation`; starts as `None`, as in
     /// `:44`.
     pub documentation: Option<String>,
+}
+
+/// Renders every field as the derive it replaces did, except that the value of
+/// a sensitive entry renders as `"Redacted"`, the word Java's
+/// `ConfigEntry.toString()` prints for it (`ConfigEntry.java:186`).
+///
+/// This struct has no Java counterpart, so it has no Java rendering of its
+/// own. It carries the values of the [`ConfigEntry`] it builds, which never
+/// renders a sensitive value, so a derived `Debug` here would print what the
+/// entry itself hides.
+impl std::fmt::Debug for ConfigEntryOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here.
+        let Self {
+            name,
+            value,
+            source,
+            is_sensitive,
+            is_read_only,
+            synonyms,
+            config_type,
+            documentation,
+        } = self;
+        let mut debug = f.debug_struct("ConfigEntryOptions");
+        debug.field("name", name);
+        if *is_sensitive {
+            debug.field("value", &REDACTED);
+        } else {
+            debug.field("value", value);
+        }
+        debug
+            .field("source", source)
+            .field("is_sensitive", is_sensitive)
+            .field("is_read_only", is_read_only)
+            .field("synonyms", synonyms)
+            .field("config_type", config_type)
+            .field("documentation", documentation)
+            .finish()
+    }
 }
 
 /// Fluent builder for [`ConfigEntryOptions`].
@@ -454,11 +504,13 @@ impl ConfigEntry {
 
 impl std::fmt::Display for ConfigEntry {
     /// Redacts sensitive value.
+    ///
+    /// Mirrors Java's `toString()` (`ConfigEntry.java:183-193`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = if self.is_sensitive {
-            "Redacted".to_string()
+            REDACTED
         } else {
-            self.value.as_deref().unwrap_or("null").to_string()
+            self.value.as_deref().unwrap_or("null")
         };
         write!(
             f,
@@ -473,6 +525,19 @@ impl std::fmt::Display for ConfigEntry {
             self.config_type,
             self.documentation.as_deref().unwrap_or("null")
         )
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()` (`ConfigEntry.java:183-193`), which prints
+/// `Redacted` for the value of a sensitive entry; a derived `Debug` would be a
+/// second, unredacted rendering. [`Config`](crate::admin::Config) and
+/// [`AlterConfigOp`](crate::admin::AlterConfigOp) embed entries, so their
+/// derived `Debug` renders through this one.
+impl std::fmt::Debug for ConfigEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -522,6 +587,82 @@ mod tests {
         let s = entry.to_string();
         assert!(s.contains("value=Redacted"), "{s}");
         assert!(!s.contains("secret"), "{s}");
+    }
+
+    /// A distinctive secret for the `Debug` tests.
+    const SECRET: &str = "ssl-keystore-S3cr3t-5b72";
+
+    /// A sensitive entry holding [`SECRET`].
+    fn sensitive_entry() -> ConfigEntry {
+        ConfigEntry::with_options(sensitive_options())
+    }
+
+    /// Options for a sensitive entry holding [`SECRET`].
+    fn sensitive_options() -> ConfigEntryOptions {
+        ConfigEntryOptionsBuilder::new()
+            .set_name("ssl.keystore.password".to_string())
+            .set_value(Some(SECRET.to_string()))
+            .set_source(ConfigSource::DynamicBrokerConfig)
+            .set_is_sensitive(true)
+            .set_config_type(ConfigType::Password)
+            .build()
+            .unwrap()
+    }
+
+    /// New test, no Java original: `Debug` renders exactly what `Display` does
+    /// (Java has a single `toString()`): `Redacted` for a sensitive value,
+    /// while a non-sensitive value still prints.
+    #[test]
+    fn debug_redacts_sensitive_value() {
+        let sensitive = sensitive_entry();
+        assert_eq!(sensitive.value(), Some(SECRET));
+        for rendered in [format!("{sensitive:?}"), format!("{sensitive:#?}")] {
+            assert_eq!(rendered, sensitive.to_string());
+            assert!(rendered.contains("name=ssl.keystore.password"), "{rendered}");
+            assert!(rendered.contains("value=Redacted"), "{rendered}");
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        }
+
+        let plain = ConfigEntry::new("retention.ms".to_string(), Some("604800000".to_string()));
+        for rendered in [format!("{plain:?}"), format!("{plain:#?}")] {
+            assert_eq!(rendered, plain.to_string());
+            assert!(rendered.contains("value=604800000"), "{rendered}");
+        }
+    }
+
+    /// New test, no Java original (Java has no such struct): `Debug` renders a
+    /// sensitive value as `"Redacted"`, as the entry built from the options
+    /// renders it, and every other field as the derive did.
+    #[test]
+    fn options_debug_redacts_sensitive_value() {
+        let options = sensitive_options();
+        assert_eq!(options.value.as_deref(), Some(SECRET));
+        let rendered = format!("{options:?}");
+        assert_eq!(
+            rendered,
+            "ConfigEntryOptions { name: \"ssl.keystore.password\", value: \"Redacted\", \
+             source: DynamicBrokerConfig, is_sensitive: true, is_read_only: false, synonyms: [], \
+             config_type: Password, documentation: None }"
+        );
+        let pretty = format!("{options:#?}");
+        assert!(pretty.contains("value: \"Redacted\""), "{pretty}");
+        for rendered in [rendered, pretty] {
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        }
+    }
+
+    /// New test, no Java original: the options of a non-sensitive entry render
+    /// the value, as the derive did.
+    #[test]
+    fn options_debug_renders_non_sensitive_value() {
+        let options = ConfigEntryOptionsBuilder::new()
+            .set_name("retention.ms".to_string())
+            .set_value(Some("604800000".to_string()))
+            .build()
+            .unwrap();
+        let rendered = format!("{options:?}");
+        assert!(rendered.contains("value: Some(\"604800000\")"), "{rendered}");
+        assert!(rendered.contains("is_sensitive: false"), "{rendered}");
     }
 
     #[test]

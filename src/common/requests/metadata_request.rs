@@ -505,6 +505,14 @@ impl RequestBuilder for MetadataRequestBuilder {
     }
 }
 
+/// Mirrors Java's `MetadataRequest.Builder.toString()`
+/// (`MetadataRequest.java:146-147`), which returns `data.toString()`.
+impl std::fmt::Display for MetadataRequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +673,19 @@ mod tests {
                 assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);
             }
         }
+    }
+
+    /// New test, no Java original: the builder renders as its data, as Java's
+    /// `Builder.toString()` returns `data.toString()` (`MetadataRequest.java:146-147`).
+    /// `NetworkClient` logs it that way when it sends a metadata request
+    /// (`NetworkClient.java:1342`).
+    #[test]
+    fn test_builder_display_renders_data() {
+        let builder = MetadataRequestBuilder::for_topic_names(&["orders"], false);
+        let rendered = builder.to_string();
+        assert_eq!(rendered, builder.data.to_string());
+        assert!(rendered.starts_with("MetadataRequestData {"), "{rendered}");
+        assert!(rendered.contains("\"orders\""), "{rendered}");
     }
 
     /// CLAUDE.md §2: the mandatory parameters are validated in

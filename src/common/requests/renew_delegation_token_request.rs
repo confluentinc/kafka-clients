@@ -76,14 +76,29 @@ impl RenewDelegationTokenRequest {
         let data = RenewDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
+
+    /// Returns a copy of `data` with the hmac emptied, for rendering.
+    ///
+    /// Mirrors Java's private `maskData` (`RenewDelegationTokenRequest.java:71-74`),
+    /// shared, as in Java, by the request's `toString()` (`:79-80`) and
+    /// `Builder.toString()` (`:66-67`). Java returns the copy's `toString()`,
+    /// and the callers here render the copy.
+    fn mask_data(data: &RenewDelegationTokenRequestData) -> RenewDelegationTokenRequestData {
+        let mut temp_data = data.clone();
+        temp_data.hmac = Vec::new();
+        temp_data
+    }
 }
 
 impl std::fmt::Display for RenewDelegationTokenRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Mirrors Java's `toString`, which masks the hmac.
-        let mut redacted = self.data.clone();
-        redacted.hmac = Vec::new();
-        write!(f, "RenewDelegationTokenRequest(version={}, data={:?})", self.version, redacted)
+        write!(
+            f,
+            "RenewDelegationTokenRequest(version={}, data={:?})",
+            self.version,
+            Self::mask_data(&self.data)
+        )
     }
 }
 
@@ -100,7 +115,7 @@ impl std::fmt::Debug for RenewDelegationTokenRequest {
 /// Builder for [`RenewDelegationTokenRequest`].
 ///
 /// Corresponds to `RenewDelegationTokenRequest.Builder` in Java.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RenewDelegationTokenRequestBuilder {
     data: RenewDelegationTokenRequestData,
     oldest_allowed_version: i16,
@@ -136,6 +151,24 @@ impl RequestBuilder for RenewDelegationTokenRequestBuilder {
             self.data.clone(),
             version,
         )))
+    }
+}
+
+/// Mirrors Java's `Builder.toString()` (`RenewDelegationTokenRequest.java:66-67`),
+/// which returns `maskData(data)`: the data with the hmac emptied.
+impl std::fmt::Display for RenewDelegationTokenRequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", RenewDelegationTokenRequest::mask_data(&self.data))
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the hmac.
+impl std::fmt::Debug for RenewDelegationTokenRequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -181,6 +214,35 @@ mod tests {
         assert_eq!(request.data().hmac, b"the-hmac");
         for rendered in [format!("{request:?}"), format!("{request:#?}")] {
             assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("hmac: []"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+        }
+    }
+
+    /// New test, no Java original: the builder renders as Java's
+    /// `Builder.toString()` does, the data with the hmac emptied (`maskData`),
+    /// so the renew period still shows.
+    #[test]
+    fn builder_display_masks_hmac() {
+        let builder = RenewDelegationTokenRequestBuilder::new(request_data());
+        let rendered = builder.to_string();
+        let mut masked = request_data();
+        masked.hmac = Vec::new();
+        assert_eq!(rendered, masked.to_string());
+        assert!(rendered.contains("hmac: []"), "{rendered}");
+        assert!(rendered.contains("renew_period_ms: 3600000"), "{rendered}");
+        assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does, an empty hmac, never the bytes a derived `Debug`
+    /// would print as their byte values.
+    #[test]
+    fn builder_debug_masks_hmac() {
+        let builder = RenewDelegationTokenRequestBuilder::new(request_data());
+        assert_eq!(builder.data.hmac, b"the-hmac");
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            assert_eq!(rendered, builder.to_string());
             assert!(rendered.contains("hmac: []"), "{rendered}");
             assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
         }

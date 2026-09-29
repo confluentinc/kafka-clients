@@ -55,7 +55,10 @@ pub struct CreateDelegationTokenResponse {
 /// `KafkaPrincipal` would silently attribute the token to nobody. Build it from
 /// [`CreateDelegationTokenResponseOptionsBuilder::new`], setting those five and
 /// overriding the token fields you need: [`CreateDelegationTokenResponseOptionsBuilder::build`] returns an error if any of `version`, `throttle_time_ms`, `error`, `owner`, `token_requester` was not set.
-#[derive(Debug, Clone)]
+///
+/// `Debug` renders neither the token id nor the hmac, as the response built
+/// from these options renders neither.
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct CreateDelegationTokenResponseOptions<'a> {
     /// Java's `version`.
@@ -78,6 +81,47 @@ pub struct CreateDelegationTokenResponseOptions<'a> {
     pub token_id: &'a str,
     /// Java's `hmac`. Starts empty, as in `:69`.
     pub hmac: Vec<u8>,
+}
+
+/// Renders every field as the derive it replaces did, except the token id and
+/// the hmac, which render as Java's `CreateDelegationTokenResponse.toString()`
+/// renders them (`CreateDelegationTokenResponse.java:109-113`): the token id as
+/// `"REDACTED"` and the hmac as empty.
+///
+/// This struct has no Java counterpart, so it has no Java rendering of its
+/// own. It carries the token id and hmac of the response it prepares, which
+/// never renders them, so a derived `Debug` here would print what the response
+/// itself hides.
+impl std::fmt::Debug for CreateDelegationTokenResponseOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here. The two secrets are bound to `_`: nothing of them is
+        // rendered, not even the length.
+        let Self {
+            version,
+            throttle_time_ms,
+            error,
+            owner,
+            token_requester,
+            issue_timestamp,
+            expiry_timestamp,
+            max_timestamp,
+            token_id: _,
+            hmac: _,
+        } = self;
+        f.debug_struct("CreateDelegationTokenResponseOptions")
+            .field("version", version)
+            .field("throttle_time_ms", throttle_time_ms)
+            .field("error", error)
+            .field("owner", owner)
+            .field("token_requester", token_requester)
+            .field("issue_timestamp", issue_timestamp)
+            .field("expiry_timestamp", expiry_timestamp)
+            .field("max_timestamp", max_timestamp)
+            .field("token_id", &"REDACTED")
+            .field("hmac", &[0u8; 0])
+            .finish()
+    }
 }
 
 /// Fluent builder for [`CreateDelegationTokenResponseOptions`].
@@ -467,6 +511,48 @@ mod tests {
             assert!(rendered.contains("REDACTED"), "{rendered}");
             assert!(!rendered.contains("secret-id"), "{rendered}");
             assert!(!rendered.contains(&format!("{:?}", &b"secret-hmac"[..])), "{rendered}");
+        }
+    }
+
+    /// New test, no Java original (Java has no such struct): `Debug` renders
+    /// the token id and the hmac as Java's `toString()` renders the response's
+    /// (`CreateDelegationTokenResponse.java:109-113`), and every other field as
+    /// the derive did.
+    #[test]
+    fn options_debug_redacts_token_id_and_hmac() {
+        const TOKEN_ID: &str = "token-id-7f3a91";
+        const HMAC: &[u8] = b"token-hmac-c4e82d";
+        let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
+        let options = CreateDelegationTokenResponseOptionsBuilder::new()
+            .set_version(3)
+            .set_throttle_time_ms(0)
+            .set_error(Errors::None)
+            .set_owner(&owner)
+            .set_token_requester(&owner)
+            .set_token_id(TOKEN_ID)
+            .set_hmac(HMAC.to_vec())
+            .build()
+            .unwrap();
+        assert_eq!(options.token_id, TOKEN_ID);
+        assert_eq!(options.hmac, HMAC);
+
+        let rendered = format!("{options:?}");
+        assert_eq!(
+            rendered,
+            format!(
+                "CreateDelegationTokenResponseOptions {{ version: 3, throttle_time_ms: 0, error: None, \
+                 owner: {owner:?}, token_requester: {owner:?}, issue_timestamp: -1, expiry_timestamp: -1, \
+                 max_timestamp: -1, token_id: \"REDACTED\", hmac: [] }}"
+            )
+        );
+        let pretty = format!("{options:#?}");
+        assert!(pretty.contains("token_id: \"REDACTED\","), "{pretty}");
+        // The pretty form of a derived byte list spreads over indented lines,
+        // so check that the field is the empty list itself.
+        assert!(pretty.contains("hmac: [],"), "{pretty}");
+        for rendered in [rendered, pretty] {
+            assert!(!rendered.contains(TOKEN_ID), "token id leaked: {rendered}");
+            assert!(!rendered.contains(&format!("{HMAC:?}")), "hmac leaked: {rendered}");
         }
     }
 

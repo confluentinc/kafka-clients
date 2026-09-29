@@ -72,6 +72,9 @@ impl OpType {
 /// operation type.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConfigOp`.
+///
+/// The derived `Debug` renders the entry through [`ConfigEntry`]'s `Debug`,
+/// which redacts a sensitive value as Java's `ConfigEntry.toString()` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlterConfigOp {
     config_entry: ConfigEntry,
@@ -96,10 +99,12 @@ impl AlterConfigOp {
 }
 
 impl std::fmt::Display for AlterConfigOp {
+    /// Mirrors Java's `toString()` (`AlterConfigOp.java:119-124`), which renders
+    /// the entry through `ConfigEntry.toString()`, the redacting rendering.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "AlterConfigOp{{opType={:?}, configEntry={:?}}}",
+            "AlterConfigOp{{opType={:?}, configEntry={}}}",
             self.op_type, self.config_entry
         )
     }
@@ -108,6 +113,8 @@ impl std::fmt::Display for AlterConfigOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::ConfigEntryOptionsBuilder;
+    use crate::admin::config_entry::ConfigType;
 
     #[test]
     fn op_type_id_round_trip() {
@@ -145,5 +152,59 @@ mod tests {
         let c = AlterConfigOp::new(entry, OpType::Delete);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// A distinctive secret for the redaction tests.
+    const SECRET: &str = "sasl-jaas-S3cr3t-2e96";
+
+    /// A `Set` operation on a sensitive entry holding [`SECRET`].
+    fn sensitive_op() -> AlterConfigOp {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("listener.name.sasl.plain.sasl.jaas.config".to_string())
+                .set_value(Some(SECRET.to_string()))
+                .set_is_sensitive(true)
+                .set_config_type(ConfigType::Password)
+                .build()
+                .unwrap(),
+        );
+        AlterConfigOp::new(entry, OpType::Set)
+    }
+
+    /// New test, no Java original: `Display` renders the entry through its
+    /// redacting `Display`, as Java's `toString()` renders it through
+    /// `ConfigEntry.toString()`.
+    #[test]
+    fn display_redacts_sensitive_value() {
+        let op = sensitive_op();
+        assert_eq!(op.config_entry().value(), Some(SECRET));
+        let rendered = op.to_string();
+        assert_eq!(
+            rendered,
+            format!("AlterConfigOp{{opType=Set, configEntry={}}}", op.config_entry())
+        );
+        assert!(rendered.contains("value=Redacted"), "{rendered}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+    }
+
+    /// New test, no Java original: the derived `Debug` renders the entry through
+    /// its redacting `Debug`, while a non-sensitive value still prints.
+    #[test]
+    fn debug_redacts_sensitive_value() {
+        let op = sensitive_op();
+        for rendered in [format!("{op:?}"), format!("{op:#?}")] {
+            assert!(rendered.starts_with("AlterConfigOp"), "{rendered}");
+            assert!(rendered.contains("op_type: Set"), "{rendered}");
+            assert!(rendered.contains(&op.config_entry().to_string()), "{rendered}");
+            assert!(rendered.contains("value=Redacted"), "{rendered}");
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        }
+
+        let plain = AlterConfigOp::new(
+            ConfigEntry::new("retention.ms".to_string(), Some("604800000".to_string())),
+            OpType::Set,
+        );
+        let rendered = format!("{plain:?}");
+        assert!(rendered.contains("value=604800000"), "{rendered}");
     }
 }

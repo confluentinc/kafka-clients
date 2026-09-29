@@ -71,6 +71,28 @@ fn system_time_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Renders an in-flight request the way Java's `{}` placeholder renders the
+/// nullable `InFlightRequest.request` field in the cancelled-request DEBUG line
+/// (`NetworkClient.java:405-409`): through its `toString()`, whose translation
+/// is the request's [`Display`](std::fmt::Display) — the rendering that redacts
+/// secrets such as SCRAM salts, config values and delegation-token HMACs.
+///
+/// A missing request renders as `null`, as SLF4J renders a null argument. The
+/// field is `None` only where Java's is null: `InFlightRequestsTest.addRequest`
+/// builds its in-flight requests with a null request
+/// (`InFlightRequestsTest.java:123-124`); every request the client sends has one.
+///
+/// `deny(dead_code)` overrides this module's blanket `allow(dead_code)`: the unit
+/// tests assert on this helper rather than on the captured log line, so the lint
+/// is what fails the build if the log line stops calling it.
+#[deny(dead_code)]
+fn loggable_request(request: Option<&ConcreteRequest>) -> &dyn std::fmt::Display {
+    match request {
+        Some(request) => request,
+        None => &"null",
+    }
+}
+
 /// Internal state enum for the client lifecycle.
 const STATE_ACTIVE: u8 = 0;
 const STATE_CLOSING: u8 = 1;
@@ -1162,7 +1184,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     self.log_context,
                     "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
                      (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
-                     throttle time: {}ms, request timeout: {}ms): {:?}",
+                     throttle time: {}ms, request timeout: {}ms): {}",
                     request.header.api_key(),
                     request.header.correlation_id(),
                     node_id,
@@ -1170,7 +1192,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     request.time_elapsed_since_send_ms(now),
                     request.throttle_time_ms(),
                     request.request_timeout_ms,
-                    request.request,
+                    loggable_request(request.request.as_ref()),
                 );
             } else {
                 kafka_info!(
@@ -1308,7 +1330,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             let metadata_request = request_and_version.request_builder;
             kafka_debug!(
                 self.log_context,
-                "Sending metadata request {:?} to node {}",
+                "Sending metadata request {} to node {}",
                 metadata_request,
                 node
             );
@@ -1760,6 +1782,10 @@ mod tests {
     use crate::common::requests::ProduceRequestBuilder;
     use crate::common::requests::ResponseHeader;
     use crate::common::requests::{MetadataRequestBuilder, MetadataRequestBuilderOptionsBuilder};
+
+    use crate::AlterUserScramCredentialsRequestData;
+    use crate::alter_user_scram_credentials_request_data::ScramCredentialUpsertion;
+    use crate::common::requests::AlterUserScramCredentialsRequestBuilder;
 
     // ---------------------------------------------------------------------------
     // TestHostResolver — a host resolver that returns 127.0.0.1 without DNS.
@@ -2695,6 +2721,81 @@ mod tests {
         let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
         assert_eq!(1, responses.len());
         assert!(responses[0].was_disconnected());
+    }
+
+    /// New test, no Java original: the DEBUG line logged for every request
+    /// cancelled by a disconnect or timeout (`NetworkClient.java:405-409`)
+    /// renders the request through its redacting `Display`, as Java renders it
+    /// through `toString()`, so a SCRAM upsertion's salt and salted password
+    /// never reach the log.
+    ///
+    /// The log line itself is not captured: the `log` crate's logger is
+    /// process-wide and can be installed only once, the `ffi` tests install
+    /// `env_logger` into this same test binary, and raising the global level to
+    /// DEBUG would change what every concurrently running test logs. So the
+    /// request is put in flight through the mock selector and then cancelled by
+    /// a disconnect, and the test asserts on `loggable_request` for that very
+    /// in-flight request — the expression the log line formats. The helper's
+    /// `#[deny(dead_code)]` fails the non-test build if the log line stops
+    /// calling it.
+    #[tokio::test]
+    async fn test_cancelled_in_flight_request_log_renders_redacted_request() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node).await;
+
+        let salt = b"alice-salt-4f9d2c";
+        let salted_password = b"alice-salted-pw-8e1b7a";
+        let mut upsertion = ScramCredentialUpsertion::new();
+        upsertion
+            .set_name("alice".to_string())
+            .set_mechanism(1)
+            .set_iterations(8192)
+            .set_salt(salt.to_vec())
+            .set_salted_password(salted_password.to_vec());
+        let mut data = AlterUserScramCredentialsRequestData::new();
+        data.set_upsertions(vec![upsertion]);
+        let builder = AlterUserScramCredentialsRequestBuilder::new(data);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
+        assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
+
+        let in_flight = client.in_flight_requests.last_sent(node.id_string());
+        let Some(ConcreteRequest::AlterUserScramCredentials(sent)) = in_flight.request.as_ref() else {
+            panic!("expected an in-flight AlterUserScramCredentials request");
+        };
+        // The in-flight request still carries both secrets; only the rendering hides them.
+        assert_eq!(sent.data().upsertions[0].salt, salt);
+        assert_eq!(sent.data().upsertions[0].salted_password, salted_password);
+        let rendered = loggable_request(in_flight.request.as_ref()).to_string();
+        assert_eq!(rendered, sent.to_string());
+        assert!(rendered.starts_with("AlterUserScramCredentialsRequest("), "{rendered}");
+        assert!(!rendered.starts_with("Some("), "{rendered}");
+        for secret in [&salt[..], &salted_password[..]] {
+            assert!(!rendered.contains(&format!("{secret:?}")), "secret leaked: {rendered}");
+            assert!(
+                !rendered.contains(std::str::from_utf8(secret).unwrap()),
+                "secret leaked: {rendered}"
+            );
+        }
+
+        // The disconnect cancels that request on the path that logs it.
+        client.disconnect(node.id_string()).await;
+        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
+        assert_eq!(1, responses.len());
+        assert!(responses[0].was_disconnected());
+        assert_eq!(0, client.in_flight_request_count_for_node(node.id_string()));
+    }
+
+    /// New test, no Java original: an in-flight request with no request renders
+    /// as `null`, as SLF4J renders the null `request.request` argument of the
+    /// cancelled-request DEBUG line (`NetworkClient.java:405-409`).
+    #[test]
+    fn test_loggable_request_renders_missing_request_as_null() {
+        assert_eq!(loggable_request(None).to_string(), "null");
     }
 
     /// Translated from `NetworkClientTest.testDisconnectWithMultipleInFlights`.
