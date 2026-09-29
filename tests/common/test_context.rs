@@ -46,6 +46,7 @@ impl TestContext {
     /// its own cluster (as every Java `@ClusterTest` invocation does), removed
     /// when this context is dropped.
     pub async fn new(config: ClusterConfig) -> Self {
+        init_test_logger();
         let cluster = if config.dedicated {
             Arc::new(KafkaCluster::start_with_config(&config).await)
         } else {
@@ -173,6 +174,18 @@ impl Drop for TestContext {
             );
         }
     }
+}
+
+/// Installs a process-wide logger so client logs reach test output. With
+/// `is_test(true)` libtest captures them per test and prints them only for a
+/// failing test, which is the one place a CI flake leaves evidence. `RUST_LOG`
+/// overrides the default filter; `try_init` is a no-op after the first call.
+fn init_test_logger() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,confluent_kafka::consumer::internals=info"),
+    )
+    .is_test(true)
+    .try_init();
 }
 
 /// Generates a random hexadecimal suffix of the given length (in bytes,

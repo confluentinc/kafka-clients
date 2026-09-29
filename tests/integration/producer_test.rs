@@ -1613,11 +1613,17 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
 /// them at consecutive offsets.
 async fn batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("topic");
+    // With `batch.size=0` a batch only becomes sendable once the next record
+    // opens a new one (or on linger expiry / flush), exactly as in Java. The
+    // gRPC `Send` RPC blocks until the record is delivered, so under Java's
+    // `linger.ms=MAX` the first send would wait forever for a second record;
+    // non-native backends use `linger.ms=0` (same as `flush_with_security`).
+    let linger_ms = if factory.name() == "rust" { INT_MAX_VALUE } else { 0 };
     let producer = factory
         .create(send_test_producer_config(
             &bootstrap_for(factory, ctx),
             &SendTestProducerOpts {
-                linger_ms: INT_MAX_VALUE,
+                linger_ms,
                 delivery_timeout_ms: INT_MAX_VALUE,
                 batch_size: 0,
                 ..SendTestProducerOpts::default()
