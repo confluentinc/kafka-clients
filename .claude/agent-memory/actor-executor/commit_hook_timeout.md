@@ -21,3 +21,5 @@ commit message so it's auditable. Do NOT run a plain `git commit` and wait — i
 will time out and the prior Actor's "stall" pattern recurs. If the change touches
 FFI/C/Python, run `make verify` yourself (in the background / long timeout)
 before committing rather than relying on the hook.
+
+**Check first (2026-09-29):** the hook exists only if `core.hooksPath` is set, which `make init-hooks` (a prerequisite of `make build`) does. In a clone where that never ran, `git config core.hooksPath` is empty and a plain `git commit` runs no hook.
