@@ -33,7 +33,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeDelegationTokenResponse`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DescribeDelegationTokenResponse {
     data: DescribeDelegationTokenResponseData,
 }
@@ -317,6 +317,16 @@ impl std::fmt::Display for DescribeDelegationTokenResponse {
     }
 }
 
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints each token id and hmac.
+impl std::fmt::Debug for DescribeDelegationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +406,29 @@ mod tests {
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): neither a token id nor an hmac, which a derived `Debug`
+    /// would print as its byte values.
+    #[test]
+    fn debug_redacts_token_id_and_hmac() {
+        let response = DescribeDelegationTokenResponse::with_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_tokens(&[token("secret-id")])
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(response.data().tokens[0].hmac, b"hmac-secret-id");
+        for rendered in [format!("{response:?}"), format!("{response:#?}")] {
+            assert_eq!(rendered, response.to_string());
+            assert!(rendered.contains("REDACTED"), "{rendered}");
+            assert!(!rendered.contains("secret-id"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"hmac-secret-id"[..])), "{rendered}");
+        }
     }
 
     /// Byte-level wire vector for v3 (flexible), error-only (no tokens). The

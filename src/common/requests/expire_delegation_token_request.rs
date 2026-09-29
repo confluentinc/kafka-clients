@@ -28,7 +28,7 @@ use super::{ConcreteRequest, ConcreteResponse, ExpireDelegationTokenResponse, Re
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.ExpireDelegationTokenRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExpireDelegationTokenRequest {
     data: ExpireDelegationTokenRequestData,
     version: i16,
@@ -104,6 +104,16 @@ impl std::fmt::Display for ExpireDelegationTokenRequest {
     }
 }
 
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the hmac.
+impl std::fmt::Debug for ExpireDelegationTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 /// Builder for [`ExpireDelegationTokenRequest`].
 ///
 /// Corresponds to `ExpireDelegationTokenRequest.Builder` in Java.
@@ -176,6 +186,22 @@ mod tests {
         };
         assert_eq!(r.error(), Errors::DelegationTokenNotFound);
         assert_eq!(r.throttle_time_ms(), 60);
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`, which masks the hmac): an empty hmac, never the bytes a
+    /// derived `Debug` would print as their byte values.
+    #[test]
+    fn debug_masks_hmac() {
+        let request =
+            ExpireDelegationTokenRequest::new(request_data(), ApiKeys::EXPIRE_DELEGATION_TOKEN.latest_version());
+        assert_eq!(request.hmac(), b"the-hmac");
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("hmac: []"), "{rendered}");
+            assert!(!rendered.contains("the-hmac"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ use super::{ConcreteRequest, ConcreteResponse, RenewDelegationTokenResponse, Req
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.RenewDelegationTokenRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RenewDelegationTokenRequest {
     data: RenewDelegationTokenRequestData,
     version: i16,
@@ -84,6 +84,16 @@ impl std::fmt::Display for RenewDelegationTokenRequest {
         let mut redacted = self.data.clone();
         redacted.hmac = Vec::new();
         write!(f, "RenewDelegationTokenRequest(version={}, data={:?})", self.version, redacted)
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the hmac.
+impl std::fmt::Debug for RenewDelegationTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -159,6 +169,21 @@ mod tests {
             RenewDelegationTokenRequest::new(request_data(), ApiKeys::RENEW_DELEGATION_TOKEN.latest_version());
         let rendered = request.to_string();
         assert!(!rendered.contains("the-hmac"), "{rendered}");
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): an empty hmac, never the bytes a derived `Debug` would
+    /// print as their byte values.
+    #[test]
+    fn debug_masks_hmac() {
+        let request =
+            RenewDelegationTokenRequest::new(request_data(), ApiKeys::RENEW_DELEGATION_TOKEN.latest_version());
+        assert_eq!(request.data().hmac, b"the-hmac");
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("hmac: []"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+        }
     }
 
     #[test]

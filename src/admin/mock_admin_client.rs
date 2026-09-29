@@ -2795,6 +2795,30 @@ mod tests {
         assert_eq!(listed, vec![token]);
     }
 
+    /// New test, no Java original: `{:?}` of a mock holding a token does not
+    /// print the token's HMAC. The mock's HMAC is the UTF-8 bytes of the token
+    /// id, and the id itself is rendered (Java's `TokenInformation.toString()`
+    /// prints it too), so the check is on the byte rendering a derived `Debug`
+    /// of the HMAC would produce.
+    #[tokio::test]
+    async fn debug_does_not_render_token_hmac() {
+        let client = admin();
+        let token = client
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(rendered.contains("hmac=[*******]"), "{rendered}");
+        assert!(!rendered.contains(&format!("{:?}", token.hmac())), "HMAC leaked: {rendered}");
+        // The pretty form spreads a byte list over indented lines, so check
+        // for the derived field itself rather than for one fixed layout.
+        let pretty = format!("{client:#?}");
+        assert!(pretty.contains("hmac=[*******]"), "{pretty}");
+        assert!(!pretty.contains("hmac: ["), "HMAC leaked: {pretty}");
+    }
+
     /// New test, no Java original: renewing an unknown HMAC fails with
     /// `DelegationTokenNotFound`; renewing a known HMAC updates the expiry.
     #[tokio::test]

@@ -31,7 +31,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.CreateDelegationTokenResponse`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CreateDelegationTokenResponse {
     data: CreateDelegationTokenResponseData,
 }
@@ -351,6 +351,16 @@ impl std::fmt::Display for CreateDelegationTokenResponse {
     }
 }
 
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the token id and hmac.
+impl std::fmt::Debug for CreateDelegationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +438,36 @@ mod tests {
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): neither the token id nor the hmac, which a derived
+    /// `Debug` would print as its byte values.
+    #[test]
+    fn debug_redacts_token_id_and_hmac() {
+        let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
+        let response = CreateDelegationTokenResponse::prepare_response_options(
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_owner(&owner)
+                .set_token_requester(&owner)
+                .set_issue_timestamp(1)
+                .set_expiry_timestamp(2)
+                .set_max_timestamp(3)
+                .set_token_id("secret-id")
+                .set_hmac(b"secret-hmac".to_vec())
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(response.data().hmac, b"secret-hmac");
+        for rendered in [format!("{response:?}"), format!("{response:#?}")] {
+            assert_eq!(rendered, response.to_string());
+            assert!(rendered.contains("REDACTED"), "{rendered}");
+            assert!(!rendered.contains("secret-id"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"secret-hmac"[..])), "{rendered}");
+        }
     }
 
     /// Byte-level wire vector for v3 (flexible). Asserts the principal strings,

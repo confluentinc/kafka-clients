@@ -38,7 +38,7 @@ use super::SaslAuthenticateResponse;
 /// A SASL authenticate request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.SaslAuthenticateRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SaslAuthenticateRequest {
     data: SaslAuthenticateRequestData,
     version: i16,
@@ -100,6 +100,16 @@ impl std::fmt::Display for SaslAuthenticateRequest {
         let mut temp_data = self.data.clone();
         temp_data.set_auth_bytes(Vec::new());
         write!(f, "{}", temp_data)
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the auth bytes.
+impl std::fmt::Debug for SaslAuthenticateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -211,6 +221,30 @@ mod tests {
             "auth_bytes field should be empty in Display output, got: {}",
             display
         );
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): `auth_bytes` present but empty, never the token bytes a
+    /// derived `Debug` would print as their byte values.
+    #[test]
+    fn test_debug_redacted() {
+        let auth_bytes = b"sensitive-auth-token-123";
+        let mut data = SaslAuthenticateRequestData::new();
+        data.set_auth_bytes(auth_bytes.to_vec());
+        let request = SaslAuthenticateRequest::new(data, 2);
+        for debug in [format!("{:?}", request), format!("{:#?}", request)] {
+            assert_eq!(debug, format!("{}", request));
+            assert!(
+                debug.contains("auth_bytes: []"),
+                "auth_bytes field should be empty in Debug output, got: {}",
+                debug
+            );
+            assert!(
+                !debug.contains(&format!("{:?}", &auth_bytes[..])),
+                "auth bytes leaked: {}",
+                debug
+            );
+        }
     }
 
     #[test]

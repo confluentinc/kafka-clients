@@ -45,6 +45,12 @@ use crate::consumer::AutoOffsetResetStrategy;
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
+// `Debug` is derived: every secret this struct holds is a `Password` inside
+// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
+// ever gains a map of the raw user properties (Java's `originals()`), replace
+// the derive with a hand-written `Debug` that renders that map with the values
+// of `SslConfigs::is_password_config` / `SaslConfigs::is_password_config` keys
+// hidden, as `ProducerConfig`'s `Debug` does.
 #[derive(Clone, Debug)]
 pub struct ConsumerConfig {
     // --- Group ---

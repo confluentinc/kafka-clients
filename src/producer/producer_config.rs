@@ -20,7 +20,8 @@
 //! reflection framework. The field names and default values match the Java
 //! config keys.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
@@ -28,7 +29,7 @@ use log::{info, warn};
 use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::types::Password;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::config::{SaslConfig, SaslConfigs, SslConfig, SslConfigs};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
@@ -51,7 +52,11 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#producerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written so that it never renders a secret: the typed
+/// secrets are [`Password`]s, and the values of the raw user map whose keys
+/// Java defines as `ConfigDef.Type.PASSWORD` render as [`Password::HIDDEN`].
+#[derive(Clone)]
 pub struct ProducerConfig {
     // --- Connection ---
     /// `bootstrap.servers` - A list of host/port pairs to use for establishing the
@@ -310,6 +315,121 @@ impl Default for ProducerConfig {
             two_phase_commit_enable: false,
             originals: HashMap::new(),
         }
+    }
+}
+
+/// Renders every field in declaration order, as the derive it replaces did,
+/// but never a secret.
+///
+/// The typed secrets are [`Password`]s inside `sasl_config` / `ssl_config` and
+/// render as [`Password::HIDDEN`] on their own. `originals` is the raw user
+/// map, so it renders through a sorted, borrowed view whose value is
+/// [`Password::HIDDEN`] for every key Java defines as `ConfigDef.Type.PASSWORD`
+/// (`SslConfigs::is_password_config`, `SaslConfigs::is_password_config`). Java
+/// never prints `originals()` at all; a derived `Debug` would print every value.
+impl fmt::Debug for ProducerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured exhaustively: a field added to the struct fails to
+        // compile until it is bound here, and a bound but unrendered field is
+        // an unused variable, which the lint rejects.
+        let Self {
+            bootstrap_servers,
+            client_id,
+            security_protocol,
+            sasl_config,
+            ssl_config,
+            batch_size,
+            linger_ms,
+            buffer_memory,
+            max_block_ms,
+            acks,
+            retries,
+            delivery_timeout_ms,
+            request_timeout_ms,
+            enable_idempotence,
+            max_request_size,
+            max_in_flight_requests_per_connection,
+            compression_type,
+            connections_max_idle_ms,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
+            socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms,
+            metadata_max_age_ms,
+            metadata_max_idle_ms,
+            partitioner_adaptive_partitioning_enable,
+            partitioner_availability_timeout_ms,
+            partitioner_ignore_keys,
+            partitioner_class,
+            transactional_id,
+            transaction_timeout_ms,
+            metrics_sample_window_ms,
+            metrics_num_samples,
+            metrics_recording_level,
+            two_phase_commit_enable,
+            originals,
+        } = self;
+        // Sorted so the rendering is deterministic; borrowed, so no key or
+        // value is copied.
+        let originals: BTreeMap<&str, &str> = originals
+            .iter()
+            .map(|(key, value)| {
+                let rendered = if SslConfigs::is_password_config(key) || SaslConfigs::is_password_config(key) {
+                    Password::HIDDEN
+                } else {
+                    value.as_str()
+                };
+                (key.as_str(), rendered)
+            })
+            .collect();
+        f.debug_struct("ProducerConfig")
+            .field("bootstrap_servers", bootstrap_servers)
+            .field("client_id", client_id)
+            .field("security_protocol", security_protocol)
+            .field("sasl_config", sasl_config)
+            .field("ssl_config", ssl_config)
+            .field("batch_size", batch_size)
+            .field("linger_ms", linger_ms)
+            .field("buffer_memory", buffer_memory)
+            .field("max_block_ms", max_block_ms)
+            .field("acks", acks)
+            .field("retries", retries)
+            .field("delivery_timeout_ms", delivery_timeout_ms)
+            .field("request_timeout_ms", request_timeout_ms)
+            .field("enable_idempotence", enable_idempotence)
+            .field("max_request_size", max_request_size)
+            .field("max_in_flight_requests_per_connection", max_in_flight_requests_per_connection)
+            .field("compression_type", compression_type)
+            .field("connections_max_idle_ms", connections_max_idle_ms)
+            .field("reconnect_backoff_ms", reconnect_backoff_ms)
+            .field("reconnect_backoff_max_ms", reconnect_backoff_max_ms)
+            .field("retry_backoff_ms", retry_backoff_ms)
+            .field("retry_backoff_max_ms", retry_backoff_max_ms)
+            .field("send_buffer_bytes", send_buffer_bytes)
+            .field("receive_buffer_bytes", receive_buffer_bytes)
+            .field("socket_connection_setup_timeout_ms", socket_connection_setup_timeout_ms)
+            .field("socket_connection_setup_timeout_max_ms", socket_connection_setup_timeout_max_ms)
+            .field("metadata_max_age_ms", metadata_max_age_ms)
+            .field("metadata_max_idle_ms", metadata_max_idle_ms)
+            .field(
+                "partitioner_adaptive_partitioning_enable",
+                partitioner_adaptive_partitioning_enable,
+            )
+            .field("partitioner_availability_timeout_ms", partitioner_availability_timeout_ms)
+            .field("partitioner_ignore_keys", partitioner_ignore_keys)
+            .field("partitioner_class", partitioner_class)
+            .field("transactional_id", transactional_id)
+            .field("transaction_timeout_ms", transaction_timeout_ms)
+            .field("metrics_sample_window_ms", metrics_sample_window_ms)
+            .field("metrics_num_samples", metrics_num_samples)
+            .field("metrics_recording_level", metrics_recording_level)
+            .field("two_phase_commit_enable", two_phase_commit_enable)
+            .field("originals", &originals)
+            .finish()
     }
 }
 
@@ -1653,5 +1773,113 @@ mod tests {
         assert_ne!(first.client_id, second.client_id);
         let n: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
         assert!(n >= 1, "Java's sequence starts at 1");
+    }
+
+    // -- Debug redaction -----------------------------------------------------
+
+    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
+    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// values: not through the typed `sasl_config` / `ssl_config` fields, and
+    /// not through the raw `originals` map, whose secret values are replaced by
+    /// `[hidden]` by key while every other value stays visible.
+    #[test]
+    fn test_debug_redacts_password_configs() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
+            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
+            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+            ("ssl.key.password", "key-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        props.insert("client.id".to_string(), "visible-client".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
+        let config = ProducerConfig::new(&props).unwrap();
+
+        // The secrets did reach the config, typed and raw; they are only hidden
+        // from `Debug`.
+        assert_eq!(config.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(config.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
+        assert_eq!(config.originals.get("ssl.key.password").map(String::as_str), Some("key-S3cr3t"));
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+            }
+            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            // Each secret is hidden twice: once as its typed field, once as its
+            // `originals` entry.
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), 2 * secrets.len(), "{rendered}");
+            for visible in [
+                "visible-host:9092",
+                "visible-client",
+                "\"PLAIN\"",
+                "/visible/truststore.pem",
+            ] {
+                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+            }
+        }
+
+        // `originals` renders sorted by key, with exactly the `Type.PASSWORD`
+        // values replaced.
+        let rendered = format!("{config:?}");
+        let expected_originals = concat!(
+            "originals: {",
+            "\"bootstrap.servers\": \"visible-host:9092\", ",
+            "\"client.id\": \"visible-client\", ",
+            "\"sasl.jaas.config\": \"[hidden]\", ",
+            "\"sasl.mechanism\": \"PLAIN\", ",
+            "\"ssl.key.password\": \"[hidden]\", ",
+            "\"ssl.keystore.certificate.chain\": \"[hidden]\", ",
+            "\"ssl.keystore.key\": \"[hidden]\", ",
+            "\"ssl.keystore.password\": \"[hidden]\", ",
+            "\"ssl.truststore.certificates\": \"[hidden]\", ",
+            "\"ssl.truststore.location\": \"/visible/truststore.pem\", ",
+            "\"ssl.truststore.password\": \"[hidden]\"",
+            "}",
+        );
+        assert!(rendered.contains(expected_originals), "{rendered}");
+    }
+
+    /// The hand-written `Debug` renders every field, in declaration order, as
+    /// the derive it replaced did. The expected names are scanned from this
+    /// file's struct definition, so the expectation cannot drift from it.
+    #[test]
+    fn test_debug_renders_every_field_in_declaration_order() {
+        let source = include_str!("producer_config.rs");
+        let start = source.find("pub struct ProducerConfig {").expect("struct definition");
+        let definition = &source[start..];
+        let end = definition.find("\n}\n").expect("end of struct definition");
+        let declared: Vec<&str> = definition[..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("    pub(crate) "))
+            .filter_map(|rest| rest.split_once(':').map(|(name, _)| name))
+            .collect();
+        assert_eq!(declared.first(), Some(&"bootstrap_servers"), "{declared:?}");
+        assert!(declared.contains(&"originals"), "{declared:?}");
+
+        let rendered = format!("{:#?}", ProducerConfig::default());
+        assert!(rendered.starts_with("ProducerConfig {\n"), "{rendered}");
+        // Top-level fields are the lines indented exactly one level.
+        let rendered_fields: Vec<&str> = rendered
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| !rest.starts_with(' '))
+            .filter_map(|rest| rest.split_once(": ").map(|(name, _)| name))
+            .collect();
+        assert_eq!(rendered_fields, declared);
     }
 }
