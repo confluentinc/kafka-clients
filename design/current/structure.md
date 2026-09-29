@@ -98,7 +98,8 @@ src/common/
 │                   # ssl/ (SslFactory), authenticator/, token/delegation/,
 │                   # scram/
 ├── config/         # ssl_configs, sasl_configs, ssl_client_auth,
-│                   # config_resource
+│                   # config_resource, types/password.rs (Password:
+│                   # Type.PASSWORD values, Display/Debug = "[hidden]")
 ├── record/         # record batches, compression framing
 ├── compress/       # gzip / snappy / lz4 / zstd
 ├── serialization/  # Serializer<T>, Deserializer<T> (sync, &[u8])

@@ -1,6 +1,8 @@
 # Milestone 15 — `Password` type and secret redaction
 
-**Status:** APPROVED (2026-09-29). Execution: Actor/Critic 85 on the branch below.
+**Status:** COMPLETE (2026-09-29) on the branch below; the user opens the PR. Phase 1 done via
+Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` after one Critic finding
+(§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). Phase 2 (§11) is proposed, **not approved**.
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -74,6 +76,17 @@ workspace crates, `tests`, Python bindings' `__repr__`s all checked). `KafkaProd
 safe pattern: a hand-written `Debug` printing only `sasl_config.mechanism` and ending with
 `finish_non_exhaustive()` (`src/common/network/sasl_channel_builder.rs:52`). `SaslClientAuthenticator`,
 which holds the plaintext password, has no `Debug`.
+
+**Correction (Critic 85, 2026-09-29): "latent" was wrong for two of the six wrappers.**
+`src/network_client.rs:1161-1175` logs every in-flight request with `{:?}` when a connection drops, a
+request times out, or a node is disconnected or closed (reached from `:991` → `:1018` → `:1121`,
+`disconnect` `:1534`, `close_connection` `:1543`). Java logs the redacting `toString()` there
+(`NetworkClient.java:405-409`). So `RenewDelegationTokenRequest` and `ExpireDelegationTokenRequest`
+leaked their HMAC at DEBUG level on that path until Commit B made their `Debug` delegate to `Display`.
+The same path still prints `AlterUserScramCredentialsRequest` (salt and salted password) and
+`IncrementalAlterConfigsRequest` (config values); both are Phase 2 (§11). The search behind the
+original claim looked for `{:?}` applied to the *config* and *token* types, not to the request enum
+that wraps them.
 
 ## 3. Scope decisions
 
@@ -172,6 +185,24 @@ type. Allowed — CLAUDE.md: the public API is not stable below 1.0.
 
 ### 4.3 `ProducerConfig`: hand-written `Debug`, `originals` redacted by key
 
+> **Amended after Critic 85 round 1 (fixup `868ea49d`).** The by-key design below was implemented in
+> Commit A/B and then replaced. Critic 85 showed it cannot match Java: `originals` holds **every** key
+> the user passed, so the predicates hid only the translated subset of Java's `Type.PASSWORD` keys.
+> Java's two OAuth `Type.PASSWORD` keys (`SaslConfigs.java:392`, `:402`), which this client does not
+> parse, and every unknown key (for example a serializer credential such as `basic.auth.user.info`)
+> printed in plaintext. Java never prints a raw `originals` value: `AbstractConfig.logAll()`
+> (`AbstractConfig.java:371-385`) prints only the values parsed for keys the `ConfigDef` defines, with
+> `Type.PASSWORD` values as `[hidden]`, and `logUnused()` (`:390-395`) prints key names only.
+>
+> **Decision (Manager): render `originals` as its sorted key set, no values** — the alternative §10.2
+> already listed. Every known non-secret value is already visible through the typed fields of the same
+> `Debug` output, so the raw map adds only *which* keys were supplied. The two predicates
+> `SslConfigs::is_password_config` / `SaslConfigs::is_password_config` then have no caller and were
+> removed with their tables and tests (both files carry a file-level `allow(dead_code)`, so lint would
+> never have flagged them). This closes the class permanently instead of chasing a key list; a future
+> `originals` map on `ConsumerConfig` / `AdminClientConfig` must render the same way (comments on both
+> structs say so). The paragraphs below are kept as the record of the superseded design.
+
 Java's `originals()` is the raw user map too, but Java never prints it; Rust's derive would. The
 `originals` values that are secrets are exactly the `Type.PASSWORD` keys — knowledge Java keeps in
 `ConfigDef`, which is out of scope. Minimal carrier of that knowledge, hosted on the structs that
@@ -215,8 +246,8 @@ src/common/config/
   types/
     mod.rs               # mod password; pub use password::Password;
     password.rs          # Password (Java: common.config.types.Password)
-  sasl_configs.rs        # jaas_config/password: Option<Password>; SaslConfigs::is_password_config
-  ssl_configs.rs         # six fields: Option<Password>; SslConfigs::is_password_config
+  sasl_configs.rs        # jaas_config/password: Option<Password>  (is_password_config removed, §4.3)
+  ssl_configs.rs         # six fields: Option<Password>            (is_password_config removed, §4.3)
 ```
 
 Import path per CLAUDE.md §2: `use crate::common::config::types::Password;` (parent-module
@@ -241,6 +272,21 @@ re-export, never `types::password::Password`).
 
 Both commits: `make verify` green (build, format-check, lint, workspace tests, check-bindings).
 
+**Fixup `868ea49d`** (after Critic 85 round 1, targets Commit B and also corrects Commit A): `originals`
+rendered as its sorted key set; both predicates removed; rustdoc on the impl, the struct,
+`apply_ssl_config_key`, `ConsumerConfig` and `AdminClientConfig` rewritten; test
+`test_debug_hides_secrets_and_renders_originals_as_key_set` replaces `test_debug_redacts_password_configs`
+(seven parsed PASSWORD keys + two OAuth keys + `basic.auth.user.info`, each with its own secret literal,
+asserted absent in `{:?}` and `{:#?}`; every key name present; `[hidden]` exactly seven times; the
+`bootstrap.servers` value once, through its typed field). Squashing note: `git rebase --autosquash` folds
+the fixup into B, so A would still add the predicates that B removes; the final tree is identical.
+
+**Verification actually run** (all green): `make verify` could not run as one target because its
+`build-c` step initialises the `kafka/` submodule (§10.4), so each Rust arm ran individually:
+`cargo build --all-features --release`, `cargo test --workspace`, `cargo test --features ffi`,
+`cargo test --all-features -- --skip __grpc` (includes the integration suite), `make check-bindings`,
+`cargo xtask format-check`, `cargo xtask lint`. C and Python suites were not re-run (no binding change, §3.4).
+
 ## 7. Tests
 
 ### 7.1 Java tests to translate
@@ -256,9 +302,11 @@ exist at the pinned SHA (HTTP 404 verified). Java exercises `Password` only thro
 - `ssl_configs.rs`: `{:?}` hides all six §3.1 fields, shows `truststore_location` / `keystore_type`.
 - `producer_config.rs`: build from props holding all seven §3.1 keys plus a non-secret key; `{:?}`
   contains none of the seven values, contains the non-secret value, contains `[hidden]`; also hides
-  the typed sub-config fields.
+  the typed sub-config fields. *As landed* (§6 fixup): the props also carry the two OAuth
+  `Type.PASSWORD` keys and an unknown key, and `originals` must render as exactly its sorted key set.
 - `consumer_config.rs`, `admin_client_config.rs`: `{:?}` hides JAAS + SSL secrets from props.
-- `is_password_config` (both structs): exhaustive over every `pub const` key on the struct.
+- ~~`is_password_config` (both structs): exhaustive over every `pub const` key on the struct.~~ Removed
+  with the predicates (§4.3 amendment).
 - `delegation_token.rs`: `debug_redacts_hmac` mirroring `display_redacts_hmac`.
 - Each of the six wrappers: `debug_redacted` mirroring the existing `test_display_redacted` /
   `display_redacts_*`.
@@ -274,10 +322,11 @@ exist at the pinned SHA (HTTP 404 verified). Java exercises `Password` only thro
    `toString` (`Display` + `Debug`), `value`.
 3. Tests per §7; `@RepeatedTest`/wire tests: N/A (no wire type changes).
 4. Blockers: none — no new dependency.
-5. `make verify` green; `cargo test --workspace` green.
+5. `make verify` green; `cargo test --workspace` green. *As run:* every Rust arm of `make verify`
+   individually (§6), because the `build-c` arm initialises the submodule.
 6. No duplicate: the only other `Password` identifier is the unrelated `admin::ConfigType::Password`
    enum variant (a `DescribeConfigs` type tag) — coexistence is fine, different modules.
-7. Items not in Java: `SslConfigs::is_password_config`, `SaslConfigs::is_password_config` — §4.3.
+7. Items not in Java: none remain — the two predicates were removed in the §6 fixup (§4.3 amendment).
    `Debug` impls are Rust-required (not new types).
 8. No TODO/FIXME.
 9. C/Python test suites: not re-run — no binding source changes (§3.4); `check-bindings` runs in
@@ -302,12 +351,18 @@ exist at the pinned SHA (HTTP 404 verified). Java exercises `Password` only thro
    `design/history/MILESTONES.md` (14 is currently missing); copy `COMMENTS.DONE.85.md` here.
 5. The user opens the PR. Repo artifacts (plan, branch, commits, PR text) carry no internal tracker identifiers.
 
+**Outcome:** one Critic round with one finding (§4.3 amendment), one fixup, second Critic round clean.
+Handoff done on 2026-09-29: `structure.md`, `status.md`, `MILESTONES.md` (14 and 15), `COMMENTS.DONE.85.md`
+copied here, this plan amended. Phase 2 (§11) awaits the user's approval.
+
 ## 10. Assumptions and open points for the reviewer
 
 1. **Certificates are hidden too** (`ssl.keystore.certificate.chain`, `ssl.truststore.certificates`)
    because Java types them PASSWORD. Say so if you would rather keep them visible.
 2. **`originals` redaction** is by key (§4.3). Alternative: print only the keys of `originals`. The
    by-key form is closer to Java's `logAll()` behaviour and more useful when debugging.
+   **Decided 2026-09-29: keys only** (§4.3 amendment). The "closer to `logAll()`" claim did not hold:
+   `logAll()` never prints an unknown key's value at all, and the by-key form printed it.
 3. **`Password` `Debug` == `Display` == `[hidden]`**, no type-name wrapper.
 4. **Java source access.** `kafka/` is not checked out. Agents will read the needed Java files
    read-only from `https://raw.githubusercontent.com/apache/kafka/26b251a451ce941d3d7a55e6487bcb7f16b5ad48/clients/src/main/java/org/apache/kafka/...`
@@ -320,3 +375,73 @@ exist at the pinned SHA (HTTP 404 verified). Java exercises `Password` only thro
 5. `resolve_password()` keeps returning `Option<&str>` (§3.2).
 6. No zeroize-on-drop (§3.5).
 7. Breaking the `pub` field types of `SslConfig` / `SaslConfig` is acceptable below 1.0.
+
+## 11. Phase 2 (proposed, NOT yet approved) — the same defect beyond the Phase-1 list
+
+Found by Actor 85 and independently verified by Critic 85 against the Java `toString()` at the
+pinned commit. Same technique as Phase 1 (§3.3): drop `Debug` from the derive list and delegate to
+the existing redacting `Display`, or hand-write it where no `Display` exists. Same agent number 85,
+one commit, Critic review, `COMMENTS.85.md` loop.
+
+### 11.1 Correction to §2 — two leaks were live, not latent
+
+`src/network_client.rs:1161-1175` logs the in-flight request with `{:?}` whenever a connection
+drops, a request times out, or a node is disconnected or closed. Java logs the redacting
+`toString()` (`NetworkClient.java:405-409`). Through that line, at DEBUG level:
+
+- `RenewDelegationTokenRequest` / `ExpireDelegationTokenRequest` leaked the HMAC until Phase 1
+  Commit B made their `Debug` delegate to `Display`. §2's "latent" claim was wrong for these two.
+- `AlterUserScramCredentialsRequest` **still** prints the salt and salted password — enough to
+  authenticate as that SCRAM user. Java masks both (`AlterUserScramCredentialsRequest.java:85-91`, `:96-97`).
+- `IncrementalAlterConfigsRequest` **still** prints every config value being altered. Java replaces
+  each with `"REDACTED"` (`IncrementalAlterConfigsRequest.java:111-118`, `:122-123`).
+
+### 11.2 Work items, in priority order
+
+| # | Item | Java reference | State |
+|---|---|---|---|
+| 1 | `network_client.rs:1161-1175`: log the request with `{}` (Display), as Java logs `toString()` | `NetworkClient.java:405-409` | **live path** |
+| 2 | `AlterUserScramCredentialsRequest`: `Debug` delegates to redacting `Display` | `AlterUserScramCredentialsRequest.java:85-97` | **live via #1** |
+| 3 | `IncrementalAlterConfigsRequest`: `Debug` delegates to redacting `Display` | `IncrementalAlterConfigsRequest.java:111-123` | **live via #1** |
+| 4 | `AlterUserScramCredentialsRequestBuilder`: `Debug` prints type only, as Java's `Builder.toString()` | `AlterUserScramCredentialsRequest.java:45-46` | latent |
+| 5 | `IncrementalAlterConfigsRequestBuilder`: same | `IncrementalAlterConfigsRequest.java:74-75` | latent |
+| 6 | `SaslAuthenticateRequestBuilder`: `Debug` delegates to its existing Java-matching `Display` | `SaslAuthenticateRequest.java:49-50` | latent |
+| 7 | `RenewDelegationTokenRequestBuilder`: same pattern | `RenewDelegationTokenRequest.java:66-74` | latent |
+| 8 | `ExpireDelegationTokenRequestBuilder`: same pattern | `ExpireDelegationTokenRequest.java:76-84` | latent |
+| 9 | `ConfigEntry`: `Debug` delegates to its redacting `Display`; this also fixes the derived `Debug` of `Config` and `AlterConfigOp`, which embed it | `ConfigEntry.java:183-186`, `Config.java:74-75`, `AlterConfigOp.java:119-124` | latent |
+| 10 | `ConfigEntryOptions` (Rust-only): hide `value` when `is_sensitive` | `ConfigEntry.java:183-186` | latent |
+| 11 | `CreateDelegationTokenResponseOptions` (Rust-only): hide `token_id` and `hmac` | `CreateDelegationTokenResponse.java:109-113` | latent |
+| 12 | `MockAdminClient` state holds mock config values unredacted; Java has no `toString()` | — | lowest; fold into #9 if its maps hold `ConfigEntry`, else document and skip |
+
+Tests: one `Debug` redaction test per item, same shape as Phase 1 (§7.2): distinctive secret literal
+absent, a non-secret field present, byte secrets asserted in their `Debug` rendering. For #1, a test
+that the disconnect/timeout log path formats requests through `Display` (assert on the rendered
+string of a request holding a secret).
+
+Not in Phase 2: the generated `*Data` types print their bytes, but so does Java's generated
+`toString()` (`Arrays.toString` in `MessageDataGenerator.generateFieldToString`); Java redacts only
+in the wrappers, and so does Rust after #1–#3.
+
+### 11.3 Also recorded
+
+When OAuth configuration is translated, its two `Type.PASSWORD` keys (`SaslConfigs.java:392`,
+`:402`) become `Password` fields like §3.1. `ProducerConfig`'s `originals` rendering no longer
+depends on a key list (§4.3 as amended), so nothing else needs updating for them.
+
+### 11.4 Rule updates Critic 85 suggested (for the user to decide; nothing in `CLAUDE.md` or `.claude/rules/` covers redaction today)
+
+1. **Java `toString()` redaction carries over to Rust `Debug`.** Where Java's `toString()` masks, omits or
+   replaces a value (`Password.HIDDEN`, `maskData(...)`, `"REDACTED"`, `Redacted`, `(redacted)`), the Rust
+   type must not derive `Debug`: delegate `Debug` to the redacting `Display`, or hand-write it with the same
+   masking, including nested `Builder` classes and Rust-only `*Options` types carrying the same values. A key
+   Java defines as `ConfigDef.Type.PASSWORD` is held as `Option<Password>`, never `Option<String>`.
+2. **Log lines use `{}` where Java logs `toString()`.** A translated log line formats a value the way the
+   Java line does; where Java relies on `toString()`, Rust uses `{}` (the `Display` translation), not `{:?}`.
+   Found at `src/network_client.rs:1161-1175` versus `NetworkClient.java:405-409`.
+3. **A raw user-property map renders as its key set.** A struct holding Java's `originals()` renders that
+   map in `Debug` as its key set only, because the map holds keys this client does not parse, so no per-key
+   filter can match what Java hides.
+
+The full rationale, with the evidence from this milestone, is in `critic-85-final-review.md` in this
+directory (the final state of Critic 85's `COMMENTS.85.md`: round-2 verification, the Phase 2 candidates
+with line references, and these rule suggestions; that filename is git-ignored everywhere by design).

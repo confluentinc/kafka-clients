@@ -1,5 +1,15 @@
-# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+# Current Status: Milestones 1–15 complete — client tracks Apache Kafka 4.3.1
 
+> **Current state (2026-09-29):** Milestone 15 landed secret redaction aligned
+> with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
+> of `SslConfig` / `SaslConfig` are typed `Password`, `ProducerConfig` renders its
+> raw `originals` map as keys only, and `DelegationToken`,
+> `UserScramCredentialUpsertion` and the six SASL / delegation-token wrappers
+> delegate `Debug` to their redacting `Display`. Milestone 14 added the
+> `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
+> ducktape system tests. See `design/history/MILESTONES.md` and
+> `design/history/Milestone-15-password-redaction/PLAN.md`.
+>
 > **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
 > 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
 > (`a18251b`) to 4.3.1 (`26b251a451`), synced the wire-spec corpus
