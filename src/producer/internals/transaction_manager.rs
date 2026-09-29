@@ -7915,7 +7915,7 @@ mod tests {
         let Error::GroupAuthorization(group_error) = &error else {
             panic!("expected a GroupAuthorization error, got {error:?}");
         };
-        assert_eq!(group_error.group_id(), CONSUMER_GROUP_ID);
+        assert_eq!(group_error.group_id(), Some(CONSUMER_GROUP_ID));
         assert!(!manager.has_pending_offset_commits());
         assert_abortable_error(&mut manager, &mut pending, Errors::GroupAuthorizationFailed);
     }
