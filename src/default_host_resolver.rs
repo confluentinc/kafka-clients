@@ -46,6 +46,17 @@ impl DefaultHostResolver {
     /// which Java's `HOST_PORT_PATTERN` accepts.
     pub(crate) const EMPTY_HOST_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
+    /// The host name of [`Self::EMPTY_HOST_ADDRESS`]: the JDK's
+    /// `loopbackAddress()` builds it as `new Inet4Address("localhost", ...)`.
+    ///
+    /// It is what Java's `InetSocketAddress.getHostString()` returns for
+    /// `new InetSocketAddress("", port)`: the host resolves, so the socket
+    /// address keeps no literal host name and falls back to the resolved
+    /// address's name. `ClientUtils::parse_and_validate_addresses` uses it as
+    /// the bootstrap node host for an empty URL host, so the node is never
+    /// empty (`Node::is_empty`) and TLS has a server name.
+    pub(crate) const EMPTY_HOST_NAME: &'static str = "localhost";
+
     /// Creates a new `DefaultHostResolver`.
     pub fn new() -> Self {
         Self
