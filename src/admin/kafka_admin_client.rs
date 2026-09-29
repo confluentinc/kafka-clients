@@ -439,52 +439,16 @@ impl KafkaAdminClient {
     }
 
     /// Submits a call to the background task, failing it immediately if the
-    /// client is closed. Mirrors `AdminClientRunnable.call` / `enqueue`.
+    /// client is closing. Mirrors `AdminClientRunnable.call` / `enqueue`; see
+    /// [`runnable_call`], which every submission path shares.
     fn submit(&self, call: Call) {
-        if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) {
-            let mut call = call;
-            // `new IllegalStateException("Cannot accept new calls when AdminClient
-            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
-            // (finding 247a).
-            call.handle_failure(&Error::local_illegal_state(
-                "Cannot accept new calls when AdminClient is closing.",
-            ));
-            return;
-        }
-        // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
-        // incompatible with a `bootstrap.controllers` client (KIP-919).
-        if self.shared.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers()
-        {
-            let mut call = call;
-            // `new UnsupportedEndpointTypeException("This Admin API is not yet
-            // supported when communicating directly with the controller quorum.")`
-            // (`KafkaAdminClient.java:1591-1593`). Spelling it
-            // `Error::unsupported_version` gave it code 35, which
-            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
-            // retry instead of failing the call (finding 247b).
-            //
-            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
-            // non-retriable, non-`UnsupportedVersionException` error on a call that
-            // has not yet passed its deadline is `handleFailure(throwable)`
-            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
-            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
-                "This Admin API is not yet supported when communicating directly with the controller quorum.",
-            )));
-            return;
-        }
-        match self.shared.admin_tx.send(call) {
-            Ok(()) => self.shared.wakeup.notify_one(),
-            Err(mpsc::error::SendError(mut call)) => {
-                // `new TimeoutException("The AdminClient thread has exited.")`
-                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
-                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
-                // so the user sees exactly a `TimeoutException` — a
-                // `RetriableException`. `illegal_state` sits outside the
-                // `KafkaException` hierarchy entirely, so it answered `false` to both
-                // `is_retriable_error()` and `is_kafka_error()`.
-                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
-            },
-        }
+        runnable_call(
+            &self.shared.admin_tx,
+            &self.shared.wakeup,
+            &self.shared.shutdown,
+            self.shared.metadata_manager.using_bootstrap_controllers(),
+            call,
+        );
     }
 
     fn now(&self) -> i64 {
@@ -497,6 +461,8 @@ impl KafkaAdminClient {
         DriverContext {
             tx: self.shared.admin_tx.clone(),
             wakeup: Arc::clone(&self.shared.wakeup),
+            shutdown: Arc::clone(&self.shared.shutdown),
+            using_bootstrap_controllers: self.shared.metadata_manager.using_bootstrap_controllers(),
             time_provider: Arc::clone(&self.shared.time_provider),
             log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
@@ -636,14 +602,9 @@ impl KafkaAdminClient {
                     handle_list_failure,
                     Box::new(|| false),
                 );
-                match ctx.tx.send(list_call) {
-                    Ok(()) => ctx.wakeup.notify_one(),
-                    Err(mpsc::error::SendError(mut call)) => {
-                        // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`;
-                        // see `Self::submit`.
-                        call.handle_failure(&Error::timeout("The AdminClient task has exited."));
-                    },
-                }
+                // `runnable.call(new Call(..) {..}, nowList)` in Java: the same
+                // closing gate as a user-submitted call.
+                ctx.call(list_call);
             }
             HandleResult::Done
         });
@@ -765,8 +726,96 @@ impl KafkaAdminClient {
 struct DriverContext {
     tx: mpsc::UnboundedSender<Call>,
     wakeup: Arc<Notify>,
+    /// The hard-shutdown deadline [`runnable_call`] gates on, shared with
+    /// `KafkaAdminClient::submit` so a driver follow-up is rejected exactly when
+    /// a user call would be.
+    shutdown: Arc<ShutdownSignal>,
+    using_bootstrap_controllers: bool,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     log_context: LogContext,
+}
+
+impl DriverContext {
+    /// `runnable.call(call, now)`: queues a call issued by a driver or by a
+    /// response hook through the same path as `KafkaAdminClient::submit`.
+    fn call(&self, call: Call) {
+        runnable_call(&self.tx, &self.wakeup, &self.shutdown, self.using_bootstrap_controllers, call);
+    }
+}
+
+/// Initiates a new call on the admin I/O task, or fails it at once when the
+/// task cannot accept it. The single submission path for user calls
+/// (`KafkaAdminClient::submit`), `AdminApiDriver` follow-ups
+/// ([`maybe_send_requests`]) and response-hook follow-ups (`listGroups`'
+/// per-broker calls), as `AdminClientRunnable.call` is in Java.
+///
+/// Translated from `AdminClientRunnable.call` (`KafkaAdminClient.java:1598-1609`)
+/// and the hand-off half of `enqueue` (`:1563-1588`):
+///
+/// 1. Once `close()` has published the hard-shutdown deadline, reject the call
+///    with `IllegalStateException("Cannot accept new calls when AdminClient is
+///    closing.")` (`:1599-1601`). This applies to driver follow-ups
+///    too: Java's `maybeSendRequests` goes through `runnable.call`
+///    (`:5110`), so a failure hook that runs during the I/O task's final
+///    `fail_all_remaining` and asks for the next fulfillment request gets this
+///    error instead of queueing a call nobody will drain.
+/// 2. Reject a call whose endpoint a `bootstrap.controllers` client cannot
+///    serve (`:1602-1605`).
+/// 3. Otherwise hand it to the I/O task and wake the task's poll
+///    (`client.wakeup()`, `:1582`). If the task has stopped accepting calls —
+///    its receiver is closed (the `finally`'s `closing = true`) or gone — fail it
+///    with
+///    `TimeoutException("The AdminClient thread has exited.")` (`:1585-1586`).
+fn runnable_call(
+    tx: &mpsc::UnboundedSender<Call>,
+    wakeup: &Notify,
+    shutdown: &ShutdownSignal,
+    using_bootstrap_controllers: bool,
+    mut call: Call,
+) {
+    // Java checks `hardShutdownTimeMs`, not the runnable's `closing` flag: the
+    // latter is only set by the I/O task's `finally` and gates `enqueue` below.
+    // Rust's `ShutdownSignal::closing` is set by both `close()` and
+    // `fail_all_remaining`, so gating on it would answer a call submitted after
+    // a panicked loop with this error instead of Java's "thread has exited".
+    if shutdown.hard_shutdown_deadline_ms.load(std::sync::atomic::Ordering::Acquire)
+        != KafkaAdminClient::NO_HARD_SHUTDOWN
+    {
+        // Java's text verbatim (finding 247a).
+        call.handle_failure(&Error::local_illegal_state(
+            "Cannot accept new calls when AdminClient is closing.",
+        ));
+        return;
+    }
+    // Reject calls whose endpoint is incompatible with a `bootstrap.controllers`
+    // client (KIP-919).
+    if using_bootstrap_controllers && !call.node_provider.supports_use_controllers() {
+        // `new UnsupportedEndpointTypeException("This Admin API is not yet
+        // supported when communicating directly with the controller quorum.")`.
+        // Spelling it `Error::unsupported_version` gave it code 35, which
+        // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+        // retry instead of failing the call (finding 247b).
+        //
+        // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
+        // non-retriable, non-`UnsupportedVersionException` error on a call that
+        // has not yet passed its deadline is `handleFailure(throwable)`
+        // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+        call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+            "This Admin API is not yet supported when communicating directly with the controller quorum.",
+        )));
+        return;
+    }
+    match tx.send(call) {
+        Ok(()) => wakeup.notify_one(),
+        Err(mpsc::error::SendError(mut call)) => {
+            // `handleTimeoutFailure` short-circuits on `cause instanceof
+            // TimeoutException` (`:969-970`), so the user sees exactly a
+            // `TimeoutException` — a `RetriableException`. `illegal_state` sits
+            // outside the `KafkaException` hierarchy entirely, so it answered
+            // `false` to both `is_retriable_error()` and `is_kafka_error()`.
+            call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
+        },
+    }
 }
 
 /// Kicks off a driver-backed RPC: polls the driver for its initial requests and
@@ -792,15 +841,9 @@ where
     // path, where the driver mutex may already be poisoned (see there).
     let specs = driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).poll();
     for spec in specs {
-        let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
-        match ctx.tx.send(call) {
-            Ok(()) => ctx.wakeup.notify_one(),
-            Err(mpsc::error::SendError(mut call)) => {
-                // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`; see
-                // `KafkaAdminClient::submit`.
-                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
-            },
-        }
+        // `runnable.call(newCall(driver, spec), currentTimeMs)`
+        // (`KafkaAdminClient.java:5110`): the closing gate applies here too.
+        ctx.call(new_driver_call(Arc::clone(driver), spec, ctx.clone()));
     }
 }
 
@@ -6746,10 +6789,10 @@ mod tests {
         assert_eq!(err3.error(), Errors::UnknownTopicId);
     }
 
-    /// `KafkaAdminClient.java:1573-1574` fails a call submitted after the I/O
+    /// `KafkaAdminClient.java:1585-1586` fails a call submitted after the I/O
     /// thread is gone with `new TimeoutException("The AdminClient thread has
     /// exited.")`, and `handleTimeoutFailure` short-circuits on
-    /// `cause instanceof TimeoutException` (`:959-961`) so the user sees exactly a
+    /// `cause instanceof TimeoutException` (`:969-970`) so the user sees exactly a
     /// `TimeoutException` — i.e. a `RetriableException`.
     ///
     /// This used to be `Error::local_illegal_state`, whose `ErrorHierarchy` is empty, so
@@ -6760,7 +6803,7 @@ mod tests {
     async fn a_call_submitted_after_the_io_task_exits_fails_with_a_timeout() {
         let (admin, runnable, _time, _nodes) = env();
         // Dropping the runnable drops the receiving end of the call channel, which
-        // is what `submit`'s `SendError` arm observes.
+        // is what `runnable_call`'s `SendError` arm observes.
         drop(runnable);
 
         let result = admin.list_topics_with_options(ListTopicsOptions::new());
@@ -8656,6 +8699,8 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
+            shutdown: Arc::new(ShutdownSignal::new()),
+            using_bootstrap_controllers: false,
             time_provider: Arc::new(move || now),
             log_context: LogContext::new("[test] "),
         };
@@ -8695,6 +8740,8 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
+            shutdown: Arc::new(ShutdownSignal::new()),
+            using_bootstrap_controllers: false,
             time_provider: Arc::new(move || now),
             log_context: LogContext::new("[test] "),
         };
@@ -13043,7 +13090,7 @@ mod tests {
     /// Regression for finding 247(a). Java rejects a call submitted once the
     /// client is closing with
     /// `new IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")` (`KafkaAdminClient.java:1589`). The Rust text had drifted to
+    /// closing.")` (`KafkaAdminClient.java:1601`). The Rust text had drifted to
     /// "The AdminClient is closed.", which is not the sanctioned
     /// "exception"->"error" rewording.
     #[tokio::test]
@@ -13563,6 +13610,193 @@ mod tests {
             .get()
             .await
             .expect("all() of a completed createTopics must succeed");
+    }
+
+    /// Steps `runnable` until exactly one `InitProducerId` request is in flight
+    /// and returns the number queued, so a `fenceProducers` test can act while
+    /// the driver holds the next key's fulfillment back.
+    async fn pump_until_one_init_producer_id_in_flight(runnable: &mut AdminClientRunnable<MockClient>) -> usize {
+        let count = |runnable: &mut AdminClientRunnable<MockClient>| {
+            runnable
+                .client_mut()
+                .requests()
+                .iter()
+                .filter(|r| *r.api_key() == crate::common::ApiKeys::INIT_PRODUCER_ID)
+                .count()
+        };
+        for _ in 0..40 {
+            if count(runnable) >= 1 {
+                break;
+            }
+            runnable.run_once().await;
+        }
+        // A few more iterations: the driver must NOT issue the second key's
+        // request while the first is outstanding (`AdminApiDriver.java:381-383`).
+        for _ in 0..5 {
+            runnable.run_once().await;
+        }
+        count(runnable)
+    }
+
+    /// Regression for A2: every key of a driver RPC resolves on `close()`, even
+    /// one whose fulfillment request had not been issued yet.
+    ///
+    /// The driver issues at most one fulfillment request per broker at a time
+    /// (`AdminApiDriver.java:381-383`), so with one broker `b`'s `InitProducerId`
+    /// is only created once `a`'s completes or fails. `close(0)` makes the I/O
+    /// task exit with `a`'s call in flight; the `finally` fails it, and its
+    /// failure hook asks the driver for the next request. Java routes that
+    /// through `runnable.call(..)` (`KafkaAdminClient.java:5110`), which rejects
+    /// it once the shutdown deadline is set (`:1599-1601`), so `b` fails with
+    /// "Cannot accept new calls when AdminClient is closing." Rust used to send
+    /// it straight into the submission channel after the final drain; the
+    /// runnable was then dropped with it inside and `b` never resolved.
+    #[tokio::test]
+    async fn close_resolves_a_driver_key_whose_fulfillment_was_not_yet_issued() {
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        let coordinator = &nodes[0];
+        // One batched lookup maps both transactional ids to the only broker.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("a", coordinator), ("b", coordinator)]));
+
+        let result =
+            admin.fence_producers_with_options(&["a".to_string(), "b".to_string()], FenceProducersOptions::new());
+        assert_eq!(
+            pump_until_one_init_producer_id_in_flight(&mut runnable).await,
+            1,
+            "exactly one key's InitProducerId must be in flight; the other's is held back"
+        );
+
+        // `close(Duration.ZERO)`: no task was spawned, so this only publishes the
+        // closing gate and a hard deadline of `now`. The loop then exits at once
+        // with the in-flight call still outstanding.
+        admin.close_with_timeout(Duration::ZERO).await;
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must exit once the hard deadline has passed");
+        // Dropping the runnable drops anything still queued in its channel, as
+        // the end of the I/O task does in production.
+        drop(runnable);
+
+        let a = result.producer_id("a").expect("a is a requested key");
+        let b = result.producer_id("b").expect("b is a requested key");
+        assert!(
+            a.is_done() && b.is_done(),
+            "every key must resolve on close(), including the one whose fulfillment was not yet \
+             issued (a: {}, b: {})",
+            a.is_done(),
+            b.is_done()
+        );
+
+        // Which key the driver issued first follows its map order, so identify
+        // the two outcomes by their errors rather than by name.
+        let mut messages = vec![
+            a.get().await.expect_err("close(0) aborts the fence").to_string(),
+            b.get().await.expect_err("close(0) aborts the fence").to_string(),
+        ];
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec![
+                "LocalIllegalStateError: Cannot accept new calls when AdminClient is closing.".to_string(),
+                "TimeoutError: The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)"
+                    .to_string(),
+            ],
+            "the in-flight key times out with the exiting task; the unissued one is rejected by the \
+             closing gate with Java's IllegalStateException text"
+        );
+    }
+
+    /// Regression for A3: a driver RPC issued after `close()` fails with Java's
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")` (`KafkaAdminClient.java:1599-1601`, reached through
+    /// `invokeDriver` → `maybeSendRequests` → `runnable.call`), exactly like a
+    /// plain call. It used to bypass the gate: with the I/O task gone the
+    /// channel send failed and the key got a retriable
+    /// `TimeoutException("The AdminClient thread has exited.")` instead.
+    #[tokio::test]
+    async fn a_driver_rpc_issued_after_close_fails_with_the_closing_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        admin.close_with_timeout(Duration::ZERO).await;
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("with no work the I/O task exits as soon as close() is called");
+        drop(runnable);
+
+        let result = admin.fence_producers_with_options(&["a".to_string()], FenceProducersOptions::new());
+        let future = result.producer_id("a").expect("a is a requested key");
+        assert!(future.is_done(), "a call rejected by the closing gate resolves at once");
+        let error = future.get().await.expect_err("a call issued after close() must fail");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        assert!(
+            !error.is_retriable_error(),
+            "Java's IllegalStateException is not retriable, unlike the TimeoutException it replaced: {error:?}"
+        );
+    }
+
+    /// Regression for N2: a follow-up call issued during the I/O task's
+    /// shutdown tail resolves instead of hanging, even when the loop ended
+    /// without `close()` having set the closing gate.
+    ///
+    /// Java's `finally` starts with `closing = true` (`KafkaAdminClient.java:1474`),
+    /// so `enqueue` rejects anything submitted from then on with
+    /// `TimeoutException("The AdminClient thread has exited.")` (`:1576-1586`).
+    /// Here the loop ends in a panic, so only that flag can stop the follow-up
+    /// the driver issues when the `finally` fails the in-flight key: without it
+    /// the call was queued after the final drain and dropped with the runnable.
+    #[tokio::test]
+    async fn a_follow_up_issued_in_the_shutdown_tail_after_a_panic_resolves() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[]);
+        let coordinator = &nodes[0];
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("a", coordinator), ("b", coordinator)]));
+        let result =
+            admin.fence_producers_with_options(&["a".to_string(), "b".to_string()], FenceProducersOptions::new());
+        assert_eq!(pump_until_one_init_producer_id_in_flight(&mut runnable).await, 1);
+
+        // End the loop with a panic (see `a_panicking_io_task_still_runs_its_finally`):
+        // an already-expired call whose failure hook panics once.
+        let now = time.now.load(Ordering::Acquire);
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_fired = Arc::clone(&fired);
+        admin.submit(Call::new(
+            "panicOnPurpose",
+            now - 1,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| unreachable!("the call expires before it is ever sent")),
+            Box::new(|_response, _now, _cur_node| HandleResult::Done),
+            Box::new(move |_error| {
+                if !hook_fired.swap(true, Ordering::AcqRel) {
+                    panic!("injected panic inside the I/O loop");
+                }
+            }),
+            Box::new(|| false),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must reach its finally after a panic");
+        assert!(fired.load(Ordering::Acquire), "the injected panic must actually have fired");
+        assert_eq!(
+            admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),
+            KafkaAdminClient::NO_HARD_SHUTDOWN,
+            "precondition: close() was never called, so the closing gate is not set"
+        );
+        drop(runnable);
+
+        let a = result.producer_id("a").expect("a is a requested key");
+        let b = result.producer_id("b").expect("b is a requested key");
+        assert!(a.is_done() && b.is_done(), "every key must resolve after the task exits");
+        for future in [a, b] {
+            let error = future.get().await.expect_err("the task exited before the fence finished");
+            assert!(error.is_timeout_error(), "got {error:?}");
+            assert!(
+                error.message().starts_with("The AdminClient thread has exited."),
+                "got {error:?}"
+            );
+        }
     }
 
     /// Java publishes the hard-shutdown deadline through a compare-and-set loop
