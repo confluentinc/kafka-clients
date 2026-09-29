@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::admin::KafkaAdminClient;
-use crate::common::errors::{DisconnectError, TimeoutError};
+use crate::common::errors::{DisconnectError, TimeoutError, UnsupportedEndpointTypeError};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::{ExponentialBackoff, LogContext, Time};
@@ -75,6 +75,97 @@ impl ShutdownSignal {
             hard_shutdown_deadline_ms: AtomicI64::new(KafkaAdminClient::NO_HARD_SHUTDOWN),
         }
     }
+
+    /// The rejection half of `AdminClientRunnable.call`
+    /// (`KafkaAdminClient.java:1598-1609`): returns the call when it may be
+    /// enqueued, and otherwise fails it and returns `None`.
+    ///
+    /// Every new call passes this gate: user calls, driver and `listGroups`
+    /// follow-ups (through `runnable_call` in `kafka_admin_client.rs`) and the
+    /// quota-retry follow-ups a response hook returns as [`HandleResult::NewCall`]
+    /// (Java's `runnable.call(call, now)` at `:1880`, `:2025`, `:2098`, `:3257`).
+    ///
+    /// 1. Once `close()` has published the hard-shutdown deadline, reject with
+    ///    `IllegalStateException("Cannot accept new calls when AdminClient is
+    ///    closing.")` (`:1599-1601`).
+    /// 2. Reject a call whose endpoint a `bootstrap.controllers` client cannot
+    ///    serve (`:1602-1605`).
+    ///    Like Java's `call.fail(now, ..)`, a call whose deadline has already
+    ///    passed gets a `TimeoutException` caused by the rejection.
+    pub(crate) fn admit_new_call(
+        &self,
+        using_bootstrap_controllers: bool,
+        retry_backoff: &ExponentialBackoff,
+        now: i64,
+        mut call: Call,
+    ) -> Option<Call> {
+        // Java checks `hardShutdownTimeMs`, not the runnable's `closing` flag: the
+        // latter is only set by the I/O task's `finally` and gates `enqueue`.
+        // Rust's `ShutdownSignal::closing` is set by both `close()` and
+        // `fail_all_remaining`, so gating on it would answer a call submitted after
+        // a panicked loop with this error instead of Java's "thread has exited".
+        if self.hard_shutdown_deadline_ms.load(Ordering::Acquire) != KafkaAdminClient::NO_HARD_SHUTDOWN {
+            // Java's text verbatim (finding 247a).
+            call.handle_failure(&Error::local_illegal_state(
+                "Cannot accept new calls when AdminClient is closing.",
+            ));
+            return None;
+        }
+        // Reject calls whose endpoint is incompatible with a `bootstrap.controllers`
+        // client (KIP-919).
+        if using_bootstrap_controllers && !call.node_provider.supports_use_controllers() {
+            // `new UnsupportedEndpointTypeException("This Admin API is not yet
+            // supported when communicating directly with the controller quorum.")`.
+            // Spelling it `Error::unsupported_version` gave it code 35, which
+            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+            // retry instead of failing the call (finding 247b).
+            let error = Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+                "This Admin API is not yet supported when communicating directly with the controller quorum.",
+            ));
+            // Java hands it to `call.fail(now, ..)` (`KafkaAdminClient.java:904-937`).
+            // A new call has no node, and the error is neither an
+            // `UnsupportedVersionException` nor retriable, so the branches that
+            // can be reached are: fail outright once the runnable is `closing`;
+            // otherwise count the try and fail with `handleTimeoutFailure` if the
+            // deadline has passed (`timeoutMs <= 0`) or with `handleFailure` if not.
+            if self.closing.load(Ordering::Acquire) {
+                call.handle_failure(&error);
+                return None;
+            }
+            // `nextAllowedTryMs = now + retryBackoff.backoff(tries++)`: the call
+            // never runs again, but both fields appear in the timeout message.
+            call.next_allowed_try_ms = now + retry_backoff.backoff(call.tries as i64);
+            call.tries += 1;
+            if calc_timeout_ms_remaining_as_int(now, call.deadline_ms) <= 0 {
+                handle_timeout_failure(call, now, error);
+            } else {
+                call.handle_failure(&error);
+            }
+            return None;
+        }
+        Some(call)
+    }
+}
+
+/// Wraps a non-timeout cause as a timeout and fails the call terminally.
+///
+/// Translated from `Call.handleTimeoutFailure`.
+fn handle_timeout_failure(mut call: Call, now: i64, cause: Error) {
+    let error = if cause.error() == Errors::RequestTimedOut {
+        cause
+    } else {
+        // `new TimeoutException(this + " timed out at " + now + " after " + tries
+        // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
+        // renders through `Call.toString()` (`:1001-1004`).
+        //
+        // The message used to gain an invented `"Aborted due to timeout: "`
+        // prefix (a string that appears nowhere in the Kafka tree), drop the
+        // `Call(...)` rendering, and append the cause as text — which left
+        // `Error::source()` empty where Java's `getCause()` is populated.
+        let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
+        Error::Timeout(TimeoutError::with_source(message, cause))
+    };
+    call.handle_failure(&error);
 }
 
 /// The background task that assigns nodes to calls, sends requests, and routes
@@ -207,7 +298,21 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             );
         }
 
-        // finally: time out any remaining calls, then close the client.
+        // finally: `closing = true` (`KafkaAdminClient.java:1474`), which makes
+        // `enqueue` reject every later call with "The AdminClient thread has
+        // exited." (`:1576-1586`). Closing the receiver is that flag: from here
+        // on a send fails, so `runnable_call` fails the call at once. That
+        // covers a call submitted while `client.close()` below is awaited, and a
+        // follow-up that a failure hook run by `fail_all_remaining` issues when
+        // the loop ended without `close()` having set the closing gate (a panic).
+        // Without it such a call is queued after the final drain, the runnable
+        // is dropped with it still in the channel, and its future never
+        // resolves. Calls already buffered can still be drained, so
+        // `fail_all_remaining` fails them as Java's
+        // `handleTimeouts(newCalls, ..)` does.
+        self.admin_rx.close();
+
+        // Time out any remaining calls, then close the client.
         let now = self.time.milliseconds();
         self.fail_all_remaining(now);
         self.client.close().await;
@@ -673,7 +778,23 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                                 }
                             },
                             HandleResult::NewCall(new_call) => {
-                                self.pending_calls.push(*new_call);
+                                // `runnable.call(call, now)`: the same gate as
+                                // every other new call. `enqueue`'s half —
+                                // `newCalls.add(call)` unless the `finally` has
+                                // set `closing` — always accepts here, because
+                                // response hooks only run inside the loop,
+                                // before `run()` closes `admin_rx`. Pushing
+                                // straight to `pending_calls` is what the next
+                                // `drain_new_calls` would do with it.
+                                if let Some(mut new_call) = self.shutdown.admit_new_call(
+                                    self.metadata_manager.using_bootstrap_controllers(),
+                                    &self.retry_backoff,
+                                    now,
+                                    *new_call,
+                                ) {
+                                    new_call.cur_node = None;
+                                    self.pending_calls.push(new_call);
+                                }
                             },
                             HandleResult::Retry(err) => {
                                 self.fail_call(call, now, err);
@@ -718,7 +839,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
         // If the call has timed out, fail.
         if calc_timeout_ms_remaining_as_int(now, call.deadline_ms) <= 0 {
-            self.handle_timeout_failure(call, now, error);
+            handle_timeout_failure(call, now, error);
             return;
         }
         // If the exception is not retriable, fail.
@@ -728,7 +849,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
         // If we are out of retries, fail.
         if call.tries > self.max_retries {
-            self.handle_timeout_failure(call, now, error);
+            handle_timeout_failure(call, now, error);
             return;
         }
         // Otherwise, retry. `maybeRetry` re-queues into pending calls by
@@ -738,27 +859,6 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             MaybeRetryOutcome::Requeue => self.pending_calls.push(call),
             MaybeRetryOutcome::Handled => {},
         }
-    }
-
-    /// Wraps a non-timeout cause as a timeout and fails the call terminally.
-    ///
-    /// Translated from `Call.handleTimeoutFailure`.
-    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: Error) {
-        let error = if cause.error() == Errors::RequestTimedOut {
-            cause
-        } else {
-            // `new TimeoutException(this + " timed out at " + now + " after " + tries
-            // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
-            // renders through `Call.toString()` (`:1001-1004`).
-            //
-            // The message used to gain an invented `"Aborted due to timeout: "`
-            // prefix (a string that appears nowhere in the Kafka tree), drop the
-            // `Call(...)` rendering, and append the cause as text — which left
-            // `Error::source()` empty where Java's `getCause()` is populated.
-            let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
-            Error::Timeout(TimeoutError::with_source(message, cause))
-        };
-        call.handle_failure(&error);
     }
 
     /// Fails all remaining calls (finally-block on shutdown).
