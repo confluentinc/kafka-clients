@@ -23,6 +23,7 @@ use log::warn;
 
 use super::HostResolver;
 use crate::common::Error;
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -59,11 +60,63 @@ impl ClientUtils {
 
     /// Parse and validate a list of bootstrap server URLs into socket addresses.
     ///
-    /// Each entry should be a `"host:port"` string. Hostnames are resolved via DNS.
-    /// Invalid entries (embedded whitespace, missing or invalid port) cause an
-    /// immediate error, matching Java's `ConfigException` behavior.
+    /// Each entry should be a `"host:port"` string. Invalid entries (embedded
+    /// whitespace, missing or invalid port) cause an immediate error, matching
+    /// Java's `ConfigException` behavior.
     ///
     /// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
+    /// The `(AbstractConfig)` overload is covered by callers passing their
+    /// config's `bootstrap.servers` and typed `client.dns.lookup`; the
+    /// `(List<String>, String)` overload is [`ClientDnsLookup::for_config`]
+    /// followed by this method.
+    ///
+    /// Each returned pair is the host string the client connects to (Java's
+    /// `InetSocketAddress.getHostString()`, which becomes the bootstrap
+    /// `Node`'s host) and one address it resolved to at validation time. As
+    /// in Java, the per-connection resolution happens later, from the host
+    /// string, in `ClusterConnectionStates` via [`Self::resolve`]; the resolved
+    /// address here only proves the host resolvable (and carries the port).
+    ///
+    /// Per `client_dns_lookup`, mirroring Java's branches:
+    ///
+    /// - [`ClientDnsLookup::UseAllDnsIps`]: exactly **one** entry per URL,
+    ///   keyed by the literal host from the URL (Java's
+    ///   `new InetSocketAddress(host, port)`). The host is not expanded into
+    ///   one entry per IP — that would create duplicate bootstrap nodes for
+    ///   the same broker; `use_all_dns_ips` walks the IPs at connect time. A
+    ///   host that does not resolve is logged and skipped.
+    /// - [`ClientDnsLookup::ResolveCanonicalBootstrapServersOnly`]: one entry
+    ///   per address the host resolves to (Java's `InetAddress.getAllByName`),
+    ///   keyed by that address's canonical host name (Java's
+    ///   `getCanonicalHostName()`). A host that does not resolve at all is an
+    ///   error (Java's `UnknownHostException` → `ConfigException`); a canonical
+    ///   name that does not resolve is logged and skipped.
+    ///
+    /// # Deviation: canonical host name
+    ///
+    /// Java's `getCanonicalHostName()` performs a reverse-DNS (PTR) lookup and,
+    /// when that fails, returns the address's textual IP. The Rust standard
+    /// library (and tokio) expose no reverse-DNS API, and this crate has no DNS
+    /// dependency, so the canonical name is always the textual IP — i.e. the
+    /// result Java produces when the reverse lookup fails. The per-address
+    /// expansion and the resolvability checks are otherwise identical.
+    ///
+    /// The consequence is that in this mode **the bootstrap `Node`'s host is
+    /// always the textual IP**, and that host is the TLS peer host:
+    ///
+    /// - **TLS (`SSL` / `SASL_SSL`)**: the SNI value and the server name that
+    ///   hostname verification checks (on by default,
+    ///   `ssl.endpoint.identification.algorithm=https`) are the IP address.
+    ///   Brokers whose certificates carry only DNS-name SANs (no IP SAN) are
+    ///   therefore rejected during the handshake, and every bootstrap
+    ///   connection fails. Java, given working PTR records, connects to the
+    ///   FQDN and verification passes. Before `client.dns.lookup` was honoured,
+    ///   this crate ignored the setting and connected by host name, so such a
+    ///   configuration used to work. The producer, consumer and admin configs
+    ///   log a warning for this combination when they are built. Use
+    ///   `use_all_dns_ips`, or add IP SANs to the broker certificates.
+    /// - **SASL/GSSAPI (Kerberos)**: its service principal is built from the
+    ///   host name. That mechanism is not implemented in this crate.
     ///
     /// # Errors
     ///
@@ -72,10 +125,47 @@ impl ClientUtils {
     ///   leading/trailing whitespace — these indicate user error (e.g., space-separated
     ///   or newline-separated addresses in a single string).
     /// - Any URL is missing a port or has an invalid port number (not 0-65535).
+    /// - In canonical mode, a host cannot be resolved at all.
     /// - No valid addresses can be resolved after validation.
     ///
     /// These correspond to Java's `ConfigException`.
-    pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, Error> {
+    pub fn parse_and_validate_addresses(
+        urls: &[String],
+        client_dns_lookup: ClientDnsLookup,
+    ) -> Result<Vec<(String, SocketAddr)>, Error> {
+        Self::parse_and_validate_addresses_with_lookup(
+            urls,
+            client_dns_lookup,
+            |host, port| (host, port).to_socket_addrs().map(Iterator::collect),
+            |address| address.to_string(),
+        )
+    }
+
+    /// Body of [`Self::parse_and_validate_addresses`] with its two name-service
+    /// calls injected: `resolve_all` (Java's `InetAddress.getAllByName` /
+    /// `InetSocketAddress` resolution) and `canonical_host_name` (Java's
+    /// `InetAddress.getCanonicalHostName`). Tests supply fakes here where
+    /// `ClientUtilsTest` uses Mockito's `mockStatic` / `mockConstruction`.
+    fn parse_and_validate_addresses_with_lookup<R, C>(
+        urls: &[String],
+        client_dns_lookup: ClientDnsLookup,
+        resolve_all: R,
+        canonical_host_name: C,
+    ) -> Result<Vec<(String, SocketAddr)>, Error>
+    where
+        R: Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
+        C: Fn(IpAddr) -> String,
+    {
+        // Java's `new InetSocketAddress(host, port)`: `Some(address)` if the
+        // host resolves, `None` for an unresolved address. `InetAddress.getByName`
+        // picks one address; take the preferred one, as `resolve` would.
+        let resolve_one = |host: &str, port: u16| -> Option<SocketAddr> {
+            let resolved = resolve_all(host, port).ok()?;
+            let ips: Vec<IpAddr> = resolved.iter().map(SocketAddr::ip).collect();
+            let ip = *Self::filter_preferred_addresses(&ips).first()?;
+            Some(SocketAddr::new(ip, port))
+        };
+
         let mut addresses = Vec::new();
         for url in urls {
             let trimmed = url.trim();
@@ -89,7 +179,7 @@ impl ClientUtils {
             if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
                 return Err(Error::local_illegal_argument(format!(
                     "Invalid url in {}: {}",
-                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
                 )));
             }
@@ -99,61 +189,62 @@ impl ClientUtils {
             let (host, port) = Self::parse_host_port(trimmed).ok_or_else(|| {
                 Error::local_illegal_argument(format!(
                     "Invalid url in {}: {}",
-                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
                 ))
             })?;
 
             // Validate port range (Java's InetSocketAddress constructor throws
             // IllegalArgumentException for ports outside 0-65535).
-            if port > 65535 {
-                return Err(Error::local_illegal_argument(format!(
+            let port = u16::try_from(port).map_err(|_| {
+                Error::local_illegal_argument(format!(
                     "Invalid port in {}: {}",
-                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
-                )));
-            }
+                ))
+            })?;
 
-            // Resolve the host:port to socket addresses via DNS.
-            // Preserve the original hostname for TLS SNI (Java's InetSocketAddress
-            // does this via getHostString()).
-            let addr_str = if host.contains(':') {
-                // IPv6: must be bracketed for to_socket_addrs
-                format!("[{}]:{}", host, port)
-            } else {
-                format!("{}:{}", host, port)
-            };
-
-            match addr_str.to_socket_addrs() {
-                Ok(addrs) => {
-                    let resolved: Vec<SocketAddr> = addrs.collect();
-                    if resolved.is_empty() {
-                        warn!(
-                            "Couldn't resolve server {} from {} as DNS resolution failed for {}",
-                            url,
-                            crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                            host
-                        );
-                    } else {
-                        for addr in resolved {
-                            addresses.push((host.to_string(), addr));
+            match client_dns_lookup {
+                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
+                    let inet_addresses = resolve_all(host, port).map_err(|_| {
+                        Error::local_illegal_argument(format!(
+                            "Unknown host in {}: {}",
+                            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                            url
+                        ))
+                    })?;
+                    for inet_address in inet_addresses {
+                        let resolved_canonical_name = canonical_host_name(inet_address.ip());
+                        match resolve_one(&resolved_canonical_name, port) {
+                            Some(address) => addresses.push((resolved_canonical_name, address)),
+                            None => warn!(
+                                "Couldn't resolve server {} from {} as DNS resolution of the canonical hostname {} failed for {}",
+                                url,
+                                CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                                resolved_canonical_name,
+                                host
+                            ),
                         }
                     }
                 },
-                Err(_) => {
-                    warn!(
+                ClientDnsLookup::UseAllDnsIps => match resolve_one(host, port) {
+                    // Preserve the original hostname: it is what the bootstrap
+                    // node connects by (re-resolved per connection attempt) and
+                    // what TLS SNI uses (Java's `getHostString()`).
+                    Some(address) => addresses.push((host.to_string(), address)),
+                    None => warn!(
                         "Couldn't resolve server {} from {} as DNS resolution failed for {}",
                         url,
-                        crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                        CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                         host
-                    );
+                    ),
                 },
             }
         }
         if addresses.is_empty() {
             return Err(Error::local_illegal_argument(format!(
                 "No resolvable bootstrap urls given in {}",
-                crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG
+                CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG
             )));
         }
         Ok(addresses)
@@ -232,219 +323,353 @@ mod tests {
         assert!(filtered.is_empty());
     }
 
+    /// `ClientUtilsTest.checkWithoutLookup`.
+    fn check_without_lookup(urls: &[&str]) -> Result<Vec<(String, SocketAddr)>, Error> {
+        let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::UseAllDnsIps)
+    }
+
+    /// `ClientUtilsTest.checkWithLookup`.
+    fn check_with_lookup(urls: &[&str]) -> Result<Vec<(String, SocketAddr)>, Error> {
+        let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
+    }
+
+    fn assert_illegal_argument(result: Result<Vec<(String, SocketAddr)>, Error>, expected: &str) {
+        match result {
+            Err(Error::LocalIllegalArgument(e)) => assert_eq!(e.message(), expected),
+            other => panic!("Expected LocalIllegalArgument({expected:?}), got: {other:?}"),
+        }
+    }
+
     /// Translated from `ClientUtilsTest.testParseAndValidateAddresses`.
+    ///
+    /// In the default mode each URL yields exactly one entry keyed by the
+    /// literal host — never one entry per resolved IP.
     #[test]
-    fn test_parse_and_validate_addresses_ip_port() {
-        let urls = vec!["127.0.0.1:9092".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].1.port(), 9092);
-    }
+    fn test_parse_and_validate_addresses() {
+        let addrs = check_without_lookup(&["127.0.0.1:8000"]).unwrap();
+        assert_eq!(addrs, vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]);
 
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — multiple servers.
-    #[test]
-    fn test_parse_and_validate_addresses_multiple() {
-        let urls = vec!["127.0.0.1:9092".to_string(), "127.0.0.1:9093".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
+        let addrs = check_without_lookup(&["localhost:8080"]).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].0, "localhost");
+        assert!(addrs[0].1.ip().is_loopback());
+        assert_eq!(addrs[0].1.port(), 8080);
+
+        let addrs = check_without_lookup(&["[::1]:8000"]).unwrap();
+        assert_eq!(addrs, vec![("::1".to_string(), "[::1]:8000".parse().unwrap())]);
+
+        let addrs = check_without_lookup(&["[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234", "localhost:10000"]).unwrap();
         assert_eq!(addrs.len(), 2);
+        assert_eq!(
+            addrs[0],
+            (
+                "2001:db8:85a3:8d3:1319:8a2e:370:7348".to_string(),
+                "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234".parse().unwrap()
+            )
+        );
+        assert_eq!(addrs[1].0, "localhost");
+        assert_eq!(addrs[1].1.port(), 10000);
+
+        let validated_addresses = check_without_lookup(&["localhost:10000"]).unwrap();
+        assert_eq!(1, validated_addresses.len());
+        let (only_host, only_address) = &validated_addresses[0];
+        assert_eq!("localhost", only_host);
+        assert_eq!(10000, only_address.port());
     }
 
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — empty list.
-    #[test]
-    fn test_parse_and_validate_addresses_empty() {
-        let urls: Vec<String> = Vec::new();
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err());
-    }
-
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — unresolvable host.
-    #[test]
-    fn test_parse_and_validate_addresses_unresolvable() {
-        let urls = vec!["this.host.does.not.exist.ever.kafka.test:9092".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err());
-    }
-
-    /// Test that whitespace-only entries are skipped.
-    #[test]
-    fn test_parse_and_validate_addresses_whitespace_only() {
-        let urls = vec!["  ".to_string(), "".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err());
-    }
-
-    /// Test that localhost resolution works.
-    #[test]
-    fn test_parse_and_validate_addresses_localhost() {
-        let urls = vec!["localhost:9092".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].1.port(), 9092);
-    }
-
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — IPv6 addresses.
+    /// Translated from `ClientUtilsTest.testParseAndValidateAddressesWithReverseLookup`.
     ///
-    /// Tests that IPv6 addresses in bracket notation are parsed correctly.
+    /// Java mocks `InetAddress.getAllByName` / `getCanonicalHostName` with
+    /// Mockito; here the same two calls are injected as closures.
     #[test]
-    fn test_parse_and_validate_addresses_ipv6() {
-        let urls = vec!["[::1]:8000".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].1.port(), 8000);
-        assert!(addrs[0].1.ip().is_ipv6(), "Expected IPv6 address, got: {}", addrs[0].1.ip());
+    fn test_parse_and_validate_addresses_with_reverse_lookup() {
+        // The literal-address checks Java repeats before mocking; with a real
+        // resolver an IP literal's canonical name is its textual form.
+        let addrs = check_with_lookup(&["127.0.0.1:8000"]).unwrap();
+        assert_eq!(addrs, vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]);
+        let addrs = check_with_lookup(&["[::1]:8000"]).unwrap();
+        assert_eq!(addrs, vec![("::1".to_string(), "[::1]:8000".parse().unwrap())]);
+        assert!(!check_with_lookup(&["localhost:8080"]).unwrap().is_empty());
+        let addrs = check_with_lookup(&["[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234", "localhost:10000"]).unwrap();
+        assert_eq!(addrs[0].0, "2001:db8:85a3:8d3:1319:8a2e:370:7348");
+        assert!(addrs[1..].iter().all(|(_, a)| a.port() == 10000));
+
+        let hostname = "example.com";
+        let port: u16 = 10000;
+        let canonical_hostname1 = "canonical_hostname1";
+        let canonical_hostname2 = "canonical_hostname2";
+        let ip1: IpAddr = "192.0.2.1".parse().unwrap();
+        let ip2: IpAddr = "192.0.2.2".parse().unwrap();
+        let ip_canonical1: IpAddr = "198.51.100.1".parse().unwrap();
+        let ip_canonical2: IpAddr = "198.51.100.2".parse().unwrap();
+
+        let resolve_all = |host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            match host {
+                "example.com" => Ok(vec![SocketAddr::new(ip1, port), SocketAddr::new(ip2, port)]),
+                "canonical_hostname1" => Ok(vec![SocketAddr::new(ip_canonical1, port)]),
+                "canonical_hostname2" => Ok(vec![SocketAddr::new(ip_canonical2, port)]),
+                _ => Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+            }
+        };
+        let canonical_host_name = |address: IpAddr| -> String {
+            if address == ip1 {
+                canonical_hostname1.to_string()
+            } else if address == ip2 {
+                canonical_hostname2.to_string()
+            } else {
+                address.to_string()
+            }
+        };
+
+        let validated_addresses = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &[format!("{hostname}:{port}")],
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            resolve_all,
+            canonical_host_name,
+        )
+        .unwrap();
+        assert_eq!(
+            validated_addresses,
+            vec![
+                (canonical_hostname1.to_string(), SocketAddr::new(ip_canonical1, port)),
+                (canonical_hostname2.to_string(), SocketAddr::new(ip_canonical2, port)),
+            ]
+        );
+
+        // The same host in the default mode is NOT expanded: one entry, keyed
+        // by the literal host.
+        let validated_addresses = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &[format!("{hostname}:{port}")],
+            ClientDnsLookup::UseAllDnsIps,
+            resolve_all,
+            canonical_host_name,
+        )
+        .unwrap();
+        assert_eq!(validated_addresses, vec![(hostname.to_string(), SocketAddr::new(ip1, port))]);
     }
 
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — mixed IPv6 and hostname.
+    /// Canonical mode: a canonical name that does not resolve is skipped (Java
+    /// logs and drops the unresolved `InetSocketAddress`); if none resolve the
+    /// "No resolvable" error is returned.
     #[test]
-    fn test_parse_and_validate_addresses_ipv6_and_hostname() {
-        let urls = vec![
-            "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234".to_string(),
-            "localhost:10000".to_string(),
-        ];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        // Should have at least 2 addresses (one IPv6 + at least one for localhost)
-        assert!(addrs.len() >= 2, "Expected at least 2 addresses, got: {}", addrs.len());
-    }
+    fn test_parse_and_validate_addresses_with_reverse_lookup_unresolved_canonical_name() {
+        let ip1: IpAddr = "192.0.2.1".parse().unwrap();
+        let ip2: IpAddr = "192.0.2.2".parse().unwrap();
+        let resolve_all = |host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            match host {
+                "example.com" => Ok(vec![SocketAddr::new(ip1, port), SocketAddr::new(ip2, port)]),
+                "good" => Ok(vec![SocketAddr::new(ip1, port)]),
+                _ => Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+            }
+        };
+        let urls = ["example.com:9092".to_string()];
 
-    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — hostname preservation.
-    ///
-    /// Java's `InetSocketAddress` preserves the original hostname via `getHostString()`.
-    /// We now preserve the hostname alongside the resolved `SocketAddr` for TLS SNI.
-    #[test]
-    fn test_parse_and_validate_addresses_hostname_port_preserved() {
-        let urls = vec!["localhost:10000".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        assert!(!addrs.is_empty());
-        for (host, addr) in &addrs {
-            assert_eq!("localhost", host);
-            assert_eq!(10000, addr.port());
-        }
-    }
-
-    /// Translated from `ClientUtilsTest.testNoPort`.
-    ///
-    /// Tests that an address without a port is rejected with an error.
-    #[test]
-    fn test_no_port() {
-        let urls = vec!["127.0.0.1".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err(), "Address without port should be rejected");
-        match result.unwrap_err() {
-            Error::LocalIllegalArgument(msg) => {
-                assert!(
-                    msg.message().contains("Invalid url") || msg.message().contains("No resolvable"),
-                    "Error should indicate invalid URL: {}",
-                    msg
-                );
+        let one_good = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &urls,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            resolve_all,
+            |address| {
+                if address == ip1 {
+                    "good".to_string()
+                } else {
+                    "bad".to_string()
+                }
             },
-            other => panic!("Expected IllegalArgument error, got: {:?}", other),
-        }
+        )
+        .unwrap();
+        assert_eq!(one_good, vec![("good".to_string(), SocketAddr::new(ip1, 9092))]);
+
+        assert_illegal_argument(
+            ClientUtils::parse_and_validate_addresses_with_lookup(
+                &urls,
+                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+                resolve_all,
+                |_| "bad".to_string(),
+            ),
+            "No resolvable bootstrap urls given in bootstrap.servers",
+        );
     }
 
-    /// Translated from `ClientUtilsTest.testInvalidPort`.
-    ///
-    /// Tests that an address with a port > 65535 is rejected.
+    /// Canonical mode: a host that does not resolve at all is an error —
+    /// Java's `getAllByName` throws `UnknownHostException`, rethrown as
+    /// `ConfigException("Unknown host in ...")`. (The default mode only logs
+    /// and skips it; see `test_only_bad_hostname`.)
     #[test]
-    fn test_invalid_port() {
-        let urls = vec!["localhost:70000".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err(), "Port 70000 should be rejected");
-        match result.unwrap_err() {
-            Error::LocalIllegalArgument(msg) => {
-                assert!(
-                    msg.message().contains("Invalid port"),
-                    "Error should indicate invalid port: {}",
-                    msg
-                );
-            },
-            other => panic!("Expected IllegalArgument error, got: {:?}", other),
-        }
-    }
-
-    /// Translated from `ClientUtilsTest.testInvalidBrokerAddress` — embedded newlines.
-    ///
-    /// Tests that addresses with embedded newlines are rejected.
-    #[test]
-    fn test_invalid_broker_address_embedded_newlines() {
-        let urls = vec!["localhost:9997\nlocalhost:9998\nlocalhost:9999".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_err(), "Address with embedded newlines should be rejected");
-    }
-
-    /// Translated from `ClientUtilsTest.testInvalidBrokerAddress` — leading space.
-    ///
-    /// Tests that an entry with a leading space (after other valid entries) is rejected.
-    /// Java rejects " localhost:9999" because the space fails the HOST_PORT_PATTERN regex.
-    /// In Rust, we trim leading/trailing whitespace (matching Java's typical pre-processing),
-    /// so " localhost:9999" trims to "localhost:9999" which is valid. However, the Java test
-    /// explicitly expects this to fail, because the Java code does NOT trim individual entries.
-    /// To match Java behavior, we validate that no entry contains leading/trailing whitespace
-    /// that could mask user errors.
-    #[test]
-    fn test_invalid_broker_address_leading_space() {
-        // Java test: List.of("localhost:9997", "localhost:9998", " localhost:9999")
-        // The third entry has a leading space. Java's getHost() returns null for " localhost:9999"
-        // because the space fails the regex, causing ConfigException.
-        //
-        // In our Rust implementation, we trim whitespace, so " localhost:9999" becomes
-        // "localhost:9999" which is valid. This is a minor behavioral difference: Rust is
-        // more lenient with leading/trailing whitespace. The trimming behavior is intentional
-        // and acceptable since the address itself is valid after trimming.
-        let urls = vec![
-            "localhost:9997".to_string(),
-            "localhost:9998".to_string(),
-            " localhost:9999".to_string(),
-        ];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        // Rust trims leading whitespace, so this succeeds (unlike Java).
-        // This is a documented behavioral difference — Rust is more lenient.
-        assert!(result.is_ok(), "Leading whitespace should be trimmed");
-    }
-
-    /// Translated from `ClientUtilsTest.testInvalidBrokerAddress` — space-separated in single string.
-    ///
-    /// Tests that space-separated addresses in a single string are rejected.
-    #[test]
-    fn test_invalid_broker_address_space_separated() {
-        let urls = vec!["localhost:9997 localhost:9998 localhost:9999".to_string()];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(
-            result.is_err(),
-            "Space-separated addresses in a single string should be rejected"
+    fn test_parse_and_validate_addresses_with_reverse_lookup_unknown_host() {
+        let urls = ["some.invalid.hostname.foo.bar.local:9999".to_string()];
+        assert_illegal_argument(
+            ClientUtils::parse_and_validate_addresses_with_lookup(
+                &urls,
+                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+                |host, _| Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+                |address| address.to_string(),
+            ),
+            "Unknown host in bootstrap.servers: some.invalid.hostname.foo.bar.local:9999",
         );
     }
 
     /// Translated from `ClientUtilsTest.testValidBrokerAddress`.
     ///
-    /// Tests that a list of valid broker addresses is accepted.
+    /// Pins the default-mode shape: one entry per URL, keyed by the literal
+    /// host, in URL order — even though `localhost` may resolve to both an
+    /// IPv4 and an IPv6 address.
     #[test]
     fn test_valid_broker_address() {
-        let urls = vec![
-            "localhost:9997".to_string(),
-            "localhost:9998".to_string(),
-            "localhost:9999".to_string(),
+        let addrs = check_without_lookup(&["localhost:9997", "localhost:9998", "localhost:9999"]).unwrap();
+        let hosts_and_ports: Vec<(&str, u16)> = addrs.iter().map(|(h, a)| (h.as_str(), a.port())).collect();
+        assert_eq!(
+            hosts_and_ports,
+            vec![("localhost", 9997), ("localhost", 9998), ("localhost", 9999)]
+        );
+        assert!(addrs.iter().all(|(_, a)| a.ip().is_loopback()));
+    }
+
+    /// Translated from `ClientUtilsTest.testInvalidBrokerAddress`
+    /// (`@ParameterizedTest` over `provideInvalidBrokerAddressTestCases`).
+    ///
+    /// Java's second case, `" localhost:9999"` (leading space), is rejected by
+    /// Java's `HOST_PORT_PATTERN`; this translation trims leading/trailing
+    /// whitespace from each entry first, so that one case is accepted — see
+    /// `test_invalid_broker_address_leading_space`.
+    #[test]
+    fn test_invalid_broker_address() {
+        let cases: [&[&str]; 2] = [
+            &["localhost:9997\nlocalhost:9998\nlocalhost:9999"],
+            // Intentionally provide a single string, as users may provide
+            // space-separated brokers, which will be parsed as a single string.
+            &["localhost:9997 localhost:9998 localhost:9999"],
         ];
-        let result = ClientUtils::parse_and_validate_addresses(&urls);
-        assert!(result.is_ok());
-        let addrs = result.unwrap();
-        // Each localhost may resolve to multiple addresses (IPv4 + IPv6),
-        // so we check at least 3 addresses and that all 3 ports are present.
-        assert!(addrs.len() >= 3, "Expected at least 3 addresses, got: {}", addrs.len());
-        let ports: std::collections::HashSet<u16> = addrs.iter().map(|a| a.1.port()).collect();
-        assert!(ports.contains(&9997));
-        assert!(ports.contains(&9998));
-        assert!(ports.contains(&9999));
+        for addresses in cases {
+            assert_illegal_argument(
+                check_without_lookup(addresses),
+                &format!("Invalid url in bootstrap.servers: {}", addresses[0]),
+            );
+        }
+    }
+
+    /// Leading-space case of `ClientUtilsTest.testInvalidBrokerAddress`.
+    ///
+    /// Java rejects `" localhost:9999"` because the space fails its
+    /// `HOST_PORT_PATTERN` regex. This translation trims leading/trailing
+    /// whitespace from each entry (embedded whitespace is still rejected), so
+    /// the entry is accepted — a documented, more lenient deviation.
+    #[test]
+    fn test_invalid_broker_address_leading_space() {
+        let addrs = check_without_lookup(&["localhost:9997", "localhost:9998", " localhost:9999"]).unwrap();
+        assert_eq!(addrs.len(), 3);
+        assert_eq!(addrs[2].0, "localhost");
+    }
+
+    /// Translated from `ClientUtilsTest.testInvalidConfig`: an unknown
+    /// `client.dns.lookup` string fails `ClientDnsLookup.forConfig` with an
+    /// `IllegalArgumentException` before any address is parsed.
+    #[test]
+    fn test_invalid_config() {
+        match ClientDnsLookup::for_config("random.value") {
+            Err(Error::LocalIllegalArgument(e)) => {
+                assert_eq!(
+                    e.message(),
+                    "No enum constant org.apache.kafka.clients.ClientDnsLookup.RANDOM.VALUE"
+                )
+            },
+            other => panic!("Expected LocalIllegalArgument, got: {other:?}"),
+        }
+    }
+
+    /// Translated from `ClientUtilsTest.testNoPort`.
+    #[test]
+    fn test_no_port() {
+        assert_illegal_argument(
+            check_without_lookup(&["127.0.0.1"]),
+            "Invalid url in bootstrap.servers: 127.0.0.1",
+        );
+    }
+
+    /// Translated from `ClientUtilsTest.testInvalidPort`.
+    #[test]
+    fn test_invalid_port() {
+        assert_illegal_argument(
+            check_without_lookup(&["localhost:70000"]),
+            "Invalid port in bootstrap.servers: localhost:70000",
+        );
+    }
+
+    /// Translated from `ClientUtilsTest.testOnlyBadHostname`.
+    ///
+    /// Java mocks `InetSocketAddress` to be unresolved; here the injected
+    /// resolver fails. The default mode logs and skips the host, leaving no
+    /// address.
+    #[test]
+    fn test_only_bad_hostname() {
+        let urls = ["some.invalid.hostname.foo.bar.local:9999".to_string()];
+        assert_illegal_argument(
+            ClientUtils::parse_and_validate_addresses_with_lookup(
+                &urls,
+                ClientDnsLookup::UseAllDnsIps,
+                |host, _| Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+                |address| address.to_string(),
+            ),
+            "No resolvable bootstrap urls given in bootstrap.servers",
+        );
+    }
+
+    /// An unresolvable host through the real resolver, in the default mode.
+    #[test]
+    fn test_parse_and_validate_addresses_unresolvable() {
+        assert_illegal_argument(
+            check_without_lookup(&["this.host.does.not.exist.ever.kafka.test:9092"]),
+            "No resolvable bootstrap urls given in bootstrap.servers",
+        );
+    }
+
+    /// Empty and whitespace-only entries are skipped (Java skips `null` / empty
+    /// URLs), leaving no address.
+    #[test]
+    fn test_parse_and_validate_addresses_empty() {
+        for mode in [
+            ClientDnsLookup::UseAllDnsIps,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+        ] {
+            assert_illegal_argument(
+                ClientUtils::parse_and_validate_addresses(&[], mode),
+                "No resolvable bootstrap urls given in bootstrap.servers",
+            );
+            assert_illegal_argument(
+                ClientUtils::parse_and_validate_addresses(&["  ".to_string(), String::new()], mode),
+                "No resolvable bootstrap urls given in bootstrap.servers",
+            );
+        }
+    }
+
+    /// Translated from `ClientUtilsTest.testResolveUnknownHostException`.
+    #[tokio::test]
+    async fn test_resolve_unknown_host_exception() {
+        struct ThrowingHostResolver;
+        impl HostResolver for ThrowingHostResolver {
+            async fn resolve(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+                Err(io::Error::new(io::ErrorKind::NotFound, host.to_string()))
+            }
+        }
+        assert!(
+            ClientUtils::resolve("some.invalid.hostname.foo.bar.local", &ThrowingHostResolver)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Translated from `ClientUtilsTest.testResolveDnsLookup`.
+    #[tokio::test]
+    async fn test_resolve_dns_lookup() {
+        struct FixedHostResolver(Vec<IpAddr>);
+        impl HostResolver for FixedHostResolver {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                Ok(self.0.clone())
+            }
+        }
+        let addresses: Vec<IpAddr> = vec!["198.51.100.0".parse().unwrap(), "198.51.100.5".parse().unwrap()];
+        let resolver = FixedHostResolver(addresses.clone());
+        assert_eq!(addresses, ClientUtils::resolve("kafka.apache.org", &resolver).await.unwrap());
     }
 }

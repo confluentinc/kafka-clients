@@ -18,7 +18,11 @@
 
 use std::fmt;
 
+use log::warn;
+
 use crate::common::Error;
+use crate::common::config::SslConfig;
+use crate::common::security::SecurityProtocol;
 
 /// Controls how the client uses DNS lookups (the `client.dns.lookup`
 /// configuration).
@@ -39,6 +43,16 @@ pub enum ClientDnsLookup {
     ///
     /// See `ClientUtils::parse_and_validate_addresses` for how the canonical
     /// name of each resolved address is derived in this translation.
+    ///
+    /// **Deviation, affects TLS.** This crate has no reverse-DNS lookup, so the
+    /// canonical name is always the address's textual IP (Java's fallback when
+    /// the PTR lookup fails). The bootstrap host is therefore an IP address,
+    /// and that IP is used for TLS SNI and for hostname verification (on by
+    /// default). With `security.protocol` `SSL` or `SASL_SSL` and broker
+    /// certificates that carry only DNS-name SANs, every bootstrap handshake
+    /// fails. Java, given working PTR records, verifies against the FQDN
+    /// instead. A warning is logged when a config combines this mode with TLS
+    /// hostname verification.
     ResolveCanonicalBootstrapServersOnly,
 }
 
@@ -96,6 +110,37 @@ impl ClientDnsLookup {
                 "String must be one of: use_all_dns_ips, resolve_canonical_bootstrap_servers_only",
             )),
         }
+    }
+
+    /// Logs a warning if `self` is
+    /// [`ClientDnsLookup::ResolveCanonicalBootstrapServersOnly`], the security
+    /// protocol uses TLS (`SSL` / `SASL_SSL`), and hostname verification is on
+    /// (`ssl.endpoint.identification.algorithm` non-empty). Returns whether
+    /// it warned.
+    ///
+    /// Java has no such check. It exists because this translation cannot
+    /// reverse-resolve the canonical name (see the variant's docs), so the
+    /// bootstrap host is an IP address. Without the warning, a DNS-name-only
+    /// broker certificate would show up only as an opaque handshake error.
+    pub(crate) fn warn_if_tls_hostname_verification_affected(
+        self,
+        security_protocol: SecurityProtocol,
+        ssl_config: &SslConfig,
+    ) -> bool {
+        let affected = self == Self::ResolveCanonicalBootstrapServersOnly
+            && matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl)
+            && !ssl_config.endpoint_identification_algorithm.is_empty();
+        if affected {
+            warn!(
+                "{}={self} with security.protocol={security_protocol}: this client cannot reverse-resolve \
+                 bootstrap addresses, so it connects to them by IP address and TLS hostname verification \
+                 checks the IP. Bootstrap connections fail unless the broker certificates carry IP SANs; \
+                 use {} or set ssl.endpoint.identification.algorithm to empty to avoid this.",
+                crate::CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG,
+                Self::UseAllDnsIps,
+            );
+        }
+        affected
     }
 }
 
@@ -200,6 +245,22 @@ mod tests {
                      use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
                 )
             );
+        }
+    }
+
+    #[test]
+    fn test_warn_if_tls_hostname_verification_affected() {
+        let verifying = SslConfig::default();
+        assert!(!verifying.endpoint_identification_algorithm.is_empty());
+        let not_verifying = SslConfig { endpoint_identification_algorithm: String::new(), ..SslConfig::default() };
+        let canonical = ClientDnsLookup::ResolveCanonicalBootstrapServersOnly;
+        for protocol in [SecurityProtocol::Ssl, SecurityProtocol::SaslSsl] {
+            assert!(canonical.warn_if_tls_hostname_verification_affected(protocol, &verifying));
+            assert!(!canonical.warn_if_tls_hostname_verification_affected(protocol, &not_verifying));
+            assert!(!ClientDnsLookup::UseAllDnsIps.warn_if_tls_hostname_verification_affected(protocol, &verifying));
+        }
+        for protocol in [SecurityProtocol::Plaintext, SecurityProtocol::SaslPlaintext] {
+            assert!(!canonical.warn_if_tls_hostname_verification_affected(protocol, &verifying));
         }
     }
 }
