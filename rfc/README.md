@@ -7,7 +7,7 @@ or release process) so the community can review it before it is implemented.
 
 Confluent is building a new generation of its non-Java Kafka clients on a shared **Rust
 core** translated from the Apache Kafka Java client. The Rust core is a native Rust client
-and, through thin bindings, also powers the Python, .NET, JavaScript, and C/C++ clients,
+and, through thin bindings, also powers the Python, .NET, JavaScript, C/C++, and Go clients,
 replacing the librdkafka C core those clients use today. The aim is feature and behavior
 parity with the Java client within weeks of a new Java release, a memory-safe core, a
 Java-aligned API across languages, and one place to contribute.
@@ -20,7 +20,7 @@ The proposals below break that effort into focused pieces that can be reviewed o
 | --- | --- | --- |
 | [GitHub repository structure](repository-structure.md) | One `confluentinc/kafka-clients` monorepo, mirrored to read-only per-language repositories. | Proposed |
 | [Client versioning](versioning.md) | Semantic versioning aligned to Apache Kafka `MAJOR.MINOR`, with a patch encoding. | Proposed |
-| [Client APIs](apis/README.md) | Align each client's API with the Java client. | Draft |
+| [Client APIs](apis/README.md) | Align each client's API with the Java client; per-language API RFCs (Rust, Python, .NET, JavaScript, C/C++, Go) added incrementally. | Draft |
 | [Source code licensing](licensing.md) | Apache 2.0 for the Rust core and language bindings (the CCL plugins are out of scope). | Proposed |
 | [Community contributions](contributions.md) | Where issues and pull requests are raised, the contribution model, and licensing/CLA terms. | Proposed |
 | [Client release and distribution](release-and-distribution.md) | Release cadence aligned to Apache Kafka, per-registry publishing, prebuilt binaries, and supply-chain integrity. | Proposed |
