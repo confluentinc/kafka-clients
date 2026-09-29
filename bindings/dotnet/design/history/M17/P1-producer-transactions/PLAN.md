@@ -47,6 +47,16 @@
 > and §5.2's sweep cites the core test set to the line where it ends. D15's
 > file-forward list gains items 14-21, from the observations of the CP2 hand-off.
 
+> **Amended at the CP4 review (2026-09-29).** Corrections carried from the CP2
+> close and the CP3 and CP4 reviews, each marked in place. D4's invariant and its gate / stop bullet now
+> say what happens after the gate closes or the pump stops: `EnqueueBarrier`
+> returns a completed task and queues no barrier, so no ordering is promised there
+> (CP3 observation (b), Critic finding 84.12). D4's Rule states D5 row 4's
+> exception to the wait, and its `PendingSendBatch` cite ends where the type ends.
+> §5.1 principle 3 names the kinds of bounded wait and poll the tests use (CP3
+> observation (c), CP4 observation (i)), and R9 points at it instead of counting
+> them. D15's file-forward list gains items 22-25.
+
 **Requirement (verbatim):** "Make sure we implement all the public producer
 transaction and idempotency apis for .NET."
 
@@ -462,13 +472,19 @@ handed to the core (via `send_batch`) before the control call reaches the core.
 **Rule.** After the D3 drain, and **before** the native commit or abort is
 submitted, enqueue a barrier on the producer's `SendCompletionPump` (new `internal
 Task EnqueueBarrier()`). After the native operation **succeeds**, await the barrier
-before completing the user's `Task`.
+before completing the user's `Task`. (⚠ amended at the CP4 review) If the token
+fires during that wait, the `Task` completes successfully without the ordering
+(D5 row 4).
 
-- **Invariant:** a barrier completes only after every group enqueued before it has
-  had its completions read, its delivery callbacks invoked, and its
-  `TaskCompletionSource`s set (or faulted). If `RunLoop` coalesces several groups
-  into one `get_all` pass, the barrier is a coalescing boundary.
-- **Shape:** `PendingSendBatch` (`SendCompletionPump.cs:931-958`) gains a barrier
+- **Invariant:** while the pump runs, a barrier completes only after every group
+  enqueued before it has had its completions read, its delivery callbacks invoked,
+  and its `TaskCompletionSource`s set (or faulted). If `RunLoop` coalesces several
+  groups into one `get_all` pass, the barrier is a coalescing boundary. (⚠ scoped
+  at the CP4 review, from Critic finding 84.12) After `CloseGate` or `Stop` the
+  invariant is not promised: `EnqueueBarrier` then returns a completed task (see
+  **Gate / stop**), and `Stop`'s drain completes a queued barrier successfully while
+  it faults the groups ahead of it without reading them.
+- **Shape:** `PendingSendBatch` (`SendCompletionPump.cs:931-954`, the base's span; ⚠ corrected at the CP4 review) gains a barrier
   form — `Count == 0`, empty arrays, a `TaskCompletionSource<bool>` created with
   `RunContinuationsAsynchronously`, and an `IsBarrier` read.
 - **`RunLoop`** (`:473-540`): on a barrier, complete it and continue. No
@@ -480,7 +496,8 @@ before completing the user's `Task`.
   for it.
 - **Gate / stop:** `EnqueueBarrier` follows `Enqueue`'s gate / stop protocol
   (`:277-300`, `:334-341`). Wherever `Enqueue` would fault a group in place,
-  `EnqueueBarrier` completes the barrier successfully instead. This is a benign
+  `EnqueueBarrier` returns an already-completed task and queues no barrier
+  (⚠ reworded at the CP4 review, CP3 observation (b)). This is a benign
   teardown race: the core then reports the closed producer on the control call
   itself.
 - **No pump** (sync types, or an async producer that never sent): no barrier. It
@@ -1213,6 +1230,25 @@ round-5 rule: delete a stale claim, do not re-word it. The grep gate is in §4 C
     `CompletePerKeyFanIn` and `FromHandle` (`AdminCallbacks.cs:2551`). Separately,
     an existing list test in `PublicAdminAlterConsumerGroupOffsetsTests.cs` depends
     on `Dictionary` enumeration order, which .NET documents as undefined.
+22. Admin docs (recorded at the CP2 close, outside the stopping rule).
+    `Admin/TopicMetadataAndConfig.cs`'s `<returns>` at `:98` and `:107` ("the topic
+    was created with") describe the success path, which is false for a validate-only
+    request (`CreateTopicsOptions.java:41-47`). `Admin/CreateTopicsResult.cs`, which
+    this phase does not change, says the same thing ("was created", "has been
+    created", "once it is created") at `:80`, `:94`, `:101`, `:110`, `:119`,
+    `:123`, `:129` and `:133`, and at `:142` for the failure path ("created, but the
+    broker sent no metadata").
+23. Core doc, for `kafka-critic` (recorded at the CP2 close). The header doc of
+    `kafka_admin_TopicMetadataAndConfig_error` says "the topic creation itself
+    succeeded", which is false for a validate-only request.
+24. A duplicated test helper (recorded at the CP3 review, observation (d)).
+    `SendCompletionPumpBarrierTests.cs` copies `StopTheLoopWithoutDraining` from
+    `SendCompletionPumpDrainCapTests.cs`. Hoist it to a shared helper when a phase
+    touches both files.
+25. A test-remark wording (noted at the CP4 review). The S5 class remarks
+    (`ProducerTransactionDrainTests.cs`) say `DrainPendingSends(TimeSpan.Zero)` is
+    true only when the accumulator is empty and idle; it is also true when no
+    accumulator exists (`?? true`).
 
 **Recommendation.** As Rule (Q12, Q19, Q20, Q21, Q27).
 
@@ -1504,10 +1540,20 @@ All paths below are relative to `bindings/dotnet/tests/Confluent.Kafka.UnitTests
    framework appends the parameter-name suffix in a TFM-specific format).
 3. **Bounded and sleep-free.** Every wait that can hang goes through `TestTimeout.Run`
    (`TestTimeout.cs:33`, `:54`, `:74`). No `Thread.Sleep` / `Task.Delay` is used as
-   synchronization. Two timing windows are sanctioned and named: D10's sync retry loop
-   (a 50 ms poll that stops at the first observation, R10) and S5's barrier hold (a
-   bounded window that gives a mutation room to show; the pass condition itself is a
-   deterministic probe).
+   synchronization. These timing windows are sanctioned and named (⚠ amended at the
+   CP4 review, CP3 observation (c) and CP4 observation (i)):
+   - D10's sync retry loop (a 50 ms poll that stops at the first observation, R10);
+   - S5's barrier-hold window: `Task.WhenAny` of the commit or abort against a
+     `Task.Delay(s_barrierHold)`, raced on the test thread, which gives a mutation
+     room to show; the pass condition itself is a deterministic probe;
+   - holds: a test continuation or callback that blocks on a bounded
+     `Wait(s_hold)` (S4, S5, S6), a bound chosen to outlast `s_deadline`;
+   - bounded direct `Wait(s_deadline)` calls on a test event (S4, S5, S6);
+   - `PollUntil` loops with a 2 ms step and a 30 s bound, each stopping at the first
+     observation, as `SendAccumulatorTests`' `PollUntil` does: S5's commit test polls
+     `MockHistoryCount()` (the mock gives no signal that the native commit is done),
+     and S6's row-4 test polls the fake submit's count (the drain runs on a pool
+     continuation). Their `Task.Delay` is a poll step, not synchronization.
 4. **Seams, not the environment.** Determinism comes from D3's internal seams —
    `NativeProducer.CreateMock(bool, SendAccumulatorSettings)`, the internal
    `AsyncMockProducer` settings overload, the `XxxWithAccumulatorDrainBound(TimeSpan)`
@@ -2106,7 +2152,7 @@ planning run was permitted to write only `design/current/PLAN-M17-producer-trans
 | R6 | **net8.0 is not runnable here** (§4.1): a net8-only failure surfaces only in CI. | Medium / medium | Q18: install .NET 8 into `$HOME/.dotnet` with the user's go-ahead, otherwise record every G5 as "CI-verified". Never `DOTNET_ROLL_FORWARD`. |
 | R7 | **arm64 protoc crash** blocks the host route for grpc-server (`Makefile:267-271`). | Medium / low | CP0 measures the route; the image route (§4.5 step 3) is the fallback; an unavailable route is reported as "not run", never as passed. |
 | R8 | **Broker and container flakes** in G10. | Medium / medium | G10 runs at CP0 (baseline) and CP7 (gate) against the **stored** CP0 log, not a derived set (M15/P12's method change); every rerun is recorded; CI's amd64 job is authoritative (§4.6). |
-| R9 | **Suite duration** grows (bounded waits, the 5000-iteration loop, the >1 MiB grow case). | Low / low | No sleeps; two sanctioned windows only (§5.1 principle 3); attempt counting uses the fake-delegate helper, with one real end-to-end call; the net10.0 suite duration is recorded at CP0 and CP5. |
+| R9 | **Suite duration** grows (bounded waits, the 5000-iteration loop, the >1 MiB grow case). | Low / low | No sleeps; only the windows §5.1 principle 3 sanctions (⚠ amended at the CP4 review); attempt counting uses the fake-delegate helper, with one real end-to-end call; the net10.0 suite duration is recorded at CP0 and CP5. |
 | R10 | **D10's sync twin** is a race by construction: the test cannot see the worker enter native. | Low / low | The 5 s `max.block.ms` window against a 50 ms retry; the async test is the deterministic contract. At CP5 the Actor runs the sync twin 50 times in a loop and records the pass count; any failure means a redesign before CP5 closes. |
 | R11 | **The hook's setup-only rule is unguarded** (D8): a hook installed while a commit runs. | Low / low | The header calls it a logical race under the mock's own lock, **not** undefined behaviour (h:16562-16569); it is documented (X11), not guarded, as the ABI intends. |
 | R12 | **Doc drift.** The residual, drain and cancellation claims are the kind of comparative text that went stale repeatedly in M14/P1. | Medium / medium | §7.1's canonical homes; on any repair, grep the clause's distinctive words across every document (ffi §A6 round-4 and round-5 rules); Critic 84 checks each canonical home against the code at CP5. |
