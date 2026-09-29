@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 
-use crate::CommonClientConfigs;
 use crate::common::Error;
+use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Configuration for the admin client.
 ///
@@ -30,6 +31,7 @@ use crate::common::security::SecurityProtocol;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
+    client_dns_lookup: ClientDnsLookup,
     client_id: String,
     request_timeout_ms: i32,
     default_api_timeout_ms: i32,
@@ -57,6 +59,10 @@ pub struct AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// Config key: `client.dns.lookup` (see
+    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `AdminClientConfig.java`
+    /// declares its own public alias of the `CommonClientConfigs` constant.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// `request.timeout.ms`
@@ -86,21 +92,23 @@ impl AdminClientConfig {
     /// `sasl.jaas.config`
     pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
-    /// Creates a config from a property map. `bootstrap.servers` is required.
+    /// Creates a config from a property map. `bootstrap.servers` must be non-empty.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
-    /// or a numeric value fails to parse.
+    /// Returns [`Error::Config`] if `bootstrap.servers` is missing or empty, and
+    /// an error if a value fails to parse or validate.
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
-        let mut bootstrap_set = false;
 
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
-                    bootstrap_set = true;
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`).
+                    config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
+                },
+                Self::CLIENT_DNS_LOOKUP_CONFIG => {
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => config.client_id = value.to_string(),
                 Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
@@ -135,25 +143,36 @@ impl AdminClientConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
             }
         }
 
-        if !bootstrap_set || config.bootstrap_servers.is_empty() {
+        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-63`):
+        // `bootstrap.servers` defaults to the empty list, and `bootstrap.controllers`
+        // is not modelled here, so it is always empty.
+        if config.bootstrap_servers.is_empty() {
             return Err(Error::config_message(format!(
-                "Missing required configuration \"{}\" which has no default value.",
+                "You must set either {} or bootstrap.controllers",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
         }
+        config
+            .client_dns_lookup
+            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
 
     /// The `bootstrap.servers` list.
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
+    }
+
+    /// `client.dns.lookup`.
+    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+        self.client_dns_lookup
     }
 
     /// The `client.id`.
@@ -232,6 +251,7 @@ impl Default for AdminClientConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             request_timeout_ms: 30_000,
             default_api_timeout_ms: 60_000,
@@ -278,10 +298,7 @@ mod tests {
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
         let err = AdminClientConfig::new(&props).unwrap_err();
-        assert_eq!(
-            err.message(),
-            "Missing required configuration \"bootstrap.servers\" which has no default value."
-        );
+        assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
     }
 
     #[test]
@@ -294,6 +311,35 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.client_id(), "admin-1");
         assert_eq!(config.request_timeout_ms(), 5000);
+    }
+
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `AdminClientConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
     }
 
     #[test]
@@ -361,5 +407,76 @@ mod tests {
         );
         assert_eq!(config.ssl_config().keystore_location.as_deref(), Some("/path/to/keystore.pem"));
         assert_eq!(config.ssl_config().endpoint_identification_algorithm, "");
+    }
+
+    /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the
+    /// value and splits it on `\\s*,\\s*`, so whitespace around the commas
+    /// and at the ends never reaches `ClientUtils.parseAndValidateAddresses`
+    /// (which does not trim, and rejects it).
+    #[test]
+    fn test_bootstrap_servers_list_parsing() {
+        for value in [
+            "localhost:1,localhost:2",
+            "localhost:1, localhost:2",
+            " localhost:1 ,localhost:2 ",
+        ] {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            let config = AdminClientConfig::new(&props).unwrap();
+            assert_eq!(
+                config.bootstrap_servers(),
+                ["localhost:1".to_string(), "localhost:2".to_string()],
+                "{value:?}"
+            );
+            let addresses = crate::ClientUtils::parse_and_validate_addresses(
+                config.bootstrap_servers(),
+                config.client_dns_lookup(),
+            )
+            .unwrap();
+            assert_eq!(addresses.len(), 2, "{value:?}");
+        }
+    }
+
+    /// `bootstrap.servers` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
+    /// (single-message `ConfigException`, no `Invalid value` prefix).
+    #[test]
+    fn test_bootstrap_servers_valid_list() {
+        let error_message = |value: &str| {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            match AdminClientConfig::new(&props) {
+                Err(Error::Config(e)) => e.message().to_string(),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        };
+        for value in ["localhost:9092,,localhost:9093", "a:1, ,b:1", "a:1,"] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' values must not be empty.",
+                "{value:?}"
+            );
+        }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_servers(), ["a:1".to_string()]);
+        assert_eq!(
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
+        );
+        // Admin allows an empty list (`isEmptyAllowed = true`), so the
+        // ValidList message never appears; `AdminBootstrapAddresses.fromConfig`'s
+        // check reports it instead.
+        for value in ["", "  "] {
+            assert_eq!(
+                error_message(value),
+                "You must set either bootstrap.servers or bootstrap.controllers",
+                "{value:?}"
+            );
+        }
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,b:1".to_string())]);
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
+            ["a:1".to_string(), "b:1".to_string()]
+        );
     }
 }

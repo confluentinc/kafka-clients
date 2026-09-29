@@ -1813,7 +1813,8 @@ where
         // Java lines 416-417 — `addresses =
         // ClientUtils.parseAndValidateAddresses(config)`,
         // `metadata.bootstrap(addresses)`.
-        let addresses = ClientUtils::parse_and_validate_addresses(config.bootstrap_servers())?;
+        let addresses =
+            ClientUtils::parse_and_validate_addresses(config.bootstrap_servers(), config.client_dns_lookup())?;
         metadata.bootstrap(addresses);
 
         // Java line 420 — `fetchConfig = new FetchConfig(config)`.
@@ -6677,8 +6678,8 @@ mod tests {
         // Java throws a `KafkaException`, so the hierarchy predicate must agree.
         assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         assert!(
-            !matches!(err, Error::LocalIllegalArgument(_)),
-            "the raw IllegalArgument must not escape: {err:?}"
+            matches!(err, Error::KafkaError(_)),
+            "the raw ConfigException must not escape unwrapped: {err:?}"
         );
         // The original failure is the cause (Java's second constructor arg).
         let source = std::error::Error::source(&err).expect("the underlying failure must be the cause");
