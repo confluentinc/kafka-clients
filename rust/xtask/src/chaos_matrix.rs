@@ -45,15 +45,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context as _};
 
 pub mod status;
 
-/// `cargo` arguments that build and select the chaos runner test.
-const TEST_ARGS: &[&str] = &["test", "--features", "integration-tests", "--test", "chaos"];
+/// `cargo` arguments that build and select the chaos runner test, built with
+/// `feature` (see `crate::chaos_test_feature`).
+fn test_args(feature: &str) -> [&str; 5] {
+    ["test", "--features", feature, "--test", "chaos"]
+}
 /// libtest arguments selecting the flag-driven runner.
 const RUNNER_ARGS: &[&str] = &["--", "--ignored", "--nocapture", "--exact", "run_test::chaos_run"];
 
@@ -76,6 +79,10 @@ const STALL_SAMPLE_SECS: &str = "5";
 /// The harness's notice when it had to force-exit a process that passed but
 /// did not terminate after teardown; libtest's summary never prints then.
 const FORCED_EXIT_AFTER_PASS: &str = "chaos: FORCED EXIT after a PASS verdict";
+
+/// The outcome of a run that failed with only the known recreate defect on
+/// every attempt.
+const KNOWN_DEFECT: &str = "KNOWN-DEFECT";
 
 /// Verdict lines copied into the results, as (column, verdict line prefix).
 const METRICS: &[(&str, &str)] = &[
@@ -215,15 +222,24 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 
     // Build once up front: a compile error should stop the matrix, not be
     // recorded as a failure of every run, and build time should not count
-    // towards the first run's duration.
-    println!("chaos-matrix: building the chaos test binary");
-    let status = Command::new("cargo")
-        .args(TEST_ARGS)
-        .arg("--no-run")
-        .status()
-        .context("running cargo")?;
-    if !status.success() {
-        bail!("building the chaos test binary failed");
+    // towards the first run's duration. Once per feature the plan's runs
+    // need, as `cargo xtask chaos` would pick it for each.
+    let mut features = BTreeSet::new();
+    for planned in &plan {
+        features.insert(crate::chaos_test_feature(&crate::parse_chaos_flags(
+            &planned.chaos_args(options.rps),
+        )?));
+    }
+    for feature in features {
+        println!("chaos-matrix: building the chaos test binary (--features {feature})");
+        let status = Command::new("cargo")
+            .args(test_args(feature))
+            .arg("--no-run")
+            .status()
+            .context("running cargo")?;
+        if !status.success() {
+            bail!("building the chaos test binary (--features {feature}) failed");
+        }
     }
     println!("chaos-matrix: checking the configuration of all {} run(s)", plan.len());
     check_configurations(&plan, options.rps)?;
@@ -234,6 +250,9 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 
     fs::create_dir_all(options.out.join("runs"))?;
     fs::copy(&options.matrix, options.out.join("matrix.txt"))?;
+    // Lets `chaos-matrix-status` tell whether a runner is working on this
+    // output directory, whatever order its flags were given in.
+    fs::write(options.out.join(status::PID_FILE), format!("{}\n", std::process::id()))?;
     // The run order, for `chaos-matrix-status` (it cannot rebuild `--only`).
     let plan_ids: Vec<String> = plan.iter().map(Planned::run_id).collect();
     fs::write(options.out.join("plan.txt"), plan_ids.join("\n") + "\n")?;
@@ -314,7 +333,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                         attempt += 1;
                         continue;
                     }
-                    result.outcome = "KNOWN-DEFECT".to_string();
+                    result.outcome = KNOWN_DEFECT.to_string();
                     result.reasons = format!("known defect on all {attempt} attempt(s): {defect}");
                     break result;
                 },
@@ -347,15 +366,40 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         options.out.join("summary.md"),
         render_summary(&options, &environment, &scenarios, &plan, &results),
     )?;
-    let passed = plan
+    let recorded: Vec<(String, &RunResult)> = plan
         .iter()
-        .filter(|p| results.get(&p.run_id()).is_some_and(|r| r.outcome == "PASS"))
-        .count();
+        .filter_map(|p| results.get(&p.run_id()).map(|r| (p.run_id(), r)))
+        .collect();
+    let passed = recorded.iter().filter(|(_, r)| r.outcome == "PASS").count();
+    let known = recorded.iter().filter(|(_, r)| r.outcome == KNOWN_DEFECT).count();
     log.line(&format!(
-        "matrix finished: {passed}/{total} passed; summary in {}",
+        "matrix finished: {passed}/{total} passed, {known} known-defect; summary in {}",
         options.out.join("summary.md").display()
     ));
+    let failed = failed_runs(&recorded);
+    if !failed.is_empty() {
+        bail!(
+            "chaos matrix: {} of {total} run(s) did not pass: {}",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// The recorded runs that fail the matrix: every outcome but PASS and
+/// KNOWN-DEFECT. A KNOWN-DEFECT run failed on every attempt with exactly the
+/// signature of the known, documented multi-topic recreate defect and nothing
+/// else; failing the matrix for it would keep the matrix red until that defect
+/// is fixed and hide any new failure behind it. It stays visible in the summary,
+/// the log and `results.tsv`, never counted as a pass. Runs a STOP left unrun
+/// are not failures either.
+fn failed_runs(recorded: &[(String, &RunResult)]) -> Vec<String> {
+    recorded
+        .iter()
+        .filter(|(_, r)| r.outcome != "PASS" && r.outcome != KNOWN_DEFECT)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 fn parse_options(raw: &[String]) -> anyhow::Result<Options> {
@@ -620,7 +664,7 @@ fn write_results(path: &Path, results: &BTreeMap<String, RunResult>) -> anyhow::
 fn runner_command(planned: &Planned, rps: u32) -> anyhow::Result<Command> {
     let env = crate::parse_chaos_flags(&planned.chaos_args(rps))?;
     let mut command = Command::new("cargo");
-    command.args(TEST_ARGS).args(RUNNER_ARGS);
+    command.args(test_args(crate::chaos_test_feature(&env))).args(RUNNER_ARGS);
     // Only this run's settings: a `CHAOS_*` left in the invoking shell would
     // otherwise leak into every run.
     for (key, _) in std::env::vars().filter(|(k, _)| k.starts_with("CHAOS_")) {
@@ -726,13 +770,21 @@ fn execute(planned: &Planned, options: &Options, log: &mut MatrixLog) -> anyhow:
             } else {
                 INTERRUPT_GRACE
             };
+            // Wait for the whole group, not just `child`: `cargo` has no
+            // SIGINT handler and dies at once, while the test binary it ran
+            // keeps tearing down (and must still be killed if it hangs).
             let deadline = Instant::now() + grace;
-            while Instant::now() < deadline && child.try_wait()?.is_none() {
+            while Instant::now() < deadline && group_running(&mut child, pid)? {
                 std::thread::sleep(Duration::from_secs(1));
             }
-            if child.try_wait()?.is_none() {
+            if group_running(&mut child, pid)? {
                 signal_group(pid, "KILL");
                 let _ = child.wait();
+                // The orphaned test binary is reaped by init, not by us.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline && group_alive(pid) {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
             }
             break;
         }
@@ -767,10 +819,19 @@ fn execute(planned: &Planned, options: &Options, log: &mut MatrixLog) -> anyhow:
         );
     }
     if let Some(reports) = &parsed.reports_dir {
-        let source = PathBuf::from(reports);
+        // The harness prints the path relative to its own working directory,
+        // the package root, which need not be this process's.
+        let source = package_root().join(reports);
         if source.is_dir() {
-            fs::rename(&source, dir.join("reports"))
-                .with_context(|| format!("moving {} into {}", source.display(), dir.display()))?;
+            // A failed move must not abort the matrix before the result is
+            // recorded; the reports just stay where the harness wrote them.
+            if let Err(e) = move_dir(&source, &dir.join("reports")) {
+                log.line(&format!(
+                    "{run_id}: WARNING: could not move {} into {}: {e}; the reports stay there",
+                    source.display(),
+                    dir.display()
+                ));
+            }
         }
     }
 
@@ -809,6 +870,22 @@ enum Ended {
 
 fn signal_group(pid: u32, signal: &str) {
     let _ = Command::new("kill").args(["-s", signal, "--", &format!("-{pid}")]).status();
+}
+
+/// Whether `child` (the leader of process group `pgid`) or any other member
+/// of its group is still running. Reaps `child` once it has exited, since its
+/// zombie would otherwise keep the group looking alive.
+fn group_running(child: &mut Child, pgid: u32) -> std::io::Result<bool> {
+    Ok(child.try_wait()?.is_none() || group_alive(pgid))
+}
+
+/// Whether any process of group `pgid` exists (`kill -0` to the group).
+fn group_alive(pgid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Write a stack sample of the chaos test binary in process group `pgid` to
@@ -1210,6 +1287,38 @@ impl MatrixLog {
     }
 }
 
+/// The root of the package the chaos test belongs to, which `cargo test` makes
+/// the test binary's working directory: the workspace root, xtask's parent.
+fn package_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives inside the workspace")
+}
+
+/// Move directory `from` to `to`, copying and then removing it when a rename
+/// is not possible (e.g. `to` is on another filesystem).
+fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_dir(from, to)?;
+    fs::remove_dir_all(from)
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn unix_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -1483,6 +1592,100 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         assert_eq!(size_label(100), "100B");
         assert_eq!(size_label(1024 * 1024), "1MiB");
         assert_eq!(size_label(1_000_000), "1000000B");
+    }
+
+    #[test]
+    fn the_rust_client_matrix_ci_runs_is_well_formed() {
+        let text = fs::read_to_string(package_root().join("tests/chaos/matrix/rust-client.txt")).unwrap();
+        let scenarios = parse_matrix(&text).unwrap();
+        let plan = plan_runs(&scenarios, &options(&["plaintext", "ssl", "sasl_ssl"], &[100])).unwrap();
+        for planned in &plan {
+            crate::parse_chaos_flags(&planned.chaos_args(1000)).unwrap_or_else(|e| panic!("{}: {e}", planned.run_id()));
+        }
+        // Topic recreation with more than one topic needs the explicit opt-in,
+        // or the harness rejects the run's configuration.
+        for scenario in &scenarios {
+            let has = |flag: &str| scenario.args.iter().any(|a| a == flag);
+            let topics = scenario
+                .args
+                .windows(2)
+                .find(|w| w[0] == "--num-topics")
+                .map_or(1, |w| w[1].parse::<u32>().unwrap());
+            if has("--topic-recreate") && topics > 1 {
+                assert!(has("--allow-multi-topic-recreate"), "scenario {}", scenario.id);
+            }
+        }
+    }
+
+    #[test]
+    fn only_outcomes_other_than_pass_and_known_defect_fail_the_matrix() {
+        let result = |outcome: &str| RunResult { outcome: outcome.into(), ..RunResult::default() };
+        let (pass, known, fail, stalled) = (result("PASS"), result(KNOWN_DEFECT), result("FAIL"), result("STALLED"));
+        let recorded = [
+            ("1-plaintext-100B".to_string(), &pass),
+            ("12-plaintext-100B".to_string(), &known),
+            ("13-plaintext-100B".to_string(), &fail),
+            ("15-plaintext-100B".to_string(), &stalled),
+        ];
+        assert_eq!(failed_runs(&recorded), ["13-plaintext-100B", "15-plaintext-100B"]);
+        assert!(failed_runs(&recorded[..2]).is_empty());
+    }
+
+    #[test]
+    fn each_run_is_built_with_the_feature_its_workloads_need() {
+        let scenarios =
+            parse_matrix("1 | rust | --cycles 1\n2 | python | --workload producer:rust --workload consumer:python\n")
+                .unwrap();
+        let plan = plan_runs(&scenarios, &options(&["plaintext"], &[100])).unwrap();
+        let features: Vec<String> = plan
+            .iter()
+            .map(|p| {
+                let command = runner_command(p, 1000).unwrap();
+                let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                args[args.iter().position(|a| a == "--features").unwrap() + 1].clone()
+            })
+            .collect();
+        assert_eq!(features, ["integration-tests", "multilanguage-tests"]);
+    }
+
+    #[test]
+    fn the_grace_wait_covers_the_whole_process_group() {
+        // The shell exits at once, like `cargo` on SIGINT, while its
+        // background child — the test binary's stand-in, which also ignores
+        // SIGINT — lives on in the same process group.
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 &"])
+            .stdout(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+        child.wait().unwrap();
+        assert!(group_running(&mut child, pgid).unwrap(), "the group outlives its leader");
+        signal_group(pgid, "KILL");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while group_alive(pgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!group_running(&mut child, pgid).unwrap());
+    }
+
+    #[test]
+    fn reports_resolve_against_the_package_root_and_move_by_copy_too() {
+        assert!(package_root().join("tests/chaos").is_dir());
+        let root = std::env::temp_dir().join(format!("chaos-matrix-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("reports");
+        fs::create_dir_all(source.join("clients")).unwrap();
+        fs::write(source.join("verdict.txt"), "PASS").unwrap();
+        fs::write(source.join("clients/consumer.log"), "log").unwrap();
+        // The fallback path taken when a rename crosses filesystems.
+        copy_dir(&source, &root.join("copied")).unwrap();
+        assert_eq!(fs::read_to_string(root.join("copied/clients/consumer.log")).unwrap(), "log");
+        move_dir(&source, &root.join("moved")).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(root.join("moved/verdict.txt")).unwrap(), "PASS");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
