@@ -134,6 +134,18 @@ impl TopicDescription {
         &self.partitions
     }
 
+    /// The partition list, for appending in place.
+    ///
+    /// Java's `partitions()` returns the mutable backing list, and
+    /// `KafkaAdminClient` appends each continuation page of a paginated
+    /// `DescribeTopicPartitions` response to it
+    /// (`partiallyFinishedTopicDescription.partitions().addAll(...)`,
+    /// `KafkaAdminClient.java:2276`). The public [`partitions`](Self::partitions)
+    /// getter stays read-only.
+    pub(crate) fn partitions_mut(&mut self) -> &mut Vec<TopicPartitionInfo> {
+        &mut self.partitions
+    }
+
     /// Authorized operations for this topic, or `None` if the broker did not
     /// report them (Java returns `null` in that case). `Some` holding an empty
     /// set means the broker reported that no operation is authorized.
