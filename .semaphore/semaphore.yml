@@ -51,7 +51,7 @@ name: build-test-release
 # run either manually or automatically.
 #
 # "Publish to crates.io" is a manual promotion (publish-crates-io.yml) run on a
-# master build to publish the confluent-kafka-rust version in Cargo.toml.
+# master build to publish the confluent-kafka version in Cargo.toml.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2

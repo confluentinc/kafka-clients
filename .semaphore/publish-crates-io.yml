@@ -1,7 +1,7 @@
 version: v1.0
 name: publish-crates-io
 # Manual promotion target from semaphore.yml. Run it only on a green build of
-# the current master tip to publish the confluent-kafka-rust version in
+# the current master tip to publish the confluent-kafka version in
 # Cargo.toml; nothing here re-runs the test suite, and any other branch or
 # commit is refused. Verify and publish run on separate single-use VMs, so no
 # build-time code (build scripts, proc macros) runs on the VM where the
@@ -40,13 +40,13 @@ blocks:
             # Not dependencies.sh: it initializes the kafka submodule, which the
             # publish block doesn't, and both blocks must package the same tree.
             - sudo apt install -y cmake rustup
-            - cargo package -p confluent-kafka-rust --locked
+            - cargo package -p confluent-kafka --locked
             # crates.io rejects these at upload; cargo package only warns or doesn't check.
             - |
-              cargo metadata --no-deps --format-version 1 | jq -e '.packages[] | select(.name == "confluent-kafka-rust") | ((.description // "") != "") and (((.license // "") != "") or .license_file != null)' >/dev/null \
+              cargo metadata --no-deps --format-version 1 | jq -e '.packages[] | select(.name == "confluent-kafka") | ((.description // "") != "") and (((.license // "") != "") or .license_file != null)' >/dev/null \
                 || { echo "Refusing to publish: crates.io requires a non-empty description and license (or license-file) in [package]" >&2; exit 1; }
             - |
-              size=$(stat -c%s target/package/confluent-kafka-rust-*.crate) || exit 1
+              size=$(stat -c%s target/package/confluent-kafka-[0-9]*.crate) || exit 1
               if [ "$size" -gt 10485760 ]; then
                 echo "Refusing to publish: .crate is ${size} bytes, over crates.io's 10 MiB limit; add an include list to Cargo.toml" >&2
                 exit 1
@@ -59,8 +59,9 @@ blocks:
         - name: "cargo publish"
           commands:
             - sudo apt install -y rustup
-            - cargo package -p confluent-kafka-rust --locked --list
+            - cargo package -p confluent-kafka --locked --list
+            # The Vault path keeps the crate's original name.
             - . vault-get-secret --secret-key=CARGO_REGISTRY_TOKEN crates/confluent-kafka-rust
             # Verified in the previous block; --no-verify keeps build-time code
             # off this VM while the token is in the environment.
-            - cargo publish -p confluent-kafka-rust --locked --no-verify
+            - cargo publish -p confluent-kafka --locked --no-verify
