@@ -2195,8 +2195,14 @@ internal sealed class NativeAdminClient : IDisposable
             // counts a sentinel row too, and de-duplicates on `(for_id(type), name)`). Every
             // key is named by at least one row — its ops, or its sentinel — so the count is
             // the number of DISTINCT keys, which is `Tasks.Count`: the bridge is keyed by
-            // `s_configResourceComparer`, the same value equality the ABI de-duplicates on
-            // (ConfigResource's ctor folds an undefined type to Unknown, as `for_id` does).
+            // `s_configResourceComparer`, and two keys equal under it are equal under the
+            // ABI's `(for_id(type), name)` too (ConfigResource's ctor folds an undefined type
+            // to Unknown, as `for_id` does). That one direction is what makes this arm safe:
+            // the ABI can never fire MORE callbacks than `Tasks.Count`, so the countdown never
+            // under-counts and the operation is never freed before its last callback. The
+            // converse does not hold for names that collapse under NUL-terminated UTF-8 (an
+            // embedded NUL, or lone surrogates that encode to U+FFFD) — a known pre-existing
+            // cross-RPC residual, not handled here (Critic 85, finding 85.3).
             // ⚠ NOT `keys.Count`: `configs` is the caller's map, whose comparer need not be
             // value equality, so two equal resources can be two keys there and still get
             // ONE callback — a countdown armed with 2 would never reach zero and would root
