@@ -47,13 +47,14 @@ from admin import (
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
     _to_describe_log_dirs, _to_describe_replica_log_dirs,
-    _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
+    _to_elect_leaders, _to_error, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_describe_topics,
     _to_partition_info,
     _close_ms, _ms,
 )
+import producer
 from producer import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
@@ -1834,6 +1835,49 @@ def test_to_keyed_errors_maps_none_to_success():
     converted = _to_keyed_errors({("t", 0): None, "g": (69, "nope", False, False)})
     assert converted[("t", 0)] is None
     assert converted["g"].code == 69
+
+
+def test_to_error_derives_txn_requires_abort_from_code():
+    """A per-key admin error is built via `KafkaError._from_parts` from a copied
+    `(code, message, is_retriable, is_fatal)` tuple -- the borrowed error handle
+    is already destroyed, so the flag cannot come from the Rust predicate and is
+    derived from the code instead. `txn_requires_abort` must be a bool (not raise
+    AttributeError), True only for TRANSACTION_ABORTABLE (120).
+
+    `test_producer.py:993-1024` separately covers the live-handle `_from_c` path.
+    """
+    abortable = _to_error((120, "aborted", 0, 0))
+    assert abortable.txn_requires_abort is True
+    assert abortable.code == 120
+    assert abortable.message == "aborted"
+
+    not_abortable = _to_error((69, "nope", 0, 0))
+    assert not_abortable.txn_requires_abort is False
+    assert not_abortable.code == 69
+    assert not_abortable.message == "nope"
+
+
+def test_txn_abortable_constant_matches_generated_error_code():
+    """Drift guard: producer._TRANSACTION_ABORTABLE is duplicated from the
+    generated `_error_code.py` (not shipped, so not importable at runtime) and
+    must stay in lock-step with `kafka_common_ErrorCode_t`."""
+    import _error_code as ec
+    assert producer._TRANSACTION_ABORTABLE == ec.TRANSACTION_ABORTABLE
+
+
+def test_describe_missing_topic_per_key_error_has_txn_requires_abort():
+    """End-to-end through the real C copy-out (`borrowed_error_to_py` ->
+    `_to_error` -> `_from_parts`): a per-key `KafkaError` for a missing topic
+    must expose `txn_requires_abort` as a bool rather than raising
+    AttributeError. UNKNOWN_TOPIC_OR_PARTITION is not abortable, so it is
+    False."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "described", 2, 2)
+        result = admin.describe_topics(["described", "missing"])
+        missing = result["missing"]
+        assert isinstance(missing, KafkaError)
+        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert missing.txn_requires_abort is False
 
 
 # ---------------------------------------------------------------------------
