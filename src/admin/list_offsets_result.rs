@@ -30,7 +30,7 @@ pub struct ListOffsetsResult {
 
 impl ListOffsetsResult {
     /// Creates a result from the per-partition futures.
-    pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>) -> Self {
+    pub fn new(futures: HashMap<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>) -> Self {
         Self { futures }
     }
 

@@ -31,7 +31,7 @@ pub struct DeleteRecordsResult {
 
 impl DeleteRecordsResult {
     /// Creates a result from the per-partition futures.
-    pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
+    pub fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
         Self { futures }
     }
 
