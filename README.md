@@ -1,5 +1,8 @@
 # Rust-Based Kafka Clients
 
+> [!WARNING]
+> **Preview:** The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open, see [RFCs and feedback](#rfcs-and-feedback).
+
 A high-fidelity, architecture-preserving Rust translation of the Apache Kafka Java client (client only), generated instruction-by-instruction from the original Java sources. This project aims to provide a native Rust Kafka client with the same API, structure, and semantics as the official Java client, following Rust idioms and conventions where appropriate.
 
 It also contains bindings for multiple languages, automatically generated following translation rules, optimized and reviewed for performance as well.
@@ -11,6 +14,12 @@ It also contains bindings for multiple languages, automatically generated follow
 - **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
+
+## RFCs and feedback
+
+The design of these clients is proposed through RFCs in the [`rfc/`](rfc/) folder, covering repository structure, versioning, client APIs (one per language), licensing, community contributions, release and distribution, and AI-assisted migration.
+
+We want your feedback while these proposals are proposed. To comment on an RFC, open a [GitHub issue](../../issues) or start a [GitHub discussion](../../discussions) that references the RFC. See [rfc/README.md](rfc/README.md) for the status of each proposal and how the review process works.
 
 ## Prerequisites
 
