@@ -65,6 +65,10 @@
 > records how the snapshot is witnessed (CP5 observation (f)). RD4 no longer calls
 > `ConsumerGroupMetadata` the first adopter of `[Obsolete]`.
 
+> **Amended at the CP6 review (2026-09-29).** One correction, marked in place: §2.4's
+> Python reference range ends at `grpc_server.py:308`, where `SendOffsetsToTransaction`
+> returns (CP6 nit n2).
+
 **Requirement (verbatim):** "Make sure we implement all the public producer
 transaction and idempotency apis for .NET."
 
@@ -211,7 +215,7 @@ new core logic. Implementing any of them is a Rust-core task first (Q4).
 ### 2.4 gRPC servicers (Mode A, `grpc-server/`)
 
 Proto: `multilanguage-test-server/proto/producer_service.proto`. Reference
-implementation: `bindings/python/grpc_server.py:245-307`, translation helpers
+implementation: `bindings/python/grpc_server.py:245-308` (⚠ corrected at the CP6 review, nit n2; it read `:245-307`), translation helpers
 `bindings/python/grpc_translate.py:222-261`.
 
 | ID | RPC (proto line) | Request -> Response | `ProducerServiceImpl` (sync) | `AsyncProducerServiceImpl` (async) |
