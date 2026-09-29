@@ -37,6 +37,7 @@ use crate::common::Error;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
 use crate::consumer::AutoOffsetResetStrategy;
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -71,7 +72,7 @@ pub struct ConsumerConfig {
     /// `bootstrap.servers` — initial connection list.
     pub(crate) bootstrap_servers: Vec<String>,
     /// `client.dns.lookup` — DNS lookup behavior.
-    pub(crate) client_dns_lookup: String,
+    pub(crate) client_dns_lookup: ClientDnsLookup,
     /// `client.id` — the client identifier. Empty by default.
     pub(crate) client_id: String,
     /// `client.rack` — the rack identifier for rack-aware fetching.
@@ -204,7 +205,7 @@ impl Default for ConsumerConfig {
             heartbeat_interval_ms: 3_000,
 
             bootstrap_servers: Vec::new(),
-            client_dns_lookup: "use_all_dns_ips".to_string(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             client_rack: String::new(),
 
@@ -291,8 +292,6 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup`.
-    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = "client.dns.lookup";
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
@@ -410,6 +409,10 @@ impl ConsumerConfig {
     /// `bootstrap.servers`.
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
+    }
+    /// `client.dns.lookup`.
+    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+        self.client_dns_lookup
     }
     /// `client.id`.
     pub fn client_id(&self) -> &str {
@@ -583,8 +586,8 @@ impl ConsumerConfig {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     config.bootstrap_servers = split_csv(value);
                 },
-                Self::CLIENT_DNS_LOOKUP_CONFIG => {
-                    config.client_dns_lookup = value.clone();
+                CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG => {
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.clone();
@@ -1015,6 +1018,33 @@ mod tests {
         assert!(msg.contains("security.protocol"), "should contain config key, got: {msg}");
         assert!(msg.contains("abc"), "should contain the invalid value, got: {msg}");
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
+    }
+
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `ConsumerConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(
+            ConsumerConfig::new(&HashMap::new()).unwrap().client_dns_lookup(),
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        let mut props = HashMap::new();
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
     }
 
     /// `sasl.mechanism` and `sasl.jaas.config` land on `sasl_config`.
