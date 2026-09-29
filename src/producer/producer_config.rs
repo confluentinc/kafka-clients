@@ -26,6 +26,7 @@ use std::sync::atomic::{self, AtomicI32};
 use log::{info, warn};
 
 use crate::common::Error;
+use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
@@ -437,7 +438,8 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`).
+                    config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
@@ -619,7 +621,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
@@ -1696,5 +1698,68 @@ mod tests {
         assert_ne!(first.client_id, second.client_id);
         let n: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
         assert!(n >= 1, "Java's sequence starts at 1");
+    }
+
+    /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the
+    /// value and splits it on `\\s*,\\s*`, so whitespace around the commas
+    /// and at the ends never reaches `ClientUtils.parseAndValidateAddresses`
+    /// (which does not trim, and rejects it).
+    #[test]
+    fn test_bootstrap_servers_list_parsing() {
+        for value in [
+            "localhost:1,localhost:2",
+            "localhost:1, localhost:2",
+            " localhost:1 ,localhost:2 ",
+        ] {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            let config = ProducerConfig::new(&props).unwrap();
+            assert_eq!(
+                config.bootstrap_servers,
+                ["localhost:1".to_string(), "localhost:2".to_string()],
+                "{value:?}"
+            );
+            let addresses =
+                crate::ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers, config.client_dns_lookup)
+                    .unwrap();
+            assert_eq!(addresses.len(), 2, "{value:?}");
+        }
+    }
+
+    /// `bootstrap.servers` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty or
+    /// duplicated element is rejected with `ConfigDef`'s exact message
+    /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
+    #[test]
+    fn test_bootstrap_servers_valid_list() {
+        let error_message = |value: &str| {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            match ProducerConfig::new(&props) {
+                Err(Error::Config(e)) => e.message().to_string(),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        };
+        for value in ["localhost:9092,,localhost:9093", "a:1, ,b:1", "a:1,"] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' values must not be empty.",
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            error_message("a:1,a:1"),
+            "Configuration 'bootstrap.servers' values must not be duplicated."
+        );
+        for value in ["", "  "] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' must not be empty. Valid values include: any non-empty value",
+                "{value:?}"
+            );
+        }
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,b:1".to_string())]);
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().bootstrap_servers,
+            ["a:1".to_string(), "b:1".to_string()]
+        );
     }
 }

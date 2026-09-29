@@ -23,7 +23,7 @@ use log::warn;
 
 use super::HostResolver;
 use crate::common::Error;
-use crate::{ClientDnsLookup, CommonClientConfigs};
+use crate::{ClientDnsLookup, CommonClientConfigs, DefaultHostResolver};
 
 /// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -161,10 +161,13 @@ impl ClientUtils {
     /// Returns [`Error::Config`] (Java's `ConfigException`, built with its
     /// single-message constructor, so the message carries no
     /// `Invalid value ... for configuration ...` prefix) if:
-    /// - Any URL contains embedded whitespace (newlines, spaces, tabs) after trimming
-    ///   leading/trailing whitespace — these indicate user error (e.g., space-separated
-    ///   or newline-separated addresses in a single string).
-    /// - Any URL is missing a port or has an invalid port number (not 0-65535).
+    /// - Any URL does not match Java's `HOST_PORT_PATTERN` — including any
+    ///   whitespace, leading or trailing too (e.g. space- or newline-separated
+    ///   addresses in a single string). URLs are **not** trimmed here: as in
+    ///   Java, trimming is the config layer's job (`ConfigDef`'s `LIST`
+    ///   parsing, [`ConfigDef::parse_list`](crate::common::config::ConfigDef)),
+    ///   which already strips the whitespace around each comma.
+    /// - Any URL has a port number outside 0-65535.
     /// - In canonical mode, a host cannot be resolved at all.
     /// - No valid addresses can be resolved after validation.
     pub fn parse_and_validate_addresses(
@@ -174,7 +177,14 @@ impl ClientUtils {
         Self::parse_and_validate_addresses_with_lookup(
             urls,
             client_dns_lookup,
-            |host, port| (host, port).to_socket_addrs().map(Iterator::collect),
+            |host, port| {
+                // `InetAddress.getAllByName("")` (and so `new InetSocketAddress("", port)`)
+                // is the loopback address with no lookup; `getaddrinfo("")` fails.
+                if host.is_empty() {
+                    return Ok(vec![SocketAddr::new(DefaultHostResolver::EMPTY_HOST_ADDRESS, port)]);
+                }
+                (host, port).to_socket_addrs().map(Iterator::collect)
+            },
             |address| address.to_string(),
         )
     }
@@ -206,25 +216,15 @@ impl ClientUtils {
 
         let mut addresses = Vec::new();
         for url in urls {
-            let trimmed = url.trim();
-            if trimmed.is_empty() {
+            // Java skips only `null` / empty entries — a whitespace-only entry
+            // falls through and fails `HOST_PORT_PATTERN` below.
+            if url.is_empty() {
                 continue;
             }
 
-            // Reject addresses containing embedded whitespace (spaces, newlines, tabs).
-            // Java's HOST_PORT_PATTERN regex rejects these because it anchors the entire
-            // string and only allows alphanumeric, -%._: and bracket characters.
-            if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
-                return Err(Error::config_message(format!(
-                    "Invalid url in {}: {}",
-                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                    url
-                )));
-            }
-
-            // Parse host and port. Java uses Utils.getHost/getPort with a regex;
-            // we parse manually to support IPv4 (host:port) and IPv6 ([host]:port).
-            let (host, port) = Self::parse_host_port(trimmed).ok_or_else(|| {
+            // Java's `Utils.getHost` / `Utils.getPort`; `null` from either is
+            // "Invalid url".
+            let (host, port) = Self::parse_host_port(url).ok_or_else(|| {
                 Error::config_message(format!(
                     "Invalid url in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
@@ -232,9 +232,10 @@ impl ClientUtils {
                 ))
             })?;
 
-            // Validate port range (Java's InetSocketAddress constructor throws
-            // IllegalArgumentException for ports outside 0-65535).
-            let port = u16::try_from(port).map_err(|_| {
+            // `Integer.parseInt` overflowing (`NumberFormatException`) and
+            // `new InetSocketAddress` rejecting a port outside 0-65535 are both
+            // `IllegalArgumentException`s, which Java rethrows as "Invalid port".
+            let port = port.parse::<u16>().map_err(|_| {
                 Error::config_message(format!(
                     "Invalid port in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
@@ -288,41 +289,49 @@ impl ClientUtils {
         Ok(addresses)
     }
 
-    /// Parse a `"host:port"` or `"[ipv6]:port"` string into its components.
+    /// Splits `address` into its host and its port digits, or `None` if it
+    /// does not match.
     ///
-    /// Returns `None` if the string doesn't match the expected format
-    /// (no port, or no host).
+    /// Translated from Java's `Utils.getHost()` / `Utils.getPort()`, which
+    /// `matches()` (whole-string) the address against
     ///
-    /// Translated from Java's `Utils.getHost()` / `Utils.getPort()` which use the
-    /// `HOST_PORT_PATTERN` regex.
-    fn parse_host_port(url: &str) -> Option<(&str, u32)> {
-        // Strip optional protocol prefix (e.g., "http://")
-        let s = if let Some(idx) = url.find("://") {
-            &url[idx + 3..]
-        } else {
-            url
-        };
+    /// ```text
+    /// HOST_PORT_PATTERN = ^(?:[0-9a-zA-Z\-%._]*://)?\[?([0-9a-zA-Z\-%._:]*)]?:([0-9]+)
+    /// ```
+    ///
+    /// and return group 1 / group 2. The pattern needs no backtracking search
+    /// here: the scheme class excludes `:`, so an optional scheme ends at the
+    /// first `://`; the host class excludes `[`, `]` and `/`, and the port is
+    /// all digits, so the port separator is the last `:`. Any character outside
+    /// those classes — whitespace included — fails the match.
+    ///
+    /// The host group is `*`, so an empty host (`":9092"`, `"[]:9092"`) matches
+    /// and is returned as `""`; resolving it yields the loopback address
+    /// ([`DefaultHostResolver::EMPTY_HOST_ADDRESS`]), as `InetAddress` does.
+    fn parse_host_port(address: &str) -> Option<(&str, &str)> {
+        let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '%' | '.' | '_');
+        let is_host_char = |c: char| is_scheme_char(c) || c == ':';
 
-        if s.starts_with('[') {
-            // IPv6 bracket notation: [host]:port
-            let close_bracket = s.find(']')?;
-            let host = &s[1..close_bracket];
-            let rest = &s[close_bracket + 1..];
-            // Must be followed by :port
-            let port_str = rest.strip_prefix(':')?;
-            let port: u32 = port_str.parse().ok()?;
-            Some((host, port))
-        } else {
-            // IPv4 or hostname: host:port — find the last colon
-            let colon_idx = s.rfind(':')?;
-            let host = &s[..colon_idx];
-            if host.is_empty() {
-                return None;
-            }
-            let port_str = &s[colon_idx + 1..];
-            let port: u32 = port_str.parse().ok()?;
-            Some((host, port))
+        // (?:[0-9a-zA-Z\-%._]*://)?
+        let rest = match address.find("://") {
+            Some(end) if address[..end].chars().all(is_scheme_char) => &address[end + 3..],
+            _ => address,
+        };
+        // \[?
+        let rest = rest.strip_prefix('[').unwrap_or(rest);
+        // :([0-9]+) at the end
+        let separator = rest.rfind(':')?;
+        let port = &rest[separator + 1..];
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
         }
+        // ([0-9a-zA-Z\-%._:]*)]?
+        let host = &rest[..separator];
+        let host = host.strip_suffix(']').unwrap_or(host);
+        if !host.chars().all(is_host_char) {
+            return None;
+        }
+        Some((host, port))
     }
 }
 
@@ -619,37 +628,96 @@ mod tests {
     /// Translated from `ClientUtilsTest.testInvalidBrokerAddress`
     /// (`@ParameterizedTest` over `provideInvalidBrokerAddressTestCases`).
     ///
-    /// Java's second case, `" localhost:9999"` (leading space), is rejected by
-    /// Java's `HOST_PORT_PATTERN`; this translation trims leading/trailing
-    /// whitespace from each entry first, so that one case is accepted — see
-    /// `test_invalid_broker_address_leading_space`.
+    /// Java asserts only `ConfigException`; the message is pinned too. Every
+    /// case fails `HOST_PORT_PATTERN`, so it is "Invalid url" naming the
+    /// offending entry verbatim — for the second case the space-prefixed
+    /// third entry, after the first two were accepted.
     #[test]
     fn test_invalid_broker_address() {
-        let cases: [&[&str]; 2] = [
-            &["localhost:9997\nlocalhost:9998\nlocalhost:9999"],
+        let cases: [(&[&str], &str); 3] = [
+            (
+                &["localhost:9997\nlocalhost:9998\nlocalhost:9999"],
+                "localhost:9997\nlocalhost:9998\nlocalhost:9999",
+            ),
+            (&["localhost:9997", "localhost:9998", " localhost:9999"], " localhost:9999"),
             // Intentionally provide a single string, as users may provide
             // space-separated brokers, which will be parsed as a single string.
-            &["localhost:9997 localhost:9998 localhost:9999"],
+            (
+                &["localhost:9997 localhost:9998 localhost:9999"],
+                "localhost:9997 localhost:9998 localhost:9999",
+            ),
         ];
-        for addresses in cases {
+        for (addresses, offending) in cases {
             assert_config_error(
                 check_without_lookup(addresses),
-                &format!("Invalid url in bootstrap.servers: {}", addresses[0]),
+                &format!("Invalid url in bootstrap.servers: {offending}"),
             );
         }
     }
 
-    /// Leading-space case of `ClientUtilsTest.testInvalidBrokerAddress`.
-    ///
-    /// Java rejects `" localhost:9999"` because the space fails its
-    /// `HOST_PORT_PATTERN` regex. This translation trims leading/trailing
-    /// whitespace from each entry (embedded whitespace is still rejected), so
-    /// the entry is accepted — a documented, more lenient deviation.
+    /// `HOST_PORT_PATTERN` edge cases: trailing whitespace, whitespace-only
+    /// entries and characters outside the host class fail the match
+    /// ("Invalid url"); a scheme prefix and an unbracketed IPv6 literal
+    /// match it.
     #[test]
-    fn test_invalid_broker_address_leading_space() {
-        let addrs = check_without_lookup(&["localhost:9997", "localhost:9998", " localhost:9999"]).unwrap();
-        assert_eq!(addrs.len(), 3);
-        assert_eq!(addrs[2].0, "localhost");
+    fn test_host_port_pattern() {
+        for url in [
+            "localhost:9092 ",
+            "localhost:9092\t",
+            "   ",
+            "local/host:9092",
+            "a,b:9092",
+            "localhost:",
+        ] {
+            assert_config_error(
+                check_without_lookup(&[url]),
+                &format!("Invalid url in bootstrap.servers: {url}"),
+            );
+        }
+        assert_eq!(
+            ClientUtils::parse_host_port("PLAINTEXT://localhost:9092"),
+            Some(("localhost", "9092"))
+        );
+        assert_eq!(ClientUtils::parse_host_port("[::1]:9092"), Some(("::1", "9092")));
+        assert_eq!(ClientUtils::parse_host_port("::1:9092"), Some(("::1", "9092")));
+        assert_eq!(ClientUtils::parse_host_port("a b://localhost:9092"), None);
+        // The host group is `*`: an empty host matches.
+        assert_eq!(ClientUtils::parse_host_port(":9092"), Some(("", "9092")));
+        assert_eq!(ClientUtils::parse_host_port("[]:9092"), Some(("", "9092")));
+        assert_eq!(ClientUtils::parse_host_port("PLAINTEXT://:9092"), Some(("", "9092")));
+    }
+
+    /// An empty host (`":9092"`) is accepted, as in Java, and resolves to the
+    /// loopback address the way `InetAddress.getAllByName("")` does, with no
+    /// name-service lookup. In `use_all_dns_ips` mode the node host stays `""`
+    /// (Java's `getHostString()`), which `DefaultHostResolver` later resolves
+    /// to loopback too. In canonical mode the one address is keyed by its
+    /// canonical name, the textual IP (see the canonical-name deviation;
+    /// Java gets `localhost` from the PTR lookup).
+    #[test]
+    fn test_empty_host_resolves_to_loopback() {
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
+        let urls = [":9092".to_string()];
+        assert_eq!(
+            ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::UseAllDnsIps).unwrap(),
+            vec![(String::new(), loopback)]
+        );
+        assert_eq!(
+            ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
+                .unwrap(),
+            vec![("127.0.0.1".to_string(), loopback)]
+        );
+    }
+
+    /// A port too large for `Integer.parseInt` is a `NumberFormatException`,
+    /// i.e. an `IllegalArgumentException`, so Java reports "Invalid port", not
+    /// "Invalid url".
+    #[test]
+    fn test_port_overflowing_int() {
+        assert_config_error(
+            check_without_lookup(&["localhost:99999999999"]),
+            "Invalid port in bootstrap.servers: localhost:99999999999",
+        );
     }
 
     /// Translated from `ClientUtilsTest.testInvalidConfig`: an unknown
@@ -714,8 +782,9 @@ mod tests {
         );
     }
 
-    /// Empty and whitespace-only entries are skipped (Java skips `null` / empty
-    /// URLs), leaving no address.
+    /// Empty entries are skipped (Java skips `null` / empty URLs), leaving no
+    /// address. A whitespace-only entry is not empty, so it is "Invalid url"
+    /// (see `test_host_port_pattern`).
     #[test]
     fn test_parse_and_validate_addresses_empty() {
         for mode in [
@@ -727,7 +796,7 @@ mod tests {
                 "No resolvable bootstrap urls given in bootstrap.servers",
             );
             assert_config_error(
-                ClientUtils::parse_and_validate_addresses(&["  ".to_string(), String::new()], mode),
+                ClientUtils::parse_and_validate_addresses(&[String::new(), String::new()], mode),
                 "No resolvable bootstrap urls given in bootstrap.servers",
             );
         }
