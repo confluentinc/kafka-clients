@@ -6921,13 +6921,13 @@ mod tests {
         assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
     }
 
-    /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1459-1476`)
+    /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1473-1492`)
     /// fails every pending call with
     /// `TimeoutException("The AdminClient thread has exited. Call: <name>")`,
     /// **however** `processRequests` terminated.
     ///
     /// Translated as straight-line code after the loop it was not a `finally` at
-    /// all: any panic inside `run_once` skipped both `fail_all_remaining` and
+    /// all: any panic inside a loop iteration skipped both `fail_all_remaining` and
     /// `client.close()`, so no outstanding `KafkaFuture` was ever completed and no
     /// socket was closed — a silent permanent hang.
     #[tokio::test]
@@ -6936,7 +6936,7 @@ mod tests {
 
         // Inject a panic inside the loop body, standing in for the
         // `ClassCastException`s Java's `catch (Throwable t)` covers (the Issue-66
-        // sites). An already-expired deadline makes `run_once`'s step 2
+        // sites). An already-expired deadline makes `process_pending_calls`'s step 2
         // (`handle_timeouts` -> `fail_call` -> `handle_timeout_failure`) invoke this
         // call's failure hook on the very first iteration, so the injection is
         // deterministic. It panics only once, so the `finally`'s own re-failing of
@@ -6952,7 +6952,7 @@ mod tests {
             Box::new(|_response, _now, _cur_node| HandleResult::Done),
             Box::new(move |_error| {
                 if counter.fetch_add(1, Ordering::AcqRel) == 0 {
-                    panic!("injected panic inside run_once");
+                    panic!("injected panic inside the I/O loop");
                 }
             }),
             Box::new(|| false),
@@ -7035,7 +7035,7 @@ mod tests {
     /// `handleFailure` → `metadataManager.updateFailed(e)`.
     ///
     /// Swallowing the mismatch ran neither `update()` nor `update_failed()` while
-    /// `run_once` had already called `transition_to_update_pending`, and
+    /// `process_pending_calls` had already called `transition_to_update_pending`, and
     /// `metadata_fetch_delay_ms` returns `i64::MAX` in `UPDATE_PENDING` — so the
     /// client never refreshed metadata again for its whole lifetime, and
     /// `HandleResult::Done` on an internal call also re-queued the pending calls
@@ -13335,7 +13335,7 @@ mod tests {
 
         /// Once armed, `poll` never returns, so the I/O loop can never reach
         /// `should_exit` again. It stands in for any `await` inside a
-        /// `run_once` phase that no shutdown deadline can interrupt — in
+        /// `process_pending_calls` phase that no shutdown deadline can interrupt — in
         /// production the unbounded `socket.connect(...).await` that
         /// `send_eligible_calls` reaches through `client.ready(...)`.
         fn stuck(&self) -> Arc<std::sync::atomic::AtomicBool> {
@@ -13461,7 +13461,7 @@ mod tests {
 
     /// Java bounds every `client.poll(...)` by the time left until the
     /// hard-shutdown deadline once `close()` has been called
-    /// (`KafkaAdminClient.java:1500-1502`):
+    /// (`KafkaAdminClient.java:1512-1515`):
     ///
     /// ```java
     /// long pollTimeout = Math.min(1200000, timeoutProcessor.nextTimeoutMs());
@@ -13682,7 +13682,7 @@ mod tests {
     /// Java publishes the hard-shutdown deadline through a compare-and-set loop
     /// that only ever moves it *earlier* (`KafkaAdminClient.close`: "Hard
     /// shutdown time is already earlier than requested"). A plain store would let
-    /// a later, more relaxed `close()` re-widen the poll budget that `run_once`
+    /// a later, more relaxed `close()` re-widen the poll budget that `process_pending_calls`
     /// reads on every iteration — stretching the wait of a caller already parked
     /// in the join above.
     #[tokio::test]
