@@ -14,7 +14,7 @@ name = "consumer-perf"
 path = "src/main.rs"
 
 [dependencies]
-confluent-kafka-rust = { path = ".." }
+confluent-kafka = { path = ".." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 # Cross-platform per-process CPU% and RSS sampling (no /proc on macOS).
 sysinfo = "0.32"

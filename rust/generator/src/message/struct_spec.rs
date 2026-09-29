@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-use crate::message::{FieldSpec, Versions};
+use super::{FieldSpec, Versions};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 

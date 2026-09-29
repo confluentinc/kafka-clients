@@ -80,12 +80,12 @@ rust/src/               # 777 .rs files
 ├── consumer/           # org.apache.kafka.clients.consumer (see below)
 ├── producer/           # org.apache.kafka.clients.producer (see below)
 ├── ffi/                # C FFI, feature-gated on `ffi` (see below)
-├── common/             # org.apache.kafka.common (see below)
-└── bin/
-    ├── consumer_test.rs
-    └── message_generator.rs
+└── common/             # org.apache.kafka.common (see below)
 
 rust/generator/         # Code generation (formerly src/message/)
+├── crate/              # The `generator` crate's manifest (tests, and the
+│                       # `message_generator` CLI); kept below the sources so
+│                       # the published package can include them
 ├── messages/           # 198 production JSON RPC specs (Apache Kafka 4.3.1)
 ├── test-messages/      # 4 test-only specs (NullableStruct, SimpleArrays,
 │                       # SimpleExample, SimpleRecords)
