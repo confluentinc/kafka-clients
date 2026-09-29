@@ -158,15 +158,15 @@ impl ClientUtils {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if:
+    /// Returns [`Error::Config`] (Java's `ConfigException`, built with its
+    /// single-message constructor, so the message carries no
+    /// `Invalid value ... for configuration ...` prefix) if:
     /// - Any URL contains embedded whitespace (newlines, spaces, tabs) after trimming
     ///   leading/trailing whitespace — these indicate user error (e.g., space-separated
     ///   or newline-separated addresses in a single string).
     /// - Any URL is missing a port or has an invalid port number (not 0-65535).
     /// - In canonical mode, a host cannot be resolved at all.
     /// - No valid addresses can be resolved after validation.
-    ///
-    /// These correspond to Java's `ConfigException`.
     pub fn parse_and_validate_addresses(
         urls: &[String],
         client_dns_lookup: ClientDnsLookup,
@@ -215,7 +215,7 @@ impl ClientUtils {
             // Java's HOST_PORT_PATTERN regex rejects these because it anchors the entire
             // string and only allows alphanumeric, -%._: and bracket characters.
             if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
-                return Err(Error::local_illegal_argument(format!(
+                return Err(Error::config_message(format!(
                     "Invalid url in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
@@ -225,7 +225,7 @@ impl ClientUtils {
             // Parse host and port. Java uses Utils.getHost/getPort with a regex;
             // we parse manually to support IPv4 (host:port) and IPv6 ([host]:port).
             let (host, port) = Self::parse_host_port(trimmed).ok_or_else(|| {
-                Error::local_illegal_argument(format!(
+                Error::config_message(format!(
                     "Invalid url in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
@@ -235,7 +235,7 @@ impl ClientUtils {
             // Validate port range (Java's InetSocketAddress constructor throws
             // IllegalArgumentException for ports outside 0-65535).
             let port = u16::try_from(port).map_err(|_| {
-                Error::local_illegal_argument(format!(
+                Error::config_message(format!(
                     "Invalid port in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
@@ -245,7 +245,7 @@ impl ClientUtils {
             match client_dns_lookup {
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
                     let inet_addresses = resolve_all(host, port).map_err(|_| {
-                        Error::local_illegal_argument(format!(
+                        Error::config_message(format!(
                             "Unknown host in {}: {}",
                             CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                             url
@@ -280,7 +280,7 @@ impl ClientUtils {
             }
         }
         if addresses.is_empty() {
-            return Err(Error::local_illegal_argument(format!(
+            return Err(Error::config_message(format!(
                 "No resolvable bootstrap urls given in {}",
                 CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG
             )));
@@ -419,10 +419,16 @@ mod tests {
         ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
     }
 
-    fn assert_illegal_argument(result: Result<Vec<(String, SocketAddr)>, Error>, expected: &str) {
+    /// Java's `assertThrows(ConfigException.class, ...)`, plus the exact
+    /// message, which Java builds with the single-message `ConfigException`
+    /// constructor (no `Invalid value ... for configuration ...` prefix).
+    fn assert_config_error(result: Result<Vec<(String, SocketAddr)>, Error>, expected: &str) {
+        if let Err(error) = &result {
+            assert!(error.is_kafka_error(), "ConfigException extends KafkaException: {error:?}");
+        }
         match result {
-            Err(Error::LocalIllegalArgument(e)) => assert_eq!(e.message(), expected),
-            other => panic!("Expected LocalIllegalArgument({expected:?}), got: {other:?}"),
+            Err(Error::Config(e)) => assert_eq!(e.message(), expected),
+            other => panic!("Expected Config({expected:?}), got: {other:?}"),
         }
     }
 
@@ -565,7 +571,7 @@ mod tests {
         .unwrap();
         assert_eq!(one_good, vec![("good".to_string(), SocketAddr::new(ip1, 9092))]);
 
-        assert_illegal_argument(
+        assert_config_error(
             ClientUtils::parse_and_validate_addresses_with_lookup(
                 &urls,
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
@@ -583,7 +589,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_with_reverse_lookup_unknown_host() {
         let urls = ["some.invalid.hostname.foo.bar.local:9999".to_string()];
-        assert_illegal_argument(
+        assert_config_error(
             ClientUtils::parse_and_validate_addresses_with_lookup(
                 &urls,
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
@@ -626,7 +632,7 @@ mod tests {
             &["localhost:9997 localhost:9998 localhost:9999"],
         ];
         for addresses in cases {
-            assert_illegal_argument(
+            assert_config_error(
                 check_without_lookup(addresses),
                 &format!("Invalid url in bootstrap.servers: {}", addresses[0]),
             );
@@ -665,7 +671,7 @@ mod tests {
     /// Translated from `ClientUtilsTest.testNoPort`.
     #[test]
     fn test_no_port() {
-        assert_illegal_argument(
+        assert_config_error(
             check_without_lookup(&["127.0.0.1"]),
             "Invalid url in bootstrap.servers: 127.0.0.1",
         );
@@ -674,7 +680,7 @@ mod tests {
     /// Translated from `ClientUtilsTest.testInvalidPort`.
     #[test]
     fn test_invalid_port() {
-        assert_illegal_argument(
+        assert_config_error(
             check_without_lookup(&["localhost:70000"]),
             "Invalid port in bootstrap.servers: localhost:70000",
         );
@@ -688,7 +694,7 @@ mod tests {
     #[test]
     fn test_only_bad_hostname() {
         let urls = ["some.invalid.hostname.foo.bar.local:9999".to_string()];
-        assert_illegal_argument(
+        assert_config_error(
             ClientUtils::parse_and_validate_addresses_with_lookup(
                 &urls,
                 ClientDnsLookup::UseAllDnsIps,
@@ -702,7 +708,7 @@ mod tests {
     /// An unresolvable host through the real resolver, in the default mode.
     #[test]
     fn test_parse_and_validate_addresses_unresolvable() {
-        assert_illegal_argument(
+        assert_config_error(
             check_without_lookup(&["this.host.does.not.exist.ever.kafka.test:9092"]),
             "No resolvable bootstrap urls given in bootstrap.servers",
         );
@@ -716,11 +722,11 @@ mod tests {
             ClientDnsLookup::UseAllDnsIps,
             ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
         ] {
-            assert_illegal_argument(
+            assert_config_error(
                 ClientUtils::parse_and_validate_addresses(&[], mode),
                 "No resolvable bootstrap urls given in bootstrap.servers",
             );
-            assert_illegal_argument(
+            assert_config_error(
                 ClientUtils::parse_and_validate_addresses(&["  ".to_string(), String::new()], mode),
                 "No resolvable bootstrap urls given in bootstrap.servers",
             );

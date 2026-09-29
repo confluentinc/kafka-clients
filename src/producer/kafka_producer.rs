@@ -7126,6 +7126,13 @@ mod tests {
             error.source().is_some(),
             "the underlying failure must be the wrapper's cause, not lost"
         );
+        // The cause is `parseAndValidateAddresses`' `ConfigException`, with its
+        // single-message text.
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
     }
 
     /// `doSend`'s inner `catch (KafkaException e)` around `waitOnMetadata`

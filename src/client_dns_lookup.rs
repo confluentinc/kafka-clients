@@ -238,6 +238,9 @@ mod tests {
     fn test_parse_config_value_rejects_other_values() {
         for value in ["USE_ALL_DNS_IPS", "default", ""] {
             let err = ClientDnsLookup::parse_config_value(value).unwrap_err();
+            // `ValidString.ensureValid` throws `ConfigException`, not the
+            // `IllegalArgumentException` that `forConfig` throws.
+            assert!(matches!(err, Error::Config(_)), "got {err:?}");
             assert_eq!(
                 err.message(),
                 format!(
