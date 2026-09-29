@@ -288,24 +288,29 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t</c> (result
-    /// shape <b>4c</b> — one independent callback per partition fanned in to Java's
-    /// <b>single</b> <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>).
-    /// ⚠⚠ <paramref name="error"/> is that partition's map <b>VALUE</b>, not a fault, and
-    /// is <b>owned</b>. <paramref name="topic"/> is borrowed for the call only.
+    /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t</c>: Java's
+    /// <b>single</b> <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>, so it fires
+    /// <b>exactly once</b> per submission — also for an empty request.
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ Exactly one of <paramref name="result"/> / <paramref name="error"/> is non-null and
+    /// the callback <b>owns</b> it. A per-partition failure arrives <b>inside</b>
+    /// <paramref name="result"/> (read through <see cref="AlterConsumerGroupOffsetsOptionalError"/>,
+    /// a <em>value</em>, not a fault); a non-null <paramref name="error"/> means the whole
+    /// request failed or could not be submitted at all.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterConsumerGroupOffsetsCallback(
-        IntPtr topic, int partition, IntPtr error, IntPtr userData);
+    internal delegate void AlterConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t</c> — result
-    /// shape <b>4c</b>, identical to <see cref="AlterConsumerGroupOffsetsCallback"/>.
+    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t</c> — the same
+    /// one-shot <c>(result, error, user_data)</c> contract as
+    /// <see cref="AlterConsumerGroupOffsetsCallback"/>, over
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_t</c>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteConsumerGroupOffsetsCallback(
-        IntPtr topic, int partition, IntPtr error, IntPtr userData);
+    internal delegate void DeleteConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
@@ -452,8 +457,7 @@ internal static class AdminCallbacks
     /// <summary>
     /// The C signature for
     /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c> — result
-    /// shape <b>4c</b>, like <see cref="AlterConsumerGroupOffsetsCallback"/>, with a
-    /// <b>mode-dependent</b> key.
+    /// shape <b>4c</b>, with a <b>mode-dependent</b> key.
     /// </summary>
     /// <remarks>
     /// ⚠⚠ <b>Same arity as the aggregate callback it replaced — only the first parameter's
@@ -577,17 +581,17 @@ internal static class AdminCallbacks
     /// <summary>
     /// Builds a <b>composite</b> key reader over a result whose key is
     /// <c>(get_topic(i), get_partition(i))</c> — the shape M15/P2a's <c>(result, index)</c>
-    /// key seam exists for, and which three RPCs now share.
+    /// key seam exists for.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>One body instead of three copies, for the same testability reason as
+    /// ⚠ <b>One body instead of a copy per RPC, for the same testability reason as
     /// <see cref="BorrowedOptionalError"/>.</b> <c>deleteRecords</c> and
     /// <c>alterPartitionReassignments</c> both drive this body against a real result root,
     /// so a defect in the composition — a missing
     /// <see cref="KeyedResultMarshal.ReadStringKey"/>, a transposed pair — is caught there
-    /// and therefore for <c>electLeaders</c> too. What that still does not reach is
-    /// <em>which accessors</em> <c>electLeaders</c>' instance is built on; that is pinned
-    /// structurally by <c>AdminP4ReaderWiringTests</c>.
+    /// and therefore for every instance built on it. What that does not reach is
+    /// <em>which accessors</em> a given instance is built on; that is pinned structurally by
+    /// <c>AdminP4ReaderWiringTests</c>.
     /// </remarks>
     /// <param name="getTopic">That RPC's <c>*Result_get_topic</c>, borrowed and NUL-terminated.</param>
     /// <param name="getPartition">That RPC's <c>*Result_get_partition</c>.</param>
@@ -596,6 +600,52 @@ internal static class AdminCallbacks
         KeyedResultMarshal.IndexedAccessor getTopic, Func<IntPtr, int, int> getPartition) =>
         (result, index) => new TopicPartition(
             KeyedResultMarshal.ReadStringKey(getTopic(result, index)), getPartition(result, index));
+
+    /// <summary>
+    /// Builds a consumer-group-offsets <b>outcome</b> reader: the per-partition map walked off
+    /// the result root, paired with the core's own <c>all()</c> outcome read once off the same
+    /// root — the value <see cref="Admin.AlterConsumerGroupOffsetsResult"/> and
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult"/> are resolved with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two ownership regimes on one root.</b> Each per-partition error is
+    /// <b>BORROWED</b> — <paramref name="readError"/> is a <see cref="BorrowedOptionalError"/>
+    /// reader, never destroyed. The <c>all()</c> error is <b>OWNED</b> — it goes through
+    /// <see cref="KafkaException.FromHandle"/>, which frees it before this returns. So nothing
+    /// the reader returns points into the root, and the caller may destroy the root as soon as
+    /// it returns.
+    /// </para>
+    /// <para>
+    /// The walk runs <b>before</b> <paramref name="all"/>: a throw mid-walk then never calls
+    /// it, so there is no owned error to leak. The per-key map is keyed by the core's rows,
+    /// which cover every requested partition (the header documents <c>count</c> as "the
+    /// number of partitions in the request").
+    /// </para>
+    /// <para>
+    /// Called once per RPC at static initialization, like the readers it composes, so its
+    /// closure is not on any completion.
+    /// </para>
+    /// </remarks>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="readKey">That RPC's composite key reader.</param>
+    /// <param name="readError">That RPC's borrowed per-partition error reader.</param>
+    /// <param name="all">That RPC's <c>*Result_all</c>, returning an <b>owned</b> error.</param>
+    /// <returns>The outcome reader.</returns>
+    internal static Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
+        PartitionOutcomes(
+            KeyedResultMarshal.CountAccessor count,
+            Func<IntPtr, int, TopicPartition> readKey,
+            Func<IntPtr, int, KafkaException?> readError,
+            Func<IntPtr, IntPtr> all) =>
+        result =>
+        {
+            IReadOnlyDictionary<TopicPartition, KafkaException?> perKey = KeyedResultMarshal.ReadAggregate(
+                result, count, readKey, readError, EqualityComparer<TopicPartition>.Default);
+
+            // ⚠ OWNED — FromHandle frees it exactly once.
+            return (perKey, KafkaException.FromHandle(all(result)));
+        };
 
     /// <summary>
     /// <c>createTopics</c>' per-key value reader: <c>get_value(i)</c> yields a
@@ -899,16 +949,15 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The rooted instance passed to every <c>alter_consumer_group_offsets_async</c>
-    /// submission (result shape 4c — per-partition callbacks fanned in to one aggregate
-    /// task).
+    /// submission (one callback resolving one aggregate task, like
+    /// <see cref="ElectLeaders"/>).
     /// </summary>
     internal static readonly AlterConsumerGroupOffsetsCallback AlterConsumerGroupOffsets =
         OnAlterConsumerGroupOffsets;
 
     /// <summary>
     /// The rooted instance passed to every <c>delete_consumer_group_offsets_async</c>
-    /// submission (result shape 4c, the same shape as
-    /// <see cref="AlterConsumerGroupOffsets"/>).
+    /// submission (the same one-shot shape as <see cref="AlterConsumerGroupOffsets"/>).
     /// </summary>
     internal static readonly DeleteConsumerGroupOffsetsCallback DeleteConsumerGroupOffsets =
         OnDeleteConsumerGroupOffsets;
@@ -1158,15 +1207,23 @@ internal static class AdminCallbacks
         NativeMethods.DescribeDelegationTokenResultCount;
 
     /// <summary>
-    /// The completion body the four <b>count-less</b> P7 trampolines share: read one value off
-    /// the result root and resolve the single awaiter with it.
+    /// The completion body shared by every trampoline whose single awaiter resolves with
+    /// <b>one value read off the result root</b>: <paramref name="readRoot"/> builds that value,
+    /// and this shell owns everything else.
     /// </summary>
     /// <remarks>
-    /// ⚠ <paramref name="error"/> is <b>OWNED</b> — none of these results declares a
-    /// <c>get_error</c>, so nothing on this path is borrowed and
-    /// <see cref="KafkaException.FromHandle"/> is what frees it exactly once. The
-    /// <c>finally</c> discharges the usual three obligations, with the destroy strictly after
-    /// the read because every value read is borrowed from that root.
+    /// <para>
+    /// ⚠ <paramref name="error"/> is <b>OWNED</b> — <see cref="KafkaException.FromHandle"/> is
+    /// what frees it exactly once. Whatever <paramref name="readRoot"/> reads off the root is
+    /// its own business to classify: a <b>borrowed</b> pointer must be copied out before it
+    /// returns, and an <b>owned</b> one freed by it (the group-offsets outcome readers do both
+    /// — see <see cref="PartitionOutcomes"/>). Nothing it returns may point into the root.
+    /// </para>
+    /// <para>
+    /// The <c>finally</c> discharges the usual three obligations, with the destroy strictly
+    /// after the read because the read borrows from that root. The destroy is null-safe, so it
+    /// also covers the <paramref name="error"/> path, where the root is null.
+    /// </para>
     /// </remarks>
     private static void CompleteRootValueRpc<TValue>(
         IntPtr result,
@@ -1746,9 +1803,11 @@ internal static class AdminCallbacks
     /// partition's offset was altered successfully, any other code is that partition's own
     /// outcome. The per-partition error <em>is</em> the map's value, so it is read by the
     /// value reader and lands in the map — it does not fault anything on its own; only
-    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/> and
-    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.All"/> turn a non-null entry into a
-    /// fault, mirroring Java's <c>partitionResult</c> / <c>all()</c>.
+    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/>
+    /// turns a non-null entry into a fault, mirroring Java's <c>partitionResult</c>.
+    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.All"/> does not consult the map at
+    /// all: it carries the core's own <c>all()</c> outcome, read beside the map by
+    /// <see cref="AlterConsumerGroupOffsetsOutcome"/>.
     /// </para>
     /// <para>
     /// ⚠ <b>The ABI accessor set cannot tell you this.</b> This result's accessor set is
@@ -1772,16 +1831,76 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// Java's future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
-    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) — <c>Errors.NONE</c> means that
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:31</c>) — <c>Errors.NONE</c> means that
     /// partition's offset was deleted successfully, any other code is that partition's own
     /// outcome. The per-partition error <em>is</em> the map's value, so it is read by the
     /// value reader and lands in the map — it does not fault anything on its own; only
-    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/> and
-    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.All"/> turn a non-null entry into a
-    /// fault, mirroring Java's <c>partitionResult</c> / <c>all()</c>.
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/>
+    /// turns a non-null entry into a fault, mirroring Java's <c>partitionResult</c>.
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.All"/> carries the core's own
+    /// <c>all()</c> outcome instead, read beside the map by
+    /// <see cref="DeleteConsumerGroupOffsetsOutcome"/>.
     /// </remarks>
     internal static readonly Func<IntPtr, int, KafkaException?> DeleteConsumerGroupOffsetsOptionalError =
         BorrowedOptionalError(NativeMethods.DeleteConsumerGroupOffsetsResultGetError);
+
+    /// <summary>
+    /// <c>alterConsumerGroupOffsets</c>' <b>composite</b> key reader — the key is
+    /// <c>(get_topic(i), get_partition(i))</c>, reassembled into the
+    /// <see cref="TopicPartition"/> Java keys the map by. Same reader shape as
+    /// <see cref="ElectLeadersKey"/>.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> AlterConsumerGroupOffsetsKey =
+        TopicPartitionKey(
+            NativeMethods.AlterConsumerGroupOffsetsResultGetTopic,
+            NativeMethods.AlterConsumerGroupOffsetsResultGetPartition);
+
+    /// <summary>
+    /// <c>deleteConsumerGroupOffsets</c>' <b>composite</b> key reader — the same shape as
+    /// <see cref="AlterConsumerGroupOffsetsKey"/>, over this result's own accessors.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> DeleteConsumerGroupOffsetsKey =
+        TopicPartitionKey(
+            NativeMethods.DeleteConsumerGroupOffsetsResultGetTopic,
+            NativeMethods.DeleteConsumerGroupOffsetsResultGetPartition);
+
+    /// <summary>
+    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' <b>outcome</b> reader: the per-partition map
+    /// (<see cref="AlterConsumerGroupOffsetsKey"/> →
+    /// <see cref="AlterConsumerGroupOffsetsOptionalError"/>) plus the core's
+    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_all</c>.
+    /// </summary>
+    /// <remarks>
+    /// The <c>all()</c> fault is the <b>core's</b>, not rebuilt here — including Java's
+    /// aggregate <c>Failed altering group offsets for the following partitions: [...]</c>
+    /// message — so <see cref="Admin.AlterConsumerGroupOffsetsResult.All"/> rethrows it
+    /// unchanged. See <see cref="PartitionOutcomes"/> for the ownership of the two reads.
+    /// </remarks>
+    internal static readonly Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
+        AlterConsumerGroupOffsetsOutcome = PartitionOutcomes(
+            NativeMethods.AlterConsumerGroupOffsetsResultCount,
+            AlterConsumerGroupOffsetsKey,
+            AlterConsumerGroupOffsetsOptionalError,
+            NativeMethods.AlterConsumerGroupOffsetsResultAll);
+
+    /// <summary>
+    /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' <b>outcome</b> reader: the per-partition map
+    /// (<see cref="DeleteConsumerGroupOffsetsKey"/> →
+    /// <see cref="DeleteConsumerGroupOffsetsOptionalError"/>) plus the core's
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_all</c>.
+    /// </summary>
+    /// <remarks>
+    /// The <c>all()</c> fault is the <b>core's</b> choice of the first failing requested
+    /// partition, not re-derived here, so
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.All"/> rethrows it unchanged. See
+    /// <see cref="PartitionOutcomes"/> for the ownership of the two reads.
+    /// </remarks>
+    internal static readonly Func<IntPtr, (IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>
+        DeleteConsumerGroupOffsetsOutcome = PartitionOutcomes(
+            NativeMethods.DeleteConsumerGroupOffsetsResultCount,
+            DeleteConsumerGroupOffsetsKey,
+            DeleteConsumerGroupOffsetsOptionalError,
+            NativeMethods.DeleteConsumerGroupOffsetsResultAll);
 
     /// <summary>
     /// <c>alterPartitionReassignments</c>' universal accessors — result <b>shape 2</b>:
@@ -2138,6 +2257,14 @@ internal static class AdminCallbacks
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyElectLeadersResult = NativeMethods.ElectLeadersResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    private static readonly Action<IntPtr> s_destroyAlterConsumerGroupOffsetsResult =
+        NativeMethods.AlterConsumerGroupOffsetsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupOffsetsResult =
+        NativeMethods.DeleteConsumerGroupOffsetsResultDestroy;
 
     /// <summary>
     /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
@@ -2830,28 +2957,50 @@ internal static class AdminCallbacks
             s_destroyElectLeadersResult);
 
     /// <summary>
-    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' shape-<b>4c</b> trampoline: one partition's
-    /// outcome fanned in to the single aggregate task, with the per-partition
-    /// <paramref name="error"/> as the map's <b>VALUE</b>. Java's
-    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
-    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) is what decides this, not the
-    /// callback shape — <see cref="OnAlterPartitionReassignments"/> takes the same
-    /// <c>(topic, partition, error)</c> callback and fans out to N tasks instead.
+    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' trampoline: the <b>one</b> callback of Java's
+    /// single <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>), resolving the one awaiter with the
+    /// per-partition map <b>and</b> the core's own <c>all()</c> outcome.
     /// </summary>
-    private static void OnAlterConsumerGroupOffsets(
-        IntPtr topic, int partition, IntPtr error, IntPtr userData) =>
-        CompletePerKeyFanIn(
-            new PartitionKeySource(topic, partition), error, userData, s_topicPartitionKey);
+    /// <remarks>
+    /// <para>
+    /// Routed through <see cref="CompleteRootValueRpc{TValue}"/>, the shared single-awaiter
+    /// shell — so the no-throw boundary and the <c>finally</c>'s three obligations (destroy the
+    /// root once, <see cref="SingleAdminOperation{TValue}.FailUncompleted"/>,
+    /// <see cref="AdminOperation.FreeGcHandle"/>) are stated once, not re-derived here.
+    /// <see cref="AlterConsumerGroupOffsetsOutcome"/> is the whole of what is specific to the
+    /// RPC.
+    /// </para>
+    /// <para>
+    /// ⚠ The <see cref="AdminOperation.FreeGcHandle"/> in that <c>finally</c> is the
+    /// <b>only</b> release of the operation's handle and its span-the-op client reference.
+    /// The ABI fires this callback exactly once — also for an empty request and, inline on the
+    /// submitting thread, for a request that cannot be submitted — so the submit path must
+    /// take no countdown and release no submit token: either would free the handle before
+    /// this runs (PLAN R1).
+    /// </para>
+    /// </remarks>
+    private static void OnAlterConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            AlterConsumerGroupOffsetsOutcome,
+            s_destroyAlterConsumerGroupOffsetsResult);
 
     /// <summary>
-    /// <c>deleteConsumerGroupOffsets</c>' shape-4c trampoline — identical to
+    /// <c>deleteConsumerGroupOffsets</c>' trampoline — the same one-shot shell as
     /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same Java return type
-    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>).
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:31</c>), over this RPC's own
+    /// <see cref="DeleteConsumerGroupOffsetsOutcome"/>.
     /// </summary>
-    private static void OnDeleteConsumerGroupOffsets(
-        IntPtr topic, int partition, IntPtr error, IntPtr userData) =>
-        CompletePerKeyFanIn(
-            new PartitionKeySource(topic, partition), error, userData, s_topicPartitionKey);
+    private static void OnDeleteConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            DeleteConsumerGroupOffsetsOutcome,
+            s_destroyDeleteConsumerGroupOffsetsResult);
 
     /// <summary>
     /// <c>deleteConsumerGroups</c>' shape-4b trampoline: one awaiter per requested group id,

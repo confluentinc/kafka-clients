@@ -31,24 +31,20 @@ namespace Confluent.Kafka.UnitTests;
 /// ⚠ <b>The mock has no success path, and that is FAITHFUL, not a gap.</b> Java's
 /// <c>MockAdminClient.alterConsumerGroupOffsets</c> throws
 /// <c>UnsupportedOperationException("Not implement yet")</c> (Java's own typo —
-/// <c>MockAdminClient.java:1213</c>), and the core surfaces that as a resolved map whose
-/// <b>every requested partition</b> carries the identical "unsupported" error — Java's
-/// <c>Map&lt;TopicPartition, Errors&gt;</c> has no top-level-fault channel of its own, so a
-/// call-level refusal is expressed as "every partition failed the same way" rather than as
-/// a faulted aggregate <see cref="System.Threading.Tasks.Task"/> (unlike
-/// <see cref="ElectLeadersResult"/>, whose mock refusal below <b>does</b> fault the
-/// call-level <see cref="System.Threading.Tasks.Task"/> — a different Java return-type
-/// shape, per <c>AdminCallbacks.OnAlterConsumerGroupOffsets</c>'s remarks). So
-/// <see cref="AlterConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/> throws the
-/// per-partition "Not implement yet" error verbatim, while
-/// <see cref="AlterConsumerGroupOffsetsResult.All"/> throws its own <b>aggregate</b> message
-/// (carrying the same code) — asserted below.
+/// <c>MockAdminClient.java:1213</c>), and the core fails the RPC's one future with it. The
+/// ABI delivers that as the callback's whole-request error, so the single awaitable
+/// <b>faults</b>, and both accessors rethrow the mock's error unchanged — Java's
+/// <c>partitionResult</c> tests the <c>throwable</c> first
+/// (<c>AlterConsumerGroupOffsetsResult.java:46-47</c>) and its <c>all()</c> is a
+/// <c>thenApply</c> that the failure bypasses (<c>:68</c>).
 /// </para>
 /// <para>
-/// The map-value semantics are additionally tested against the public type directly, with a
-/// map the test supplies — the same accommodation
+/// The map-value semantics are additionally tested against the public type directly, with an
+/// outcome the test supplies — the same accommodation
 /// <c>PublicAdminElectionsReassignmentsTests.ElectLeadersResult_APerPartitionFailureIsAValue_AndAllReportsTheFirst</c>
-/// makes for <see cref="ElectLeadersResult"/>, which shares this result's shape.
+/// makes for <see cref="ElectLeadersResult"/>, which shares this result's shape. The supplied
+/// <c>All</c> stands for the core's <c>kafka_admin_AlterConsumerGroupOffsetsResult_all</c>,
+/// which the binding reads rather than derives.
 /// </para>
 /// </remarks>
 public sealed class PublicAdminAlterConsumerGroupOffsetsTests
@@ -65,10 +61,10 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     private const string NotImplemented = "Not implement yet";
 
     /// <summary>
-    /// <c>alterConsumerGroupOffsets</c> reaches the core and its single awaitable resolves
-    /// to a map where the requested partition carries the mock's documented refusal —
-    /// verbatim from <see cref="AlterConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/>,
-    /// aggregated (same code, own message) from <see cref="AlterConsumerGroupOffsetsResult.All"/>.
+    /// <c>alterConsumerGroupOffsets</c> reaches the core, whose mock fails the whole request,
+    /// and both accessors rethrow the mock's documented refusal <b>verbatim</b> — no
+    /// "Failed altering group offsets for the following partitions" wording, which Java
+    /// attaches only to a per-partition failure on a resolved map.
     /// </summary>
     [Fact]
     public async Task AlterConsumerGroupOffsets_SurfacesTheMocksDocumentedRefusal()
@@ -88,7 +84,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         KafkaException fromAll = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
-        Assert.Contains(tp.ToString(), fromAll.Message, StringComparison.Ordinal);
+        Assert.Equal(NotImplemented, fromAll.Message);
     }
 
     /// <summary>A closed client rejects the call before reaching the core.</summary>
@@ -109,9 +105,8 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     /// <summary>
     /// ⚠⚠ <b>A per-partition failure is a map VALUE on a SUCCESSFUL task</b> — Java's
     /// <c>Map&lt;TopicPartition, Errors&gt;</c> (<c>AlterConsumerGroupOffsetsResult.java:33</c>)
-    /// — and <see cref="AlterConsumerGroupOffsetsResult.PartitionResult"/> /
-    /// <see cref="AlterConsumerGroupOffsetsResult.All"/> are what turn a non-null entry into
-    /// a fault.
+    /// — and <see cref="AlterConsumerGroupOffsetsResult.PartitionResult"/> is what turns a
+    /// non-null entry into a fault (<c>:53-56</c>).
     /// </summary>
     [Fact]
     public async Task PartitionResult_SucceedsOnNull_AndThrowsThePartitionsOwnError()
@@ -126,8 +121,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             [bad] = error,
         };
 
-        AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(
-            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(outcomes));
+        AlterConsumerGroupOffsetsResult result = Resolved(outcomes, all: null);
 
         await TestTimeout.Run(() => result.PartitionResult(good), s_deadline);
 
@@ -137,9 +131,11 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     }
 
     /// <summary>
-    /// A partition never named in the request faults with Java's exact
+    /// A partition absent from a <b>resolved</b> map — including one never named in the
+    /// request — faults on the returned task with Java's exact
     /// <c>IllegalArgumentException</c> message, translated to <see cref="ArgumentException"/>
-    /// (<c>AlterConsumerGroupOffsetsResult.java:44-46</c>-equivalent wording).
+    /// (<c>AlterConsumerGroupOffsetsResult.java:48-50</c>). The success half of G5-4; the
+    /// failure half is <see cref="AFaultedFuture_PropagatesFromBothAccessors"/>.
     /// </summary>
     [Fact]
     public async Task PartitionResult_UnknownPartition_ThrowsWithJavasExactMessage()
@@ -147,9 +143,8 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         TopicPartition known = new TopicPartition("p5-known", 0);
         TopicPartition unknown = new TopicPartition("p5-unknown", 7);
 
-        AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(
-            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
-                new Dictionary<TopicPartition, KafkaException?> { [known] = null }));
+        AlterConsumerGroupOffsetsResult result = Resolved(
+            new Dictionary<TopicPartition, KafkaException?> { [known] = null }, all: null);
 
         ArgumentException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<ArgumentException>(() => result.PartitionResult(unknown)), s_deadline);
@@ -159,53 +154,72 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     }
 
     /// <summary>
-    /// <see cref="AlterConsumerGroupOffsetsResult.All"/> collects <b>every</b> failed
-    /// partition into its message (unlike <see cref="ElectLeadersResult.All"/>, which
-    /// reports only the first) while the thrown exception's code/retriable flag come from
-    /// the <b>first</b> failure encountered.
+    /// ⚠ <see cref="AlterConsumerGroupOffsetsResult.All"/> rethrows the <b>stored</b>
+    /// outcome — the same instance, unchanged — rather than building its own aggregate from
+    /// the map. Java's aggregate message (<c>AlterConsumerGroupOffsetsResult.java:68-81</c>)
+    /// is the core's to compose now; the binding only carries it.
     /// </summary>
     [Fact]
-    public async Task All_ListsEveryFailedPartition_AndCarriesTheFirstFailuresCode()
+    public async Task All_RethrowsTheStoredOutcomeUnchanged()
     {
-        TopicPartition good = new TopicPartition("p5-all", 0);
         TopicPartition bad = new TopicPartition("p5-all", 1);
         TopicPartition worse = new TopicPartition("p5-all", 2);
 
-        KafkaException first = new KafkaException(11, "first failure", isRetriable: true);
-        KafkaException second = new KafkaException(12, "second failure", isRetriable: false);
+        KafkaException stored = new KafkaException(
+            11,
+            "Failed altering group offsets for the following partitions: [p5-all-1, p5-all-2]",
+            isRetriable: true);
 
-        Dictionary<TopicPartition, KafkaException?> outcomes = new Dictionary<TopicPartition, KafkaException?>
-        {
-            [good] = null,
-            [bad] = first,
-            [worse] = second,
-        };
-
-        AlterConsumerGroupOffsetsResult mixed = new AlterConsumerGroupOffsetsResult(
-            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(outcomes));
+        AlterConsumerGroupOffsetsResult result = Resolved(
+            new Dictionary<TopicPartition, KafkaException?>
+            {
+                [bad] = new KafkaException(11, "first failure", isRetriable: true),
+                [worse] = new KafkaException(12, "second failure", isRetriable: false),
+            },
+            stored);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(mixed.All), s_deadline);
-
-        Assert.Equal(first.Code, thrown.Code);
-        Assert.Equal(first.IsRetriable, thrown.IsRetriable);
-        Assert.Contains(bad.ToString(), thrown.Message, StringComparison.Ordinal);
-        Assert.Contains(worse.ToString(), thrown.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(good.ToString(), thrown.Message, StringComparison.Ordinal);
-
-        AlterConsumerGroupOffsetsResult clean = new AlterConsumerGroupOffsetsResult(
-            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
-                new Dictionary<TopicPartition, KafkaException?> { [good] = null }));
-        await TestTimeout.Run(clean.All, s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        Assert.Same(stored, thrown);
     }
 
-    /// <summary>A call-level failure of the aggregate future propagates from both accessors.</summary>
+    /// <summary>
+    /// ⚠ The control for <see cref="All_RethrowsTheStoredOutcomeUnchanged"/>: a <b>null</b>
+    /// stored outcome completes <see cref="AlterConsumerGroupOffsetsResult.All"/> even though
+    /// the map carries a failure. Only an implementation that reads the stored outcome — and
+    /// derives nothing from the map — passes both; a derivation over the map faults here.
+    /// </summary>
+    [Fact]
+    public async Task All_CompletesOnANullStoredOutcome_WhateverTheMapHolds()
+    {
+        TopicPartition bad = new TopicPartition("p5-all-null", 0);
+        KafkaException perPartition = new KafkaException(11, "partition failure", isRetriable: false);
+
+        AlterConsumerGroupOffsetsResult result = Resolved(
+            new Dictionary<TopicPartition, KafkaException?> { [bad] = perPartition }, all: null);
+
+        await TestTimeout.Run(result.All, s_deadline);
+
+        // The map value is still what PartitionResult reports — the two accessors read
+        // different halves of one outcome.
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
+        Assert.Same(perPartition, thrown);
+    }
+
+    /// <summary>
+    /// A whole-request failure faults the single awaitable, and both accessors rethrow it
+    /// unchanged — <see cref="AlterConsumerGroupOffsetsResult.PartitionResult"/> even for a
+    /// partition that was never requested, because Java tests the <c>throwable</c> before it
+    /// looks at the map (<c>AlterConsumerGroupOffsetsResult.java:46-47</c>). The failure
+    /// half of G5-4.
+    /// </summary>
     [Fact]
     public async Task AFaultedFuture_PropagatesFromBothAccessors()
     {
         KafkaException callLevel = new KafkaException(35, "call failed", isRetriable: false);
-        TaskCompletionSource<IReadOnlyDictionary<TopicPartition, KafkaException?>> source =
-            new TaskCompletionSource<IReadOnlyDictionary<TopicPartition, KafkaException?>>();
+        TaskCompletionSource<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> source =
+            new TaskCompletionSource<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>();
         source.SetException(callLevel);
 
         AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(source.Task);
@@ -220,4 +234,12 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
         Assert.Same(callLevel, fromAll);
     }
+
+    /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>
+    private static AlterConsumerGroupOffsetsResult Resolved(
+        IReadOnlyDictionary<TopicPartition, KafkaException?> perKey,
+        KafkaException? all) =>
+        new AlterConsumerGroupOffsetsResult(
+            Task.FromResult<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+                (perKey, all)));
 }

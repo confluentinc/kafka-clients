@@ -89,8 +89,8 @@ public sealed class AdminKeySeamShapeTests
     }
 
     /// <summary>
-    /// The walker's non-public static methods are exactly these six. Adding one is a
-    /// deliberate act that must be recorded here.
+    /// The walker's non-public static methods are exactly the ones listed below. Adding one is
+    /// a deliberate act that must be recorded here.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>This assertion exists to go RED when a method is added to the walker, and the
@@ -114,8 +114,9 @@ public sealed class AdminKeySeamShapeTests
     /// </para>
     /// <para>
     /// <see cref="CompilerGeneratedAttribute"/> is excluded so a future compiler-emitted
-    /// static cannot turn this red for no reason. Measured today: none of the six is
-    /// compiler-generated, and the lambda display class is a <em>nested type</em>, which
+    /// static cannot turn this red for no reason. None of the listed callables is
+    /// compiler-generated (were one, the exclusion would drop it and the set would not match),
+    /// and the lambda display class is a <em>nested type</em>, which
     /// <see cref="Type.GetMethods(BindingFlags)"/> on the containing type never returns.
     /// </para>
     /// <para>
@@ -139,6 +140,16 @@ public sealed class AdminKeySeamShapeTests
     /// result root at all — and this went red as designed. They are walk callables and do
     /// belong in D40's set; the five table walkers above are untouched.
     /// </para>
+    /// <para>
+    /// M15/P13.1 CP1 added <see cref="KeyedResultMarshal.ReadAggregate{TKey, TValue}"/> and
+    /// this went red as designed. It is <b>not a new result shape</b>: it is the table walk
+    /// <see cref="KeyedResultMarshal.CompleteAggregate{TKey, TValue}"/> already performed,
+    /// split out so that walk returns the map instead of resolving an operation — which
+    /// <c>alterConsumerGroupOffsets</c> / <c>deleteConsumerGroupOffsets</c> need, because
+    /// their single callback resolves the map <em>together with</em> the core's own
+    /// <c>all()</c> outcome. <see cref="KeyedResultMarshal.CompleteAggregate{TKey, TValue}"/>
+    /// now delegates to it, so the two cannot walk differently.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheWalker_ExposesExactlyTheKnownCallables()
@@ -158,6 +169,7 @@ public sealed class AdminKeySeamShapeTests
                 nameof(KeyedResultMarshal.CompleteKey),
                 nameof(KeyedResultMarshal.CompleteList),
                 nameof(KeyedResultMarshal.CompleteTwoLists),
+                nameof(KeyedResultMarshal.ReadAggregate),
                 nameof(KeyedResultMarshal.ReadStringKey),
                 nameof(KeyedResultMarshal.StringKeyReader),
             },

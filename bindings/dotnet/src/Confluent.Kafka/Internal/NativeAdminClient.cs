@@ -2948,9 +2948,18 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
-    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) while the ABI fires one callback per
-    /// partition, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result
-    /// shape 4c.
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>), and the ABI fires <b>one</b>
+    /// callback for it, so this uses <see cref="SingleAdminOperation{TValue}"/> — the
+    /// <c>electLeaders</c> shape. The awaitable resolves with the per-partition map <b>and</b>
+    /// the core's own <c>all()</c> outcome, read together off the one result root.
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>No countdown and no submit token.</b> The callback fires exactly once — also for
+    /// an empty <paramref name="offsets"/>, and synchronously on this thread, before the
+    /// submit returns, when the request cannot be submitted — and its <c>finally</c> is the
+    /// sole release of the operation's handle and client reference. A submit-side release
+    /// would free the handle before that callback runs (PLAN R1), so after the submit returns
+    /// nothing here touches <paramref name="submit"/>'s <c>userData</c> again.
     /// </para>
     /// </remarks>
     internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
@@ -3008,9 +3017,9 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        FanInAdminOperation<TopicPartition, KafkaException?> operation =
-            new FanInAdminOperation<TopicPartition, KafkaException?>(
-                keys.Count, EqualityComparer<TopicPartition>.Default);
+        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
+            new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+                "alterConsumerGroupOffsets");
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3044,10 +3053,6 @@ internal sealed class NativeAdminClient : IDisposable
                 metadataPointers[i] = metadata.Pointer;
             }
 
-            // Shape 4c: the ABI fires once per (topic, partition) key it was handed, and
-            // `offsets` is a dictionary, so `keys` is already distinct.
-            operation.SetPendingCallbacks(keys.Count);
-
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -3061,8 +3066,6 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.AlterConsumerGroupOffsets,
                 GCHandle.ToIntPtr(gcHandle));
-
-            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3107,15 +3110,15 @@ internal sealed class NativeAdminClient : IDisposable
     /// Submits <c>deleteConsumerGroupOffsets</c> and returns immediately with the
     /// <b>single</b> awaitable Java's <c>DeleteConsumerGroupOffsetsResult</c> wraps (result
     /// shape 3) — plus the original request's partition set, the second stored field Java
-    /// carries (<c>DeleteConsumerGroupOffsetsResult.java:34</c>) that
+    /// carries (<c>DeleteConsumerGroupOffsetsResult.java:32</c>) that
     /// <c>AlterConsumerGroupOffsetsResult</c> does not.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
-    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) while the ABI fires one callback per
-    /// partition, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result
-    /// shape 4c, the same as
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:31</c>), and the ABI fires <b>one</b>
+    /// callback for it — the same <see cref="SingleAdminOperation{TValue}"/> shape, with the
+    /// same no-countdown / no-submit-token rule, as
     /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </remarks>
     internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -3142,8 +3145,8 @@ internal sealed class NativeAdminClient : IDisposable
             timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupOffsetsOptions));
         }
 
-        // De-duplicated (Java's parameter is a Set): the ABI fires once per key it was
-        // handed, so a repeat would draw a second callback the accumulator cannot key.
+        // De-duplicated because Java's parameter is a Set: a repeated partition is one
+        // request entry, so it must reach the core — and come back in the per-key map — once.
         List<TopicPartition> keys = new List<TopicPartition>(partitions.Count);
         HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         foreach (TopicPartition partition in partitions)
@@ -3168,9 +3171,9 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        FanInAdminOperation<TopicPartition, KafkaException?> operation =
-            new FanInAdminOperation<TopicPartition, KafkaException?>(
-                keys.Count, EqualityComparer<TopicPartition>.Default);
+        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
+            new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+                "deleteConsumerGroupOffsets");
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3197,9 +3200,6 @@ internal sealed class NativeAdminClient : IDisposable
                 topics[i] = topic.Pointer;
             }
 
-            // Shape 4c: one callback per key handed over, and `keys` is distinct above.
-            operation.SetPendingCallbacks(keys.Count);
-
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -3209,8 +3209,6 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DeleteConsumerGroupOffsets,
                 GCHandle.ToIntPtr(gcHandle));
-
-            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3319,8 +3317,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES</b> — Java's future
     /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c> while the ABI fires one callback per
-    /// member, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result shape 4c,
-    /// the same as <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// member, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result shape 4c.
     /// </para>
     /// <para>
     /// ⚠⚠ <b>removeAll mode passes no member array at all, and its callback count is 1.</b>

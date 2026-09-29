@@ -149,9 +149,12 @@ public sealed class AdminP4ReaderWiringTests
     /// <c>get_topic</c> / <c>get_partition</c> pair.
     /// </summary>
     /// <remarks>
-    /// The three share one body, so this is the assertion that keeps them distinguishable:
+    /// They share one body, so this is the assertion that keeps them distinguishable:
     /// pointing <c>electLeaders</c>' reader at <c>deleteRecords</c>' accessors would be
-    /// invisible to every behavioural test and is caught here.
+    /// invisible to every behavioural test and is caught here. The two group-offsets rows
+    /// (M15/P13.1) are twins with layout-identical accessors, so a cross-wire hands one RPC's
+    /// root to the other's accessor — a call that can return a plausible answer rather than
+    /// fail.
     /// </remarks>
     [Theory]
     [InlineData(
@@ -166,6 +169,14 @@ public sealed class AdminP4ReaderWiringTests
         nameof(AdminCallbacks.ListPartitionReassignmentsKey),
         "kafka_admin_ListPartitionReassignmentsResult_get_topic",
         "kafka_admin_ListPartitionReassignmentsResult_get_partition")]
+    [InlineData(
+        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+        "kafka_admin_AlterConsumerGroupOffsetsResult_get_topic",
+        "kafka_admin_AlterConsumerGroupOffsetsResult_get_partition")]
+    [InlineData(
+        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic",
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition")]
     public void EachCompositeKeyReader_CapturesItsOwnAccessors(
         string readerName, string getTopic, string getPartition) =>
         Assert.Equal(
@@ -204,6 +215,97 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[] { "kafka_admin_DeleteConsumerGroupOffsetsResult_get_error" },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))));
+
+    /// <summary>
+    /// ⚠ <c>alterConsumerGroupOffsets</c>' <b>outcome</b> reader captures its own
+    /// <c>count</c> and — the M15/P13.1 addition — its own <c>all</c>, the accessor that now
+    /// carries Java's <c>all()</c> outcome instead of a C# derivation over the map.
+    /// </summary>
+    /// <remarks>
+    /// The two twins' <c>_all</c> are layout-identical (<c>const Result_t*</c> → owned
+    /// <c>Error_t*</c>), so a cross-wire compiles and hands one RPC's root to the other's
+    /// accessor. What such a type-confused call returns is not something to reason from;
+    /// the symbol is what this row pins.
+    /// </remarks>
+    [Fact]
+    public void AlterConsumerGroupOffsetsOutcome_CapturesItsOwnCountAndAllAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_AlterConsumerGroupOffsetsResult_all",
+                "kafka_admin_AlterConsumerGroupOffsetsResult_count",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome))));
+
+    /// <summary>
+    /// <c>deleteConsumerGroupOffsets</c>' <b>outcome</b> reader captures its own
+    /// <c>count</c> and <c>all</c> — not <c>alterConsumerGroupOffsets</c>' layout-identical
+    /// twins.
+    /// </summary>
+    [Fact]
+    public void DeleteConsumerGroupOffsetsOutcome_CapturesItsOwnCountAndAllAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_DeleteConsumerGroupOffsetsResult_all",
+                "kafka_admin_DeleteConsumerGroupOffsetsResult_count",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome))));
+
+    /// <summary>
+    /// ⚠⚠ Each outcome reader composes <b>its own RPC's</b> key and optional-error readers —
+    /// the axis <see cref="CapturedEntryPoints"/> cannot see, because those two are closures,
+    /// not P/Invokes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Handing <c>alterConsumerGroupOffsets</c>' outcome <c>deleteConsumerGroupOffsets</c>'
+    /// key reader compiles (the two are the same delegate type) and passes every per-reader
+    /// row above, since each reader is still wired to its own accessors in isolation — the
+    /// mistake is in which reader was passed. So the composition is pinned by reference
+    /// identity against the tracked fields.
+    /// </para>
+    /// <para>
+    /// It also pins textual order: the outcome fields are initialised from the key and
+    /// error fields, so declaring an outcome above them would capture <see langword="null"/>
+    /// — and a <see langword="null"/> capture fails the identity check here, at the wiring
+    /// level, not only as a faulted operation on the first root the reader walks.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(
+        nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
+        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+        nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError))]
+    [InlineData(
+        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
+        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))]
+    public void EachGroupOffsetsOutcome_ComposesItsOwnKeyAndErrorReaders(
+        string outcomeName, string keyName, string errorName)
+    {
+        object target = Reader(outcomeName).Target
+            ?? throw new Xunit.Sdk.XunitException(
+                "the outcome reader no longer closes over its readers, so its composition is "
+                + "not readable here — this assertion needs a different mechanism, not deleting");
+
+        // Every captured field, P/Invoke or not, so a null capture is counted rather than
+        // silently filtered out by a type test.
+        object?[] captured = target.GetType()
+            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(field => typeof(Delegate).IsAssignableFrom(field.FieldType))
+            .Select(field => field.GetValue(target))
+            .ToArray();
+
+        object?[] composed = captured
+            .Where(value => value is not Delegate accessor
+                || accessor.Method.GetCustomAttribute<DllImportAttribute>() is null)
+            .ToArray();
+
+        Assert.Equal(2, composed.Length);
+        Assert.Contains(composed, value => ReferenceEquals(value, Reader(keyName)));
+        Assert.Contains(composed, value => ReferenceEquals(value, Reader(errorName)));
+    }
 
     /// <summary>
     /// <c>removeMembersFromConsumerGroup</c>' optional-error <b>value</b> reader captures
@@ -337,10 +439,14 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.ElectLeadersKey),
             nameof(AdminCallbacks.DeleteRecordsKey),
             nameof(AdminCallbacks.ListPartitionReassignmentsKey),
+            nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
             nameof(AdminCallbacks.ElectLeadersOptionalError),
             nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
+            nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
+            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
             nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
             nameof(AdminCallbacks.DescribeAclsValue),
             nameof(AdminCallbacks.DescribeClientQuotasKey),
@@ -399,9 +505,13 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
+                nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
+                nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
                 nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
+                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
+                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
                 nameof(AdminCallbacks.DeleteRecordsKey),
                 nameof(AdminCallbacks.DescribeAclsValue),
                 nameof(AdminCallbacks.DescribeClientQuotasKey),

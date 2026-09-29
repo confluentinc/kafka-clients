@@ -2846,10 +2846,18 @@ internal static partial class NativeMethods
     /// corrupting every flag after the first.
     /// </para>
     /// <para>
-    /// ⚠ When <paramref name="count"/> is <c>0</c> there is no per-key slot for an outcome, so
-    /// the whole-request error is returned instead — mirroring Java, where <c>all()</c> is
-    /// then the only observable accessor. The completion callback carries that error; no
-    /// special-casing is needed on the managed side.
+    /// ⚠ Java's result is <b>one</b> future, so <paramref name="callback"/> fires <b>exactly
+    /// once</b> — also when <paramref name="count"/> is <c>0</c> — carrying either the result
+    /// handle or the whole-request error, never both. The "returns the whole-request error
+    /// instead" rule for a zero <paramref name="count"/> belongs to the joined sync sibling
+    /// (<c>kafka_admin_AdminClient_alter_consumer_group_offsets</c>), not to this form.
+    /// </para>
+    /// <para>
+    /// ⚠ It fires <b>synchronously on the calling thread, before this function returns</b>,
+    /// when the RPC cannot be submitted at all — a NULL <paramref name="admin"/>, a NULL
+    /// <paramref name="groupId"/>, a NULL topic entry, or a negative offset. So the operation's
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> may already be freed when this
+    /// call returns, and the caller must not touch it afterwards.
     /// </para>
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_consumer_group_offsets_async", CallingConvention = CallingConvention.Cdecl)]
@@ -2894,6 +2902,22 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AlterConsumerGroupOffsetsResultGetError(IntPtr result, int index);
 
+    /// <summary>
+    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_all</c> — Java's <c>all()</c>: null if
+    /// every partition's offset was committed, otherwise its fault. ⚠ <b>OWNED</b> — read with
+    /// <see cref="KafkaException.FromHandle"/>, never <c>FromBorrowedHandle</c> (which would
+    /// leak one error per faulting <c>All()</c>).
+    /// </summary>
+    /// <remarks>
+    /// The core derives the fault, so the binding never rebuilds it: the whole request's error
+    /// if the request failed, or else a failed partition's error carrying the message
+    /// <c>Failed altering group offsets for the following partitions: [&lt;topic&gt;-&lt;partition&gt;, ...]</c>,
+    /// every failed partition listed sorted by topic name then partition id. Never blocks, so
+    /// it is safe inside the completion callback.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_all", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterConsumerGroupOffsetsResultAll(IntPtr result);
+
     [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AlterConsumerGroupOffsetsResultDestroy(IntPtr result);
 
@@ -2908,9 +2932,20 @@ internal static partial class NativeMethods
     /// committed offset carries no per-partition value.
     /// </summary>
     /// <remarks>
-    /// ⚠ When <paramref name="count"/> is <c>0</c> there is no per-key slot for an outcome, so
-    /// the whole-request error is returned instead — mirroring
-    /// <see cref="AdminClientAlterConsumerGroupOffsetsAsync"/>'s identical convention.
+    /// <para>
+    /// ⚠ Java's result is <b>one</b> future, so <paramref name="callback"/> fires <b>exactly
+    /// once</b> — also when <paramref name="count"/> is <c>0</c> — carrying either the result
+    /// handle or the whole-request error, never both. The "returns the whole-request error
+    /// instead" rule for a zero <paramref name="count"/> belongs to the joined sync sibling
+    /// (<c>kafka_admin_AdminClient_delete_consumer_group_offsets</c>), not to this form.
+    /// </para>
+    /// <para>
+    /// ⚠ It fires <b>synchronously on the calling thread, before this function returns</b>,
+    /// when the RPC cannot be submitted at all — a NULL <paramref name="admin"/> or a NULL
+    /// <paramref name="groupId"/>. So the operation's
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> may already be freed when this
+    /// call returns, and the caller must not touch it afterwards.
+    /// </para>
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_consumer_group_offsets_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientDeleteConsumerGroupOffsetsAsync(
@@ -2946,6 +2981,22 @@ internal static partial class NativeMethods
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DeleteConsumerGroupOffsetsResultGetError(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_all</c> — Java's <c>all()</c>: null if
+    /// every requested partition's offset was deleted, otherwise its fault. ⚠ <b>OWNED</b> —
+    /// read with <see cref="KafkaException.FromHandle"/>, never <c>FromBorrowedHandle</c>
+    /// (which would leak one error per faulting <c>All()</c>).
+    /// </summary>
+    /// <remarks>
+    /// The core derives the fault, so the binding never rebuilds it: the whole request's error
+    /// if the request failed, or else the outcome <c>partition_result</c> gives for the first
+    /// failing requested partition in topic-name-then-partition-id order. No aggregate message
+    /// is synthesized (contrast <see cref="AlterConsumerGroupOffsetsResultAll"/>). Never
+    /// blocks, so it is safe inside the completion callback.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_all", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteConsumerGroupOffsetsResultAll(IntPtr result);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DeleteConsumerGroupOffsetsResultDestroy(IntPtr result);

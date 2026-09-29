@@ -416,6 +416,35 @@ internal static class KeyedResultMarshal
         Func<IntPtr, int, TKey> readKey,
         Func<IntPtr, int, TValue> readValue,
         IEqualityComparer<TKey> keyComparer)
+        where TKey : notnull =>
+        operation.SetResult(ReadAggregate(result, count, readKey, readValue, keyComparer));
+
+    /// <summary>
+    /// The walk behind <see cref="CompleteAggregate{TKey, TValue}"/>: every
+    /// <c>(key, value)</c> row of the result table, in a map keyed by
+    /// <paramref name="keyComparer"/>. It only reads — the root stays the caller's to destroy.
+    /// </summary>
+    /// <remarks>
+    /// Split out so a completion that resolves with <em>more</em> than the map reuses the walk
+    /// rather than copying it: <c>alterConsumerGroupOffsets</c> /
+    /// <c>deleteConsumerGroupOffsets</c> pair it with the core's own <c>all()</c> outcome
+    /// (<c>AdminCallbacks.PartitionOutcomes</c>). A throw from either reader propagates, as
+    /// it does from <see cref="CompleteAggregate{TKey, TValue}"/>.
+    /// </remarks>
+    /// <param name="result">The result root, borrowed for the walk.</param>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="readValue">That RPC's value reader.</param>
+    /// <param name="keyComparer">The comparer the assembled map is keyed by.</param>
+    /// <typeparam name="TKey">The managed key type.</typeparam>
+    /// <typeparam name="TValue">The managed value type.</typeparam>
+    /// <returns>The assembled map.</returns>
+    internal static IReadOnlyDictionary<TKey, TValue> ReadAggregate<TKey, TValue>(
+        IntPtr result,
+        CountAccessor count,
+        Func<IntPtr, int, TKey> readKey,
+        Func<IntPtr, int, TValue> readValue,
+        IEqualityComparer<TKey> keyComparer)
         where TKey : notnull
     {
         int total = count(result);
@@ -429,7 +458,7 @@ internal static class KeyedResultMarshal
             entries.Add(readKey(result, index), readValue(result, index));
         }
 
-        operation.SetResult(entries);
+        return entries;
     }
 
     /// <summary>
