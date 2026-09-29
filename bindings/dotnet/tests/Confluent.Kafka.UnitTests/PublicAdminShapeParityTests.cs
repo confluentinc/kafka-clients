@@ -183,6 +183,86 @@ public sealed class PublicAdminShapeParityTests
         Assert.Equal(new ArgumentNullException("synonyms").Message, nullSynonyms.Message);
     }
 
+    /// <summary>
+    /// ⚠ A null synonym <b>element</b> is rejected by the published 8-argument constructor
+    /// (M15/P13.2, Critic 85 finding 85.2) — the same stricter-than-Java deviation as the
+    /// null list (D8), recorded on the constructor.
+    /// </summary>
+    /// <remarks>
+    /// Java stores the element, and its <c>equals</c> / <c>hashCode</c> / <c>toString</c>
+    /// tolerate it; here all three read every element, so an accepted null made each of them
+    /// throw <see cref="NullReferenceException"/>. Both a leading and a trailing null are
+    /// covered, since the check runs per element. The message is the constructor's own, so
+    /// it is asserted through the runtime's rendering of that message with the parameter
+    /// name (the suffix differs between .NET Framework and .NET).
+    /// </remarks>
+    [Fact]
+    public void ConfigEntry_TheEightArgumentConstructor_RejectsANullSynonymElement()
+    {
+        ConfigEntry.ConfigSynonym synonym =
+            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.StaticBrokerConfig);
+        string expected =
+            new ArgumentNullException("synonyms", "Config synonyms must not contain a null element.").Message;
+
+        foreach (IReadOnlyList<ConfigEntry.ConfigSynonym> synonyms in new IReadOnlyList<ConfigEntry.ConfigSynonym>[]
+        {
+            new ConfigEntry.ConfigSynonym[1],
+            new[] { synonym, null! },
+        })
+        {
+            ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
+                () => WithSynonyms(synonyms));
+            Assert.Equal("synonyms", nullElement.ParamName);
+            Assert.Equal(expected, nullElement.Message);
+        }
+    }
+
+    /// <summary>
+    /// The published 8-argument constructor <b>copies</b> the synonyms (M15/P13.2, Critic 85
+    /// finding 85.2), so the null-element check cannot be bypassed by mutating the caller's
+    /// list afterwards, and the entry's equality and hash cannot change under a key.
+    /// </summary>
+    /// <remarks>
+    /// Java stores the caller's list (<c>ConfigEntry.java:73</c>); the copy is part of the
+    /// recorded deviation. <see cref="ConfigEntry.Synonyms"/> is also not the backing array
+    /// itself, so it cannot be cast back to one and written through.
+    /// </remarks>
+    [Fact]
+    public void ConfigEntry_TheEightArgumentConstructor_CopiesTheSynonyms()
+    {
+        ConfigEntry.ConfigSynonym synonym =
+            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.StaticBrokerConfig);
+        List<ConfigEntry.ConfigSynonym> callers = new List<ConfigEntry.ConfigSynonym> { synonym };
+
+        ConfigEntry entry = WithSynonyms(callers);
+        ConfigEntry twin = WithSynonyms(new[] { synonym });
+        int hash = entry.GetHashCode();
+
+        callers[0] = new ConfigEntry.ConfigSynonym("b", "2", ConfigEntry.ConfigSource.DefaultConfig);
+        callers.Add(null!);
+
+        Assert.Equal(new[] { synonym }, entry.Synonyms);
+        Assert.False(entry.Synonyms is ConfigEntry.ConfigSynonym[], "Synonyms must not expose the backing array");
+        Assert.Equal(twin, entry);
+        Assert.Equal(hash, entry.GetHashCode());
+        Assert.Equal(
+            "ConfigEntry(name=k, value=v, source=DefaultConfig, isSensitive=false, isReadOnly=false, "
+                + "synonyms=[ConfigSynonym(name=a, value=1, source=StaticBrokerConfig)], type=String, "
+                + "documentation=doc)",
+            entry.ToString());
+    }
+
+    private static ConfigEntry WithSynonyms(IReadOnlyList<ConfigEntry.ConfigSynonym> synonyms) =>
+        new ConfigEntry(
+            "k",
+            "v",
+            ConfigEntry.ConfigSource.DefaultConfig,
+            isSensitive: false,
+            isReadOnly: false,
+            synonyms,
+            ConfigEntry.ConfigType.String,
+            "doc");
+
     private static ConfigEntry Full(ConfigEntry.ConfigSource source) =>
         new ConfigEntry(
             "k",

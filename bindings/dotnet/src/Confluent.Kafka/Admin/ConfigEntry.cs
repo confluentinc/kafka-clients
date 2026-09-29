@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 
@@ -141,6 +142,18 @@ public sealed class ConfigEntry
     /// non-nullable here, so accepting a null would either break that annotation or require
     /// silently turning it into an empty list, which changes equality relative to Java's
     /// <c>Objects.equals(null, [])</c>. Pass an empty list for "no synonyms".
+    /// ⚠ <b>Same recorded deviation — a null synonym <em>element</em> is rejected too</b>
+    /// (Critic 85, finding 85.2), where Java stores it and its <c>equals</c>,
+    /// <c>hashCode</c> and <c>toString</c> tolerate it through <c>List</c>'s own. Here
+    /// <see cref="Equals(object?)"/>, <see cref="GetHashCode"/> and <see cref="ToString"/>
+    /// read every element, so accepting a null would make them throw, which .NET's
+    /// guidelines for <see cref="object.Equals(object?)"/> and
+    /// <see cref="object.GetHashCode"/> rule out. This is the precedent
+    /// <see cref="Config.Config(IEnumerable{ConfigEntry})"/> follows for a null entry.
+    /// ⚠ The list is <b>copied</b>, unlike Java, which stores the caller's list
+    /// (<c>ConfigEntry.java:73</c>): a stored reference would let the caller add a null
+    /// after this check, and change the entry's equality and hash after it was used as a
+    /// key.
     /// </remarks>
     /// <param name="name">The configuration key.</param>
     /// <param name="value">The configuration value, or <see langword="null"/>.</param>
@@ -153,7 +166,8 @@ public sealed class ConfigEntry
     /// <param name="type">The value's data type.</param>
     /// <param name="documentation">The documentation, or <see langword="null"/>.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="name"/> or <paramref name="synonyms"/> is null.
+    /// <paramref name="name"/> or <paramref name="synonyms"/> is null, or
+    /// <paramref name="synonyms"/> contains a null element.
     /// </exception>
     public ConfigEntry(
         string name,
@@ -170,7 +184,7 @@ public sealed class ConfigEntry
         Source = source;
         IsSensitive = isSensitive;
         IsReadOnly = isReadOnly;
-        _synonyms = synonyms ?? throw new ArgumentNullException(nameof(synonyms));
+        _synonyms = CopySynonyms(synonyms);
         Type = type;
         Documentation = documentation;
     }
@@ -305,6 +319,39 @@ public sealed class ConfigEntry
             synonyms,
             Type,
             Documentation);
+    }
+
+    /// <summary>
+    /// Validates and copies the constructor's <c>synonyms</c> — see the 8-argument
+    /// constructor's remarks for why both are stricter than Java.
+    /// </summary>
+    /// <remarks>
+    /// The copy is wrapped read-only, so <see cref="Synonyms"/> cannot be cast back to a
+    /// mutable array to write a null into it. An empty list becomes the shared empty array
+    /// (nothing to write into), so the constructors that pass no synonyms allocate nothing.
+    /// </remarks>
+    private static IReadOnlyList<ConfigSynonym> CopySynonyms(IReadOnlyList<ConfigSynonym> synonyms)
+    {
+        if (synonyms is null)
+        {
+            throw new ArgumentNullException(nameof(synonyms));
+        }
+
+        int count = synonyms.Count;
+        if (count == 0)
+        {
+            return Array.Empty<ConfigSynonym>();
+        }
+
+        ConfigSynonym[] copy = new ConfigSynonym[count];
+        for (int index = 0; index < count; index++)
+        {
+            copy[index] = synonyms[index]
+                ?? throw new ArgumentNullException(
+                    nameof(synonyms), "Config synonyms must not contain a null element.");
+        }
+
+        return new ReadOnlyCollection<ConfigSynonym>(copy);
     }
 
     private static bool SynonymsEqual(IReadOnlyList<ConfigSynonym> left, IReadOnlyList<ConfigSynonym> right)

@@ -14,7 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -34,6 +36,9 @@ namespace Confluent.Kafka.UnitTests.Interop;
 public sealed class AdminConfigsLifetimeTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long <see cref="DisposeAndAwaitRelease"/> waits for a dispatcher-side release.</summary>
+    private static readonly TimeSpan s_releaseBound = TimeSpan.FromSeconds(5);
 
     /// <summary><c>Errors::UnsupportedVersion</c>'s wire code, which the core's <c>unsupported_version</c> carries.</summary>
     private const int UnsupportedVersionCode = 35;
@@ -288,8 +293,73 @@ public sealed class AdminConfigsLifetimeTests
         Assert.Equal(UnsupportedVersionCode, alterFailure.Code);
         Assert.Equal("Not implemented yet", alterFailure.Message);
 
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(handle.IsClosed, "both operations must have released their GCHandle and client reference");
+        Assert.True(
+            DisposeAndAwaitRelease(admin, handle),
+            "both operations must have released their GCHandle and client reference");
+    }
+
+    /// <summary>
+    /// ⚠ <b>Two equal resources in a map that holds them as two keys are ONE resource, and
+    /// the operation is released</b> (M15/P13.2, Critic 85 finding 85.1) — through the
+    /// <em>real</em> ABI, for every mix of zero-op and non-empty op collections.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The <c>configs</c> parameter is a public <see cref="IReadOnlyDictionary{TKey, TValue}"/>,
+    /// so its comparer is the caller's, not <see cref="ConfigResource"/>'s value equality. A
+    /// reference comparer keeps two equal resources as two entries. The ABI then answers
+    /// <b>once</b>: it fires "once per distinct resource named across the input rows", which
+    /// <c>distinct_config_resources</c> computes on <c>(for_id(type), name)</c>. The bridge
+    /// holds <b>one</b> <see cref="Task"/>, keyed by value equality. A countdown armed with the
+    /// caller map's key count (2) never reaches zero, so the <c>GCHandle</c> and the
+    /// span-the-op client reference stay held for the process lifetime. The caller's
+    /// <see cref="Task"/> still completes, so nothing hangs; the only symptom is the leak, and
+    /// <see cref="SafeHandle.IsClosed"/> after <c>Dispose</c> is what observes it.
+    /// </para>
+    /// <para>
+    /// Java cannot leak here: it keys its futures on a value-equality <c>HashMap</c>
+    /// (<c>KafkaAdminClient.java:2893-2895</c>) and returns one future per distinct resource
+    /// (<c>:2886</c>). A <see cref="ConfigResourceType.Group"/> resource is used because the
+    /// mock applies ops to a group it has never seen and answers success
+    /// (<c>handle_incremental_resource_alteration</c>'s <c>Group</c> arm), so the entry settles
+    /// successfully and there is no error message to assert.
+    /// </para>
+    /// </remarks>
+    /// <param name="row">Which op collections the two equal keys carry.</param>
+    [Theory]
+    [InlineData(CollisionRow.ZeroOpsAndZeroOps)]
+    [InlineData(CollisionRow.OpsAndZeroOps)]
+    [InlineData(CollisionRow.OpsAndOps)]
+    public async Task EqualResourcesInANonValueEqualityMap_AreOneResource_AndReleaseTheOperation(
+        CollisionRow row)
+    {
+        ConfigResource first = new ConfigResource(ConfigResourceType.Group, "cfg-collision-group");
+        ConfigResource second = new ConfigResource(ConfigResourceType.Group, "cfg-collision-group");
+        Assert.Equal(first, second);
+        Assert.NotSame(first, second);
+
+        IReadOnlyCollection<AlterConfigOp> ops =
+            new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) };
+        Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs =
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(ReferenceComparer.Instance)
+            {
+                [first] = row == CollisionRow.ZeroOpsAndZeroOps ? Array.Empty<AlterConfigOp>() : ops,
+                [second] = row == CollisionRow.OpsAndOps ? ops : Array.Empty<AlterConfigOp>(),
+            };
+        Assert.Equal(2, configs.Count);
+
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+
+        AlterConfigsResult result = admin.IncrementalAlterConfigs(configs, options: null);
+        Assert.Single(result.Values);
+
+        await TestTimeout.Run(() => result.Values[first], s_deadline);
+        await TestTimeout.Run(result.All, s_deadline);
+
+        Assert.True(
+            DisposeAndAwaitRelease(admin, handle),
+            "the countdown must be armed with the distinct resources the ABI answers, not the caller map's key count");
     }
 
     /// <summary>
@@ -345,6 +415,56 @@ public sealed class AdminConfigsLifetimeTests
 
         /// <summary>Result shape 2 — a composite key with a void per-resource future.</summary>
         IncrementalAlterConfigs,
+    }
+
+    /// <summary>Which op collections the two equal keys of a collision case carry.</summary>
+    public enum CollisionRow
+    {
+        /// <summary>Both keys map to an empty collection — two sentinel rows.</summary>
+        ZeroOpsAndZeroOps,
+
+        /// <summary>The first key has one op; the second maps to an empty collection.</summary>
+        OpsAndZeroOps,
+
+        /// <summary>Both keys have one op.</summary>
+        OpsAndOps,
+    }
+
+    /// <summary>
+    /// A comparer that is <b>not</b> value equality: two equal <see cref="ConfigResource"/>
+    /// instances stay two keys. <c>System.Collections.Generic.ReferenceEqualityComparer</c> is
+    /// .NET 5+, and this project also targets net462, so it is spelled out here.
+    /// </summary>
+    private sealed class ReferenceComparer : IEqualityComparer<ConfigResource>
+    {
+        internal static readonly ReferenceComparer Instance = new ReferenceComparer();
+
+        public bool Equals(ConfigResource? x, ConfigResource? y) => ReferenceEquals(x, y);
+
+        public int GetHashCode(ConfigResource obj) => RuntimeHelpers.GetHashCode(obj);
+    }
+
+    /// <summary>
+    /// Disposes the client, then waits — bounded — for the native release, for a test whose
+    /// callbacks the <em>real</em> ABI fired on its dispatcher thread.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Not an immediate <see cref="SafeHandle.IsClosed"/> check.</b> A per-key
+    /// trampoline resolves its key's <see cref="Task"/> first and releases the operation in
+    /// its <c>finally</c> after that, and the awaiter resumes on the pool
+    /// (<see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>). So a test can
+    /// observe the outcome and reach <c>Dispose</c> while the dispatcher still holds the
+    /// operation's reference; the deferred destroy then runs on the dispatcher a moment
+    /// later. A temporary probe measured exactly that for a correctly released operation
+    /// (closed only after the wait). A leak never releases, so the bound only decides how
+    /// long a red takes to report. Tests that fire the trampoline on the test thread, or
+    /// whose callback runs inline inside the submit, need no wait and do not use this.
+    /// </remarks>
+    /// <returns>Whether the handle closed within the bound.</returns>
+    private static bool DisposeAndAwaitRelease(NativeAdminClient admin, SafeAdminHandle handle)
+    {
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        return SpinWait.SpinUntil(() => handle.IsClosed, s_releaseBound);
     }
 
     private static Func<Task> SubmitCapturing(NativeAdminClient admin, Rpc rpc, Action<IntPtr> onSubmit)

@@ -2020,7 +2020,11 @@ internal sealed class NativeAdminClient : IDisposable
     /// ⚠ <b>Rows for one resource are emitted contiguously, in the caller's op order</b> —
     /// the header requires it ("rows naming the same resource are grouped in order"), and
     /// the flattening below walks the map resource-by-resource so two resources can never
-    /// interleave.
+    /// interleave. That holds under the caller map's own comparer: a map whose comparer is
+    /// not value equality can hold two equal resources as two keys, with another key
+    /// between them. The ABI merges rows by value (<c>read_alter_config_ops</c> collects
+    /// them into a map, in row order) and answers such a resource once — which is why the
+    /// countdown below is armed with the distinct keys, not the map's key count.
     /// </para>
     /// <para>
     /// ⚠ <b>A null config value is passed through as a null pointer.</b> It is the value
@@ -2188,9 +2192,16 @@ internal sealed class NativeAdminClient : IDisposable
 
             // ⚠ Shape 4b, counted from the ABI doc, not from the rows: the ABI fires once per
             // DISTINCT RESOURCE NAMED ACROSS THE ROWS (`distinct_config_resources`, which
-            // counts a sentinel row too). Every key is named by at least one row — its ops,
-            // or its sentinel — and the keys are a map's, so the count is the key count.
-            operation.SetPendingCallbacks(keys.Count);
+            // counts a sentinel row too, and de-duplicates on `(for_id(type), name)`). Every
+            // key is named by at least one row — its ops, or its sentinel — so the count is
+            // the number of DISTINCT keys, which is `Tasks.Count`: the bridge is keyed by
+            // `s_configResourceComparer`, the same value equality the ABI de-duplicates on
+            // (ConfigResource's ctor folds an undefined type to Unknown, as `for_id` does).
+            // ⚠ NOT `keys.Count`: `configs` is the caller's map, whose comparer need not be
+            // value equality, so two equal resources can be two keys there and still get
+            // ONE callback — a countdown armed with 2 would never reach zero and would root
+            // the GCHandle and the client reference forever (Critic 85, finding 85.1).
+            operation.SetPendingCallbacks(operation.Tasks.Count);
 
             submit(
                 _handle.DangerousGetHandle(),
