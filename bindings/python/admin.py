@@ -3322,10 +3322,9 @@ class _AdminBase:
         alteration's entity IS its key, but its `ops` are per-row, non-key
         data that a dedup must not silently drop. Unlike
         `_create_acls_keys_and_spec` this does NOT deduplicate the spec sent
-        to the native layer: a genuinely repeated entity across `entries`
-        must still reach `read_client_quota_alterations` so it is rejected
-        with its real per-row message (`admin-client.md`'s "the C layer is
-        stricter" deviation), rather than being silently coalesced here.
+        to the native layer: a repeated entity across `entries` is sent
+        twice, as Java sends it, and only the futures (keyed by entity)
+        collapse.
 
         ``entries`` is materialized to a ``list`` once up front: it is iterated
         twice below (to build ``keys`` and again for the native rows), so a
@@ -4189,12 +4188,9 @@ class Admin(_AdminBase):
         entity's ``Future`` resolves independently.
 
         An op whose ``value`` is ``None`` removes that quota. Two alterations
-        of the same entity make every entity's ``Future`` in this call raise
-        the *same* error: the request is rejected before it reaches the
-        broker at all (`read_client_quota_alterations` in the Rust core).
-        Java accepts them -- it sends both and only the future map collapses
-        -- but the result crosses as a flat array, so the caller could not
-        tell which alteration the surviving outcome describes.
+        of the same entity are both sent, as Java sends them, and share that
+        entity's one ``Future`` (Java's per-entity future map collapses them,
+        ``KafkaAdminClient.java:4314-4342``).
         """
         self._check_closed()
         keys, rows = self._alter_client_quotas_keys_and_spec(entries)

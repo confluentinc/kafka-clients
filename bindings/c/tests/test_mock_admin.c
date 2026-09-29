@@ -5784,7 +5784,7 @@ static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(v
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void) {
+static void test_mock_admin_alter_client_quotas_repeated_type_rejected_repeated_entity_sent(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *dup_types[2] = {"user", "user"};
     const char *dup_names[2] = {"alice", "bob"};
@@ -5802,11 +5802,10 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 
-    /* The same entity in two alterations. Java accepts this -- it sends both
-     * and only the future map collapses (KafkaAdminClient.java:4301-4313) --
-     * but the C result is a flat array built from that map, so the caller
-     * could not tell which of its two rows the surviving outcome describes.
-     * Rejected at the exact row instead; see read_client_quota_alterations. */
+    /* The same entity in two alterations: sent as Java sends it (both reach
+     * the broker) and, as Java's per-entity future map collapses it
+     * (KafkaAdminClient.java:4314-4342), the result has one entry for it. The
+     * mock fails every entity like Java's mock throws. */
     const char *types[1] = {"user"};
     const char *names[1] = {"alice"};
     const char *const *const two_types[2] = {types, types};
@@ -5814,11 +5813,13 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
     const int32_t ones[2] = {1, 1};
     error = kafka_admin_AdminClient_alter_client_quotas(admin, two_types, two_names, ones, NULL,
                                                         NULL, NULL, NULL, 2, -1, false, &result);
-    TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_EQUAL_STRING(
-        "quota alteration at index 1 repeats an entity already altered by an earlier entry",
-        kafka_common_Error_message(error));
-    kafka_common_Error_destroy(error);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterClientQuotasResult_count(result));
+    TEST_ASSERT_NOT_NULL(kafka_admin_AlterClientQuotasResult_get_error(result, 0));
+    TEST_ASSERT_EQUAL_STRING("Not implement yet",
+                             kafka_common_Error_message(kafka_admin_AlterClientQuotasResult_get_error(result, 0)));
+    kafka_admin_AlterClientQuotasResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5881,6 +5882,24 @@ static void test_mock_admin_alter_client_quotas_async(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.ok_count));
     TEST_ASSERT_EQUAL_STRING("Not implement yet", r.message);
     TEST_ASSERT_EQUAL_STRING("async-user", r.entity_name_for_error);
+
+    /* The same entity in two alterations is sent as Java sends it and is ONE
+     * key (Java's per-entity future map): one callback, not two. */
+    const char *const *const two_types[2] = {types, types};
+    const char *const *const two_names[2] = {names, names};
+    const int32_t ones[2] = {1, 1};
+    alter_client_quotas_async_result_t dup = {0};
+    atomic_init(&dup.fired, 0);
+    atomic_init(&dup.error_count, 0);
+    atomic_init(&dup.ok_count, 0);
+    kafka_admin_AdminClient_alter_client_quotas_async(admin, two_types, two_names, ones, NULL,
+                                                      NULL, NULL, NULL, 2, -1, true,
+                                                      on_alter_client_quotas, &dup);
+    TEST_ASSERT_TRUE(wait_for(&dup.fired, 1));
+    struct timespec ts = {0, 100000000}; /* 100ms: let a wrong second callback land */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&dup.fired));
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", dup.message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -7551,7 +7570,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_client_quotas_async);
     RUN_TEST(test_mock_admin_describe_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_alter_client_quotas_reports_unsupported_per_entity);
-    RUN_TEST(test_mock_admin_alter_client_quotas_rejects_duplicate_entities);
+    RUN_TEST(test_mock_admin_alter_client_quotas_repeated_type_rejected_repeated_entity_sent);
     RUN_TEST(test_mock_admin_alter_client_quotas_async);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle_with_entities);
