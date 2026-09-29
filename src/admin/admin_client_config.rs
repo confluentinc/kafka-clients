@@ -92,22 +92,20 @@ impl AdminClientConfig {
     /// `sasl.jaas.config`
     pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
-    /// Creates a config from a property map. `bootstrap.servers` is required.
+    /// Creates a config from a property map. `bootstrap.servers` must be non-empty.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
-    /// or a numeric value fails to parse.
+    /// Returns [`Error::Config`] if `bootstrap.servers` is missing or empty, and
+    /// an error if a value fails to parse or validate.
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
-        let mut bootstrap_set = false;
 
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                    bootstrap_set = true;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
@@ -152,9 +150,12 @@ impl AdminClientConfig {
             }
         }
 
-        if !bootstrap_set || config.bootstrap_servers.is_empty() {
+        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-63`):
+        // `bootstrap.servers` defaults to the empty list, and `bootstrap.controllers`
+        // is not modelled here, so it is always empty.
+        if config.bootstrap_servers.is_empty() {
             return Err(Error::config_message(format!(
-                "Missing required configuration \"{}\" which has no default value.",
+                "You must set either {} or bootstrap.controllers",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
         }
@@ -297,10 +298,7 @@ mod tests {
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
         let err = AdminClientConfig::new(&props).unwrap_err();
-        assert_eq!(
-            err.message(),
-            "Missing required configuration \"bootstrap.servers\" which has no default value."
-        );
+        assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
     }
 
     #[test]
@@ -439,8 +437,8 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`): an empty or
-    /// duplicated element is rejected with `ConfigDef`'s exact message
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix).
     #[test]
     fn test_bootstrap_servers_valid_list() {
@@ -458,16 +456,20 @@ mod tests {
                 "{value:?}"
             );
         }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_servers(), ["a:1".to_string()]);
         assert_eq!(
-            error_message("a:1,a:1"),
-            "Configuration 'bootstrap.servers' values must not be duplicated."
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
         );
         // Admin allows an empty list (`isEmptyAllowed = true`), so the
-        // ValidList message never appears; the constructor's own
-        // bootstrap check reports it instead.
+        // ValidList message never appears; `AdminBootstrapAddresses.fromConfig`'s
+        // check reports it instead.
         for value in ["", "  "] {
-            assert!(
-                !error_message(value).contains("must not be empty. Valid values include"),
+            assert_eq!(
+                error_message(value),
+                "You must set either bootstrap.servers or bootstrap.controllers",
                 "{value:?}"
             );
         }

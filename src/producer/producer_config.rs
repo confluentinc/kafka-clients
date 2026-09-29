@@ -1726,8 +1726,8 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty or
-    /// duplicated element is rejected with `ConfigDef`'s exact message
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
     fn test_bootstrap_servers_valid_list() {
@@ -1745,9 +1745,12 @@ mod tests {
                 "{value:?}"
             );
         }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(ProducerConfig::new(&props).unwrap().bootstrap_servers, ["a:1".to_string()]);
         assert_eq!(
-            error_message("a:1,a:1"),
-            "Configuration 'bootstrap.servers' values must not be duplicated."
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
         );
         for value in ["", "  "] {
             assert_eq!(
