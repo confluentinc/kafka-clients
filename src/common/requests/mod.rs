@@ -71,6 +71,8 @@ mod describe_log_dirs_request;
 mod describe_log_dirs_response;
 mod describe_producers_request;
 mod describe_producers_response;
+mod describe_topic_partitions_request;
+mod describe_topic_partitions_response;
 mod describe_transactions_request;
 mod describe_transactions_response;
 mod describe_user_scram_credentials_request;
@@ -199,6 +201,8 @@ pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsReque
 pub use describe_log_dirs_response::DescribeLogDirsResponse;
 pub use describe_producers_request::{DescribeProducersRequest, DescribeProducersRequestBuilder};
 pub use describe_producers_response::DescribeProducersResponse;
+pub use describe_topic_partitions_request::{DescribeTopicPartitionsRequest, DescribeTopicPartitionsRequestBuilder};
+pub use describe_topic_partitions_response::DescribeTopicPartitionsResponse;
 pub use describe_transactions_request::{DescribeTransactionsRequest, DescribeTransactionsRequestBuilder};
 pub use describe_transactions_response::DescribeTransactionsResponse;
 pub use describe_user_scram_credentials_request::{
