@@ -48,6 +48,7 @@ use crate::DescribeDelegationTokenRequestData;
 use crate::DescribeGroupsRequestData;
 use crate::DescribeLogDirsRequestData;
 use crate::DescribeProducersRequestData;
+use crate::DescribeTopicPartitionsRequestData;
 use crate::DescribeTransactionsRequestData;
 use crate::DescribeUserScramCredentialsRequestData;
 use crate::ElectLeadersRequestData;
@@ -106,6 +107,7 @@ use super::DescribeDelegationTokenRequest;
 use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
 use super::DescribeProducersRequest;
+use super::DescribeTopicPartitionsRequest;
 use super::DescribeTransactionsRequest;
 use super::DescribeUserScramCredentialsRequest;
 use super::ElectLeadersRequest;
@@ -242,6 +244,8 @@ pub enum AbstractRequest {
     ListConfigResources(ListConfigResourcesRequest),
     /// A DescribeCluster request.
     DescribeCluster(DescribeClusterRequest),
+    /// A DescribeTopicPartitions request.
+    DescribeTopicPartitions(DescribeTopicPartitionsRequest),
     /// A DescribeLogDirs request.
     DescribeLogDirs(DescribeLogDirsRequest),
     /// An AlterReplicaLogDirs request.
@@ -322,6 +326,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => r.version(),
             Self::ListConfigResources(r) => r.version(),
             Self::DescribeCluster(r) => r.version(),
+            Self::DescribeTopicPartitions(r) => r.version(),
             Self::DescribeLogDirs(r) => r.version(),
             Self::AlterReplicaLogDirs(r) => r.version(),
             Self::ElectLeaders(r) => r.version(),
@@ -380,6 +385,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => r.api_key(),
             Self::ListConfigResources(r) => r.api_key(),
             Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeTopicPartitions(r) => r.api_key(),
             Self::DescribeLogDirs(r) => r.api_key(),
             Self::AlterReplicaLogDirs(r) => r.api_key(),
             Self::ElectLeaders(r) => r.api_key(),
@@ -447,6 +453,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeTopicPartitions(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
@@ -595,6 +602,9 @@ impl AbstractRequest {
             Self::DescribeCluster(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeTopicPartitions(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::DescribeLogDirs(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -702,6 +712,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTopicPartitions(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
@@ -778,6 +789,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeTopicPartitions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -934,6 +946,13 @@ impl AbstractRequest {
             ApiKeys::DESCRIBE_CLUSTER => {
                 let data = DescribeClusterRequestData::read(readable, api_version)?;
                 Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_TOPIC_PARTITIONS => {
+                let data = DescribeTopicPartitionsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeTopicPartitions(DescribeTopicPartitionsRequest::with_version(
+                    data,
+                    api_version,
+                )))
             },
             ApiKeys::DESCRIBE_LOG_DIRS => {
                 let data = DescribeLogDirsRequestData::read(readable, api_version)?;
@@ -1104,6 +1123,7 @@ impl std::fmt::Display for AbstractRequest {
             Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
             Self::ListConfigResources(r) => write!(f, "{r}"),
             Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeTopicPartitions(r) => write!(f, "{r}"),
             Self::DescribeLogDirs(r) => write!(f, "{r}"),
             Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
             Self::ElectLeaders(r) => write!(f, "{r}"),
