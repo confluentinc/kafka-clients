@@ -49,6 +49,9 @@ name: build-test-release
 # The translation agent is a separate manual promotion (start-translation-plan.yml).
 # It runs in a detached git worktree and pushes new commits when promotions
 # run either manually or automatically.
+#
+# "Publish to crates.io" is a manual promotion (publish-crates-io.yml) run on a
+# master build to publish the confluent-kafka-rust version in Cargo.toml.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -181,6 +184,8 @@ promotions:
     pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
+  - name: Publish to crates.io
+    pipeline_file: publish-crates-io.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
