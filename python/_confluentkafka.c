@@ -4613,7 +4613,11 @@ static PyObject* py_DescribeClusterResult_drain(PyObject* self, PyObject* args) 
         kafka_admin_DescribeClusterResult_destroy(r); return NULL;
     }
 
-    PyObject* out = Py_BuildValue("(sNNN)", kafka_admin_DescribeClusterResult_cluster_id(r),
+    // The FFI returns NULL for Java's null cluster id (the Metadata fallback).
+    // Python's ClusterDescription.cluster_id keeps its "" for that case in this
+    // round; surfacing Java's None is deferred to the Python Java-shape plan.
+    const char* cluster_id = kafka_admin_DescribeClusterResult_cluster_id(r);
+    PyObject* out = Py_BuildValue("(sNNN)", cluster_id != NULL ? cluster_id : "",
                                   nodes, controller, operations);
     kafka_admin_DescribeClusterResult_destroy(r);
     return out;
