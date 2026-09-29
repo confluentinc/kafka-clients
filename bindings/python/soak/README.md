@@ -524,16 +524,17 @@ namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
 config through verbatim: no `sasl.jaas.config` → `sasl.username`/`sasl.password`
 translation, and no `confluent-kafka` dependency. The security-protocol support
 on the client makes this work against SASL/SSL clusters (Confluent Cloud). Each
-multi-key RPC returns one **already-resolved** result per key: `create_topics()`
-yields `{name: TopicMetadataAndConfig | KafkaError}` and `delete_topics()` yields
-`{name: None | KafkaError}`, and the whole call raises a `KafkaError` on a
-call-level failure. A per-key value that `isinstance(v, KafkaError)` marks that
-key's failure (its numeric `.code` is the wire error code); otherwise it is the
-success value — so the soak iterates
-`for _t, result in ....items(): if isinstance(result, KafkaError): ...`.
-(The Python per-key `Future` interface — `{name: Future}` with `fut.result()`,
-matching Java's `KafkaFuture` and librdkafka's dict-of-futures — lands in the
-follow-up PR that reworks the admin binding.)
+multi-key RPC returns one **`concurrent.futures.Future` per key**, matching
+Java's `KafkaFuture` and librdkafka's dict-of-futures: `create_topics()` yields
+`{name: Future}` (each future resolves to a `TopicMetadataAndConfig`) and
+`delete_topics()` yields `{name: Future}` (each future resolves to `None`), and
+the whole call still raises a `KafkaError` on a call-level failure. Calling
+`fut.result()` returns that key's success value or **raises** the key's
+`KafkaError` (whose numeric `.code` is the wire error code) — so the soak
+iterates `for _t, fut in ....items(): try: fut.result() except KafkaError: ...`,
+classifying each key independently (see `_classify` in `soak_metrics.py`, which
+tolerates the benign `TOPIC_ALREADY_EXISTS` / `UNKNOWN_TOPIC_OR_PARTITION`
+codes and treats the rest as fatal/transient).
 
 ## Threading
 
