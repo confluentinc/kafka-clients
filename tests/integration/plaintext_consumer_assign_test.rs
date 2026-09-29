@@ -48,9 +48,14 @@
 //! - `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`
 //!   → `test_async_assign_and_retrieving_committed_offsets_multiple_times`
 //!
+//! # Added in Apache Kafka 4.3.1
+//!
+//! - `testAsyncPollAfterTopicDeleted` (4.3.1 line 304, KAFKA-20165)
+//!   → `test_async_poll_after_topic_deleted`
+//!
 //! # SKIPped methods
 //!
-//! The 8 `testClassic*` twin methods are SKIPped — the project targets
+//! The 9 `testClassic*` twin methods are SKIPped — the project targets
 //! KIP-848 only per `.claude/rules/consumer-threading.md` §20. They are
 //! enumerated here for traceability:
 //!
@@ -62,6 +67,7 @@
 //! - SKIP: `testClassicAssignAndFetchCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicAssignAndConsumeFromCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicAssignAndRetrievingCommittedOffsetsMultipleTimes` — classic-protocol-only
+//! - SKIP: `testClassicPollAfterTopicDeleted` — classic-protocol-only
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,7 +79,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -90,6 +100,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -116,8 +127,7 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// `tests/common/cluster_pool.rs` materializes one 3-broker cluster
 /// and amortizes its 30–60s startup across the suite.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    // Manual-assignment tests auto-create single-partition topics (no admin
-    // client); the canonical helper supplies the shared KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(1)
 }
 
@@ -226,32 +236,25 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
     producer.close().await.expect("producer close should succeed");
 }
 
+/// Java `PlaintextConsumerAssignTest.BROKER_COUNT` (`PlaintextConsumerAssignTest.java:63`).
+const BROKER_COUNT: i16 = 3;
+
 /// Pre-create an EMPTY topic, mirroring Java's
 /// `PlaintextConsumerAssignTest.setup()` which does
-/// `clusterInstance.createTopic(topic, partitions, replicationFactor)` in
-/// `@BeforeEach` — i.e. the topic is created with no records BEFORE any
-/// records are produced.
+/// `clusterInstance.createTopic(topic, 2, (short) BROKER_COUNT)` in
+/// `@BeforeEach` (`PlaintextConsumerAssignTest.java:74-77`) — i.e. the topic
+/// is created with no records BEFORE any records are produced.
 ///
-/// The Rust harness has no admin client, but `partitions_for` over the
-/// METADATA path triggers broker auto-create (`auto.create.topics.enable`
-/// is on by default) — exactly an empty topic, matching Java. Producing
-/// into a non-existent topic and relying on produce-triggered auto-create
-/// leaves a window where consumer-side metadata for the topic is not yet
-/// settled, which intermittently mis-reads offset 0 during the
-/// exact-offset/timestamp verification. Creating the topic empty up front
-/// closes that race.
-async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
-        if parts.len() >= partitions {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests. Auto-creating the topic
+/// (by producing or via metadata) instead races leader election on the
+/// 3-broker cluster: `NOT_LEADER_OR_FOLLOWER` retries reorder the
+/// non-idempotent sends, breaking the exact-offset/timestamp verification.
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32) {
+    let admin = admin_for(bootstrap_servers);
+    test_utils::create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // ── Consumer test helpers (mirror ClientsTestUtils.poll/consume) ──────
@@ -509,7 +512,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -575,7 +578,7 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.commit_sync().await.expect("commit_sync should succeed");
@@ -622,7 +625,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
@@ -668,7 +671,7 @@ async fn test_async_assign_and_consume() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
@@ -705,7 +708,7 @@ async fn test_async_assign_and_consume_skipping_position() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
@@ -759,7 +762,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
-        create_topic(consumer.as_mut(), &topic, 1).await;
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
         consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
@@ -824,7 +827,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
-        create_topic(consumer.as_mut(), &topic, 1).await;
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -907,7 +910,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_topic(consumer.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -937,6 +940,117 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     );
 
     consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's `testAsyncPollAfterTopicDeleted`
+/// (`PlaintextConsumerAssignTest.java:304`, body `testPollAfterTopicDeleted`
+/// :317) — validates KAFKA-20165.
+///
+/// `poll()` must not fail to retrieve committed offsets after the assigned
+/// topic is deleted: the consumer still has the topic id cached, so the
+/// OffsetFetch it issues on the re-assignment gets `UNKNOWN_TOPIC_ID`, which
+/// it must treat as a retriable partition error and recover from.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_poll_after_topic_deleted() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic_to_delete = ctx.topic("topic-to-delete-assign");
+    // Java: `GROUP_ID_CONFIG, "test-group"` (namespaced per test run here).
+    let group_id = ctx.group_id("test-group");
+
+    // Java: `clusterInstance.createTopic(topicToDelete, 1, (short) BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic_to_delete, 1, 3).await;
+    let tp_to_delete = TopicPartition::new(topic_to_delete.clone(), 0);
+
+    let num_records: usize = 10;
+    let starting_timestamp = current_time_ms();
+
+    // Java: `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, ...,
+    // GROUP_ID_CONFIG, "test-group", AUTO_OFFSET_RESET_CONFIG, "earliest"))`.
+    // Unlike this file's `make_consumer_config_bytes`, Java does NOT disable
+    // auto-commit here, so `enable.auto.commit` is left at its default (true).
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("group.id".to_string(), group_id.clone()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("client.id".to_string(), "integration-test-consumer".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&props).expect("invalid test config"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+
+    // Send records and consume them (this caches the topic ID in the consumer)
+    send_records_bytes(ctx.bootstrap_servers(), &tp_to_delete, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+    consumer
+        .seek_with_offset(tp_to_delete.clone(), 0)
+        .await
+        .expect("seek should succeed");
+    consume_and_verify_records_bytes(consumer.as_mut(), &tp_to_delete, num_records, 0, 0, starting_timestamp).await;
+    consumer.commit_sync().await.expect("commit_sync should succeed");
+
+    // Delete the topic and wait for deletion to propagate to metadata
+    admin
+        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .all()
+        .get()
+        .await
+        .expect("delete_topics should succeed");
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            // Java's `waitForCondition` retries when `listTopics()` throws;
+            // an error here is treated as "not yet" for the same reason.
+            match admin.list_topics().names().get().await {
+                Ok(names) => !names.contains(&topic_to_delete),
+                Err(_) => false,
+            }
+        },
+        "Condition not met within timeout 10000. Topic should be removed from metadata",
+        10_000,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+
+    // Change assignment to force the consumer to fetch committed offsets on next poll()
+    // The consumer still has the topic ID cached, so it will use version 10+
+    // and get UNKNOWN_TOPIC_ID from the broker
+    consumer.unsubscribe().await.expect("unsubscribe should succeed");
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+
+    // poll() should not throw - internally fetches committed offsets for deleted topic and recovers
+    let result = consumer.poll(Duration::from_millis(5000)).await;
+    assert!(
+        result.is_ok(),
+        "poll() after topic deletion should not fail: {:?}",
+        result.err()
+    );
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Builds an admin client for topic provisioning / deletion (Java's
+/// `clusterInstance.admin()`). Mirrors the per-file `admin_for` helper the
+/// other integration tests use.
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "assign-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
