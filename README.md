@@ -19,7 +19,7 @@ It also contains bindings for multiple languages, automatically generated follow
 
 The design of these clients is proposed through RFCs in the [`rfc/`](rfc/) folder, covering topics such as repository structure, versioning, client APIs, licensing, contributions, release and distribution, and AI-assisted migration.
 
-We want your feedback while these proposals are proposed. To comment on an RFC, open a [GitHub issue](../../issues) or start a [GitHub discussion](../../discussions) that references the RFC. See [rfc/README.md](rfc/README.md) for the status of each proposal and how the review process works.
+We want your feedback while these proposals are still open. To comment on an RFC, open a [GitHub issue](https://github.com/confluentinc/kafka-clients/issues) or start a [GitHub discussion](https://github.com/confluentinc/kafka-clients/discussions) that references the RFC. See [rfc/README.md](rfc/README.md) for the status of each proposal and how the review process works.
 
 ## Prerequisites
 
