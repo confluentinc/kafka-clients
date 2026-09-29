@@ -263,12 +263,15 @@ impl SslConfig {
                 // Not modelled (the TLS provider picks the suites), but Java
                 // still validates it with `ValidList.anyNonDuplicateValues(true,
                 // false)` (`SslConfigs.java:129`), so a value Java rejects is
-                // rejected here too before the key is ignored.
-                ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                log::warn!(
-                    "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
-                    key
-                );
+                // rejected here too before the key is ignored. An empty list
+                // is Java's default (`List.of()`, meaning the provider's
+                // defaults), so only a non-empty list is actually ignored.
+                if !ValidList::parse_any_non_duplicate_values(key, value, true)?.is_empty() {
+                    log::warn!(
+                        "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
+                        key
+                    );
+                }
             },
             _ => {
                 log::warn!("Unknown SSL configuration key: {}", key);
