@@ -53,10 +53,11 @@
 //!   - its host ports — each advertised client port is bound by an
 //!     in-process `BrokerProxy` forwarding to a pre-reserved backend host port
 //!     pinned with `with_mapped_port` (which Docker re-binds on start); the
-//!     proxy rebinds the advertised ports on start, so bootstrap strings handed
-//!     out earlier stay valid. Stopping the proxy with the container closes
-//!     every client connection and refuses new ones, as a shut-down in-JVM
-//!     broker does (see [`KafkaCluster::shutdown_broker`]);
+//!     proxy keeps the advertised ports bound for its whole life, so bootstrap
+//!     strings handed out earlier stay valid. Stopping the proxy with the
+//!     container closes every client connection and closes new ones as soon
+//!     as they are accepted, the closest a bound port gets to a shut-down
+//!     in-JVM broker refusing them (see [`KafkaCluster::shutdown_broker`]);
 //!   - its data — the log directory lives in the container's writable layer,
 //!     which survives a stop. The image's start-up script re-runs the storage
 //!     format on every start but tolerates "already formatted", and
@@ -77,6 +78,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use super::cluster_config::{ClusterConfig, Type};
 use super::test_certs;
@@ -272,23 +274,49 @@ fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
 /// connection to the host ports Docker maps the container's listeners to.
 ///
 /// It exists so [`KafkaCluster::shutdown_broker`] can give clients the view
-/// Java's in-JVM brokers give once shut down — every connection closed, new
-/// ones refused — which Docker's own host-port forwarder does not reliably do
-/// around a container stop (see `shutdown_broker`). Stopping the proxy drops
-/// its listeners and every forwarded connection; starting it rebinds the same
-/// ports, so bootstrap strings handed out earlier stay valid.
+/// Java's in-JVM brokers give once shut down — every connection closed, no new
+/// one served — which Docker's own host-port forwarder does not reliably do
+/// around a container stop (see `shutdown_broker`).
+///
+/// The listeners are bound on the first [`Self::start`] and stay bound for the
+/// proxy's whole life, so bootstrap strings handed out earlier stay valid.
+/// Releasing them on stop and rebinding on start would not be safe: while a
+/// port is unbound the kernel may hand it out as an ephemeral *source* port of
+/// some outgoing connection, and the rebind then fails with `EADDRINUSE`.
+/// Stopping therefore closes every forwarded connection and, until the next
+/// start, accepts each new connection only to close it at once.
+///
+/// **Deviation from Java.** A shut-down in-JVM broker *refuses* connections
+/// (its socket server is closed); a stopped proxy accepts and immediately
+/// closes them. Clients see a connection that ends before any response —
+/// handled as a disconnect, exactly like a refused connect — so the difference
+/// is not observable at the Kafka-client level.
 struct BrokerProxy {
     /// `(advertised host port, Docker-mapped backend host port)` per listener.
     routes: Vec<(u16, u16)>,
-    /// The running accept loops and connections; `None` while stopped.
-    running: std::sync::Mutex<Option<ProxyRun>>,
+    /// Shared with the accept loops, which consult it on every accept.
+    state: Arc<std::sync::Mutex<ProxyState>>,
+    /// Cancelled when the proxy is dropped; ends the accept loops, which
+    /// releases the listeners.
+    closed: tokio_util::sync::CancellationToken,
 }
 
-/// One start..stop lifetime of a [`BrokerProxy`].
+/// Mutable state of a [`BrokerProxy`], shared with its accept loops.
+struct ProxyState {
+    /// Whether the listeners have been bound (by the first successful start).
+    listening: bool,
+    /// The current start..stop lifetime; `None` while stopped.
+    run: Option<ProxyRun>,
+}
+
+/// One start..stop lifetime of a [`BrokerProxy`]: the forwarded connections
+/// accepted while it was current.
 struct ProxyRun {
     cancel: tokio_util::sync::CancellationToken,
-    /// Every accept loop and connection task holds a clone of the matching
-    /// sender, so `recv()` yields `None` once all of them have exited.
+    /// Cloned into every connection task of this run; dropped by
+    /// [`BrokerProxy::stop`] so `exited` yields `None` once they have all
+    /// exited.
+    alive: tokio::sync::mpsc::Sender<()>,
     exited: tokio::sync::mpsc::Receiver<()>,
 }
 
@@ -301,43 +329,54 @@ impl BrokerProxy {
                 (front.sasl_plaintext, backend.sasl_plaintext),
                 (front.sasl_ssl, backend.sasl_ssl),
             ],
-            running: std::sync::Mutex::new(None),
+            state: Arc::new(std::sync::Mutex::new(ProxyState { listening: false, run: None })),
+            closed: tokio_util::sync::CancellationToken::new(),
         }
     }
 
-    /// Binds every advertised port and starts forwarding. A bind failure is
-    /// reported with "address already in use" wording, so a cluster start that
-    /// lost a port race is retried (`is_port_allocation_error`).
-    async fn start(&self) -> Result<(), String> {
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let (alive, exited) = tokio::sync::mpsc::channel(1);
-        for &(front, backend) in &self.routes {
-            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", front)).await {
-                Ok(listener) => listener,
-                Err(err) => {
-                    // Nothing else holds `cancel` yet, so stop the routes already bound.
-                    cancel.cancel();
-                    return Err(format!(
-                        "broker proxy failed to bind 127.0.0.1:{front} (address already in use?): {err}"
-                    ));
-                },
-            };
-            tokio::spawn(Self::accept_loop(listener, backend, cancel.clone(), alive.clone()));
+    /// Starts forwarding. The first call binds every advertised port; a bind
+    /// failure is reported with "address already in use" wording, so a cluster
+    /// start that lost a port race is retried (`is_port_allocation_error`).
+    /// Every port is bound before any accept loop is spawned, so on a partial
+    /// failure the ports already bound are released as the listeners drop and
+    /// nothing is left running. Later calls (restarts) reuse the listeners and
+    /// cannot fail.
+    fn start(&self) -> Result<(), String> {
+        let mut state = self.state.lock().expect("broker proxy state poisoned");
+        assert!(state.run.is_none(), "broker proxy started twice");
+        if !state.listening {
+            let mut listeners = Vec::with_capacity(self.routes.len());
+            for &(front, backend) in &self.routes {
+                let listener = std::net::TcpListener::bind(("127.0.0.1", front))
+                    .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
+                    .and_then(tokio::net::TcpListener::from_std)
+                    .map_err(|err| {
+                        format!("broker proxy failed to bind 127.0.0.1:{front} (address already in use?): {err}")
+                    })?;
+                listeners.push((listener, backend));
+            }
+            for (listener, backend) in listeners {
+                tokio::spawn(Self::accept_loop(
+                    listener,
+                    backend,
+                    Arc::clone(&self.state),
+                    self.closed.clone(),
+                ));
+            }
+            state.listening = true;
         }
-        let previous = self
-            .running
-            .lock()
-            .expect("broker proxy state poisoned")
-            .replace(ProxyRun { cancel, exited });
-        assert!(previous.is_none(), "broker proxy started twice");
+        let (alive, exited) = tokio::sync::mpsc::channel(1);
+        state.run = Some(ProxyRun { cancel: tokio_util::sync::CancellationToken::new(), alive, exited });
         Ok(())
     }
 
-    /// Closes the listeners and every forwarded connection, returning once
-    /// all of them are closed.
+    /// Closes every forwarded connection, returning once all of them are
+    /// closed. The listeners stay bound; until the next [`Self::start`] each
+    /// new connection is closed as soon as it is accepted.
     async fn stop(&self) {
-        let run = self.running.lock().expect("broker proxy state poisoned").take();
-        if let Some(ProxyRun { cancel, mut exited }) = run {
+        let run = self.state.lock().expect("broker proxy state poisoned").run.take();
+        if let Some(ProxyRun { cancel, alive, mut exited }) = run {
+            drop(alive);
             cancel.cancel();
             while exited.recv().await.is_some() {}
         }
@@ -346,12 +385,12 @@ impl BrokerProxy {
     async fn accept_loop(
         listener: tokio::net::TcpListener,
         backend: u16,
-        cancel: tokio_util::sync::CancellationToken,
-        alive: tokio::sync::mpsc::Sender<()>,
+        state: Arc<std::sync::Mutex<ProxyState>>,
+        closed: tokio_util::sync::CancellationToken,
     ) {
         loop {
             let accepted = tokio::select! {
-                _ = cancel.cancelled() => return,
+                _ = closed.cancelled() => return,
                 accepted = listener.accept() => accepted,
             };
             let Ok((mut client, _)) = accepted else {
@@ -359,8 +398,15 @@ impl BrokerProxy {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };
-            let cancel = cancel.clone();
-            let alive = alive.clone();
+            // A connection accepted while stopped is closed at once (dropping
+            // `client`), as close to a refused connect as a bound listener gets.
+            // A stop that takes the run after this clone still sees the
+            // connection: it holds `alive`, and `cancel` is already cancelled.
+            let run = {
+                let state = state.lock().expect("broker proxy state poisoned");
+                state.run.as_ref().map(|run| (run.cancel.clone(), run.alive.clone()))
+            };
+            let Some((cancel, alive)) = run else { continue };
             tokio::spawn(async move {
                 let _alive = alive;
                 tokio::select! {
@@ -375,6 +421,14 @@ impl BrokerProxy {
                 }
             });
         }
+    }
+}
+
+impl Drop for BrokerProxy {
+    fn drop(&mut self) {
+        // End the accept loops so the listeners are released, e.g. when a
+        // failed cluster-start attempt drops the proxies it had started.
+        self.closed.cancel();
     }
 }
 
@@ -670,6 +724,16 @@ impl KafkaAllProtocols {
         let this_container = &node.container_name;
         env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".into(), "BROKER".into());
         env_vars.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".into(), num_brokers.min(3).to_string());
+        // Disable time-based retention. Tests produce records with timestamp 0
+        // (1970), as Java's do, so under the default 7-day `log.retention.ms`
+        // every such segment is already expired. The broker's retention check
+        // runs 30 s after startup and then every 300 s; Java's per-test fresh
+        // clusters finish before the first check, but pooled clusters here live
+        // for minutes, so the check deleted records mid-test (e.g.
+        // `ListOffsets EARLIEST` returned 50 in `test_async_consumer_seek`).
+        // Set on every broker-role node, combined nodes included; a
+        // `server_properties` override from a `ClusterConfig` still wins.
+        env_vars.insert("KAFKA_LOG_RETENTION_MS".into(), "-1".into());
 
         // Listeners — custom names avoid the configure script's SSL check.
         //
@@ -1051,8 +1115,10 @@ impl KafkaCluster {
             let Some(ports) = node.ports.as_ref() else { continue };
             if let Some(backend) = node.backend_ports.as_ref() {
                 let proxy = BrokerProxy::new(ports, backend);
-                if let Err(err) = proxy.start().await {
-                    // Earlier nodes' proxies are dropped with this attempt; stop them first.
+                if let Err(err) = proxy.start() {
+                    // Earlier nodes' proxies are dropped with this attempt, which
+                    // releases their listeners (`BrokerProxy`'s `Drop`); stop them
+                    // first so their connection tasks are gone too.
                     for started in proxies.values() {
                         BrokerProxy::stop(started).await;
                     }
@@ -1222,9 +1288,10 @@ impl KafkaCluster {
     /// the broker's data) is kept for [`Self::start_broker`].
     ///
     /// It then stops the broker's [`BrokerProxy`], so on return every client
-    /// connection to the broker is closed and new connections are refused —
-    /// what a client sees once Java's `awaitShutdown()` has returned and the
-    /// broker's socket server is closed. Relying on `docker stop` alone is not
+    /// connection to the broker is closed and new connections are closed as
+    /// soon as they are accepted — what a client sees once Java's
+    /// `awaitShutdown()` has returned and the broker's socket server is closed,
+    /// except that Java refuses the connect (see [`BrokerProxy`]). Relying on `docker stop` alone is not
     /// equivalent: Docker's host-port forwarder (notably Docker Desktop's) can
     /// outlive the container briefly, accepting a connection it then holds for
     /// ~15 s before resetting it — long enough to stall a client whose close
@@ -1270,7 +1337,6 @@ impl KafkaCluster {
             .unwrap_or_else(|err| panic!("failed to start broker {broker_id}: {err}"));
         self.proxies[&broker_id]
             .start()
-            .await
             .unwrap_or_else(|err| panic!("failed to restart the proxy of broker {broker_id}: {err}"));
         self.shutdown_brokers
             .lock()

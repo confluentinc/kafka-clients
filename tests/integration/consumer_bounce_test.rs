@@ -181,10 +181,23 @@ fn create_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 }
 
 /// Java's `tearDown` `consumers.forEach(Consumer::close)` for one consumer a
-/// poller handed back. A close error is not asserted: the rejected consumer of
-/// the max-size test may surface its fatal error again on close. The close is
-/// bounded so a wedged consumer fails the test instead of hanging it.
+/// poller handed back (or the test held directly). As in Java, where a
+/// throwing `close` fails the test's `tearDown`, a close error fails the test.
+/// The close is bounded so a wedged consumer fails the test instead of hanging
+/// it.
 async fn close_consumer(consumer: Option<BytesConsumer>) {
+    if let Some(mut consumer) = consumer {
+        tokio::time::timeout(Duration::from_secs(60), consumer.close())
+            .await
+            .expect("consumer close did not return within 60 s")
+            .expect("consumer close");
+    }
+}
+
+/// [`close_consumer`] for the max-size test's rejected consumer only: its
+/// close error is not asserted, because that consumer may surface its fatal
+/// `GroupMaxSizeReached` error again on close. Still bounded.
+async fn close_consumer_ignoring_error(consumer: Option<BytesConsumer>) {
     if let Some(mut consumer) = consumer {
         let _ = tokio::time::timeout(Duration::from_secs(60), consumer.close())
             .await
@@ -344,7 +357,7 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
         thrown.message(),
         format!("The consumer group has reached its maximum capacity of {MAX_GROUP_SIZE} members.")
     );
-    close_consumer(rejected_consumer.shutdown().await).await;
+    close_consumer_ignoring_error(rejected_consumer.shutdown().await).await;
 
     // assert group continues to live and the records to be distributed across all partitions.
     let data = b"data".to_vec();

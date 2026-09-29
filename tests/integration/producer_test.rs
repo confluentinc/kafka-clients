@@ -1608,9 +1608,11 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
 /// (`PlaintextProducerSendTest.scala:69-78`) and the `sendAndVerify` helper it
 /// calls (`BaseProducerSendTest.scala:213-237`).
 ///
-/// With `batch.size=0` every record is its own full batch, so the records are
-/// sent even though `linger.ms=Int.MaxValue`; `close(20 s)` must deliver all of
-/// them at consecutive offsets.
+/// With `batch.size=0` every record fills its batch, which becomes sendable as
+/// soon as the next record opens a new one (or on close), so the records are
+/// sent without waiting out `linger.ms`; `close(20 s)` must deliver all of them
+/// at consecutive offsets. Only the native arm keeps Java's
+/// `linger.ms=Int.MaxValue`; the gRPC arms use `linger.ms=0` (see below).
 async fn batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("topic");
     // With `batch.size=0` a batch only becomes sendable once the next record

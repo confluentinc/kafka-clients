@@ -1447,6 +1447,8 @@ async fn test_async_consume_coordinator_failover() {
             Ok(parts) if !parts.is_empty() => break parts,
             other => assert!(Instant::now() < deadline, "no metadata for __consumer_offsets: {other:?}"),
         }
+        // Same pause as `create_topic`'s metadata retry loop.
+        tokio::time::sleep(Duration::from_millis(200)).await;
     };
     assert_eq!(1, parts.len());
     let coordinator = parts[0].leader().expect("offsets partition has a leader").id();
