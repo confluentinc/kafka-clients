@@ -83,7 +83,7 @@ use crate::alter_replica_log_dirs_request_data::{AlterReplicaLogDir, AlterReplic
 use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, ScramCredentialUpsertion};
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, config_resource};
-use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
+use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
@@ -773,10 +773,13 @@ impl DriverContext {
 }
 
 /// Initiates a new call on the admin I/O task, or fails it at once when the
-/// task cannot accept it. The single submission path for user calls
+/// task cannot accept it. The submission path for user calls
 /// (`KafkaAdminClient::submit`), `AdminApiDriver` follow-ups
 /// ([`maybe_send_requests`]) and response-hook follow-ups (`listGroups`'
-/// per-broker calls), as `AdminClientRunnable.call` is in Java.
+/// per-broker calls), as `AdminClientRunnable.call` is in Java. Steps 1 and 2
+/// are [`ShutdownSignal::admit_new_call`], which the I/O task also applies to the follow-ups a
+/// response hook returns as `HandleResult::NewCall` (quota retries), so every
+/// new call passes the same gate.
 ///
 /// Translated from `AdminClientRunnable.call` (`KafkaAdminClient.java:1598-1609`)
 /// and the hand-off half of `enqueue` (`:1563-1588`):
@@ -800,40 +803,12 @@ fn runnable_call(
     wakeup: &Notify,
     shutdown: &ShutdownSignal,
     using_bootstrap_controllers: bool,
-    mut call: Call,
+    call: Call,
 ) {
-    // Java checks `hardShutdownTimeMs`, not the runnable's `closing` flag: the
-    // latter is only set by the I/O task's `finally` and gates `enqueue` below.
-    // Rust's `ShutdownSignal::closing` is set by both `close()` and
-    // `fail_all_remaining`, so gating on it would answer a call submitted after
-    // a panicked loop with this error instead of Java's "thread has exited".
-    if shutdown.hard_shutdown_deadline_ms.load(std::sync::atomic::Ordering::Acquire)
-        != KafkaAdminClient::NO_HARD_SHUTDOWN
-    {
-        // Java's text verbatim (finding 247a).
-        call.handle_failure(&Error::local_illegal_state(
-            "Cannot accept new calls when AdminClient is closing.",
-        ));
+    // Steps 1 and 2, shared with the runnable's own follow-ups.
+    let Some(call) = shutdown.admit_new_call(using_bootstrap_controllers, call) else {
         return;
-    }
-    // Reject calls whose endpoint is incompatible with a `bootstrap.controllers`
-    // client (KIP-919).
-    if using_bootstrap_controllers && !call.node_provider.supports_use_controllers() {
-        // `new UnsupportedEndpointTypeException("This Admin API is not yet
-        // supported when communicating directly with the controller quorum.")`.
-        // Spelling it `Error::unsupported_version` gave it code 35, which
-        // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
-        // retry instead of failing the call (finding 247b).
-        //
-        // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
-        // non-retriable, non-`UnsupportedVersionException` error on a call that
-        // has not yet passed its deadline is `handleFailure(throwable)`
-        // (`KafkaAdminClient.java:930-936`) — what is invoked here.
-        call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
-            "This Admin API is not yet supported when communicating directly with the controller quorum.",
-        )));
-        return;
-    }
+    };
     match tx.send(call) {
         Ok(()) => wakeup.notify_one(),
         Err(mpsc::error::SendError(mut call)) => {
@@ -13903,14 +13878,73 @@ mod tests {
         let a = result.producer_id("a").expect("a is a requested key");
         let b = result.producer_id("b").expect("b is a requested key");
         assert!(a.is_done() && b.is_done(), "every key must resolve after the task exits");
+        // The two keys reach the text by different paths, and the exact messages
+        // tell them apart: the in-flight key is failed by `fail_all_remaining`
+        // (with the call rendered after it), while the follow-up is rejected by
+        // the closed channel (bare, as Java's `enqueue` builds it). A follow-up
+        // that was queued and failed by a later drain would carry the suffix.
+        let mut messages = Vec::new();
         for future in [a, b] {
             let error = future.get().await.expect_err("the task exited before the fence finished");
             assert!(error.is_timeout_error(), "got {error:?}");
-            assert!(
-                error.message().starts_with("The AdminClient thread has exited."),
-                "got {error:?}"
-            );
+            messages.push(error.message().to_string());
         }
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec![
+                "The AdminClient thread has exited.".to_string(),
+                "The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)".to_string(),
+            ]
+        );
+    }
+
+    /// Regression for COMMENTS.66.md Issue 2: a quota-retry follow-up passes the
+    /// same `runnable.call` gate as every other new call.
+    ///
+    /// Java resubmits the throttled topics with `runnable.call(call, now)`
+    /// (`KafkaAdminClient.java:1880`), which rejects the retry once `close()` has
+    /// set the hard-shutdown deadline (`:1599-1601`). The retry's
+    /// `handleFailure` leaves a non-timeout cause alone
+    /// (`maybeCompleteQuotaExceededException`), so the topic fails with
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")`. Rust used to push the retry straight into `pending_calls`,
+    /// where it kept the loop alive and was sent again during `close()`.
+    #[tokio::test]
+    async fn a_quota_retry_during_close_is_rejected_by_the_closing_gate() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                "topic1",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new().set_retry_on_quota_violation(true),
+        );
+        pump_until_request_queued(&mut runnable).await;
+
+        // `close(30s)` with the createTopics request in flight. No task was
+        // spawned, so this only publishes the deadline and the closing flag.
+        admin.close_with_timeout(Duration::from_secs(30)).await;
+        // The controller answers with a quota violation, which asks for a retry.
+        runnable.client_mut().respond(create_response_throttled(
+            1000,
+            vec![create_result("topic1", Errors::ThrottlingQuotaExceeded, None)],
+        ));
+        runnable.run_once().await;
+
+        let future = &result.values()["topic1"];
+        assert!(
+            future.is_done(),
+            "the quota retry must be rejected at once, not queued to be sent again during close()"
+        );
+        let error = future.get().await.expect_err("the rejected retry fails the topic");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        assert!(
+            !runnable.has_active_external_calls_for_test(),
+            "the rejected retry must not stay queued"
+        );
     }
 
     /// Java publishes the hard-shutdown deadline through a compare-and-set loop
