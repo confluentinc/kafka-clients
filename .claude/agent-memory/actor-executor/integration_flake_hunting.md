@@ -1,6 +1,6 @@
 ---
 name: integration-flake-hunting
-description: How to prove an integration-suite flake is fixed — full-target run cost, why a green suite does not exercise cluster eviction, and the before/after teeth-check technique that does
+description: How to prove an integration-suite flake is fixed — full-target run cost, why a green suite does not exercise cluster eviction, the before/after teeth-check technique that does, and the suite taking this 8 GiB host's Docker engine (and the user's broker) down
 metadata:
   type: project
 ---
@@ -100,6 +100,26 @@ expose port <p>/tcp", which is what a *stopped* container looks like).
 Also: `docker version` itself can take 60s+ to answer right after a heavy suite
 run. Poll for readiness before concluding Docker is broken.
 
-See [[integration_metadata_propagation_races]] for the other half of this
+**The suite can take the whole engine down, and the user's own container with
+it.** Loop 78 (2026-09-24) ran the `consumer` filter twice back to back while
+the user's long-lived `kafka-perf-local` broker was up. Run 1: one
+cluster-start timeout. Run 2: container inspects hit `context deadline
+exceeded (15s)` for two minutes, then `com.docker.backend services: signal:
+killed` (Docker Desktop `log/host/monitor.log`), and the engine stayed down,
+taking `kafka-perf-local` with it. Every test that failed in one run passed in
+the other on the same commit. Cause not isolated (host memory pressure is the
+likely one); the correlation is what matters.
+**How to apply:** run the integration target once, not back to back, when
+the user's broker container is up; if a run shows cluster-start timeouts or
+`client error (Connect)`, stop and report rather than re-run. Never restart
+Docker Desktop yourself — say the engine is down so the user can decide.
+
+**Reaping is the user's call in auto mode.** `docker rm` of a stray test
+container was denied by the auto-mode classifier (Interfere With Workloads),
+so the "reap between runs" advice above does not apply to an agent: list what
+is stray (`docker ps -a`, `docker network ls`, with creation dates, since old
+`kafka-net-*` networks may not be yours) and hand the user the command.
+
+See [[integration-metadata-propagation-races]] for the other half of this
 branch's flakiness — the describe-after-create window and the
 `retry_on_exception_with_timeout` idiom that closes it.
