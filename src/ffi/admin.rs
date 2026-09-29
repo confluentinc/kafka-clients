@@ -17009,12 +17009,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
 // drivers. They take the same handle and return an error if it does not wrap a
 // mock.
 //
-// A driver is exposed once a landed slice's tests need it. `add_topic` and
-// `mark_topic_for_deletion` additionally need `TopicPartitionInfo` input
-// marshaling and a non-panicking Rust surface (both currently `panic!` on
-// duplicate/missing topics, mirroring Java's `IllegalArgumentException`, which
-// must not cross the FFI boundary — CLAUDE.md §10.1), so they arrive with the
-// slice whose tests need them.
+// The Rust mock returns Java's `IllegalArgumentException`s (a duplicate or
+// missing topic, an unknown broker) as `Err`, never a panic, so every driver
+// reports them through its returned error handle.
 // ---------------------------------------------------------------------------
 
 /// Returns the mock client behind `admin`, or an error if it wraps the
@@ -17033,6 +17030,193 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
         _ => Err(Error::local_illegal_state(
             "this operation is only supported on a MockAdminClient",
         )),
+    }
+}
+
+/// Adds an existing topic to the mock's state — Java's
+/// `MockAdminClient.addTopic(boolean internal, String name,
+/// List<TopicPartitionInfo> partitions, Map<String, String> configs)`.
+///
+/// # Parameters
+///
+/// - `internal`: whether the topic is internal.
+/// - `name`: the topic name.
+/// - `partitions` / `leaders` / `replicas` / `replica_counts` / `isrs` /
+///   `isr_counts` / `partition_count`: the `TopicPartitionInfo` list, as
+///   parallel arrays — partition `i` is `partitions[i]`, led by broker
+///   `leaders[i]` (`-1` is Java's null leader), with replicas
+///   `replicas[i][0..replica_counts[i]]` and ISR `isrs[i][0..isr_counts[i]]`
+///   (a NULL `replicas` / `isrs` array, or NULL row, is an empty list). Broker
+///   ids are resolved against the mock's brokers; an id that is not one of
+///   them stands for a broker the mock does not have, so Java's validation
+///   rejects it ("Leader broker unknown", "Unknown brokers in replica list",
+///   "Unknown brokers in isr list").
+/// - `config_keys` / `config_values` / `config_count`: the topic configs. A
+///   NULL `config_keys` is Java's null map; a NULL `config_values[i]` (or a
+///   NULL `config_values`) is a null value; a NULL key is skipped.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): Java's `IllegalArgumentException` messages
+/// ("Topic <name> was already added.", and the three above), a NULL `name`,
+/// or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `name` must be null or a valid C string; every non-null array must have
+/// `partition_count` (partition arrays) or `config_count` (config arrays)
+/// entries, and each non-null replica / ISR row its matching count.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
+    admin: *const kafka_admin_AdminClient_t,
+    internal: bool,
+    name: *const c_char,
+    partitions: *const i32,
+    leaders: *const i32,
+    replicas: *const *const i32,
+    replica_counts: *const i32,
+    isrs: *const *const i32,
+    isr_counts: *const i32,
+    partition_count: i32,
+    config_keys: *const *const c_char,
+    config_values: *const *const c_char,
+    config_count: i32,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    if name.is_null() {
+        return box_error(Error::local_illegal_argument("topic name must not be null"));
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let brokers = mock.brokers();
+    // A broker id the mock does not have becomes a node that is not in its
+    // broker list, so `add_topic` reports it with Java's message.
+    let node = |id: i32| {
+        brokers
+            .iter()
+            .find(|broker| broker.id() == id)
+            .cloned()
+            .unwrap_or_else(|| Node::new(id, String::new(), -1))
+    };
+    let ids = |rows: *const *const i32, counts: *const i32, index: usize| -> Vec<i32> {
+        if rows.is_null() || counts.is_null() {
+            return Vec::new();
+        }
+        let row = unsafe { *rows.add(index) };
+        unsafe { read_i32s(row, *counts.add(index)) }
+    };
+    let n = partition_count.max(0) as usize;
+    let mut infos = Vec::with_capacity(n);
+    if !partitions.is_null() {
+        for index in 0..n {
+            let leader = if leaders.is_null() {
+                -1
+            } else {
+                unsafe { *leaders.add(index) }
+            };
+            infos.push(TopicPartitionInfo::new(
+                unsafe { *partitions.add(index) },
+                (leader >= 0).then(|| node(leader)),
+                ids(replicas, replica_counts, index).into_iter().map(node).collect(),
+                ids(isrs, isr_counts, index).into_iter().map(node).collect(),
+            ));
+        }
+    }
+    let configs = (!config_keys.is_null()).then(|| {
+        (0..config_count.max(0) as usize)
+            .filter_map(|index| {
+                let key = unsafe { optional_string_at(config_keys, index) }?;
+                let value = if config_values.is_null() {
+                    None
+                } else {
+                    unsafe { optional_string_at(config_values, index) }
+                };
+                Some((key, value))
+            })
+            .collect::<BTreeMap<String, Option<String>>>()
+    });
+    match mock.add_topic(internal, &name, infos, configs) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Marks a topic for deletion, so `describeTopics` and `describeConfigs` treat
+/// it as absent — Java's `MockAdminClient.markTopicForDeletion(String)`.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): Java's `IllegalArgumentException` "Topic
+/// <name> did not exist.", a NULL `name`, or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `name` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
+    admin: *const kafka_admin_AdminClient_t,
+    name: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    if name.is_null() {
+        return box_error(Error::local_illegal_argument("topic name must not be null"));
+    }
+    match mock.mark_topic_for_deletion(&unsafe { CStr::from_ptr(name) }.to_string_lossy()) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Replaces one broker's log directories — Java's
+/// `MockAdminClient.Builder.brokerLogDirs`, which installs every broker's list
+/// at construction time; the Rust mock sets one broker's list at a time.
+/// `describeLogDirs`, `alterReplicaLogDirs` and `describeReplicaLogDirs` read
+/// them, and a topic added afterwards starts on its leader's first log dir.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): "Broker <id> does not exist." for an id the
+/// mock does not have, a NULL `log_dirs` entry, or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `log_dirs` must be null or have `count` entries, each NULL or a valid C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
+    admin: *const kafka_admin_AdminClient_t,
+    broker_id: i32,
+    log_dirs: *const *const c_char,
+    count: i32,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    let mut dirs = Vec::with_capacity(count.max(0) as usize);
+    if !log_dirs.is_null() {
+        for index in 0..count.max(0) as usize {
+            match unsafe { required_string_at(log_dirs, index, "log dir") } {
+                Ok(dir) => dirs.push(dir),
+                Err(e) => return box_error(e),
+            }
+        }
+    }
+    match mock.set_broker_log_dirs(broker_id, dirs) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
     }
 }
 
@@ -24140,6 +24324,72 @@ mod tests {
             }
             kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
             kafka_admin_DescribeClassicGroupsResult_destroy(classic_result);
+        }
+    }
+
+    /// `kafka_admin_MockAdminClient_add_topic` builds Java's `addTopic`
+    /// arguments: broker ids resolve to the mock's own broker nodes, `-1` is a
+    /// null leader (which Java's validation rejects), and a NULL config value
+    /// is a null map value.
+    #[test]
+    fn mock_add_topic_resolves_brokers_and_keeps_null_config_values() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        let partitions = [0i32];
+        let leaders = [0i32];
+        let replicas_0 = [0i32];
+        let replicas = [replicas_0.as_ptr()];
+        let counts = [1i32];
+        let (_keys, keys) = c_array(&["retention.ms"]);
+        let values: [*const c_char; 1] = [std::ptr::null()];
+        unsafe {
+            let err = kafka_admin_MockAdminClient_add_topic(
+                admin,
+                true,
+                c"seeded".as_ptr(),
+                partitions.as_ptr(),
+                leaders.as_ptr(),
+                replicas.as_ptr(),
+                counts.as_ptr(),
+                replicas.as_ptr(),
+                counts.as_ptr(),
+                1,
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+            );
+            assert!(err.is_null());
+            let mock = mock_ref(admin).unwrap();
+            let resource = ConfigResource::new(ConfigResourceType::Topic, "seeded".to_string());
+            let config = handle_ref(admin)
+                .runtime
+                .block_on(mock.describe_configs(std::slice::from_ref(&resource)).values()[&resource].get())
+                .unwrap();
+            assert_eq!(config.get("retention.ms").unwrap().value(), None);
+
+            // A null leader is "Leader broker unknown", as `brokers.contains(null)`
+            // is false in Java.
+            let no_leader = [-1i32];
+            let err = kafka_admin_MockAdminClient_add_topic(
+                admin,
+                false,
+                c"leaderless".as_ptr(),
+                partitions.as_ptr(),
+                no_leader.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(
+                CStr::from_ptr(common::kafka_common_Error_message(err)).to_str(),
+                Ok("Leader broker unknown")
+            );
+            common::kafka_common_Error_destroy(err);
+            kafka_admin_AdminClient_destroy(admin);
         }
     }
 

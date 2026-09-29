@@ -1656,6 +1656,98 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
 }
 
 /* A NULL resource name skips that row rather than drifting the two arrays. */
+/* The three mock drivers Java's MockAdminClient offers for seeding topics
+ * and log dirs: addTopic (with Java's validation messages),
+ * markTopicForDeletion and the Builder's brokerLogDirs. */
+static void test_mock_admin_add_topic_mark_for_deletion_and_log_dirs(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(2);
+
+    /* A broker's log dirs, set before the topic: its partitions start there. */
+    const char *dirs[2] = {"/data/a", "/data/b"};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_set_broker_log_dirs(admin, 1, dirs, 2));
+    kafka_common_Error_t *err = kafka_admin_MockAdminClient_set_broker_log_dirs(admin, 9, dirs, 2);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Broker 9 does not exist.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    const int32_t partitions[1] = {0};
+    const int32_t leaders[1] = {1};
+    const int32_t replicas_0[2] = {1, 0};
+    const int32_t isr_0[1] = {1};
+    const int32_t *const replicas[1] = {replicas_0};
+    const int32_t replica_counts[1] = {2};
+    const int32_t *const isrs[1] = {isr_0};
+    const int32_t isr_counts[1] = {1};
+    const char *keys[1] = {"cleanup.policy"};
+    const char *values[1] = {"compact"};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_add_topic(admin, false, "added", partitions,
+                                                           leaders, replicas, replica_counts, isrs,
+                                                           isr_counts, 1, keys, values, 1));
+
+    /* Java's IllegalArgumentException messages. */
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "added", partitions, leaders,
+                                                replicas, replica_counts, isrs, isr_counts, 1,
+                                                NULL, NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Topic added was already added.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    const int32_t unknown_leader[1] = {5};
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "other", partitions, unknown_leader,
+                                                replicas, replica_counts, isrs, isr_counts, 1,
+                                                NULL, NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Leader broker unknown", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    const int32_t bad_replicas_0[1] = {7};
+    const int32_t *const bad_replicas[1] = {bad_replicas_0};
+    const int32_t one[1] = {1};
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "other", partitions, leaders,
+                                                bad_replicas, one, isrs, isr_counts, 1, NULL,
+                                                NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Unknown brokers in replica list", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    /* The added topic is described with its partition layout and config. */
+    const char *names[1] = {"added"};
+    kafka_admin_DescribeTopicsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_topics(admin, names, 1, -1, false, -1,
+                                                             &described));
+    const kafka_admin_TopicDescription_t *description =
+        kafka_admin_DescribeTopicsResult_get_value(described, 0);
+    TEST_ASSERT_NOT_NULL(description);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicDescription_partition_count(description));
+    const kafka_admin_TopicPartitionInfo_t *info = kafka_admin_TopicDescription_partition(description, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(kafka_admin_TopicPartitionInfo_leader(info)));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_TopicPartitionInfo_replica_count(info));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicPartitionInfo_isr_count(info));
+    kafka_admin_DescribeTopicsResult_destroy(described);
+
+    /* Its partition starts on the leader's first log dir, the only dir the
+     * mock's describeLogDirs reports (it lists the dirs holding replicas). */
+    const int32_t brokers[1] = {1};
+    kafka_admin_DescribeLogDirsResult_t *log_dirs = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_log_dirs(admin, brokers, 1, -1, &log_dirs));
+    const kafka_admin_LogDirDescriptionMap_t *map = kafka_admin_DescribeLogDirsResult_get_value(log_dirs, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_LogDirDescriptionMap_count(map));
+    TEST_ASSERT_EQUAL_STRING("/data/a", kafka_admin_LogDirDescriptionMap_get_key(map, 0));
+    kafka_admin_DescribeLogDirsResult_destroy(log_dirs);
+
+    /* markTopicForDeletion: the topic is no longer described. */
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_mark_topic_for_deletion(admin, "added"));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_topics(admin, names, 1, -1, false, -1,
+                                                             &described));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_get_value(described, 0));
+    TEST_ASSERT_NOT_NULL(kafka_admin_DescribeTopicsResult_get_error(described, 0));
+    kafka_admin_DescribeTopicsResult_destroy(described);
+    err = kafka_admin_MockAdminClient_mark_topic_for_deletion(admin, "missing");
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Topic missing did not exist.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 /* A NULL config value is Java's null map value in NewTopic.configs(Map): it
  * is kept (not dropped) and stays distinct from "". The mock echoes it on the
  * created topic's config and in describeConfigs, as Java's mock does
@@ -7494,6 +7586,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_configs_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_null_row_skipped);
     RUN_TEST(test_mock_admin_new_topic_null_config_value);
+    RUN_TEST(test_mock_admin_add_topic_mark_for_deletion_and_log_dirs);
     RUN_TEST(test_mock_admin_describe_configs_async_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_async_null_handle);
     RUN_TEST(test_mock_admin_incremental_alter_configs_set_then_delete);
