@@ -1,10 +1,11 @@
 version: v1.0
 name: publish-crates-io
-# Manual promotion target from semaphore.yml. Run it only on a green build of the
-# current master tip to publish the confluent-kafka-rust version in Cargo.toml;
-# nothing here re-runs the test suite, and any other branch or commit is refused. Verify and publish run on separate single-use VMs, so no build-time
-# code (build scripts, proc macros) runs on the VM where the crates.io token is
-# loaded.
+# Manual promotion target from semaphore.yml. Run it only on a green build of
+# the current master tip to publish the confluent-kafka-rust version in
+# Cargo.toml; nothing here re-runs the test suite, and any other branch or
+# commit is refused. Verify and publish run on separate single-use VMs, so no
+# build-time code (build scripts, proc macros) runs on the VM where the
+# crates.io token is loaded.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
