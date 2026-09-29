@@ -2252,6 +2252,37 @@ def test_create_acls_rejects_what_javas_constructors_reject(acl, message):
         assert str(exc.value) == message
 
 
+def test_create_acls_resolves_a_binding_with_an_undefined_enum_code():
+    """Java's `AclOperation.fromCode` maps an undefined code (99) to UNKNOWN,
+    and the native callback is keyed by that normalised binding. The caller's
+    own Future -- keyed with 99 -- must still resolve (it used to hang), and so
+    must a second binding that differs only in another undefined code, which
+    Java treats as the same binding."""
+    with MockAdminClient(1) as admin:
+        a = AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*", 99,
+                       AclPermissionType.ALLOW)
+        b = AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*", 98,
+                       AclPermissionType.ALLOW)
+        defined = _acl("t2", "User:b")
+        futures = admin.create_acls([a, b, defined])
+        assert set(futures) == {a, b, defined}
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
+
+
+@pytest.mark.asyncio
+async def test_create_acls_resolves_an_undefined_enum_code_async():
+    async with AsyncMockAdminClient(1) as admin:
+        acl = AclBinding(99, "t", PatternType.LITERAL, "User:a", "*", AclOperation.READ,
+                         AclPermissionType.ALLOW)
+        (future,) = (await admin.create_acls([acl])).values()
+        with pytest.raises(KafkaError) as exc:
+            await asyncio.wait_for(future, timeout=5)
+        assert str(exc.value) == "Not implemented yet"
+
+
 def test_describe_acls_raises_because_it_has_one_future_for_the_whole_call():
     with MockAdminClient(1) as admin:
         with pytest.raises(KafkaError) as exc:
