@@ -248,10 +248,9 @@ impl Builder {
     /// `brokers` (after [`set_broker_log_dirs`](Self::set_broker_log_dirs)), where
     /// Java's `brokerLogDirs.subList(0, n)` throws.
     pub fn set_brokers(self, brokers: Vec<Node>) -> Result<Self, Error> {
-        // A `List.size()` is never negative, and a Rust length above `i32::MAX`
-        // cannot be built from Java either.
-        let count = i32::try_from(brokers.len())
-            .map_err(|_| Error::local_illegal_argument(format!("Too many brokers: {}", brokers.len())))?;
+        // `Collection.size()` saturates at `Integer.MAX_VALUE`, so a length that
+        // does not fit an `i32` becomes `i32::MAX`, as Java's `size()` reports it.
+        let count = i32::try_from(brokers.len()).unwrap_or(i32::MAX);
         let mut builder = self.set_num_brokers(count)?;
         builder.brokers = brokers;
         Ok(builder)
@@ -451,6 +450,14 @@ impl MockAdminClient {
     ///
     /// Mirrors Java's `MockAdminClient.DEFAULT_LOG_DIRS`.
     pub const DEFAULT_LOG_DIRS: &'static [&'static str] = &["/tmp/kafka-logs"];
+
+    /// Creates a [`Builder`] with one broker.
+    ///
+    /// Mirrors Java's `public static Builder create()`
+    /// (`MockAdminClient.java:118-120`), which returns `new Builder()`.
+    pub fn create() -> Builder {
+        Builder::new()
+    }
 
     /// The log directories of one broker, as owned strings.
     fn default_log_dirs() -> Vec<String> {
@@ -2413,6 +2420,29 @@ mod tests {
                 "1".to_string()
             )])]
         );
+    }
+
+    /// `MockAdminClient.create()` is `new Builder()` (`MockAdminClient.java:118-120`),
+    /// so it builds the same defaults as `Builder::new()`.
+    #[test]
+    fn create_returns_a_fresh_builder() {
+        let from_create = MockAdminClient::create().build().expect("a fresh builder has one broker");
+        let from_new = Builder::new().build().expect("a fresh builder has one broker");
+        let created = from_create.state.lock().unwrap();
+        let fresh = from_new.state.lock().unwrap();
+        assert_eq!(created.brokers, fresh.brokers);
+        assert_eq!(created.controller, fresh.controller);
+        assert_eq!(created.cluster_id, fresh.cluster_id);
+        assert_eq!(created.cluster_id, MockAdminClient::DEFAULT_CLUSTER_ID);
+        assert_eq!(created.default_partitions, fresh.default_partitions);
+        assert_eq!(created.default_replication_factor, fresh.default_replication_factor);
+        assert_eq!(created.broker_log_dirs, fresh.broker_log_dirs);
+        assert_eq!(created.broker_configs, fresh.broker_configs);
+        assert_eq!(created.using_raft_controller, fresh.using_raft_controller);
+        assert_eq!(created.default_group_configs, fresh.default_group_configs);
+        assert_eq!(created.feature_levels, fresh.feature_levels);
+        assert_eq!(created.min_supported_feature_levels, fresh.min_supported_feature_levels);
+        assert_eq!(created.max_supported_feature_levels, fresh.max_supported_feature_levels);
     }
 
     /// Growing appends `Node(id, "localhost", 1000 + id)` with the default log
