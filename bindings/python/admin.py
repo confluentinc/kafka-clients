@@ -2857,26 +2857,47 @@ class _AdminBase:
             loop.call_soon_threadsafe(self._resolve_keyed_void_group, futs, error)
         return cb
 
+    @staticmethod
+    def _resolve_keyed_value_group(futs, value, error, convert):
+        """`_resolve_keyed_value` for every Future in ``futs``, draining the
+        owned ``value`` / ``error`` handle once."""
+        if error:
+            exc, result = KafkaError._from_c(error), None
+        else:
+            exc, result = None, convert(value)
+        for fut in futs:
+            if fut.cancelled() or fut.done():
+                continue
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+
     def _keyed_acl_binding_filter_value_cb(self, futures, loop=None):
         """Builds the `cb(key_tuple, value, error)` native callback for
         `delete_acls` (Phase F), whose key is an `AclBindingFilter` delivered
         as its seven-field tuple and whose value, when present, is an owned
         `DeleteAclsFilterResults` handle drained by
-        `_drain_delete_acls_filter_results`."""
+        `_drain_delete_acls_filter_results`.
+
+        The key arrives normalised (an undefined enum code is UNKNOWN), so it
+        is looked up through `_futures_by_normalized_acl_key`, as for
+        `create_acls`; a direct ``futures[key]`` lookup would leave a filter
+        with an undefined code pending forever."""
+        groups = self._futures_by_normalized_acl_key(futures)
+        convert = _drain_delete_acls_filter_results
         if loop is None:
             def cb(key_tuple, value, error):
-                self._resolve_keyed_value(futures[_to_acl_binding_filter(key_tuple)], value, error,
-                                          _drain_delete_acls_filter_results)
+                futs = groups.get(_normalized_acl_key(_to_acl_binding_filter(key_tuple)), [])
+                self._resolve_keyed_value_group(futs, value, error, convert)
             return cb
 
         def cb(key_tuple, value, error):
-            key = _to_acl_binding_filter(key_tuple)
+            futs = groups.get(_normalized_acl_key(_to_acl_binding_filter(key_tuple)), [])
             if loop.is_closed():
-                self._free_keyed_value(value, error, _drain_delete_acls_filter_results)
+                self._free_keyed_value(value, error, convert)
                 return
-            loop.call_soon_threadsafe(
-                self._resolve_keyed_value, futures[key], value, error,
-                _drain_delete_acls_filter_results)
+            loop.call_soon_threadsafe(self._resolve_keyed_value_group, futs, value, error, convert)
         return cb
 
     def _keyed_client_quota_entity_void_cb(self, futures, loop=None):
@@ -3358,9 +3379,11 @@ class _AdminBase:
 
     def _delete_acls_keys_and_spec(self, filters):
         """Same reasoning as `_create_acls_keys_and_spec`, for
-        `AclBindingFilter`."""
+        `AclBindingFilter`, including sending the distinct normalised filters
+        so the C incref count matches the native layer's callbacks."""
         deduped = list(dict.fromkeys(filters))
-        return deduped, self._acl_filter_rows(deduped)
+        normalized = list(dict.fromkeys(_normalized_acl_key(f) for f in deduped))
+        return deduped, self._acl_filter_rows(normalized)
 
     @staticmethod
     def _quota_filter_rows(quota_filter):
