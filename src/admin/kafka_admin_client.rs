@@ -104,7 +104,7 @@ use crate::common::requests::{
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::{ExponentialBackoff, LogContext};
+use crate::common::utils::{ExponentialBackoff, LogContext, Utils};
 use crate::common::{
     Cluster, Error, GroupState, GroupType, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };
@@ -4800,7 +4800,7 @@ impl Admin for KafkaAdminClient {
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
-            if feature.is_empty() {
+            if Utils::is_blank(Some(feature)) {
                 return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
@@ -9789,6 +9789,19 @@ mod tests {
         let err = admin
             .update_features_with_options(&updates, UpdateFeaturesOptions::new())
             .unwrap_err();
+        assert_eq!(err.message(), "Provided feature can not be empty.");
+    }
+
+    /// Java checks `Utils.isBlank(feature)`, so a whitespace-only name is
+    /// rejected just like an empty one.
+    #[tokio::test]
+    async fn test_update_features_rejects_a_blank_feature_name() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let updates = HashMap::from([(" \t ".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap())]);
+        let err = admin
+            .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+            .unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
         assert_eq!(err.message(), "Provided feature can not be empty.");
     }
 

@@ -7316,10 +7316,21 @@ static PyObject* py_Admin_update_features_async(PyObject* self, PyObject* args) 
         // not one for the whole batch - see admin_update_features_trampoline.
         // `rows` comes from a Python dict's keys, already unique.
         admin_incref_n(cb, n);
-        kafka_admin_AdminClient_update_features_async(
+        kafka_common_Error_t* submit_err = kafka_admin_AdminClient_update_features_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, features, max_version_levels, upgrade_types,
             (int32_t)n, timeout_ms, validate_only ? true : false, admin_update_features_trampoline,
             cb);
+        if (submit_err != NULL) {
+            // The FFI returns a submission error (Java throws it from
+            // updateFeatures itself) and fires no callback. admin.py already
+            // built one Future per feature and expects each to resolve, so the
+            // error is fanned out to every feature here, as the FFI used to:
+            // one owned copy per invocation, each balancing one incref above.
+            for (Py_ssize_t i = 0; i < n; i++) {
+                admin_update_features_trampoline(features[i], kafka_common_Error_clone(submit_err), cb);
+            }
+            kafka_common_Error_destroy(submit_err);
+        }
     }
     PyMem_Free((void*)features); PyMem_Free(max_version_levels); PyMem_Free(upgrade_types);
     if (failed) return NULL;

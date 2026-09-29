@@ -18039,8 +18039,8 @@ fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions)
 /// `IllegalArgumentException` for an empty update map or a blank feature name
 /// (`KafkaAdminClient.java`), and the Rust core returns that as an `Err`
 /// (`src/admin/mod.rs`). It is propagated here rather than being turned into a
-/// failed future, so a C caller sees it on the sync return value and, on the
-/// async path, in an inline callback. Java's `MockAdminClient` does not
+/// failed future, so a C caller sees it on the return value of both the sync
+/// and the async entry point. Java's `MockAdminClient` does not
 /// validate (`MockAdminClient.java:1285-1300`), and neither does the Rust
 /// mock, so this arm is unreachable through a mock handle.
 fn submit_update_features(
@@ -18055,25 +18055,6 @@ fn submit_update_features(
         .map(|(feature, f)| (feature.clone(), f.clone()))
         .collect();
     Ok(KafkaFuture::join_map_results(entries))
-}
-
-/// Reads `count` feature names, tolerant of a NULL entry (kept as an empty
-/// string) so every requested row still gets an identity for
-/// [`admin_async_per_key_op`]'s fan-out even when [`read_feature_updates`]'s
-/// validated parse fails on a NULL/duplicate feature or an invalid update in
-/// an earlier or later row.
-///
-/// # Safety
-///
-/// `features` must be null, or have `count` entries.
-unsafe fn read_feature_keys(features: *const *const c_char, count: i32) -> Vec<String> {
-    let n = count.max(0) as usize;
-    if features.is_null() {
-        return Vec::new();
-    }
-    (0..n)
-        .map(|i| unsafe { optional_string_at(features, i) }.unwrap_or_default())
-        .collect()
 }
 
 /// Submits `updateFeatures`, unjoined, for [`admin_async_per_key_op`]'s
@@ -19134,33 +19115,43 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 /// Applies feature updates asynchronously. See
 /// [`kafka_admin_AdminClient_update_features`].
 ///
-/// Unlike the synchronous entry point, the callback fires **once per feature,
-/// as that feature's future resolves**, not once for the whole batch — a fast
-/// or already-resolved feature is not held up by a slow or failing one. It is
-/// called once per distinct feature in the input, but not always on the same
-/// thread. Per key, it normally runs on the handle's dispatcher thread. It
-/// runs **synchronously on the calling thread, before this function returns,
-/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
-/// handle, a NULL or repeated feature name, a `FeatureUpdate` the constructor
-/// rejects, or — against a real client, not a mock — an empty update map,
-/// for which `KafkaAdminClient.updateFeatures` throws
-/// `IllegalArgumentException`). And it runs on a **tokio worker thread** if
-/// the dispatcher's completion queue can no longer be reached when a given
-/// feature's result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally,
-/// i.e. a panic inside an earlier callback. So callbacks for different keys
-/// are not guaranteed to be serialised on one thread, nor in request order.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before
-/// calling rather than after.
+/// # Submission errors are returned, as Java throws them
 ///
-/// When `count` is 0, there is no key at all — the callback is **never
-/// invoked** for this input, even though a real client's empty-map validation
-/// error exists (`KafkaAdminClient.updateFeatures`'s `IllegalArgumentException`
-/// for an empty update map): there is no per-call callback slot to report a
-/// whole-call failure through when zero keys were requested. Use the
-/// synchronous entry point to observe that outcome.
+/// Java's `KafkaAdminClient.updateFeatures` validates its argument **before**
+/// it creates any future and throws `IllegalArgumentException` from the call
+/// itself: for an empty update map ("Feature updates can not be null or
+/// empty.") and for a blank feature name ("Provided feature can not be
+/// empty."). `FeatureUpdate`'s constructor throws the same way for an invalid
+/// update, before the call is even made. This entry point therefore reports
+/// every such failure **as its return value** — non-null means nothing was
+/// submitted and `callback` will **never** be invoked; the caller owns the
+/// returned error and frees it with `kafka_common_Error_destroy`. The same
+/// applies to the C-only marshaling failures (a NULL or repeated feature name,
+/// a `FeatureUpdate` the constructor rejects) and to a NULL `admin` handle.
+///
+/// Java's `MockAdminClient.updateFeatures` validates nothing
+/// (`MockAdminClient.java:1285-1300`), so against a mock handle an empty update
+/// map returns null and fires no callback, as Java's mock returns an empty
+/// result.
+///
+/// # Callback
+///
+/// When this returns null, the callback fires **once per feature, as that
+/// feature's future resolves**, not once for the whole batch — a fast or
+/// already-resolved feature is not held up by a slow or failing one. It is
+/// called once per feature in the input, but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread, and on a
+/// **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when a given feature's result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it
+/// cannot disconnect the queue; what remains is a dispatcher thread that
+/// terminated abnormally, i.e. a panic inside an earlier callback. So callbacks
+/// for different keys are not guaranteed to be serialised on one thread, nor
+/// in request order. A callback may run before this function returns (a
+/// feature whose future is already complete, as a mock's are). Do not hold a
+/// lock across this call and re-acquire it in the callback, and publish
+/// everything the callback needs (including `user_data`) before calling rather
+/// than after.
 ///
 /// # Safety
 ///
@@ -19178,20 +19169,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     validate_only: bool,
     callback: kafka_admin_AdminClient_update_features_callback_t,
     user_data: *mut c_void,
-) {
-    // Computed independently of `read_feature_updates`'s validated (and
-    // duplicate-rejecting) parse, so every requested row still gets its own
-    // callback via `admin_async_per_key_op`'s fan-out even when that parse
-    // fails.
-    let keys = unsafe { read_feature_keys(features, count) };
-    let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
+) -> *mut kafka_common_Error_t {
+    if admin.is_null() {
+        return box_error(Error::local_illegal_argument("admin handle must not be null"));
+    }
+    let updates = match unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) } {
+        Ok(updates) => updates,
+        Err(e) => return box_error(e),
+    };
     let options = update_features_options(timeout_ms, validate_only);
+    let h = unsafe { handle_ref(admin) };
+    // Submitted on the calling thread, as Java's `updateFeatures` is, so its
+    // validation error can be returned before any callback is registered.
+    let entries = {
+        let _guard = h.runtime.enter();
+        match submit_update_features_entries(h.admin(), &updates, options) {
+            Ok(entries) => entries,
+            Err(e) => return box_error(e),
+        }
+    };
+    let keys: Vec<String> = entries.iter().map(|(feature, _)| feature.clone()).collect();
     unsafe {
         admin_async_per_key_op(
             admin,
             user_data,
             keys,
-            move |a| submit_update_features_entries(a, &updates?, options),
+            move |_a| Ok(entries),
             move |feature, outcome, ud| {
                 let feature_c = to_cstring(&feature);
                 let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
@@ -19199,6 +19202,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
             },
         )
     };
+    std::ptr::null_mut()
 }
 
 // ---------------------------------------------------------------------------
@@ -30106,7 +30110,7 @@ mod tests {
         let ctx = Box::new(Ctx(tx));
         let ctx_ptr = Box::into_raw(ctx);
 
-        unsafe {
+        let submitted = unsafe {
             kafka_admin_AdminClient_update_features_async(
                 admin,
                 feature_ptrs.as_ptr(),
@@ -30117,8 +30121,9 @@ mod tests {
                 false,
                 on_update,
                 ctx_ptr as *mut c_void,
-            );
-        }
+            )
+        };
+        assert!(submitted.is_null(), "a valid update is submitted");
 
         let message = rx
             .recv_timeout(Duration::from_secs(5))
@@ -30126,6 +30131,56 @@ mod tests {
         assert_eq!(
             message, None,
             "a valid SAFE_DOWNGRADE to level 0 against an unseeded mock must succeed"
+        );
+
+        // Submission failures — an invalid `FeatureUpdate` (Java's constructor
+        // throws), a NULL feature name (C marshaling) and a NULL handle — are
+        // returned, as Java throws from the call, and the callback never fires.
+        let bad_levels = [0i16];
+        let upgrade = [i32::from(UpgradeType::Upgrade.code())];
+        let null_name: [*const c_char; 1] = [std::ptr::null()];
+        for (admin_arg, names, levels, expected) in [
+            (
+                admin as *const kafka_admin_AdminClient_t,
+                feature_ptrs.as_ptr(),
+                bad_levels.as_ptr(),
+                "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or \
+                 UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.",
+            ),
+            (
+                admin as *const _,
+                null_name.as_ptr(),
+                max_version_levels.as_ptr(),
+                "feature at index 0 must not be null",
+            ),
+            (
+                std::ptr::null(),
+                feature_ptrs.as_ptr(),
+                max_version_levels.as_ptr(),
+                "admin handle must not be null",
+            ),
+        ] {
+            let error = unsafe {
+                kafka_admin_AdminClient_update_features_async(
+                    admin_arg,
+                    names,
+                    levels,
+                    upgrade.as_ptr(),
+                    1,
+                    -1,
+                    false,
+                    on_update,
+                    ctx_ptr as *mut c_void,
+                )
+            };
+            assert!(!error.is_null(), "{expected}");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) };
+            assert_eq!(message.to_str(), Ok(expected));
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no callback after a returned error"
         );
 
         unsafe {
