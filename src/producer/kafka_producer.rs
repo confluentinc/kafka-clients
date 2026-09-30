@@ -3518,7 +3518,7 @@ mod tests {
     // pinned explicitly here:
     //
     //   - test_round_robin_partitioner_resolution_and_gating — `new` resolves a
-    //         built-in `partitioner.type` (both spellings) and a resolved partitioner
+    //         `partitioner.type=RoundRobinPartitioner` and a resolved partitioner
     //         disables adaptive partitioning (KafkaProducer.java:428-433).
     //   - test_round_robin_partitioner_used_once_per_record — a stateful partitioner is
     //         consulted EXACTLY once per record on the send path (do_send computes it,
@@ -3774,8 +3774,8 @@ mod tests {
         );
     }
 
-    /// A built-in `partitioner.type` (both the simple name and the fully-qualified
-    /// Java class name) is resolved by `new` into a live `partitioner`, and a
+    /// `partitioner.type=RoundRobinPartitioner` is resolved by `new` into a live
+    /// `partitioner`, and a
     /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
     /// `KafkaProducer.java:428-433`: "no need ... if we use a custom partitioner"). The
     /// control producer (no `partitioner.type`) keeps `partitioner = None` and adaptive
@@ -3787,10 +3787,8 @@ mod tests {
     /// harmlessly and is dropped with the test.
     #[tokio::test]
     async fn test_round_robin_partitioner_resolution_and_gating() {
-        for name in [
-            "RoundRobinPartitioner",
-            "org.apache.kafka.clients.producer.RoundRobinPartitioner",
-        ] {
+        {
+            let name = ProducerConfig::ROUND_ROBIN_PARTITIONER;
             let props = guard_props(&[("partitioner.type", name)]);
             let config = ProducerConfig::new(&props).expect("valid config");
             let producer =

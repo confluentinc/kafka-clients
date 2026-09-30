@@ -195,17 +195,16 @@ pub struct ProducerConfig {
     /// - `Murmur2RandomPartitioner` — the default built-in partitioner with a
     ///   murmur2 key hash, identical to the Java client's built-in partitioner
     ///   (exact Java parity).
-    /// - `RoundRobinPartitioner`, or the Java fully-qualified class name
-    ///   `org.apache.kafka.clients.producer.RoundRobinPartitioner` — the
+    /// - `RoundRobinPartitioner` — the
     ///   [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner), which
     ///   distributes writes evenly across a topic's available partitions and
     ///   ignores the record key. Selecting it **disables adaptive partitioning**,
     ///   exactly as Java does when a `partitioner.class` is configured.
     ///
-    /// Any other value is rejected by [`from_properties`](Self::from_properties)
-    /// with the Java `ConfigException` "could not be found" message. Java loads
-    /// the named class reflectively; Rust has no reflection, so only the built-in
-    /// names above resolve here, and a user-written
+    /// Any other value is rejected by [`new`](Self::new) as not supported. Java's
+    /// `partitioner.class` names a class to load reflectively; Rust has no
+    /// reflection, so this key names one of the built-in types above, and a
+    /// user-written
     /// [`Partitioner`](crate::producer::Partitioner) is instead set with
     /// [`set_partitioner`](Self::set_partitioner). Unlike Java, this
     /// Rust client's default key hash is CRC-32, not murmur2 — see
@@ -404,13 +403,6 @@ impl ProducerConfig {
     /// Accepted `partitioner.type` value selecting the
     /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner).
     pub const ROUND_ROBIN_PARTITIONER: &'static str = "RoundRobinPartitioner";
-    /// The Java fully-qualified class name for the
-    /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner), also
-    /// accepted as a `partitioner.type` value, so the value of a Java
-    /// `partitioner.class` naming the built-in round-robin partitioner can be
-    /// reused. Java resolves it reflectively; Rust maps it to the built-in
-    /// instance.
-    pub const ROUND_ROBIN_PARTITIONER_FQCN: &'static str = "org.apache.kafka.clients.producer.RoundRobinPartitioner";
     /// Config key: `transactional.id`
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
@@ -544,23 +536,25 @@ impl ProducerConfig {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_TYPE_CONFIG => {
-                    // Only the built-in partitioner names resolve. Java's
-                    // `ConfigDef` reflectively loads the class named here and
-                    // throws `ConfigException` when it cannot be found; we mirror
-                    // that error text exactly for any unrecognised value. The two
+                    // Only the built-in partitioner types are accepted. The two
                     // `*RandomPartitioner` names select the built-in default
-                    // partitioner's key hash; the RoundRobin spellings select the
-                    // `RoundRobinPartitioner` (resolved to an instance in
-                    // `KafkaProducer::from_config`). The verbatim string is kept
-                    // so both consumers below can recognise it.
+                    // partitioner's key hash; `RoundRobinPartitioner` selects the
+                    // `RoundRobinPartitioner` (resolved to an instance by
+                    // `resolve_partitioner`). The verbatim string is kept so both
+                    // can recognise it.
                     if value != Self::CONSISTENT_RANDOM_PARTITIONER
                         && value != Self::MURMUR2_RANDOM_PARTITIONER
-                        && !Self::is_round_robin_partitioner(value)
+                        && value != Self::ROUND_ROBIN_PARTITIONER
                     {
                         return Err(Error::config_name_value_message(
                             Self::PARTITIONER_TYPE_CONFIG,
                             value,
-                            format!("Class {value} could not be found."),
+                            format!(
+                                "Partitioner type {value} is not supported; the supported types are {}, {} and {}.",
+                                Self::CONSISTENT_RANDOM_PARTITIONER,
+                                Self::MURMUR2_RANDOM_PARTITIONER,
+                                Self::ROUND_ROBIN_PARTITIONER
+                            ),
                         ));
                     }
                     config.partitioner_type = Some(value.to_string());
@@ -648,18 +642,6 @@ impl ProducerConfig {
         Ok(config)
     }
 
-    /// Whether `value` names the built-in
-    /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner) — either
-    /// the simple name [`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER)
-    /// or the Java fully-qualified class name
-    /// [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN).
-    ///
-    /// The accepted spellings are stated once here so `from_properties`
-    /// validation and the partitioner resolver cannot drift apart.
-    fn is_round_robin_partitioner(value: &str) -> bool {
-        value == Self::ROUND_ROBIN_PARTITIONER || value == Self::ROUND_ROBIN_PARTITIONER_FQCN
-    }
-
     /// Resolves `partitioner.type` to the [`KeyHasher`] used on the built-in
     /// default partitioner's keyed partition path.
     ///
@@ -668,7 +650,7 @@ impl ProducerConfig {
     /// [`partitioner_type`](Self::partitioner_type) string to the internal
     /// [`KeyHasher`] enum. Only `Murmur2RandomPartitioner` maps to murmur2;
     /// every other accepted value — unset (`None`), `ConsistentRandomPartitioner`,
-    /// and the two `RoundRobinPartitioner` spellings — maps to the CRC-32
+    /// and `RoundRobinPartitioner` — maps to the CRC-32
     /// default.
     ///
     /// For a `RoundRobinPartitioner` config the hash is moot: the producer uses
@@ -679,8 +661,8 @@ impl ProducerConfig {
     pub(crate) fn key_hasher(&self) -> KeyHasher {
         match self.partitioner_type.as_deref() {
             Some(Self::MURMUR2_RANDOM_PARTITIONER) => KeyHasher::Murmur2,
-            // Unset (`None`), `ConsistentRandomPartitioner`, and the RoundRobin
-            // spellings all use the CRC-32 default. `from_properties` rejects
+            // Unset (`None`), `ConsistentRandomPartitioner`, and
+            // `RoundRobinPartitioner` all use the CRC-32 default. `new` rejects
             // every other value, so no other string can reach here.
             _ => KeyHasher::Crc32,
         }
@@ -695,9 +677,7 @@ impl ProducerConfig {
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
-    /// - the two [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner)
-    ///   spellings ([`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) and
-    ///   [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN)) →
+    /// - [`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) →
     ///   `Some(Box::new(RoundRobinPartitioner::new()))`;
     /// - every other accepted value (unset, `ConsistentRandomPartitioner`,
     ///   `Murmur2RandomPartitioner`) → `None`, meaning the built-in default
@@ -706,9 +686,8 @@ impl ProducerConfig {
     /// The partitioner set with [`set_partitioner`](Self::set_partitioner)
     /// takes precedence over a `partitioner.type` name.
     ///
-    /// `from_properties` has already rejected any value that is neither a
-    /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
-    /// here.
+    /// `new` has already rejected any value that is not a built-in type, so no
+    /// unknown string reaches here.
     ///
     /// # Errors
     ///
@@ -735,7 +714,7 @@ impl ProducerConfig {
             return Ok(Some(*partitioner));
         }
         Ok(match self.partitioner_type.as_deref() {
-            Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
+            Some(Self::ROUND_ROBIN_PARTITIONER) => Some(Box::new(RoundRobinPartitioner::new())),
             _ => None,
         })
     }
@@ -1118,20 +1097,38 @@ mod tests {
         assert_eq!(config.key_hasher(), KeyHasher::Murmur2);
     }
 
-    /// An unrecognised `partitioner.type` is rejected with the EXACT Java
-    /// `ConfigException` text (DoD §3: error messages are the contract).
+    /// An unrecognised `partitioner.type` is rejected with the exact message
+    /// naming the supported types (DoD §3: error messages are the contract).
+    /// A Java fully-qualified class name is not a type, so it is rejected too.
     #[test]
     fn test_partitioner_type_unknown_rejected_with_exact_message() {
         let mut props = HashMap::new();
         props.insert("partitioner.type".to_string(), "com.example.MyPartitioner".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         // `err.to_string()` prepends the variant tag, so assert on the exact
-        // inner `ConfigException` text with `ends_with`, matching
+        // inner text with `ends_with`, matching
         // `test_metrics_recording_level_validator` above.
         assert!(
             err.to_string().ends_with(
                 "Invalid value com.example.MyPartitioner for configuration partitioner.type: \
-                 Class com.example.MyPartitioner could not be found."
+                 Partitioner type com.example.MyPartitioner is not supported; the supported types are \
+                 ConsistentRandomPartitioner, Murmur2RandomPartitioner and RoundRobinPartitioner."
+            ),
+            "unexpected message: {err}"
+        );
+
+        let mut props = HashMap::new();
+        props.insert(
+            "partitioner.type".to_string(),
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value org.apache.kafka.clients.producer.RoundRobinPartitioner for configuration \
+                 partitioner.type: Partitioner type org.apache.kafka.clients.producer.RoundRobinPartitioner \
+                 is not supported; the supported types are ConsistentRandomPartitioner, \
+                 Murmur2RandomPartitioner and RoundRobinPartitioner."
             ),
             "unexpected message: {err}"
         );
@@ -1153,29 +1150,6 @@ mod tests {
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
     }
 
-    /// `partitioner.type=org.apache.kafka.clients.producer.RoundRobinPartitioner`
-    /// (the Java fully-qualified class name) is accepted and stored verbatim, so
-    /// a Java producer config naming the built-in round-robin partitioner works
-    /// unchanged.
-    #[test]
-    fn test_partitioner_type_round_robin_fqcn() {
-        let mut props = HashMap::new();
-        props.insert(
-            "partitioner.type".to_string(),
-            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
-        );
-        let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(
-            config.partitioner_type.as_deref(),
-            Some("org.apache.kafka.clients.producer.RoundRobinPartitioner")
-        );
-        assert_eq!(
-            config.partitioner_type.as_deref(),
-            Some(ProducerConfig::ROUND_ROBIN_PARTITIONER_FQCN)
-        );
-        assert_eq!(config.key_hasher(), KeyHasher::Crc32);
-    }
-
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
@@ -1184,19 +1158,6 @@ mod tests {
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = HashMap::new();
         props.insert("partitioner.type".to_string(), "RoundRobinPartitioner".to_string());
-        let mut config = ProducerConfig::new(&props).unwrap();
-        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
-    }
-
-    /// `resolve_partitioner` also resolves the fully-qualified Java class name,
-    /// so a Java producer config naming the round-robin partitioner works.
-    #[test]
-    fn test_resolve_partitioner_round_robin_fqcn() {
-        let mut props = HashMap::new();
-        props.insert(
-            "partitioner.type".to_string(),
-            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
-        );
         let mut config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
@@ -1215,7 +1176,7 @@ mod tests {
     /// random/sticky partitioners, which in this client are handled by the
     /// key-hash path (see [`key_hasher`](ProducerConfig::key_hasher)), not by a
     /// [`Partitioner`] instance. So `resolve_partitioner` returns `None` for
-    /// both — only the round-robin names map to a dedicated partitioner type.
+    /// both — only `RoundRobinPartitioner` maps to a dedicated partitioner type.
     #[test]
     fn test_resolve_partitioner_random_names_none() {
         for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
