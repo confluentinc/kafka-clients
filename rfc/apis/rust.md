@@ -1,6 +1,6 @@
 # RFC: Rust client API
 
-- **Status:** Draft
+- **Status:** Proposed
 - **Audience:** users of Confluent's Rust client
 
 ## Summary
@@ -28,7 +28,7 @@ At the API level the key points for the Rust core are:
 
 * **Java-aligned names and structure,** adapted to Rust naming (modules, `snake_case` methods, `Error` types in place of Java exceptions).
 
-* **Result-based error handling** with a `KafkaError` that carries an error code and predicates such as `is_retriable` and `is_fatal`, rather than exceptions.
+* **Result-based error handling** with a flat `Error` enum that carries error details and hierarchy predicates such as `is_retriable_error`, rather than exceptions.
 
 * **Idiomatic ownership and zero-copy** on the hot paths (produce and consume), so the Rust client is a first-class client in its own right and not only a substrate for the bindings.
 
@@ -47,13 +47,13 @@ The names in Java have a clear mapping to their equivalents in Rust. The followi
 | `package org.apache.kafka.clients.consumer`        | `module consumer`                                   |
 | `class ProducerRecord` (PascalCase)                | `ProducerRecord struct/enum` (PascalCase)           |
 | `method maybeThrowAnyException` (camelCase)        | `maybe_return_any_error` (snake_case)               |
-| `const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE` | `common_client_configs::RETRY_BACKOFF_EXP_BASE`     |
+| `const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE` | `CommonClientConfigs::RETRY_BACKOFF_EXP_BASE`     |
 | `throw / throws`                                   | `return Err(...) / Result<T, Error>`                |
 | Java "thread"                                      | Rust "task" (e.g. in log messages)                  |
 
 ### Concurrency and callbacks
 
-A method that blocks in Java becomes `async` in Rust; a non-blocking Java method stays synchronous.
+A method that blocks in Java becomes `async` in Rust. A method that must hand work to the client's background task (for example `Consumer::pause`, `assign` or `seek_to_beginning`) is also `async`, even though its Java equivalent does not block. Pure reads of local state (for example `assignment()` or `paused()`) stay synchronous.
 
 A Java callback becomes code run after awaiting the corresponding call. If the original does not block to await the result, use tokio::task::spawn to run it detached.
 
@@ -66,7 +66,7 @@ A callback obligation survives translation: if Java guarantees exactly-once call
 Rust has no method overloading, so every Java overloaded method must be given a distinct Rust name. The Rust names are derived from the Java signature by appending the Java argument or type names. For example, the Java method `KafkaConsumer.commitSync(Map<TopicPartition, OffsetAndMetadata> offsets, Duration timeout)` is one of 4 overloaded methods. The Rust equivalent is:
 
 ```rust
-async fn commit_sync_offsets_timeout(
+async fn commit_sync_with_offsets_timeout(
     &mut self,
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     timeout: Duration,
@@ -91,11 +91,11 @@ Rust can propagate the error to the caller automatically, without all the condit
 
 * `code()` — the protocol error code as an i16; `error()` — the same as an `Errors` value; `message()` — the text, translating `Throwable.getMessage()`.
 
-* Match a specific error as an enum variant, e.g. `Error::Timeout()` or `Error::RecordTooLarge()`.
+* Match a specific error as an enum variant, e.g. `Error::Timeout(_)` or `Error::RecordTooLarge(_)`.
 
 #### The ErrorHierarchy predicates
 
-Because the hierarchy is flattened, every intermediate (non-leaf) Java class is recoverable as a predicate — the reader has no other way to see the extends chain. The family of predicates is: `is_kafka_error`, `is_api_error`, `is_retriable_error`, `is_refresh_retriable_error`, `is_invalid_metadata_error`, `is_invalid_configuration_error`, `is_authentication_error`, `is_authorization_error`, and so on.
+Because the hierarchy is flattened, every intermediate (non-leaf) Java class is recoverable as an inherent predicate method on `Error` — the reader has no other way to see the extends chain. The family of predicates is: `is_kafka_error`, `is_api_error`, `is_retriable_error`, `is_refresh_retriable_error`, `is_invalid_metadata_error`, `is_invalid_configuration_error`, `is_authentication_error`, `is_authorization_error`, and so on.
 
 The predicates are not complements of one another: `SerializationException` and `WakeupException` are `KafkaException`s that are not `ApiException`s, so they answer true to `is_kafka_error()` and false to `is_api_error()`.
 
@@ -120,12 +120,12 @@ producer.close();
 let props = HashMap::from([
     ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
 ]);
-let config = ProducerConfig::from_properties(&props)?;
-let producer = KafkaProducer::<String, String>::from_config(
+let config = ProducerConfig::new(&props)?;
+let producer = KafkaProducer::<String, String>::new(
     config, Box::new(StringSerializer), Box::new(StringSerializer),
 )?;
-let record = ProducerRecord::with_key("my-topic".to_string(), Some(key), Some(value));
-producer.send(record).await?;
+let record = ProducerRecord::with_key("my-topic".to_string(), Some("key".to_string()), Some("value".to_string()));
+producer.send(record).await?.get().await?;
 producer.close().await?;
 ```
 
@@ -202,11 +202,10 @@ impl RebalanceListener for LoggingRebalanceListener {
         Ok(())
     }
 }
-let listener: Arc<dyn RebalanceListener> = Arc::new(LoggingRebalanceListener);
+
+let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(LoggingRebalanceListener);
 consumer
-    .setRebalanceListener(listener);
-consumer
-    .subscribe_topics_listener(vec!["foo".into(), "bar".into()])
+    .subscribe_with_topics_listener(vec!["foo".into(), "bar".into()], listener)
     .await?;
 loop {
     let records = consumer.poll(Duration::from_millis(100)).await?;
@@ -253,7 +252,7 @@ result.all().get().await?; // block until created or failed
 
 The equivalent of the Java `Producer<K, V>` interface is a trait. Applications use `KafkaProducer<K, V>` which implements the trait, just like in Java.
 
-Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. Because the trait has async methods but the return values all implement `Send`, the trait is annotated with the linter rule `#[allow(async_fn_in_trait)]` to ensure that this remains true.
+Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait uses native `async fn` and is annotated with `#[allow(async_fn_in_trait)]`, which silences the lint warning that such futures carry no `Send` bound. The futures returned by `KafkaProducer` are `Send`, but generic code over `impl Producer<K, V>` cannot assume that without naming the concrete type.
 
 The `Producer<K, V>` trait has looser restrictions than the consumer equivalent. The methods of the `Producer<K, V>` trait take a non-mutable reference to the producer. The producer instance is shareable across threads.
 
@@ -349,13 +348,13 @@ impl<K, V> ProducerRecord<K, V> {
 
 The equivalent of the Java `Consumer<K, V>` interface is a trait. Applications use `KafkaConsumer<K, V>` which implements the trait, just like in Java.
 
-Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. Because the trait has async methods, it is an `#[async_trait]` so the return types of the methods are derived from `Box<dyn<Future<Result<..., Error>>>>` which is very roughly analogous to Java methods which return `KafkaFuture<...>`.
+Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait is an `#[async_trait]`, so each async method actually returns `Pin<Box<dyn Future<Output = Result<..., Error>> + Send + '_>>`. Unlike Java's `KafkaFuture`, a Rust future is lazy: the operation does not start until it is `.await`ed.
 
 The `Consumer<K, V>` trait and its type parameters are both `Send + 'static` because their ownership can be transferred between threads and their lifetime can exist for the duration of the program.
 
 Most of the methods of the `Consumer<K, V>` trait take a mutable reference to the consumer. This is because, just like in Java, the consumer instance is not shareable across threads.
 
-Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported.
+Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns an `UnsupportedVersion` error for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
 
 ```rust
 #[async_trait]
@@ -379,10 +378,10 @@ where
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error>;
-    async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error>;
-    async fn subscribe_pattern_listener(
+    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
+    async fn subscribe_with_pattern_listener(
         &mut self,
-        pattern: Regex,
+        pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error>;
     async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
@@ -499,7 +498,7 @@ impl<K, V> ConsumerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
     ) -> Self;
-    pub fn new_options(options: ConsumerRecordOptions<K, V>) -> Self;
+    pub fn with_options(options: ConsumerRecordOptions<K, V>) -> Self;
     pub fn topic(&self) -> &str;
     pub fn partition(&self) -> i32;
     pub fn offset(&self) -> i64;
@@ -543,20 +542,6 @@ These are complete, compilable examples which you can also find in github (ADD U
 This producer sends 10 records and waits for each to be acknowledged.
 
 ```rust
-// Copyright 2026 Confluent Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::collections::HashMap;
 use std::process::ExitCode;
 
@@ -645,19 +630,6 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
 This producer sends 10 records and uses a delivery callback to track the completion of the records. 
 
 ```rust
-// Copyright 2026 Confluent Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -712,10 +684,9 @@ async fn produce_records(
     Ok(())
 }
 fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Callback {
-    // Per the `Callback` contract (mirrored from Java), on failure `metadata` is
-    // still `Some` but holds a sentinel `-1` offset (and `-1` partition if none
-    // could be resolved), so `error` must be checked first to tell success from
-    // failure.
+    // Per the `Callback` contract, on failure `metadata` is still `Some` but holds a
+    // sentinel `-1` offset (and `-1` partition if none could be resolved), so `error`
+    // must be checked first to tell success from failure.
     Box::new(move |metadata, error| match error {
         Some(error) => {
             eprintln!("Failed to deliver record {index}: {error}");
@@ -754,19 +725,6 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
 This consumer polls for records with a 30-second timeout. It stops if no records are received within the timeout. If records are received, it prints the record content, and then commits the records just received.
 
 ```rust
-// Copyright 2026 Confluent Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Duration;
