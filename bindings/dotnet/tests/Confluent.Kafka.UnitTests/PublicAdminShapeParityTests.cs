@@ -102,16 +102,22 @@ public sealed class PublicAdminShapeParityTests
     /// <c>source</c> (<c>:102-104</c>).
     /// </summary>
     /// <remarks>
-    /// The flag-taking form the result marshaller uses stays <see langword="internal"/>, and
-    /// so does <see cref="ConfigEntry.ConfigSynonym"/>'s constructor, because Java's is
-    /// package-private (<c>:243</c>). This replaces a test that pinned the 2-argument form
-    /// as the only public one, from before the maintainer's decision to publish the second.
+    /// <see cref="ConfigEntry.ConfigSynonym"/>'s constructor stays <see langword="internal"/>,
+    /// because Java's is package-private (<c>:243</c>). The internal flag-taking
+    /// <c>(name, value, isDefault, isSensitive, isReadOnly)</c> form the flattened
+    /// <c>createTopics</c> reader used is <b>gone</b> (M15/P13.3, D13): that reader now goes
+    /// through <c>kafka_admin_TopicMetadataAndConfig_config</c> and the 8-argument form, so
+    /// <see cref="ConfigEntry"/> has no non-public constructor left — a constructor Java does
+    /// not have (<c>definition-of-done.md</c> §7). This replaces a test that pinned the
+    /// 2-argument form as the only public one, from before the maintainer's decision to
+    /// publish the second.
     /// </remarks>
     [Fact]
     public void ConfigEntry_PublishesBothConstructorsJavaHas()
     {
         ConstructorInfo[] publicCtors = typeof(ConfigEntry).GetConstructors();
         Assert.Equal(2, publicCtors.Length);
+        Assert.Empty(typeof(ConfigEntry).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
 
         ConstructorInfo twoArg = Assert.Single(publicCtors, ctor => ctor.GetParameters().Length == 2);
         AssertParameters(

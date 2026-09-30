@@ -115,6 +115,22 @@ internal static partial class NativeMethods
     internal static extern void ErrorDestroy(IntPtr error);
 
     /// <summary>
+    /// <c>kafka_common_Error_cause</c> — the error that caused <paramref name="error"/>, or
+    /// <see cref="IntPtr.Zero"/> when there is none: Java's <c>Throwable.getCause()</c>.
+    /// <para>
+    /// ⚠ <b>OWNED, even when <paramref name="error"/> is borrowed.</b> The header: "an
+    /// independent copy of the cause (variant, code, message, payload and its own cause
+    /// chain), not a view into <c>error</c>. Free it with <c>kafka_common_Error_destroy</c>.
+    /// It stays valid after <c>error</c> is destroyed". So the result always goes through
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, never <c>FromBorrowedHandle</c>
+    /// (which would leak one handle per cause), and a chain is walked by calling this again
+    /// on the returned handle. <paramref name="error"/> must be non-null.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_cause", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorCause(IntPtr error);
+
+    /// <summary>
     /// <c>kafka_common_Error_new</c> — the <b>inverse</b> of the accessors above:
     /// builds an error handle a managed callback can <b>return</b> to the Rust core. The
     /// rebalance-listener trampolines are the motivating (and only) caller: a listener that
@@ -2024,6 +2040,16 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_Node_rack", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr NodeRack(IntPtr node, out int outLen);
+
+    /// <summary>
+    /// <c>kafka_common_Node_is_fenced</c> — Java's <c>Node.isFenced()</c> (by value). Only
+    /// <c>describeCluster</c> with <c>includeFencedBrokers(true)</c> (KIP-1073) can return a
+    /// fenced broker, so every node obtained any other way answers <c>false</c>. A one-byte
+    /// C <c>bool</c>, hence <c>[return: MarshalAs(I1)]</c> (ffi §0.1).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Node_is_fenced", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool NodeIsFenced(IntPtr node);
 
     // ---- MockConsumer_update_partitions — mock-only partition-metadata driver (ffi §B5) ----
 

@@ -59,6 +59,36 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     /// <summary>
+    /// M15/P13.3 D12 — every node crosses the ABI with <see cref="Node.IsFenced"/> read from
+    /// <c>kafka_common_Node_is_fenced</c>, and renders it in Java's <c>toString()</c>.
+    /// Neither Java's mock nor the core's can report a fenced broker (the header: only
+    /// <c>describeCluster</c> with <c>includeFencedBrokers</c> against a real cluster can), so
+    /// this is the <see langword="false"/> polarity end to end, asked for both ways; the
+    /// <see langword="true"/> polarity is proven at the constructor
+    /// (<c>PublicConsumerPartitionMetadataValueTypeTests.Node_FourArgumentConstructor_IsUnfenced</c>)
+    /// and the marshalling by the I1 pin (<c>CommonNativeMethodsMarshallingTests</c>).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DescribeCluster_TheMocksNodesAreUnfenced_AndRenderIt(bool includeFencedBrokers)
+    {
+        using MockAdminClient admin = new MockAdminClient(3);
+
+        DescribeClusterResult result = admin.DescribeCluster(
+            new DescribeClusterOptions { IncludeFencedBrokers = includeFencedBrokers });
+
+        IReadOnlyCollection<Node> nodes = await TestTimeout.Run(result.Nodes, s_deadline);
+        Assert.Equal(3, nodes.Count);
+        Assert.All(nodes, node => Assert.False(node.IsFenced));
+        Assert.All(nodes, node => Assert.EndsWith(" isFenced: false)", node.ToString(), StringComparison.Ordinal));
+
+        Node? controller = await TestTimeout.Run(result.Controller, s_deadline);
+        Assert.NotNull(controller);
+        Assert.False(controller!.IsFenced);
+    }
+
+    /// <summary>
     /// The mock reports an <b>empty but present</b> authorized-operation set, mirroring
     /// Java's own mock, so the public accessor yields an empty collection rather than
     /// <see langword="null"/>.

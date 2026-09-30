@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 
 using Xunit;
 
@@ -58,10 +59,11 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_ToString_MirrorsJavaFormat_WithRack()
     {
-        // Java: host + ":" + port + " (id: " + id + " rack: " + rack + ")".
+        // Java (Node.java:158): host + ":" + port + " (id: " + idString + " rack: " + rack
+        // + " isFenced: " + isFenced + ")".
         Node node = new Node(5, "kafka-1", 9092, "us-east-1a");
 
-        Assert.Equal("kafka-1:9092 (id: 5 rack: us-east-1a)", node.ToString());
+        Assert.Equal("kafka-1:9092 (id: 5 rack: us-east-1a isFenced: false)", node.ToString());
     }
 
     [Fact]
@@ -70,7 +72,44 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
         // Java renders an absent rack as the literal "null" (rack is interpolated directly).
         Node node = new Node(5, "kafka-1", 9092, null);
 
-        Assert.Equal("kafka-1:9092 (id: 5 rack: null)", node.ToString());
+        Assert.Equal("kafka-1:9092 (id: 5 rack: null isFenced: false)", node.ToString());
+    }
+
+    [Fact]
+    public void Node_ToString_FencedNode_RendersLowercaseTrue()
+    {
+        // Java concatenates the boolean, so it renders "true" — never .NET's "True".
+        Node node = new Node(5, "kafka-1", 9092, "us-east-1a", isFenced: true);
+
+        Assert.Equal("kafka-1:9092 (id: 5 rack: us-east-1a isFenced: true)", node.ToString());
+    }
+
+    /// <summary>
+    /// M15/P13.3 D12 — Java's <c>public boolean isFenced()</c> (<c>Node.java:122</c>) is a
+    /// get-only <see cref="bool"/> property, and adding it published no constructor: both
+    /// forms stay <see langword="internal"/>, as the other members' did.
+    /// </summary>
+    [Fact]
+    public void Node_IsFenced_IsAGetOnlyPublicBool_AndNoConstructorIsPublic()
+    {
+        PropertyInfo? property = typeof(Node).GetProperty(nameof(Node.IsFenced), BindingFlags.Public | BindingFlags.Instance);
+
+        Assert.NotNull(property);
+        Assert.Equal(typeof(bool), property!.PropertyType);
+        Assert.NotNull(property.GetGetMethod(nonPublic: false));
+        Assert.Null(property.GetSetMethod(nonPublic: true));
+
+        Assert.Empty(typeof(Node).GetConstructors());
+    }
+
+    [Fact]
+    public void Node_FourArgumentConstructor_IsUnfenced()
+    {
+        // Java's Node(id, host, port, rack) sets isFenced = false (Node.java:42-49); the
+        // five-argument form stores what it is given (Node.java:51-58), both polarities.
+        Assert.False(new Node(5, "kafka-1", 9092, "r").IsFenced);
+        Assert.False(new Node(5, "kafka-1", 9092, "r", isFenced: false).IsFenced);
+        Assert.True(new Node(5, "kafka-1", 9092, "r", isFenced: true).IsFenced);
     }
 
     // ---- PartitionInfo ----

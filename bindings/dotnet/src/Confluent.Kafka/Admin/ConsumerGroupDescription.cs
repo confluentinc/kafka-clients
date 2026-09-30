@@ -291,8 +291,8 @@ public sealed class ConsumerGroupDescription
     /// this binding's <see cref="Node"/> deliberately carries no value equality — a recorded
     /// choice on that type, which this slice does not re-author. Performing the comparison
     /// here restores Java's answer for this class without changing a shipped type; it covers
-    /// the four members <see cref="Node"/> models, Java's fifth (<c>isFenced</c>) having no
-    /// counterpart on it.
+    /// all five of Java's members, <see cref="Node.IsFenced"/> included since M15/P13.3 (D12)
+    /// gave it a counterpart.
     /// </para>
     /// </remarks>
     public override bool Equals(object? obj)
@@ -429,7 +429,7 @@ public sealed class ConsumerGroupDescription
 
     /// <summary>
     /// Compares two possibly-absent coordinators by value, mirroring Java's
-    /// <c>Node.equals</c> over the four members this binding's <see cref="Node"/> models.
+    /// <c>Node.equals</c> over all five of its members (<c>Node.java:143-154</c>).
     /// </summary>
     /// <param name="left">The first coordinator, or null for absent.</param>
     /// <param name="right">The second coordinator, or null for absent.</param>
@@ -446,7 +446,8 @@ public sealed class ConsumerGroupDescription
             && left.Id == right.Id
             && left.Port == right.Port
             && string.Equals(left.Host, right.Host, StringComparison.Ordinal)
-            && string.Equals(left.Rack, right.Rack, StringComparison.Ordinal);
+            && string.Equals(left.Rack, right.Rack, StringComparison.Ordinal)
+            && left.IsFenced == right.IsFenced;
     }
 
     /// <summary>
@@ -470,6 +471,7 @@ public sealed class ConsumerGroupDescription
             hash = (hash * 31) + coordinator.Port;
             hash = (hash * 31)
                 + (coordinator.Rack is null ? 0 : StringComparer.Ordinal.GetHashCode(coordinator.Rack));
+            hash = (hash * 31) + (coordinator.IsFenced ? 1 : 0);
             return hash;
         }
     }

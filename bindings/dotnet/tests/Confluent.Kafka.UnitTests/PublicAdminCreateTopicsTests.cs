@@ -361,6 +361,52 @@ public sealed class PublicAdminCreateTopicsTests
     }
 
     /// <summary>
+    /// M15/P13.3 D13 — a <c>createTopics</c> entry is now read through
+    /// <c>kafka_admin_TopicMetadataAndConfig_config</c> with the <c>describeConfigs</c>
+    /// reader, so it is a full <see cref="ConfigEntry"/>. Against the mock that entry is
+    /// exactly Java's mock's: <c>MockAdminClient.config(NewTopic)</c> builds
+    /// <c>new ConfigEntry(key, value)</c> (<c>MockAdminClient.java:426-434</c>), whose source,
+    /// type, documentation, synonyms and flags are all the two-argument constructor's
+    /// defaults — which the header states for a <c>createTopics</c> entry (no synonyms, a null
+    /// type and documentation; the null type reads as <see cref="ConfigEntry.ConfigType.Unknown"/>).
+    /// </summary>
+    /// <remarks>
+    /// Not discriminating between the old flat reader and this one: against the mock both
+    /// produce <see cref="ConfigEntry.ConfigSource.Unknown"/>. The difference — the core's
+    /// real source instead of one guessed from <c>is_default</c> — shows only against a
+    /// broker. The removal itself is pinned structurally in
+    /// <c>CommonNativeMethodsMarshallingTests</c>.
+    /// </remarks>
+    [Fact]
+    public async Task ConfigEntries_AreJavasMockEntries_ReadThroughTheConfigGetter()
+    {
+        const string Topic = "d13-config-entries";
+
+        using MockAdminClient admin = new MockAdminClient(1);
+
+        CreateTopicsResult created = admin.CreateTopics(new[]
+        {
+            new NewTopic(Topic, 1, 1)
+            {
+                Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
+            },
+        });
+
+        Config config = default!;
+        await TestTimeout.Run(async () => config = await created.Config(Topic), s_deadline);
+
+        ConfigEntry entry = Assert.Single(config.Entries);
+        Assert.Equal(new ConfigEntry("cleanup.policy", "compact"), entry);
+        Assert.Equal(ConfigEntry.ConfigSource.Unknown, entry.Source);
+        Assert.Equal(ConfigEntry.ConfigType.Unknown, entry.Type);
+        Assert.Null(entry.Documentation);
+        Assert.Empty(entry.Synonyms);
+        Assert.False(entry.IsDefault);
+        Assert.False(entry.IsSensitive);
+        Assert.False(entry.IsReadOnly);
+    }
+
+    /// <summary>
     /// M15/P13.3 D16 — Java's <c>NewTopic.configs(Map)</c> accepts a null value and sends it,
     /// and the ABI keeps a NULL <c>value</c> as that null (header,
     /// <c>kafka_admin_NewTopic_put_config</c>). So the topic is created, and both the

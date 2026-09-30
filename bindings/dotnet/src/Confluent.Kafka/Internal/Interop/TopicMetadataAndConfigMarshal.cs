@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 
@@ -28,8 +27,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <remarks>
 /// <para>
 /// ⚠ Both the metadata pointer and everything reachable from it — the inner error, the
-/// topic-id string, every config name and value — are <b>borrowed from the result
-/// root</b> and die with it. They are read and copied here, on whichever thread the
+/// topic-id string, the <c>kafka_admin_Config_t</c> and every entry and string it hands
+/// back — are <b>borrowed from the result root</b> and die with it. They are read and copied here, on whichever thread the
 /// completion callback fired on, strictly before the trampoline destroys that root.
 /// The inner error therefore uses
 /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>; destroying it would be a
@@ -83,40 +82,33 @@ internal static class TopicMetadataAndConfigMarshal
     }
 
     /// <summary>
-    /// Copies the flattened config accessors into an owned <see cref="Config"/>.
+    /// Copies the topic's borrowed <c>kafka_admin_Config_t</c> into an owned
+    /// <see cref="Config"/> with the <b>same reader <c>describeConfigs</c> uses</b>, so every
+    /// entry's <see cref="ConfigEntry.Source"/>, <see cref="ConfigEntry.IsSensitive"/> and
+    /// <see cref="ConfigEntry.IsReadOnly"/> come from the core (M15/P13.3, D13) — and
+    /// <see cref="ConfigEntry.IsDefault"/> derives from that source, as in Java, instead of
+    /// the source being guessed from an <c>is_default</c> flag.
     /// </summary>
+    /// <remarks>
+    /// ⚠ The <c>Config_t</c> is <b>borrowed</b> from <paramref name="metadataAndConfig"/> and is
+    /// never destroyed here: <see cref="ConfigMarshal.CopyOut(IntPtr)"/> only reads it. As in
+    /// Java, a <c>createTopics</c> entry has no synonyms and a null type and documentation;
+    /// <c>ConfigMarshal</c> maps the null type to <see cref="ConfigEntry.ConfigType.Unknown"/>,
+    /// because <see cref="ConfigEntry.Type"/> is not nullable here.
+    /// </remarks>
     private static Config CopyOutConfig(IntPtr metadataAndConfig)
     {
-        int count = NativeMethods.TopicMetadataAndConfigConfigCount(metadataAndConfig);
-        if (count <= 0)
+        IntPtr config = NativeMethods.TopicMetadataAndConfigConfig(metadataAndConfig);
+        if (config == IntPtr.Zero)
         {
-            return new Config(Array.Empty<ConfigEntry>());
+            // The header returns null only when the metadata is unavailable, which CopyOut
+            // handled before calling here (the inner error was non-null), so this is a core
+            // contract violation. Fault just this key (KeyedResultMarshal's per-key catch)
+            // rather than inventing an empty configuration.
+            throw new KafkaException(
+                "The createTopics result carried neither a topic configuration nor a metadata error for a topic.");
         }
 
-        List<ConfigEntry> entries = new List<ConfigEntry>(count);
-        for (int index = 0; index < count; index++)
-        {
-            string? name = Utf8Marshal.PtrToString(
-                NativeMethods.TopicMetadataAndConfigConfigName(metadataAndConfig, index));
-            if (name is null)
-            {
-                // Guarded by `count`, so unreachable; skipping is the safe reading.
-                continue;
-            }
-
-            // A null value pointer is a genuinely null value (Java's ConfigEntry.value()
-            // is nullable), NOT an out-of-range marker — `name` already proved the index.
-            string? value = Utf8Marshal.PtrToString(
-                NativeMethods.TopicMetadataAndConfigConfigValue(metadataAndConfig, index));
-
-            entries.Add(new ConfigEntry(
-                name,
-                value,
-                NativeMethods.TopicMetadataAndConfigConfigIsDefault(metadataAndConfig, index),
-                NativeMethods.TopicMetadataAndConfigConfigIsSensitive(metadataAndConfig, index),
-                NativeMethods.TopicMetadataAndConfigConfigIsReadOnly(metadataAndConfig, index)));
-        }
-
-        return new Config(entries);
+        return ConfigMarshal.CopyOut(config);
     }
 }

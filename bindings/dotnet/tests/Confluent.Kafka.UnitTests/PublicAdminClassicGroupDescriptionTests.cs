@@ -357,8 +357,9 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
     /// <summary>
     /// The coordinator is nullable, and a present one is compared field-by-field — this
-    /// binding's <see cref="Node"/> carries no value equality of its own, so the four members
-    /// it models each have to discriminate here.
+    /// binding's <see cref="Node"/> carries no value equality of its own, so each of the five
+    /// members Java's <c>Node.equals</c> compares (<c>Node.java:143-154</c>) has to
+    /// discriminate here, <see cref="Node.IsFenced"/> included (M15/P13.3, D12).
     /// </summary>
     [Fact]
     public void Coordinator_CoversAbsentAndPresent()
@@ -377,6 +378,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-2", 9092, "r-1"))));
         Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-1", 9093, "r-1"))));
         Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-1", 9092, null))));
+        Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-1", 9092, "r-1", isFenced: true))));
     }
 
     /// <summary>
@@ -464,7 +466,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             + "(memberId=m-1, groupInstanceId=null, rackId=null, clientId=c-1, host=h-1, "
             + "assignment=(topicPartitions=), targetAssignment=Optional.empty, "
             + "memberEpoch=null, upgraded=null)"
-            + ", state=Stable, coordinator=broker-1:9092 (id: 7 rack: r-1), "
+            + ", state=Stable, coordinator=broker-1:9092 (id: 7 rack: r-1 isFenced: false), "
             + "authorizedOperations=[Read, Write])",
             description.ToString());
 

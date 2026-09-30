@@ -27,14 +27,17 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// <b>M15/P1 shipped a flattened subset; M15/P3 Stage 2 completed the accessors.</b> The
-/// <c>createTopics</c> result exposes its topic configuration through a flattened accessor
-/// family (<c>config_name</c> / <c>config_value</c> / <c>config_is_default</c> /
-/// <c>config_is_sensitive</c> / <c>config_is_read_only</c>), which is why P1 could carry
-/// only those five. <c>describeConfigs</c>' <c>kafka_admin_ConfigEntry_t</c> exposes the
-/// rest, so <see cref="Source"/>, <see cref="Type"/>, <see cref="Documentation"/> and
-/// <see cref="Synonyms"/> now land, matching Java's <c>source()</c> (<c>:95</c>),
-/// <c>type()</c> (<c>:133</c>), <c>documentation()</c> (<c>:140</c>) and
-/// <c>synonyms()</c> (<c>:126</c>).
+/// <c>createTopics</c> result used to expose its topic configuration only through a
+/// flattened accessor family (<c>config_name</c> / <c>config_value</c> /
+/// <c>config_is_default</c> / <c>config_is_sensitive</c> / <c>config_is_read_only</c>),
+/// which is why P1 could carry only those five. <c>describeConfigs</c>'
+/// <c>kafka_admin_ConfigEntry_t</c> exposes the rest, so <see cref="Source"/>,
+/// <see cref="Type"/>, <see cref="Documentation"/> and <see cref="Synonyms"/> landed,
+/// matching Java's <c>source()</c> (<c>:95</c>), <c>type()</c> (<c>:133</c>),
+/// <c>documentation()</c> (<c>:140</c>) and <c>synonyms()</c> (<c>:126</c>). Since
+/// M15/P13.3 (D13) the <c>createTopics</c> result is read through the same full entries
+/// (<c>kafka_admin_TopicMetadataAndConfig_config</c>), so its <see cref="Source"/> is the
+/// core's too.
 /// </para>
 /// <para>
 /// ⚠ <b><see cref="IsDefault"/> is where that growth was not merely additive — and P1's
@@ -46,9 +49,10 @@ namespace Confluent.Kafka.Admin;
 /// an entry whose <see cref="IsDefault"/> and <see cref="Source"/> disagree, a state Java
 /// cannot represent. P1 recorded that "when <c>Source</c> lands it becomes the source of
 /// truth and <see cref="IsDefault"/> derives from it, exactly as in Java" — that is what
-/// happens here. The internal flag-taking constructor survives for the flattened
-/// <c>createTopics</c> path and now translates its flag into a
-/// <see cref="ConfigSource"/>, so the two can no longer disagree by construction.
+/// happens here. The internal flag-taking constructor that survived for the flattened
+/// <c>createTopics</c> path was deleted in M15/P13.3 (D13), with that path: it had no Java
+/// counterpart (<c>definition-of-done.md</c> §7), and every entry now carries the core's
+/// <see cref="ConfigSource"/>.
 /// </para>
 /// <para>
 /// <b>Both of Java's public constructors are public here.</b> Java's 8-argument
@@ -88,39 +92,6 @@ public sealed class ConfigEntry
             ConfigSource.Unknown,
             isSensitive: false,
             isReadOnly: false,
-            synonyms: Array.Empty<ConfigSynonym>(),
-            type: ConfigType.Unknown,
-            documentation: null)
-    {
-    }
-
-    /// <summary>
-    /// Initializes an entry from the <b>flattened</b> <c>createTopics</c> accessors, whose
-    /// only source signal is an <c>is_default</c> flag.
-    /// </summary>
-    /// <remarks>
-    /// <b>Deliberately <see langword="internal"/>, and it has no Java counterpart</b>
-    /// (<c>definition-of-done.md</c> §7): Java's public constructors take <c>source</c>,
-    /// never <c>isDefault</c> — see the type remarks for why publishing this one would
-    /// create a state Java cannot represent. It now translates the flag into a
-    /// <see cref="ConfigSource"/> rather than storing it, so
-    /// <see cref="IsDefault"/> derives from <see cref="Source"/> on every path.
-    /// <c>false</c> becomes <see cref="ConfigSource.Unknown"/> — Java's own default for
-    /// "source not set" (<c>:45</c>) — because the flattened accessors report no source.
-    /// </remarks>
-    /// <param name="name">The configuration key.</param>
-    /// <param name="value">The configuration value, or <see langword="null"/>.</param>
-    /// <param name="isDefault">Whether the value is the broker default (Java's <c>isDefault()</c>).</param>
-    /// <param name="isSensitive">Whether the value is sensitive and therefore redacted (Java's <c>isSensitive()</c>).</param>
-    /// <param name="isReadOnly">Whether the entry cannot be changed (Java's <c>isReadOnly()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
-    internal ConfigEntry(string name, string? value, bool isDefault, bool isSensitive, bool isReadOnly)
-        : this(
-            name,
-            value,
-            isDefault ? ConfigSource.DefaultConfig : ConfigSource.Unknown,
-            isSensitive,
-            isReadOnly,
             synonyms: Array.Empty<ConfigSynonym>(),
             type: ConfigType.Unknown,
             documentation: null)

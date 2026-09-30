@@ -79,10 +79,15 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
 
+        // The real-native no-cause case (M15/P13.3, D11): the core attaches no cause to the
+        // mock's refusal, so kafka_common_Error_cause returns null and InnerException stays null.
+        Assert.Null(fromAll.InnerException);
+
         KafkaException fromMember = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromMember.Code);
         Assert.Equal(NotImplemented, fromMember.Message);
+        Assert.Null(fromMember.InnerException);
     }
 
     /// <summary>
@@ -413,19 +418,32 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     /// ⚠⚠ removeAll mode: the stored outcome is the <b>only</b> carrier of a member failure
     /// (the map is empty), and <see cref="RemoveMembersFromConsumerGroupResult.All"/> rethrows
     /// it unchanged — the shape the core builds, with code -1 (<c>UNKNOWN_SERVER_ERROR</c>),
-    /// not retriable, no cause, and the header's
+    /// not retriable, the header's
     /// (<c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>) message for a dynamic
-    /// member with no reason. Nothing here rewrites the code or message the way the old
-    /// binding-side "Encounter exception" loop did.
+    /// member with no reason, and — since M15/P13.3 (D11) — the member's own error as its
+    /// <see cref="Exception.InnerException"/>, Java's <c>getCause()</c>. Nothing here rewrites
+    /// the code, the message or the cause the way the old binding-side "Encounter exception"
+    /// loop did.
     /// </summary>
+    /// <remarks>
+    /// Built by hand because the mock cannot reach a partial removeAll failure (it refuses the
+    /// whole call). <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>'s cause read
+    /// is proven against the real native elsewhere
+    /// (<c>KafkaExceptionCauseTests</c>); this test pins only that the result carries the
+    /// outcome, cause included, through to the caller.
+    /// </remarks>
     [Fact]
     public async Task All_RemoveAllMode_RethrowsTheStoredOutcomeUnchanged()
     {
+        // UNKNOWN_MEMBER_ID (25) is the header's own example of the member's error.
+        KafkaException memberError = new KafkaException(
+            25, "The coordinator is not aware of this member.", isRetriable: false);
         KafkaException stored = new KafkaException(
             -1,
             "Encounter error when trying to remove: "
                 + "MemberIdentity(memberId='member-1', groupInstanceId=null, reason=null)",
-            isRetriable: false);
+            isRetriable: false,
+            memberError);
 
         RemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal), stored);
@@ -437,7 +455,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         Assert.Same(stored, thrown);
         Assert.Equal(-1, thrown.Code);
         Assert.False(thrown.IsRetriable);
-        Assert.Null(thrown.InnerException);
+        Assert.Same(memberError, thrown.InnerException);
         Assert.Equal(
             "Encounter error when trying to remove: "
                 + "MemberIdentity(memberId='member-1', groupInstanceId=null, reason=null)",

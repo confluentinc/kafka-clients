@@ -266,36 +266,27 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_replication_factor", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicMetadataAndConfigReplicationFactor(IntPtr metadataAndConfig);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int TopicMetadataAndConfigConfigCount(IntPtr metadataAndConfig);
-
     /// <summary>
-    /// <c>kafka_admin_TopicMetadataAndConfig_config_name</c> — the config entry name at
-    /// <paramref name="index"/> (borrowed), or null if out of range. Entries are sorted
-    /// by name.
+    /// <c>kafka_admin_TopicMetadataAndConfig_config</c> — Java's
+    /// <c>TopicMetadataAndConfig.config()</c>: the topic's configuration as a
+    /// <c>kafka_admin_Config_t</c> whose entries are full <c>kafka_admin_ConfigEntry_t</c>
+    /// handles, so each entry's real <c>source</c> is reachable (M15/P13.3, D13). Null when
+    /// the metadata is unavailable — the case <see cref="TopicMetadataAndConfigError"/>
+    /// reports.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>) from <paramref name="metadataAndConfig"/>, which is
+    /// itself borrowed from the <c>CreateTopicsResult</c> root or owned by the per-key
+    /// callback: read it with <see cref="ConfigMarshal.CopyOut(IntPtr)"/> and <b>never</b>
+    /// destroy it. It dies with <paramref name="metadataAndConfig"/>. As in Java, a
+    /// <c>createTopics</c> entry has no synonyms and a null type and documentation.
+    /// </para>
+    /// <para>
+    /// It replaces the six flat <c>kafka_admin_TopicMetadataAndConfig_config_*</c> accessors
+    /// this binding used before, whose only source signal was an <c>is_default</c> flag.
+    /// </para>
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_name", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr TopicMetadataAndConfigConfigName(IntPtr metadataAndConfig, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_TopicMetadataAndConfig_config_value</c> — the config entry value
-    /// at <paramref name="index"/> (borrowed), or null if out of range <b>or</b> if the
-    /// entry's value is null (Java's <c>ConfigEntry.value()</c> is nullable).
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr TopicMetadataAndConfigConfigValue(IntPtr metadataAndConfig, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_is_default", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool TopicMetadataAndConfigConfigIsDefault(IntPtr metadataAndConfig, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_is_sensitive", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool TopicMetadataAndConfigConfigIsSensitive(IntPtr metadataAndConfig, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_is_read_only", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool TopicMetadataAndConfigConfigIsReadOnly(IntPtr metadataAndConfig, int index);
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicMetadataAndConfigConfig(IntPtr metadataAndConfig);
 
     // ---- deleteTopics (M15/P2a) — the by-name and by-id entry points ----
 
@@ -3115,9 +3106,15 @@ internal static partial class NativeMethods
     /// if the request failed; on a <c>remove_all</c> result, for the first member the broker
     /// reports as failed, a plain Kafka error with code -1 (<c>UNKNOWN_SERVER_ERROR</c>) and
     /// the message <c>Encounter error when trying to remove: MemberIdentity(...)</c>, whose
-    /// cause — the member's own error — the C API cannot read; otherwise the outcome
+    /// cause is the member's own error; otherwise the outcome
     /// <c>member_result</c> gives for the first failing requested member, in
     /// group-instance-id order. Never blocks, so it is safe inside the completion callback.
+    /// <para>
+    /// ⚠ This entry's own header text still says "this C API cannot read an error's cause";
+    /// <c>kafka_common_Error_cause</c> (PR #201 round 70) supersedes that sentence, and its
+    /// doc names this very wrap. <see cref="KafkaException.FromHandle"/> reads the cause, so
+    /// the member's error arrives as the <see cref="System.Exception.InnerException"/>.
+    /// </para>
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_all", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr RemoveMembersFromConsumerGroupResultAll(IntPtr result);

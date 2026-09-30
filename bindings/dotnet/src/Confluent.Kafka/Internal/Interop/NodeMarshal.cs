@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// (<c>kafka_common_Node</c>) — the innermost layer of the M5/P5 partition-metadata tree
 /// (ffi-marshalling.md §B2/§B3, consumer-threading.md §27). Turns a borrowed
 /// (Category-4) <c>Node_t</c> view into an owned managed <see cref="Node"/>, copying the
-/// id / host / port / rack so <b>nothing native-backed escapes</b>.
+/// id / host / port / rack / fenced flag so <b>nothing native-backed escapes</b>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -78,6 +78,10 @@ internal static class NodeMarshal
         IntPtr rackPtr = NativeMethods.NodeRack(node, out int rackLen);
         string? rack = Utf8Marshal.PtrToString(rackPtr, rackLen);
 
-        return new Node(id, host, port, rack);
+        // Java's isFenced(): true only for a fenced broker from describeCluster with
+        // includeFencedBrokers (KIP-1073); false for every other node.
+        bool isFenced = NativeMethods.NodeIsFenced(node);
+
+        return new Node(id, host, port, rack, isFenced);
     }
 }

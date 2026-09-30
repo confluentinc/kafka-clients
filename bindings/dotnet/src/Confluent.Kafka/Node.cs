@@ -34,7 +34,9 @@ namespace Confluent.Kafka;
 public sealed class Node
 {
     /// <summary>
-    /// Initializes a new instance from the values copied out of the ABI element.
+    /// Initializes a new, <b>unfenced</b> instance from the values copied out of the ABI
+    /// element — Java's <c>Node(int id, String host, int port, String rack)</c>
+    /// (<c>Node.java:42</c>), which likewise sets <c>isFenced</c> to <c>false</c>.
     /// </summary>
     /// <param name="id">The node (broker) id.</param>
     /// <param name="host">The node host name.</param>
@@ -44,11 +46,30 @@ public sealed class Node
     /// nullable <c>rack()</c>).
     /// </param>
     internal Node(int id, string host, int port, string? rack)
+        : this(id, host, port, rack, isFenced: false)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance from the values copied out of the ABI element — Java's
+    /// <c>Node(int id, String host, int port, String rack, boolean isFenced)</c>
+    /// (<c>Node.java:51</c>).
+    /// </summary>
+    /// <param name="id">The node (broker) id.</param>
+    /// <param name="host">The node host name.</param>
+    /// <param name="port">The node port.</param>
+    /// <param name="rack">
+    /// The rack the node belongs to, or <see langword="null"/> when absent (Java's
+    /// nullable <c>rack()</c>).
+    /// </param>
+    /// <param name="isFenced">Whether the node is fenced (<c>kafka_common_Node_is_fenced</c>).</param>
+    internal Node(int id, string host, int port, string? rack, bool isFenced)
     {
         Id = id;
         Host = host;
         Port = port;
         Rack = rack;
+        IsFenced = isFenced;
     }
 
     /// <summary>The node (broker) id.</summary>
@@ -67,16 +88,30 @@ public sealed class Node
     public string? Rack { get; }
 
     /// <summary>
-    /// Returns a string of the form <c>"host:port (id: N rack: R)"</c>, mirroring Java's
-    /// <c>Node.toString()</c>. An absent <see cref="Rack"/> renders as the literal
-    /// <c>null</c>, as it does in Java.
+    /// Whether the node is fenced — Java's <c>isFenced()</c> (<c>Node.java:122</c>).
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="Admin.IAdmin.DescribeCluster(Admin.DescribeClusterOptions)"/> with
+    /// <see cref="Admin.DescribeClusterOptions.IncludeFencedBrokers"/> set (KIP-1073) can
+    /// return a fenced broker, so every node obtained any other way is
+    /// <see langword="false"/> — the header's statement for <c>kafka_common_Node_is_fenced</c>.
+    /// </remarks>
+    public bool IsFenced { get; }
+
+    /// <summary>
+    /// Returns a string of the form <c>"host:port (id: N rack: R isFenced: F)"</c>, mirroring
+    /// Java's <c>Node.toString()</c> (<c>Node.java:157-158</c>). An absent
+    /// <see cref="Rack"/> renders as the literal <c>null</c>, and <see cref="IsFenced"/> as
+    /// <c>true</c> / <c>false</c>, as they do in Java.
     /// </summary>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
-            "{0}:{1} (id: {2} rack: {3})",
+            "{0}:{1} (id: {2} rack: {3} isFenced: {4})",
             Host,
             Port,
             Id,
-            Rack ?? "null");
+            Rack ?? "null",
+            // Java renders a boolean lowercase; bool.ToString() would give True/False.
+            IsFenced ? "true" : "false");
 }

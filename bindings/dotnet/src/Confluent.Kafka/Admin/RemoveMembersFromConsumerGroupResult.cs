@@ -43,16 +43,17 @@ namespace Confluent.Kafka.Admin;
 /// (group-instance-id order — Java iterates its set in unspecified order).
 /// </para>
 /// <para>
-/// ⚠⚠ <b>In <see cref="RemoveAll"/> mode a member failure has a different error code than
-/// in Java, recorded here rather than hidden.</b> Java's <c>all()</c> (<c>:56-64</c>) throws
+/// ⚠⚠ <b>In <see cref="RemoveAll"/> mode a member failure is a wrapper whose cause is the
+/// member's own error, as in Java.</b> Java's <c>all()</c> (<c>:56-64</c>) throws
 /// <c>new KafkaException("Encounter exception when trying to remove: " + identity,
-/// memberException)</c>. The core builds the same error, with "exception" spelled "error",
-/// but the C API cannot read an error's cause, so it arrives as a bare
-/// <see cref="KafkaException"/> with <see cref="KafkaException.Code"/> -1
-/// (<c>UNKNOWN_SERVER_ERROR</c>), not retriable, with no
-/// <see cref="Exception.InnerException"/>: the message still names the member, but the
-/// member's own error code is not observable. There is no per-member outcome in this mode
-/// at all, as in Java.
+/// memberException)</c>. The core builds the same error, with "exception" spelled "error":
+/// a bare <see cref="KafkaException"/> with <see cref="KafkaException.Code"/> -1
+/// (<c>UNKNOWN_SERVER_ERROR</c>, the code a Java <c>KafkaException</c> without one flattens
+/// to), not retriable, whose message names the member. The member's own error (for example
+/// <c>UNKNOWN_MEMBER_ID</c>, code 25) is its <see cref="Exception.InnerException"/> — Java's
+/// <c>getCause()</c>, read through <c>kafka_common_Error_cause</c> since M15/P13.3 (D11); it
+/// was not observable before. There is no per-member outcome in this mode at all, as in
+/// Java.
 /// </para>
 /// </remarks>
 public sealed class RemoveMembersFromConsumerGroupResult

@@ -44,6 +44,17 @@ namespace Confluent.Kafka;
 /// no timeline is implied.
 /// </para>
 /// <para>
+/// <b><see cref="Exception.InnerException"/> is Java's <c>getCause()</c></b> (M15/P13.3,
+/// decision D11). Where the core keeps a cause — wherever Java passes one to the
+/// exception's constructor, for example <c>KafkaException("Failed to create new
+/// KafkaAdminClient", exc)</c>, the <c>removeMembersFromConsumerGroup</c> remove-all wrap, or
+/// a timeout that records the last error seen before its deadline — the exception built from
+/// the native error carries it as an inner <see cref="KafkaException"/>, read through
+/// <c>kafka_common_Error_cause</c>, with its own <see cref="Code"/>, message and cause in
+/// turn. An error without a cause has a <see langword="null"/>
+/// <see cref="Exception.InnerException"/>, as Java's <c>getCause()</c> is null.
+/// </para>
+/// <para>
 /// There is no <c>IsFatal</c> flag: the Rust core's error redesign
 /// (<c>a8205c5c</c>, "Error redesign") deliberately does not expose fatality
 /// on the ABI's error handle — fatality is contextual (the same error class is
@@ -92,16 +103,33 @@ public class KafkaException : Exception
     }
 
     /// <summary>
-    /// Initializes a new instance from the values copied out of a
-    /// <c>kafka_common_Error_t</c> handle. Used by
-    /// <see cref="FromBorrowedHandle(IntPtr)"/>; <see cref="FromHandle(IntPtr)"/>
-    /// delegates to it and additionally frees the handle. Also used by the admin absent-key
-    /// error (<c>AdminCallbacks.AbsentKey</c>), whose code <c>-4</c> no
+    /// Initializes a new instance with an error classification and no cause. Used by the
+    /// admin absent-key error (<c>AdminCallbacks.AbsentKey</c>), whose code <c>-4</c> no
     /// <c>kafka_common_Error_t</c> can carry — <c>kafka_common_Error_new</c> maps a
-    /// non-protocol code to <c>UnknownServerError</c>.
+    /// non-protocol code to <c>UnknownServerError</c>. An exception built from a native
+    /// error goes through the four-argument form instead, which also carries the cause.
     /// </summary>
     internal KafkaException(int code, string? message, bool isRetriable)
-        : base(message)
+        : this(code, message, isRetriable, innerException: null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance from the values copied out of a
+    /// <c>kafka_common_Error_t</c> handle together with the exception built from its cause —
+    /// Java's <c>KafkaException(String message, Throwable cause)</c>. Used by
+    /// <see cref="FromBorrowedHandle(IntPtr)"/>, which reads the cause with
+    /// <c>kafka_common_Error_cause</c>.
+    /// </summary>
+    /// <param name="code">The numeric error code.</param>
+    /// <param name="message">The error message.</param>
+    /// <param name="isRetriable">Whether the failed operation may succeed if retried.</param>
+    /// <param name="innerException">
+    /// The exception built from the core error's cause, or <see langword="null"/> when it has
+    /// none (Java's null <c>getCause()</c>).
+    /// </param>
+    internal KafkaException(int code, string? message, bool isRetriable, Exception? innerException)
+        : base(message, innerException)
     {
         Code = code;
         IsRetriable = isRetriable;
@@ -137,7 +165,8 @@ public class KafkaException : Exception
     /// <c>const char*</c> dies with the handle), all values are copied out, and the
     /// handle is destroyed in a <c>finally</c> so it is freed exactly once even if
     /// construction throws. The returned exception holds only copied values — never
-    /// the handle (ffi §A5/§B5).
+    /// the handle (ffi §A5/§B5). The error's cause, if any, becomes its
+    /// <see cref="Exception.InnerException"/> (see <see cref="FromBorrowedHandle(IntPtr)"/>).
     /// </remarks>
     internal static KafkaException? FromHandle(IntPtr error)
     {
@@ -195,6 +224,14 @@ public class KafkaException : Exception
     /// so that one takes <see cref="FromHandle(IntPtr)"/>. Read the accessor's
     /// signature, never the type name.
     /// </para>
+    /// <para>
+    /// ⚠ <b>The cause is freed here, even from a borrowed <paramref name="error"/>.</b> <c>kafka_common_Error_cause</c> returns an <em>owned</em>
+    /// copy of the cause (or null), not a view into <paramref name="error"/>, so it is built
+    /// with <see cref="FromHandle(IntPtr)"/> — which frees it exactly once, also when building
+    /// it throws — and becomes the result's <see cref="Exception.InnerException"/>. Walking a
+    /// longer chain is that same call recursing. <paramref name="error"/> itself is never
+    /// freed here.
+    /// </para>
     /// </remarks>
     internal static KafkaException? FromBorrowedHandle(IntPtr error)
     {
@@ -207,6 +244,15 @@ public class KafkaException : Exception
         string? message = Utf8Marshal.PtrToString(NativeMethods.Message(error));
         bool isRetriable = NativeMethods.IsRetriable(error);
 
-        return new KafkaException(code, message, isRetriable);
+        // Java's getCause(). ⚠ The cause is an OWNED copy even when `error` is borrowed, so
+        // it goes straight into FromHandle — no managed code runs between the P/Invoke
+        // returning it and FromHandle's try, so nothing can throw and leak it — and
+        // FromHandle frees it in its finally, including when building the inner exception
+        // throws. That throw then propagates out of here, and the caller's own ownership rule
+        // for `error` still holds: FromHandle's finally frees an owned `error`, a borrowed
+        // one is left to its root. Recursion walks the chain until the core returns null.
+        KafkaException? cause = FromHandle(NativeMethods.ErrorCause(error));
+
+        return new KafkaException(code, message, isRetriable, cause);
     }
 }

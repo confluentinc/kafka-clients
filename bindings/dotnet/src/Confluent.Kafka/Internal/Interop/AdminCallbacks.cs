@@ -2114,8 +2114,9 @@ internal static class AdminCallbacks
     /// ⚠ In <c>removeAll</c> mode <c>count</c> is 0, so the map is empty and <c>all()</c> is
     /// the <b>only</b> carrier of a member failure: a bare Kafka error with code -1 and
     /// Java's "Encounter error when trying to remove: MemberIdentity(...)" message, whose
-    /// cause the C API cannot read. See <see cref="KeyedOutcomes{TKey}"/> for the ownership of
-    /// the two reads.
+    /// cause — the member's own error — <see cref="KafkaException.FromHandle"/> reads into its
+    /// <see cref="Exception.InnerException"/>. See <see cref="KeyedOutcomes{TKey}"/> for the
+    /// ownership of the two reads.
     /// </para>
     /// </remarks>
     internal static readonly Func<IntPtr, (IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>
