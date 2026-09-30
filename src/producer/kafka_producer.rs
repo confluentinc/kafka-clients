@@ -5966,6 +5966,104 @@ mod tests {
         );
     }
 
+    /// Sets `dropped` when the callback that owns it is dropped, whether or not it fired.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A callback that counts its invocations in `fired` and sets `dropped` when it is
+    /// dropped. Used to see what `send` did with a callback when it returned `Err`.
+    fn observed_callback(
+        fired: &Arc<std::sync::atomic::AtomicUsize>,
+        dropped: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Callback {
+        let fired = Arc::clone(fired);
+        let flag = DropFlag(Arc::clone(dropped));
+        Box::new(move |_metadata, _error| {
+            fired.fetch_add(1, Ordering::SeqCst);
+            drop(flag);
+        })
+    }
+
+    /// A send that fails **after** its record was appended keeps the callback in the
+    /// batch: `send` returns `Err`, and the callback has neither fired nor been
+    /// dropped. The batch fires it later, exactly once.
+    ///
+    /// This is Java's behaviour for an `IllegalStateException` from
+    /// `maybeAddPartition` (`KafkaProducer.java:1038`): `doSend` rethrows it
+    /// (`:1077-1081`), yet the record is already in the accumulator carrying its
+    /// `appendCallbacks`, which fire when the batch completes or is aborted. The C
+    /// ABI's `kafka_producer_Producer_send_with_callback_cancellable` relies on
+    /// exactly this to report `out_callback_pending == true` for a failed call.
+    #[test]
+    fn test_send_error_after_append_keeps_callback_for_the_batch() {
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (fired_in, dropped_in) = (Arc::clone(&fired), Arc::clone(&dropped));
+        let (error, fired_after_send, dropped_after_send, fired_final) =
+            bounded_block_on("send outside a transaction with callback", move || async move {
+                let mut ctx = TxnProducerContext::transactional();
+                init_transactions(&mut ctx).await;
+                let error = ctx
+                    .producer
+                    .send_with_callback(misuse_record(), Some(observed_callback(&fired_in, &dropped_in)))
+                    .await
+                    .expect_err("a send needs an open transaction");
+                let fired_after_send = fired_in.load(Ordering::SeqCst);
+                let dropped_after_send = dropped_in.load(Ordering::SeqCst);
+                // As the Sender's close path would.
+                ctx.accumulator.abort_incomplete_batches();
+                (error, fired_after_send, dropped_after_send, fired_in.load(Ordering::SeqCst))
+            });
+
+        assert_eq!(
+            error.to_string(),
+            format!("LocalIllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
+        );
+        assert_eq!(fired_after_send, 0, "the rethrowing path does not fire the callback");
+        assert!(
+            !dropped_after_send,
+            "the appended record's batch still owns the callback after send() returned Err"
+        );
+        assert_eq!(fired_final, 1, "the batch fires the callback exactly once when it is aborted");
+        assert!(dropped.load(Ordering::SeqCst), "the callback is consumed by firing");
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    /// A send that fails **before** its record was appended drops the callback
+    /// unfired, and has done so by the time `send` returns: Java's `doSend` rethrows
+    /// from its terminal catches without invoking the callback
+    /// (`KafkaProducer.java:1069-1081`), and nothing else holds it.
+    ///
+    /// The counterpart of [`test_send_error_after_append_keeps_callback_for_the_batch`]:
+    /// the C ABI tells the two apart by whether the callback was dropped.
+    #[tokio::test]
+    async fn test_send_error_before_append_drops_callback() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata, accumulator);
+        producer.close().await.unwrap();
+
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("test".to_string()));
+        let error = producer
+            .send_with_callback(record, Some(observed_callback(&fired, &dropped)))
+            .await
+            .expect_err("a closed producer rejects the send");
+
+        assert_eq!(
+            error.to_string(),
+            "LocalIllegalStateError: Cannot perform operation after producer has been closed"
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "a rethrown pre-append error fires no callback");
+        assert!(dropped.load(Ordering::SeqCst), "send() dropped the callback before returning");
+    }
+
     /// Translated from
     /// `KafkaProducerTest.testCommitTransactionWithRecordTooLargeException`
     /// (Java 1532-1560).

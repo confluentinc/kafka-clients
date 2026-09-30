@@ -52,11 +52,14 @@
 //! `kind` mutex across its enqueue and
 //! [`kafka_producer_Producer_send_batch`] holds it across the whole batch, so N
 //! threads calling either take turns, and one metadata fetch blocks all of them
-//! for up to `max.block.ms`. Only [`kafka_producer_Producer_send_async`] and
+//! for up to `max.block.ms`. [`kafka_producer_Producer_send_async`] and
 //! [`kafka_producer_Producer_send_batch_async`] are genuinely concurrent — they
 //! touch no shared mutex, just an unbounded channel drained by the submission
-//! task. Callers that need real send parallelism should prefer the async pair.
-//! (Removing that serialization is a change to the blocking send path, out of
+//! task. So are the blocking [`kafka_producer_Producer_send_with_callback`] and
+//! [`kafka_producer_Producer_send_with_callback_cancellable`]: they take the
+//! mutex only to extend a reference to the producer and then block without it,
+//! so each caller waits only for its own metadata and `buffer.memory`, as in
+//! Java. (Removing the serialization from `send` / `send_batch` too is out of
 //! scope here.)
 //!
 //! Java's *transaction-control* methods are the exception: `initTransactions`,
@@ -129,6 +132,7 @@ use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::TopicPartition;
+use crate::common::errors::InterruptError;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
@@ -371,36 +375,6 @@ fn producer_send(
             rt.block_on(mock.send(owned_record))
         },
         ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, None)),
-    }
-}
-
-/// Send a record through the producer, also firing `callback` on completion.
-///
-/// Identical to [`producer_send`] except that the native [`Callback`] is
-/// attached to the record, mirroring Java's `send(record, Callback)`: the
-/// returned future *and* the callback both report the same outcome.
-fn producer_send_with_callback(
-    kind: &ProducerKind,
-    record: ProducerRecord<&[u8], &[u8]>,
-    callback: Callback,
-) -> Result<KafkaFuture<RecordMetadata>, Error> {
-    let rt = kind.runtime();
-    match kind {
-        ProducerKind::Mock(mock, _) => {
-            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
-            let owned_record = ProducerRecordOptionsBuilder::new()
-                .set_topic(topic)
-                .set_value(value.map(|v| v.to_vec()))
-                .set_partition(partition)
-                .set_timestamp(timestamp)
-                .set_key(key.map(|k| k.to_vec()))
-                .build()
-                .and_then(|options| {
-                    ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
-                })?;
-            rt.block_on(mock.send_with_callback(owned_record, Some(callback)))
-        },
-        ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, Some(callback))),
     }
 }
 
@@ -677,6 +651,46 @@ fn make_record_callback(
     })
 }
 
+/// Records that a record callback was dropped without having fired.
+///
+/// Moved into the closure built by [`make_tracked_record_callback`], so it is
+/// dropped together with the callback: either right after the callback fires (by
+/// then `fired` is set, so it records nothing) or when the callback is dropped
+/// unfired. `KafkaProducer::send` drops its callback unfired on every path that
+/// fails *before* the record is appended, and keeps it in the batch on the one
+/// path that fails *after* (`maybe_add_partition`), where the batch fires it later.
+/// That is how [`send_with_callback_impl`] tells the two apart and reports
+/// `out_callback_pending` without guessing.
+struct DiscardSentinel {
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    discarded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for DiscardSentinel {
+    fn drop(&mut self) {
+        if !self.fired.load(std::sync::atomic::Ordering::Acquire) {
+            self.discarded.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// As [`make_record_callback`], but also sets `discarded` if the callback is
+/// dropped without firing (see [`DiscardSentinel`]).
+fn make_tracked_record_callback(
+    target: RecordCallbackTarget,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    discarded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Callback {
+    let sentinel = DiscardSentinel { fired: std::sync::Arc::clone(&fired), discarded };
+    let deliver = make_record_callback(target, completion_tx, fired);
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+        deliver(metadata, error);
+        // Dropped only now, after `deliver` has set `fired`.
+        drop(sentinel);
+    })
+}
+
 /// A non-blocking send submitted to the per-producer submission task.
 ///
 /// Holds a fully-built `ProducerRecord` (validated synchronously in
@@ -740,7 +754,17 @@ enum ProducerStaticRef {
 unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     let handle = unsafe { &*(ptr as *const ProducerHandle) };
     let guard = handle.kind.lock().unwrap();
-    match &*guard {
+    unsafe { static_ref_from_kind(&guard) }
+}
+
+/// Extends a reference to the producer inside `kind` to `'static`.
+///
+/// # Safety
+/// `kind` must be the `kind` of a live producer handle, and the caller must not
+/// use the returned reference after that handle is destroyed (see
+/// [`ProducerStaticRef`]).
+unsafe fn static_ref_from_kind(kind: &ProducerKind) -> ProducerStaticRef {
+    match kind {
         ProducerKind::Kafka(k, _) => {
             ProducerStaticRef::Kafka(unsafe { &*(k.as_ref() as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
         },
@@ -1378,8 +1402,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// valid [`kafka_common_Error_t`] handle on failure.
 ///
 /// `out_error` reports synchronous validation errors (null topic / bad
-/// key/value length) and synchronous send failures (closed producer), in which
-/// case `callback` is **not** invoked.
+/// key/value length) and synchronous send failures (closed producer). In those
+/// cases `callback` is **not** invoked, with one exception Java shares: a record
+/// that was already appended when a transaction-state check failed
+/// (`KafkaProducer.java:1038`) is reported through `out_error` **and** later
+/// through `callback`, with the batch's real outcome. This function cannot tell
+/// the caller which case it is; a caller that releases `user_data` on failure
+/// should use [`kafka_producer_Producer_send_with_callback_cancellable`], whose
+/// `out_callback_pending` says whether the callback still owns it.
+///
+/// # Blocking
+///
+/// Blocks the calling thread until the record is appended or `max.block.ms`
+/// runs out, like Java's `send()`. The producer's `kind` mutex is held only
+/// briefly, never across that wait, so other sends, `flush`, `close` and
+/// `partitions_for` are not blocked behind it, and `close` wakes it.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1410,6 +1447,159 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_producer_FutureRecordMetadata_t {
+    unsafe {
+        send_with_callback_impl(
+            producer,
+            topic,
+            partition,
+            timestamp,
+            key,
+            key_len,
+            value,
+            value_len,
+            callback,
+            user_data,
+            None,
+            std::ptr::null_mut(),
+            out_error,
+        )
+    }
+}
+
+/// Sends a single record like [`kafka_producer_Producer_send_with_callback`], but
+/// the wait for metadata / `buffer.memory` can be cancelled through `cancel`, and
+/// `out_callback_pending` says whether `callback` still owns `user_data` when the
+/// call fails.
+///
+/// This is Java's `send(record, Callback)` together with its `InterruptException`
+/// path: interrupting a thread blocked in `send` makes `send` throw
+/// `InterruptException`, the record is not appended and the callback is not
+/// invoked (`KafkaProducer.java:1062-1065`). Cancelling `cancel` while this call is
+/// parked has exactly that effect: it returns null with an `INTERRUPT` error
+/// (`kafka_common_ErrorCode_INTERRUPT`), `*out_callback_pending == false`, and
+/// nothing was appended.
+///
+/// # Blocking and cancellation
+///
+/// The call blocks the calling thread until the record is in the accumulator, or
+/// until `max.block.ms` runs out, exactly like Java's `send()`. Only this caller is
+/// blocked: the producer's `kind` mutex is not held across the wait, so other sends,
+/// `flush`, `close` and `partitions_for` proceed, and `close` wakes a parked send.
+///
+/// Cancellation acts only while the send is waiting. The send is polled before the
+/// token, so a send that does not need to wait succeeds even if `cancel` is already
+/// cancelled — as a Java send on an interrupted thread succeeds unless it blocks.
+/// Cancelling after the record was appended has no effect on it. Both of the send's
+/// waits are cancel-safe: an abandoned metadata wait leaves the update running, and
+/// an abandoned `buffer.memory` wait returns any memory it had reserved and hands
+/// the wakeup to the next waiter (`BufferPool::allocate_blocking`'s `WaitGuard`).
+///
+/// # Callback ownership (`out_callback_pending`)
+///
+/// `*out_callback_pending` is written on every return (when non-null):
+///
+/// - `true`: `callback` has been, or will be, invoked exactly once, and it owns
+///   `user_data`. This is always the case on success, and also on the one failure
+///   Java reports both ways — a send whose record was already appended when a
+///   transaction-state check failed (`KafkaProducer.java:1038`): the call fails
+///   **and** the callback later reports the batch's real outcome.
+/// - `false`: `callback` was never invoked and never will be. The caller owns
+///   `user_data` again and must release it.
+///
+/// # Parameters
+///
+/// As [`kafka_producer_Producer_send_with_callback`], plus:
+///
+/// - `cancel`: A token from [`kafka_producer_SendCancelToken_new`], or null for a
+///   send that cannot be cancelled. It must stay alive until this call returns and
+///   until any concurrent [`kafka_producer_SendCancelToken_cancel`] on it returns.
+/// - `out_callback_pending`: Where to write the ownership flag above, or null.
+///
+/// # Safety
+///
+/// As [`kafka_producer_Producer_send_with_callback`]; `cancel` must be null or a
+/// live token handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cancellable(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    partition: i32,
+    timestamp: i64,
+    key: *const u8,
+    key_len: i32,
+    value: *const u8,
+    value_len: i32,
+    callback: kafka_producer_Producer_send_callback_t,
+    user_data: *mut std::ffi::c_void,
+    cancel: *const kafka_producer_SendCancelToken_t,
+    out_callback_pending: *mut bool,
+    out_error: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_producer_FutureRecordMetadata_t {
+    let cancel = if cancel.is_null() {
+        None
+    } else {
+        Some(unsafe { send_cancel_token_ref(cancel) }.token.clone())
+    };
+    unsafe {
+        send_with_callback_impl(
+            producer,
+            topic,
+            partition,
+            timestamp,
+            key,
+            key_len,
+            value,
+            value_len,
+            callback,
+            user_data,
+            cancel,
+            out_callback_pending,
+            out_error,
+        )
+    }
+}
+
+/// Error message of a send cancelled through its [`kafka_producer_SendCancelToken_t`]
+/// while it was waiting for metadata or `buffer.memory`.
+const SEND_CANCELLED_MESSAGE: &str = "Send was cancelled while waiting for metadata or buffer memory";
+
+/// Shared body of [`kafka_producer_Producer_send_with_callback`] and
+/// [`kafka_producer_Producer_send_with_callback_cancellable`].
+///
+/// Holds the `kind` mutex only long enough to clone the runtime handle and extend a
+/// reference to the inner producer — the pattern the submission task,
+/// [`flush_or_close_async`] and [`with_txn_control`] already use — and blocks on the
+/// send **without** it. So a send parked on metadata or `buffer.memory` for up to
+/// `max.block.ms` blocks only its own caller: other sends, `flush`, `close` and
+/// `partitions_for` proceed, and `close` can wake it. Java's `send()` takes no
+/// producer-wide lock either. This is sound for the reason [`with_txn_control`]
+/// states: the `block_on` completes within this C call and the C caller keeps the
+/// handle alive for its duration, so the `&'static` reference never outlives the
+/// producer and no task registration is needed.
+#[allow(clippy::too_many_arguments)]
+unsafe fn send_with_callback_impl(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    partition: i32,
+    timestamp: i64,
+    key: *const u8,
+    key_len: i32,
+    value: *const u8,
+    value_len: i32,
+    callback: kafka_producer_Producer_send_callback_t,
+    user_data: *mut std::ffi::c_void,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    out_callback_pending: *mut bool,
+    out_error: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_producer_FutureRecordMetadata_t {
+    let set_callback_pending = |pending: bool| {
+        if !out_callback_pending.is_null() {
+            unsafe { *out_callback_pending = pending };
+        }
+    };
+    // Every early return below happens before the callback exists, so it never fires.
+    set_callback_pending(false);
+
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
@@ -1467,30 +1657,162 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 
     let handle = unsafe { producer_handle(producer) };
     let completion_tx = handle.completion_tx.clone();
-    // The native callback that converts the delivery result into owned C handles
-    // and hands them to the dispatcher thread. Dropped unfired if the send fails
-    // synchronously (no handles were allocated yet). This synchronous path has a
-    // single fire site (the delivery path on `Ok`), so a fresh at-most-once guard
-    // is all `make_record_callback` needs here — no second firing site to share it
-    // with, unlike the async submission path.
+    // The native callback that converts the delivery result into owned C handles and
+    // hands them to the dispatcher thread. It has a single fire site (the record's
+    // delivery, or `handle_api_error` inside `send`), so a fresh at-most-once guard
+    // is enough. `discarded` records whether `send` dropped it unfired, which is
+    // what `out_callback_pending` reports.
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, completion_tx.clone(), fired);
-    let guard = handle.kind.lock().unwrap();
-    let runtime_handle = guard.runtime().handle().clone();
-    match producer_send_with_callback(&guard, record, cb) {
+    let discarded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cb = make_tracked_record_callback(
+        RecordCallbackTarget { callback, user_data },
+        completion_tx.clone(),
+        fired,
+        std::sync::Arc::clone(&discarded),
+    );
+
+    // Brief lock: clone the runtime handle and extend a reference to the inner
+    // producer. The guard is dropped at the end of this statement, before the wait.
+    let (runtime_handle, inner) = {
+        let guard = handle.kind.lock().unwrap();
+        (guard.runtime().handle().clone(), unsafe { static_ref_from_kind(&guard) })
+    };
+
+    let send = send_through_static_ref(inner, record, cb);
+    let result = match cancel {
+        None => runtime_handle.block_on(send),
+        Some(token) => runtime_handle.block_on(async move {
+            tokio::select! {
+                // The send is polled first: a send that does not have to wait
+                // completes even when the token is already cancelled, and the
+                // token wins only while the send is parked (Java's interrupt
+                // semantics). Dropping the parked send is cancel-safe (see
+                // `kafka_producer_Producer_send_with_callback_cancellable`).
+                biased;
+                result = send => result,
+                _ = token.cancelled() => Err(Error::Interrupt(InterruptError::new(SEND_CANCELLED_MESSAGE))),
+            }
+        }),
+    };
+
+    match result {
         Ok(future) => {
+            set_callback_pending(true);
             if !out_error.is_null() {
                 unsafe { *out_error = std::ptr::null_mut() };
             }
             box_future(future, runtime_handle, completion_tx)
         },
         Err(e) => {
+            // `send` takes the callback by value, and on every path that fails
+            // before the append it drops it before returning, so `discarded` is
+            // final here. A callback that was not discarded is owned by a batch
+            // (the post-append transaction-state failure) or has already fired;
+            // either way it fires exactly once and owns `user_data`.
+            set_callback_pending(!discarded.load(std::sync::atomic::Ordering::Acquire));
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(e) };
             }
             std::ptr::null_mut()
         },
     }
+}
+
+/// Sends `record` through the inner producer with `callback` attached.
+///
+/// The mock takes an owned record, so its arm copies the borrowed bytes (a test
+/// helper, not a hot path); the real producer's arm sends the borrowed record
+/// directly (zero-copy).
+async fn send_through_static_ref(
+    inner: ProducerStaticRef,
+    record: ProducerRecord<&[u8], &[u8]>,
+    callback: Callback,
+) -> Result<KafkaFuture<RecordMetadata>, Error> {
+    match inner {
+        ProducerStaticRef::Kafka(producer) => producer.send(record, Some(callback)).await,
+        ProducerStaticRef::Mock(mock) => {
+            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
+            let owned_record = ProducerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_value(value.map(|v| v.to_vec()))
+                .set_partition(partition)
+                .set_timestamp(timestamp)
+                .set_key(key.map(|k| k.to_vec()))
+                .build()
+                .and_then(|options| {
+                    ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                })?;
+            mock.send_with_callback(owned_record, Some(callback)).await
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Send cancellation token
+// ---------------------------------------------------------------------------
+
+/// Opaque cancellation token for
+/// [`kafka_producer_Producer_send_with_callback_cancellable`].
+///
+/// The binding-side stand-in for interrupting a thread blocked in Java's `send()`:
+/// cancel it from any thread to make a send that is waiting for metadata or
+/// `buffer.memory` return an `INTERRUPT` error without appending its record.
+/// Once cancelled it stays cancelled, so use a fresh token per send (or per
+/// cancellation scope).
+#[repr(C)]
+pub struct kafka_producer_SendCancelToken_t {
+    _private: [u8; 0],
+}
+
+/// The state behind a [`kafka_producer_SendCancelToken_t`].
+struct SendCancelToken {
+    token: tokio_util::sync::CancellationToken,
+}
+
+/// Casts a `*const kafka_producer_SendCancelToken_t` to its [`SendCancelToken`].
+///
+/// # Safety
+///
+/// The pointer must be non-null and must have been created by
+/// [`kafka_producer_SendCancelToken_new`] and not yet destroyed.
+unsafe fn send_cancel_token_ref(token: *const kafka_producer_SendCancelToken_t) -> &'static SendCancelToken {
+    unsafe { &*(token as *const SendCancelToken) }
+}
+
+/// Creates a new, not-yet-cancelled send cancellation token. Free it with
+/// [`kafka_producer_SendCancelToken_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_producer_SendCancelToken_new() -> *mut kafka_producer_SendCancelToken_t {
+    let token = SendCancelToken { token: tokio_util::sync::CancellationToken::new() };
+    Box::into_raw(Box::new(token)) as *mut kafka_producer_SendCancelToken_t
+}
+
+/// Cancels `token`, waking any send currently waiting on it. Idempotent, callable
+/// from any thread, and a no-op for null.
+///
+/// # Safety
+///
+/// `token` must be null or a live token handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_SendCancelToken_cancel(token: *const kafka_producer_SendCancelToken_t) {
+    if token.is_null() {
+        return;
+    }
+    unsafe { send_cancel_token_ref(token) }.token.cancel();
+}
+
+/// Destroys `token`. Null is a no-op.
+///
+/// # Safety
+///
+/// `token` must be null or a live token handle. No send using it may still be in
+/// progress, and no [`kafka_producer_SendCancelToken_cancel`] on it may be running.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_SendCancelToken_destroy(token: *mut kafka_producer_SendCancelToken_t) {
+    if token.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(token as *mut SendCancelToken) });
 }
 
 /// Inner implementation of [`kafka_producer_Producer_send_batch`].
@@ -6263,5 +6585,689 @@ mod tests {
         // Null producer -> null handle (no panic).
         let null_map = unsafe { kafka_producer_Producer_metrics(std::ptr::null_mut()) };
         assert!(null_map.is_null());
+    }
+
+    // -- send_with_callback_cancellable ----------------------------------------
+    //
+    // Blocking send + push completion: the caller blocks until the record is
+    // appended (or `max.block.ms`), the future is destroyed right away, and the
+    // result arrives through the delivery callback on the dispatcher thread.
+
+    use crate::ffi::common::kafka_common_ErrorCode_t::{
+        kafka_common_ErrorCode_INTERRUPT, kafka_common_ErrorCode_INVALID_REQUEST,
+        kafka_common_ErrorCode_REQUEST_TIMED_OUT,
+    };
+
+    /// What one delivery callback observed.
+    #[derive(Debug)]
+    struct Delivery {
+        /// `(partition, offset)` of the delivered metadata, if any.
+        metadata: Option<(i32, i64)>,
+        /// `(code, message)` of the delivered error, if any.
+        error: Option<(kafka_common_ErrorCode_t, String)>,
+        /// Name of the thread the callback ran on.
+        thread: Option<String>,
+    }
+
+    /// The `user_data` [`probe_cb`] receives: a boxed sender it takes ownership of.
+    type DeliverySender = std::sync::mpsc::Sender<Delivery>;
+
+    fn probe_user_data(tx: &DeliverySender) -> usize {
+        Box::into_raw(Box::new(tx.clone())) as usize
+    }
+
+    /// Frees a `user_data` the send handed back (`out_callback_pending == false`).
+    unsafe fn release_probe_user_data(user_data: usize) {
+        drop(unsafe { Box::from_raw(user_data as *mut DeliverySender) });
+    }
+
+    /// Delivery callback that owns `user_data`, as the ABI says it does: it frees
+    /// it, and frees both handles, so a second invocation would be a double free.
+    unsafe extern "C" fn probe_cb(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let tx = unsafe { Box::from_raw(user_data as *mut DeliverySender) };
+        let delivery = Delivery {
+            metadata: (!metadata.is_null()).then(|| unsafe {
+                (
+                    kafka_producer_RecordMetadata_partition(metadata),
+                    kafka_producer_RecordMetadata_offset(metadata),
+                )
+            }),
+            error: unsafe { error_details(error) },
+            thread: std::thread::current().name().map(str::to_owned),
+        };
+        if !metadata.is_null() {
+            unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+        }
+        let _ = tx.send(delivery);
+    }
+
+    /// Copies out and frees an error handle; null → `None`.
+    unsafe fn error_details(error: *mut kafka_common_Error_t) -> Option<(kafka_common_ErrorCode_t, String)> {
+        if error.is_null() {
+            return None;
+        }
+        let code = unsafe { kafka_common_Error_code(error) };
+        let message = unsafe { CStr::from_ptr(kafka_common_Error_message(error)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { kafka_common_Error_destroy(error) };
+        Some((code, message))
+    }
+
+    /// Outcome of one cancellable send, with the error copied out and freed.
+    #[derive(Debug)]
+    struct Sent {
+        /// The returned future, as `usize` so the outcome can cross threads.
+        future: usize,
+        pending: bool,
+        error: Option<(kafka_common_ErrorCode_t, String)>,
+    }
+
+    impl Sent {
+        /// Destroys the future right away, as the binding does: the delivery
+        /// callback, not the future, carries the result.
+        fn destroy_future(&self) {
+            unsafe { kafka_producer_FutureRecordMetadata_destroy(self.future as *mut _) };
+        }
+    }
+
+    /// Calls `kafka_producer_Producer_send_with_callback_cancellable` for `value`
+    /// on topic `"topic"` with [`probe_cb`]. `out_callback_pending` starts `true`
+    /// so an error test sees the call overwrite it.
+    unsafe fn send_cancellable(producer: usize, value: &[u8], user_data: usize, cancel: usize) -> Sent {
+        let topic = CString::new("topic").unwrap();
+        let mut pending = true;
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let future = unsafe {
+            kafka_producer_Producer_send_with_callback_cancellable(
+                producer as *mut _,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                probe_cb,
+                user_data as *mut std::ffi::c_void,
+                cancel as *const kafka_producer_SendCancelToken_t,
+                &mut pending,
+                &mut err,
+            )
+        };
+        Sent { future: future as usize, pending, error: unsafe { error_details(err) } }
+    }
+
+    /// Runs [`send_cancellable`] on its own thread; the receiver yields the outcome
+    /// and how long the call blocked.
+    fn spawn_send(
+        producer: usize,
+        user_data: usize,
+        cancel: usize,
+    ) -> std::sync::mpsc::Receiver<(Sent, std::time::Duration)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let sent = unsafe { send_cancellable(producer, b"value", user_data, cancel) };
+            let _ = tx.send((sent, started.elapsed()));
+        });
+        rx
+    }
+
+    /// Returns once every completion already queued on `producer`'s dispatcher has
+    /// run. The queue is FIFO, so a callback that was going to be queued by then
+    /// would have been seen.
+    unsafe fn drain_dispatcher(producer: usize) {
+        let handle = unsafe { producer_handle(producer as *mut _) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        enqueue_or_run_inline(
+            &handle.completion_tx,
+            Box::new(move || {
+                let _ = tx.send(());
+            }),
+        );
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the dispatcher drains");
+    }
+
+    /// Creates a `KafkaProducer` whose bootstrap server refuses connections
+    /// (`127.0.0.1:1`), so a send parks on metadata for `max_block_ms`.
+    unsafe fn unreachable_kafka_producer(max_block_ms: &str) -> usize {
+        let entries = [("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", max_block_ms)];
+        let owned: Vec<CString> = entries
+            .iter()
+            .flat_map(|(k, v)| [CString::new(*k).unwrap(), CString::new(*v).unwrap()])
+            .collect();
+        let mut configs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+        configs.push(std::ptr::null());
+        let props = unsafe { kafka_producer_ProducerProperties_from_configs(configs.as_ptr()) };
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let producer = unsafe { kafka_producer_KafkaProducer_new(props, &mut err) };
+        unsafe { kafka_producer_ProducerProperties_destroy(props) };
+        unsafe { assert_success(err) };
+        assert!(!producer.is_null());
+        producer as usize
+    }
+
+    unsafe fn close_and_destroy(producer: usize) {
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_close(producer as *mut _, &mut err) };
+        unsafe { assert_success(err) };
+        unsafe { kafka_producer_Producer_destroy(producer as *mut _) };
+    }
+
+    /// How long a send that is expected to stay parked is watched before it is
+    /// released. Far below the 30 s `max.block.ms` the parked sends use.
+    const PARKED_FOR: std::time::Duration = std::time::Duration::from_millis(500);
+    /// Upper bound for a released send, close or flush to return.
+    const RETURNS_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// A tracked callback that is dropped without firing records the discard and
+    /// queues nothing.
+    #[test]
+    fn test_tracked_record_callback_dropped_unfired_is_discarded() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-tracked-dropped");
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let user_data = probe_user_data(&probe_tx);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discarded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback = make_tracked_record_callback(
+            RecordCallbackTarget { callback: probe_cb, user_data: user_data as *mut _ },
+            tx.clone(),
+            std::sync::Arc::clone(&fired),
+            std::sync::Arc::clone(&discarded),
+        );
+
+        drop(callback);
+        drop(tx);
+        dispatcher.join().expect("dispatcher thread joins");
+
+        assert!(discarded.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!fired.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(probe_rx.try_recv().is_err(), "a discarded callback never fires");
+        // Ownership of `user_data` came back with the discard.
+        unsafe { release_probe_user_data(user_data) };
+    }
+
+    /// A tracked callback that fires is not a discard, and fires once.
+    #[test]
+    fn test_tracked_record_callback_fired_is_not_discarded() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-tracked-fired");
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discarded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback = make_tracked_record_callback(
+            RecordCallbackTarget { callback: probe_cb, user_data: probe_user_data(&probe_tx) as *mut _ },
+            tx.clone(),
+            std::sync::Arc::clone(&fired),
+            std::sync::Arc::clone(&discarded),
+        );
+
+        callback(None, Some(&Error::transaction_aborted()));
+        assert!(!discarded.load(std::sync::atomic::Ordering::SeqCst));
+        drop(tx);
+        dispatcher.join().expect("dispatcher thread joins");
+
+        let delivery = probe_rx.try_recv().expect("the callback fired");
+        assert!(delivery.metadata.is_none());
+        assert!(delivery.error.is_some());
+        assert_eq!(delivery.thread.as_deref(), Some("test-tracked-fired"));
+        assert!(probe_rx.try_recv().is_err(), "exactly once");
+    }
+
+    /// A tracked callback held by someone else (a batch) is not a discard; it
+    /// fires later, once, and is still not a discard afterwards.
+    #[test]
+    fn test_tracked_record_callback_held_then_fired_is_not_discarded() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-tracked-held");
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discarded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback = make_tracked_record_callback(
+            RecordCallbackTarget { callback: probe_cb, user_data: probe_user_data(&probe_tx) as *mut _ },
+            tx.clone(),
+            std::sync::Arc::clone(&fired),
+            std::sync::Arc::clone(&discarded),
+        );
+
+        let held = std::sync::Mutex::new(Some(callback));
+        assert!(!discarded.load(std::sync::atomic::Ordering::SeqCst), "held, not discarded");
+        let callback = held.lock().unwrap().take().unwrap();
+        std::thread::spawn(move || callback(None, Some(&Error::transaction_aborted())))
+            .join()
+            .expect("the holder fires the callback");
+        assert!(!discarded.load(std::sync::atomic::Ordering::SeqCst));
+        drop(tx);
+        dispatcher.join().expect("dispatcher thread joins");
+
+        assert!(probe_rx.try_recv().is_ok(), "the callback fired");
+        assert!(probe_rx.try_recv().is_err(), "exactly once");
+    }
+
+    #[test]
+    fn test_send_cancel_token_lifecycle() {
+        unsafe {
+            let token = kafka_producer_SendCancelToken_new();
+            assert!(!token.is_null());
+            assert!(!send_cancel_token_ref(token).token.is_cancelled());
+            kafka_producer_SendCancelToken_cancel(token);
+            kafka_producer_SendCancelToken_cancel(token);
+            assert!(
+                send_cancel_token_ref(token).token.is_cancelled(),
+                "cancel is idempotent and sticky"
+            );
+            kafka_producer_SendCancelToken_destroy(token);
+            // Null is a no-op for both.
+            kafka_producer_SendCancelToken_cancel(std::ptr::null());
+            kafka_producer_SendCancelToken_destroy(std::ptr::null_mut());
+        }
+    }
+
+    /// Success: the call reports the callback pending, the future can be destroyed
+    /// at once, and the callback still delivers the metadata, on the dispatcher.
+    #[test]
+    fn test_send_with_callback_cancellable_mock_success_delivers_through_callback() {
+        let producer = kafka_producer_MockProducer_new(true) as usize;
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let topic = CString::new("topic").unwrap();
+        let value = b"value";
+        let mut pending = false;
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let future = unsafe {
+            kafka_producer_Producer_send_with_callback_cancellable(
+                producer as *mut _,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                probe_cb,
+                probe_user_data(&probe_tx) as *mut _,
+                std::ptr::null(),
+                &mut pending,
+                &mut err,
+            )
+        };
+        assert!(err.is_null());
+        assert!(!future.is_null());
+        assert!(pending, "a successful send leaves the callback pending");
+        unsafe { kafka_producer_FutureRecordMetadata_destroy(future) };
+
+        let delivery = probe_rx.recv_timeout(RETURNS_WITHIN).expect("the callback fires");
+        assert_eq!(delivery.metadata, Some((0, 0)));
+        assert!(delivery.error.is_none());
+        assert_eq!(delivery.thread.as_deref(), Some("kafka-producer-callback-dispatcher"));
+
+        // A second record, with null out-params: accepted, and gets the next offset.
+        let future = unsafe {
+            kafka_producer_Producer_send_with_callback_cancellable(
+                producer as *mut _,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                probe_cb,
+                probe_user_data(&probe_tx) as *mut _,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!future.is_null());
+        unsafe { kafka_producer_FutureRecordMetadata_destroy(future) };
+        assert_eq!(probe_rx.recv_timeout(RETURNS_WITHIN).unwrap().metadata, Some((0, 1)));
+        assert!(probe_rx.try_recv().is_err(), "one callback per record");
+
+        unsafe { close_and_destroy(producer) };
+    }
+
+    /// Manual completion: the callback fires when the mock completes the record,
+    /// not when `send` returns — with the metadata on success, the error on failure.
+    #[test]
+    fn test_send_with_callback_cancellable_mock_callback_fires_on_completion() {
+        let producer = kafka_producer_MockProducer_new(false) as usize;
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+
+        let first = unsafe { send_cancellable(producer, b"a", probe_user_data(&probe_tx), 0) };
+        let second = unsafe { send_cancellable(producer, b"b", probe_user_data(&probe_tx), 0) };
+        for sent in [&first, &second] {
+            assert!(sent.error.is_none(), "{sent:?}");
+            assert!(sent.pending);
+            sent.destroy_future();
+        }
+        unsafe { drain_dispatcher(producer) };
+        assert!(probe_rx.try_recv().is_err(), "nothing completes before the mock does");
+
+        assert!(unsafe { kafka_producer_MockProducer_complete_next(producer as *mut _) });
+        let delivery = probe_rx.recv_timeout(RETURNS_WITHIN).unwrap();
+        assert_eq!(delivery.metadata, Some((0, 0)));
+        assert!(delivery.error.is_none());
+
+        let message = CString::new("broker says no").unwrap();
+        assert!(unsafe {
+            kafka_producer_MockProducer_error_next(
+                producer as *mut _,
+                Errors::CorruptMessage.code() as i32,
+                message.as_ptr(),
+            )
+        });
+        let delivery = probe_rx.recv_timeout(RETURNS_WITHIN).unwrap();
+        let (_code, error_message) = delivery.error.expect("the failure is delivered");
+        assert_eq!(error_message, "broker says no");
+        assert!(probe_rx.try_recv().is_err());
+
+        unsafe { close_and_destroy(producer) };
+    }
+
+    /// Gap 1: a flush completes after every record it covers has delivered its
+    /// callback, because both go through the same FIFO dispatcher in that order.
+    #[test]
+    fn test_send_with_callback_cancellable_callbacks_precede_flush_completion() {
+        #[derive(Debug, PartialEq)]
+        enum Event {
+            Record(i32, i64),
+            Flushed,
+        }
+        type EventSender = std::sync::mpsc::Sender<Event>;
+
+        unsafe extern "C" fn record_cb(
+            metadata: *mut kafka_producer_RecordMetadata_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut std::ffi::c_void,
+        ) {
+            let tx = unsafe { Box::from_raw(user_data as *mut EventSender) };
+            assert!(error.is_null());
+            let event = unsafe {
+                Event::Record(
+                    kafka_producer_RecordMetadata_partition(metadata),
+                    kafka_producer_RecordMetadata_offset(metadata),
+                )
+            };
+            unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+            let _ = tx.send(event);
+        }
+        unsafe extern "C" fn flush_cb(error: *mut kafka_common_Error_t, user_data: *mut std::ffi::c_void) {
+            let tx = unsafe { Box::from_raw(user_data as *mut EventSender) };
+            assert!(error.is_null());
+            let _ = tx.send(Event::Flushed);
+        }
+
+        const RECORDS: i64 = 50;
+        let producer = kafka_producer_MockProducer_new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        let topic = CString::new("topic").unwrap();
+        for _ in 0..RECORDS {
+            let mut pending = false;
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = unsafe {
+                kafka_producer_Producer_send_with_callback_cancellable(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    b"v".as_ptr(),
+                    1,
+                    record_cb,
+                    Box::into_raw(Box::new(tx.clone())) as *mut _,
+                    std::ptr::null(),
+                    &mut pending,
+                    &mut err,
+                )
+            };
+            unsafe { assert_success(err) };
+            assert!(pending);
+            unsafe { kafka_producer_FutureRecordMetadata_destroy(future) };
+        }
+        unsafe {
+            kafka_producer_Producer_flush_async(producer, flush_cb, Box::into_raw(Box::new(tx.clone())) as *mut _)
+        };
+
+        let events: Vec<Event> = (0..=RECORDS).map(|_| rx.recv_timeout(RETURNS_WITHIN).unwrap()).collect();
+        let expected: Vec<Event> = (0..RECORDS)
+            .map(|offset| Event::Record(0, offset))
+            .chain([Event::Flushed])
+            .collect();
+        assert_eq!(events, expected, "every record callback runs before the flush completes");
+
+        unsafe { close_and_destroy(producer as usize) };
+    }
+
+    /// Validation failures happen before the callback exists: null return, an
+    /// error, and `out_callback_pending == false` — the caller owns `user_data`.
+    #[test]
+    fn test_send_with_callback_cancellable_validation_errors_are_not_pending() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let topic = CString::new("topic").unwrap();
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let cases: [(&str, *const c_char, *const u8, i32); 3] = [
+            ("null topic", std::ptr::null(), std::ptr::null(), -1),
+            ("null key with a length", topic.as_ptr(), std::ptr::null(), 3),
+            ("null key with length 0", topic.as_ptr(), std::ptr::null(), 0),
+        ];
+        for (what, topic_ptr, key, key_len) in cases {
+            let user_data = probe_user_data(&probe_tx);
+            let mut pending = true;
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = unsafe {
+                kafka_producer_Producer_send_with_callback_cancellable(
+                    producer,
+                    topic_ptr,
+                    -1,
+                    -1,
+                    key,
+                    key_len,
+                    b"v".as_ptr(),
+                    1,
+                    probe_cb,
+                    user_data as *mut _,
+                    std::ptr::null(),
+                    &mut pending,
+                    &mut err,
+                )
+            };
+            assert!(future.is_null(), "{what}");
+            assert!(!pending, "{what}: the callback is not pending");
+            assert_eq!(unsafe { assert_error(err) }, kafka_common_ErrorCode_INVALID_REQUEST, "{what}");
+            unsafe { release_probe_user_data(user_data) };
+        }
+        unsafe { drain_dispatcher(producer as usize) };
+        assert!(probe_rx.try_recv().is_err(), "no callback fired");
+        unsafe { close_and_destroy(producer as usize) };
+    }
+
+    /// A send the producer rejects before appending (closed) is not pending, and
+    /// its callback never fires.
+    #[test]
+    fn test_send_with_callback_cancellable_closed_mock_is_not_pending() {
+        let producer = kafka_producer_MockProducer_new(true) as usize;
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_close(producer as *mut _, &mut err) };
+        unsafe { assert_success(err) };
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let user_data = probe_user_data(&probe_tx);
+        let sent = unsafe { send_cancellable(producer, b"v", user_data, 0) };
+        assert_eq!(sent.future, 0);
+        assert!(!sent.pending);
+        assert_eq!(
+            sent.error,
+            Some((
+                kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                "MockProducer is already closed.".to_string()
+            ))
+        );
+        unsafe { drain_dispatcher(producer) };
+        assert!(probe_rx.try_recv().is_err(), "a rejected send's callback never fires");
+        unsafe { release_probe_user_data(user_data) };
+        unsafe { kafka_producer_Producer_destroy(producer as *mut _) };
+    }
+
+    /// A send that does not need to wait succeeds even with an already-cancelled
+    /// token, as a Java send on an interrupted thread succeeds unless it blocks.
+    #[test]
+    fn test_send_with_callback_cancellable_cancelled_token_does_not_fail_a_fast_send() {
+        let producer = kafka_producer_MockProducer_new(true) as usize;
+        let token = kafka_producer_SendCancelToken_new();
+        unsafe { kafka_producer_SendCancelToken_cancel(token) };
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+
+        let sent = unsafe { send_cancellable(producer, b"v", probe_user_data(&probe_tx), token as usize) };
+        assert!(sent.error.is_none(), "{sent:?}");
+        assert!(sent.pending);
+        sent.destroy_future();
+        assert_eq!(probe_rx.recv_timeout(RETURNS_WITHIN).unwrap().metadata, Some((0, 0)));
+
+        unsafe { kafka_producer_SendCancelToken_destroy(token) };
+        unsafe { close_and_destroy(producer) };
+    }
+
+    /// Cancelling a send parked on metadata returns `INTERRUPT` promptly, without
+    /// appending the record and without the callback — Java's `InterruptException`
+    /// out of `send()` (`KafkaProducer.java:1062-1065`).
+    #[test]
+    fn test_send_with_callback_cancellable_cancel_while_waiting_for_metadata() {
+        let producer = unsafe { unreachable_kafka_producer("30000") };
+        let token = kafka_producer_SendCancelToken_new();
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let user_data = probe_user_data(&probe_tx);
+
+        let outcome = spawn_send(producer, user_data, token as usize);
+        std::thread::sleep(PARKED_FOR);
+        assert!(outcome.try_recv().is_err(), "the send is parked on metadata");
+
+        unsafe { kafka_producer_SendCancelToken_cancel(token) };
+        let (sent, blocked_for) = outcome.recv_timeout(RETURNS_WITHIN).expect("the cancelled send returns");
+        assert!(blocked_for < RETURNS_WITHIN, "returned after {blocked_for:?}");
+        assert_eq!(sent.future, 0);
+        assert!(!sent.pending, "a cancelled send never fires its callback");
+        assert_eq!(
+            sent.error,
+            Some((kafka_common_ErrorCode_INTERRUPT, SEND_CANCELLED_MESSAGE.to_string()))
+        );
+
+        unsafe { drain_dispatcher(producer) };
+        assert!(probe_rx.try_recv().is_err());
+        unsafe { release_probe_user_data(user_data) };
+        unsafe { kafka_producer_SendCancelToken_destroy(token) };
+        unsafe { close_and_destroy(producer) };
+    }
+
+    /// A parked send holds no producer-wide lock: `flush` returns and a second
+    /// send is independently cancellable while the first stays parked.
+    #[test]
+    fn test_send_with_callback_cancellable_parked_send_does_not_block_other_calls() {
+        let producer = unsafe { unreachable_kafka_producer("30000") };
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let first_token = kafka_producer_SendCancelToken_new();
+        let second_token = kafka_producer_SendCancelToken_new();
+        let first_user_data = probe_user_data(&probe_tx);
+        let second_user_data = probe_user_data(&probe_tx);
+
+        let first = spawn_send(producer, first_user_data, first_token as usize);
+        std::thread::sleep(PARKED_FOR);
+        assert!(first.try_recv().is_err(), "the first send is parked");
+
+        // flush returns although a send is parked (there is nothing appended to flush).
+        let started = std::time::Instant::now();
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_flush(producer as *mut _, &mut err) };
+        unsafe { assert_success(err) };
+        assert!(started.elapsed() < RETURNS_WITHIN, "flush waited {:?}", started.elapsed());
+
+        // A second send parks as well, and cancelling it releases only it.
+        let second = spawn_send(producer, second_user_data, second_token as usize);
+        std::thread::sleep(PARKED_FOR);
+        assert!(second.try_recv().is_err(), "the second send is parked");
+        unsafe { kafka_producer_SendCancelToken_cancel(second_token) };
+        let (sent, _) = second.recv_timeout(RETURNS_WITHIN).expect("the second send returns");
+        assert_eq!(sent.error.map(|(code, _)| code), Some(kafka_common_ErrorCode_INTERRUPT));
+        assert!(!sent.pending);
+        assert!(first.try_recv().is_err(), "the first send is still parked");
+
+        unsafe { kafka_producer_SendCancelToken_cancel(first_token) };
+        let (sent, _) = first.recv_timeout(RETURNS_WITHIN).expect("the first send returns");
+        assert_eq!(sent.error.map(|(code, _)| code), Some(kafka_common_ErrorCode_INTERRUPT));
+        assert!(!sent.pending);
+
+        unsafe { drain_dispatcher(producer) };
+        assert!(probe_rx.try_recv().is_err());
+        unsafe {
+            release_probe_user_data(first_user_data);
+            release_probe_user_data(second_user_data);
+            kafka_producer_SendCancelToken_destroy(first_token);
+            kafka_producer_SendCancelToken_destroy(second_token);
+            close_and_destroy(producer);
+        }
+    }
+
+    /// `close` is not blocked by a parked send and wakes it: the send fails with
+    /// Java's "Producer closed while send in progress" (`KafkaProducer.java:993-998`),
+    /// a bare `KafkaException` that fires no callback. The send uses no token, so
+    /// this holds for uncancellable sends too.
+    #[test]
+    fn test_send_with_callback_cancellable_close_wakes_parked_send() {
+        let producer = unsafe { unreachable_kafka_producer("30000") };
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let user_data = probe_user_data(&probe_tx);
+
+        let outcome = spawn_send(producer, user_data, 0);
+        std::thread::sleep(PARKED_FOR);
+        assert!(outcome.try_recv().is_err(), "the send is parked on metadata");
+
+        let started = std::time::Instant::now();
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_close(producer as *mut _, &mut err) };
+        unsafe { assert_success(err) };
+        assert!(started.elapsed() < RETURNS_WITHIN, "close waited {:?}", started.elapsed());
+
+        let (sent, _) = outcome.recv_timeout(RETURNS_WITHIN).expect("close wakes the parked send");
+        assert_eq!(sent.future, 0);
+        assert!(!sent.pending);
+        let (_code, message) = sent.error.expect("the woken send fails");
+        assert_eq!(message, "Producer closed while send in progress");
+
+        unsafe { drain_dispatcher(producer) };
+        assert!(probe_rx.try_recv().is_err());
+        unsafe { release_probe_user_data(user_data) };
+        unsafe { kafka_producer_Producer_destroy(producer as *mut _) };
+    }
+
+    /// `max.block.ms` running out on metadata is an `ApiException` in Java, which
+    /// `send()` reports through the callback and a failed future rather than by
+    /// throwing (`KafkaProducer.java:1056-1068`): the call succeeds, the callback is
+    /// pending, and it delivers the timeout with the `-1` placeholder metadata.
+    #[test]
+    fn test_send_with_callback_cancellable_metadata_timeout_is_delivered_through_callback() {
+        let producer = unsafe { unreachable_kafka_producer("200") };
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+
+        let sent = unsafe { send_cancellable(producer, b"v", probe_user_data(&probe_tx), 0) };
+        assert!(sent.error.is_none(), "{sent:?}");
+        assert!(sent.pending);
+        sent.destroy_future();
+
+        let delivery = probe_rx.recv_timeout(RETURNS_WITHIN).expect("the callback fires");
+        assert_eq!(delivery.metadata, Some((-1, -1)), "Java's placeholder metadata");
+        assert_eq!(
+            delivery.error,
+            Some((
+                kafka_common_ErrorCode_REQUEST_TIMED_OUT,
+                "Topic topic not present in metadata after 200 ms.".to_string()
+            ))
+        );
+        assert!(probe_rx.try_recv().is_err());
+
+        unsafe { close_and_destroy(producer) };
     }
 }
