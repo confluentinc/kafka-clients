@@ -170,9 +170,9 @@ pub struct KafkaProducer<K, V> {
     /// (built-in partitioning when unset) — hence [`Option`]. Resolved from
     /// `partitioner.class` via
     /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)
-    /// or supplied as an instance through
-    /// [`with_partitioner`](Self::with_partitioner).
-    partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    /// or set with
+    /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner).
+    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
     /// Which hash the keyed partition path uses, resolved from
@@ -264,7 +264,7 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// Java's `partitioner`. Stored as-is and **not** configured, mirroring
     /// `KafkaProducer.java:502`, which wraps a pre-built `Partitioner` without
     /// calling `configure`.
-    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    pub partitioner: Option<Arc<dyn Partitioner<K, V>>>,
 }
 
 /// Fluent builder for [`KafkaProducerOptions`].
@@ -287,7 +287,7 @@ pub(crate) struct KafkaProducerOptionsBuilder<'a, K, V> {
     time: Option<Arc<dyn Time>>,
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     pending_requests: Option<Arc<Mutex<PendingRequests>>>,
-    partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
 }
 
 impl<K, V> Default for KafkaProducerOptionsBuilder<'_, K, V> {
@@ -381,7 +381,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
         self
     }
     /// Sets [`KafkaProducerOptions::partitioner`]; defaults to `None`.
-    pub(crate) fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
+    pub(crate) fn set_partitioner(mut self, partitioner: Option<Arc<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
@@ -487,9 +487,8 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     /// The custom partitioner instance (already `configure`d by the caller), or
     /// `None` for the built-in default partitioner. Callers that resolve a
     /// partitioner also gate adaptive partitioning on its absence before
-    /// building the `accumulator` they pass in (see
-    /// [`KafkaProducer::with_partitioner`]).
-    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    /// building the `accumulator` they pass in (see `KafkaProducer::new`).
+    pub partitioner: Option<Arc<dyn Partitioner<K, V>>>,
 }
 
 /// Fluent builder for [`KafkaProducerClientOptions`].
@@ -510,7 +509,7 @@ pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     sender_metrics_registry: Option<SenderMetricsRegistry>,
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     pending_requests: Option<Arc<Mutex<PendingRequests>>>,
-    partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
 }
 
 impl<K, V, C> Default for KafkaProducerClientOptionsBuilder<'_, K, V, C> {
@@ -604,7 +603,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
         self
     }
     /// Sets [`KafkaProducerClientOptions::partitioner`]; defaults to `None`.
-    pub(crate) fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
+    pub(crate) fn set_partitioner(mut self, partitioner: Option<Arc<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
@@ -783,8 +782,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// constructor that could hold the plain name on its behalf. Rather than
     /// leave `new` permanently unused and rename the only general-purpose
     /// constructor after a sibling that can never exist,
-    /// the plain name stays here; `with_partitioner` remains suffixed
-    /// by the one parameter that distinguishes it. The consumer side takes the
+    /// the plain name stays here. The consumer side takes the
     /// identical decision — see
     /// `AsyncKafkaConsumer::new`.
     ///
@@ -833,7 +831,11 @@ impl<K, V> KafkaProducer<K, V> {
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        K: 'static,
+        V: 'static,
+    {
         // Java wraps the whole constructor body in `catch (Throwable t)` and
         // relabels every failure (`KafkaProducer.java:461-466`):
         //
@@ -847,79 +849,29 @@ impl<K, V> KafkaProducer<K, V> {
         // has nothing to do here: every fallible step in `new_inner`
         // precedes the `Selector` / `NetworkClient` / sender-task construction, so
         // no socket and no spawned task can leak.
-        Self::new_inner(config, key_serializer, value_serializer, None)
+        Self::new_inner(config, key_serializer, value_serializer)
             .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
 
-    /// Creates a `KafkaProducer` from configuration, serializers, and an explicit
-    /// custom [`Partitioner`] instance.
+    /// The body of [`new`](Self::new).
     ///
-    /// This is Rust's counterpart to configuring a user-written partitioner
-    /// through Java's `partitioner.class`. Java loads the named class reflectively
-    /// (`KafkaProducer.java:381-388`), but Rust has no reflection, so a
-    /// user-written [`Partitioner`] is supplied here as an instance instead. The
-    /// producer takes ownership and `configure`s it exactly as the
-    /// `partitioner.class` path does — with the user config map
-    /// ([`ProducerConfig::originals`](crate::producer::ProducerConfig)) plus the
-    /// resolved `client.id` — before sharing it with the send path. As with a
-    /// `partitioner.class` partitioner, adaptive partitioning is disabled while a
-    /// custom partitioner is in use.
-    ///
-    /// The explicit instance takes precedence over any built-in partitioner that
-    /// `partitioner.class` would otherwise name, mirroring how Java's
-    /// `getConfiguredInstance` returns the caller-provided instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The producer configuration
-    /// * `key_serializer` - The key serializer
-    /// * `value_serializer` - The value serializer
-    /// * `partitioner` - The custom partitioner instance to use
-    ///
-    /// # Errors
-    ///
-    /// Exactly as for [`new`](Self::new): every construction
-    /// failure — such as the [`Error::LocalIllegalArgument`] raised when no valid
-    /// bootstrap server addresses can be resolved from `config.bootstrap_servers`
-    /// — is returned relabelled as Java's
-    /// `KafkaException("Failed to construct kafka producer", t)`, an
-    /// [`Error::KafkaError`] carrying the underlying failure as its source.
-    #[doc(
-        alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(ProducerConfig,LogContext,Metrics,Serializer,Serializer,ProducerMetadata,RecordAccumulator,TransactionManager,Sender,ProducerInterceptors,Partitioner,Time,SenderThread,Optional)"
-    )]
-    pub fn with_partitioner(
-        config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-        partitioner: Box<dyn Partitioner<K, V>>,
-    ) -> Result<Self, Error> {
-        // Same `catch (Throwable t)` relabelling as `new` above
-        // (`KafkaProducer.java:461-466`): Java has a single constructor body
-        // behind both the `partitioner.class` and the caller-supplied-instance
-        // paths, so both Rust constructors wrap identically.
-        Self::new_inner(config, key_serializer, value_serializer, Some(partitioner))
-            .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
-    }
-
-    /// Shared implementation behind [`new`](Self::new) and
-    /// [`with_partitioner`](Self::with_partitioner).
-    ///
-    /// `explicit_partitioner` is `Some` only on the
-    /// [`with_partitioner`](Self::with_partitioner) path;
-    /// when it is `None`, the partitioner is resolved from `partitioner.class`
-    /// (built-in names only, via
-    /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)).
-    /// Either way, a resolved partitioner is `configure`d exactly once here
-    /// (`originals` + `client.id`, Java `KafkaProducer.java:381-388`), and adaptive
-    /// partitioning is gated on its absence, so both public constructors share one
-    /// configure + adaptive-gating code path. Errors escape raw from here; the
-    /// public constructors relabel them (`KafkaProducer.java:461-466`).
+    /// The partitioner is resolved from `partitioner.class` (a built-in name, or
+    /// the partitioner set with
+    /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner))
+    /// via `ProducerConfig::resolve_partitioner`. A resolved partitioner is
+    /// `configure`d exactly once here (`originals` + `client.id`, Java
+    /// `KafkaProducer.java:381-388`), and adaptive partitioning is gated on its
+    /// absence. Errors escape raw from here; `new` relabels them
+    /// (`KafkaProducer.java:461-466`).
     fn new_inner(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-        explicit_partitioner: Option<Box<dyn Partitioner<K, V>>>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        K: 'static,
+        V: 'static,
+    {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");
@@ -1025,10 +977,9 @@ impl<K, V> KafkaProducer<K, V> {
         // 9b. Resolve and configure the partitioner. Translated from
         //     `KafkaProducer.java:381-388`: Java reflectively instantiates
         //     `partitioner.class` and calls `partitioner.configure(originals +
-        //     {client.id -> clientId})`. Rust has no reflection, so an explicit
-        //     instance (`with_partitioner`) wins; otherwise the built-in
+        //     {client.id -> clientId})`. Rust has no reflection, so the built-in
         //     `partitioner.class` names resolve here, and a user-written partitioner
-        //     is always supplied as an instance. It is configured with the user
+        //     is the value set with `ProducerConfig::set_partitioner`. It is configured with the user
         //     config map (`originals`) plus the resolved (possibly generated)
         //     `client.id`, so a generated `producer-N` id is visible to `configure`
         //     just as in Java. Resolved after metrics/`TransactionManager` creation
@@ -1036,14 +987,14 @@ impl<K, V> KafkaProducer<K, V> {
         //     adaptive-partitioning flag is gated on the partitioner's absence below.
         //
         //     KAFKA-2121: Java's constructor `catch (Throwable)` closes an
-        //     already-constructed partitioner. Here, partitioner setup is infallible
-        //     (`resolve_partitioner` -> `Option`, `configure` -> `()`), and every
-        //     fallible `?` step above runs *before* this point, so no reachable
-        //     fallible step follows the partitioner's construction; the normal
-        //     `close()` path is therefore the only one, and no close-on-error path is
-        //     needed.
-        let mut partitioner = explicit_partitioner.or_else(|| config.resolve_partitioner::<K, V>());
-        if let Some(partitioner) = partitioner.as_mut() {
+        //     already-constructed partitioner. Here, `resolve_partitioner` fails
+        //     only before resolving one (a partitioner written for other record
+        //     types), `configure` is infallible, and every other fallible `?` step
+        //     runs *before* this point, so no reachable fallible step follows the
+        //     partitioner's construction; the normal `close()` path is therefore the
+        //     only one, and no close-on-error path is needed.
+        let partitioner = config.resolve_partitioner::<K, V>()?;
+        if let Some(partitioner) = &partitioner {
             let mut configs = config.originals.clone();
             configs.insert(ProducerConfig::CLIENT_ID_CONFIG.to_string(), config.client_id.clone());
             partitioner.configure(&configs);
@@ -3613,7 +3564,7 @@ mod tests {
     }
 
     impl<K, V> Partitioner<K, V> for PartitionerForClientId {
-        fn configure(&mut self, configs: &HashMap<String, String>) {
+        fn configure(&self, configs: &HashMap<String, String>) {
             if let Some(id) = configs.get(ProducerConfig::CLIENT_ID_CONFIG) {
                 self.client_ids.lock().unwrap().push(id.clone());
             }
@@ -3707,7 +3658,7 @@ mod tests {
                 .set_wakeup(wakeup)
                 .set_time(default_time())
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
-                .set_partitioner(Some(partitioner))
+                .set_partitioner(Some(Arc::from(partitioner)))
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
@@ -3795,22 +3746,23 @@ mod tests {
     /// sets none. Java asserts the same for the two serializers and the interceptor
     /// (`CLIENT_IDS.size() == 4`); Rust's `Serializer` has no `configure(client.id)`
     /// hook and no `ProducerInterceptor` exists yet, so only the partitioner is checked
-    /// here — hence exactly ONE recorded id rather than four. The producer is built via
-    /// `with_partitioner` so `configure` actually runs (the `new()` seam
-    /// does not configure).
+    /// here — hence exactly ONE recorded id rather than four. The partitioner is set
+    /// with `ProducerConfig::set_partitioner`, as Java sets `partitioner.class`,
+    /// so `new` builds and `configure`s it (the `with_options` seam does not
+    /// configure).
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#configurableObjectsShouldSeeGeneratedClientId")]
     async fn configurable_objects_should_see_generated_client_id() {
         let client_ids = Arc::new(Mutex::new(Vec::new()));
         let props = guard_props(&[]); // bootstrap only; NO client.id
-        let config = ProducerConfig::new(&props).expect("valid config");
-        let producer = KafkaProducer::<String, String>::with_partitioner(
-            config,
-            Box::new(StringSerializer),
-            Box::new(StringSerializer),
-            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
-        )
-        .expect("constructs with an explicit partitioner");
+        let config = ProducerConfig::new(&props)
+            .expect("valid config")
+            .set_partitioner::<String, String>(Arc::new(PartitionerForClientId {
+                client_ids: Arc::clone(&client_ids),
+            }));
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("constructs with a custom partitioner");
 
         assert!(!producer.client_id().is_empty(), "a client.id is generated when unset");
         let recorded = client_ids.lock().unwrap();
@@ -3963,33 +3915,65 @@ mod tests {
         );
     }
 
-    /// An explicit partitioner instance passed to `with_partitioner` wins
-    /// over a built-in `partitioner.class`, mirroring Java's `getConfiguredInstance`
-    /// returning the caller-provided instance. Verified via `configure`: only the
-    /// explicit `PartitionerForClientId` records the client.id (`RoundRobinPartitioner`'s
-    /// `configure` is the default no-op), so a single recorded id proves the explicit
-    /// instance — not the RoundRobin named by `partitioner.class` — was resolved and
-    /// configured.
+    /// `ProducerConfig::set_partitioner` replaces a built-in `partitioner.class`
+    /// from the properties, as a later value for the same key would in Java.
+    /// Verified via `configure`: only `PartitionerForClientId` records the client.id
+    /// (`RoundRobinPartitioner`'s `configure` is the default no-op), so a single
+    /// recorded id proves the user-written partitioner — not the RoundRobin named in
+    /// the properties — was built and configured.
     #[tokio::test]
-    async fn test_explicit_partitioner_instance_wins_over_partitioner_class() {
+    async fn test_set_partitioner_replaces_partitioner_class_property() {
         let client_ids = Arc::new(Mutex::new(Vec::new()));
         let props = guard_props(&[("partitioner.class", "RoundRobinPartitioner")]);
-        let config = ProducerConfig::new(&props).expect("valid config");
-        let producer = KafkaProducer::<String, String>::with_partitioner(
+        let config = ProducerConfig::new(&props)
+            .expect("valid config")
+            .set_partitioner::<String, String>(Arc::new(PartitionerForClientId {
+                client_ids: Arc::clone(&client_ids),
+            }));
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("set_partitioner overrides partitioner.class");
+
+        let recorded = client_ids.lock().unwrap();
+        assert_eq!(1, recorded.len(), "PartitionerForClientId was configured, not RoundRobin");
+        assert_eq!(recorded[0].as_str(), producer.client_id());
+        assert!(
+            !producer.accumulator.enable_adaptive_partitioning_for_test(),
+            "a custom partitioner disables adaptive partitioning"
+        );
+    }
+
+    /// A partitioner set with `ProducerConfig::set_partitioner` for other
+    /// record types than the producer's fails construction, as Java's
+    /// `getConfiguredInstance` throws `KafkaException("<class> is not an instance of
+    /// <type>")` for a class that does not implement the requested interface. The
+    /// failure is relabelled like every other construction failure.
+    #[tokio::test]
+    async fn test_set_partitioner_with_other_record_types_fails() {
+        let props = guard_props(&[]);
+        let config = ProducerConfig::new(&props)
+            .expect("valid config")
+            .set_partitioner::<Vec<u8>, Vec<u8>>(Arc::new(RoundRobinPartitioner::new()));
+        let err = match KafkaProducer::<String, String>::new(
             config,
             Box::new(StringSerializer),
             Box::new(StringSerializer),
-            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
-        )
-        .expect("explicit instance overrides partitioner.class");
-
-        let recorded = client_ids.lock().unwrap();
-        assert_eq!(
-            1,
-            recorded.len(),
-            "the explicit PartitionerForClientId was configured, not RoundRobin"
+        ) {
+            Ok(_) => panic!("a partitioner for other record types must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Failed to construct kafka producer"), "{err}");
+        let source = std::error::Error::source(&err)
+            .expect("the cause is kept as the source")
+            .to_string();
+        assert!(
+            source.contains(&format!(
+                "{} is not an instance of {}",
+                std::any::type_name::<dyn Partitioner<Vec<u8>, Vec<u8>>>(),
+                std::any::type_name::<dyn Partitioner<String, String>>()
+            )),
+            "{source}"
         );
-        assert_eq!(recorded[0].as_str(), producer.client_id());
     }
 
     /// Tests that a record can be successfully sent and appended to the accumulator.
@@ -4840,8 +4824,8 @@ mod tests {
     #[tokio::test]
     async fn test_send_allocations_do_not_grow_with_a_custom_partitioner() {
         async fn steady_state_send_allocations(with_partitioner: bool) -> usize {
-            let partitioner: Option<Box<dyn Partitioner<String, String>>> = if with_partitioner {
-                Some(Box::new(RoundRobinPartitioner::new()))
+            let partitioner: Option<Arc<dyn Partitioner<String, String>>> = if with_partitioner {
+                Some(Arc::new(RoundRobinPartitioner::new()))
             } else {
                 None
             };

@@ -42,10 +42,6 @@ crate::consumer::consumer_record::ConsumerRecordOptions*  # ConsumerRecord const
 crate::producer::mock_producer::MockProducerOptions*  # MockProducer constructor overloads
 crate::producer::producer_record::ProducerRecordOptions*  # ProducerRecord constructor overloads
 
-# --- Public methods translating a Java method that is not public ---
-
-org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(ProducerConfig,LogContext,Metrics,Serializer,Serializer,ProducerMetadata,RecordAccumulator,TransactionManager,Sender,ProducerInterceptors,Partitioner,Time,SenderThread,Optional)  # `with_partitioner`: Java loads a custom `Partitioner` (a public interface) from `partitioner.class` by reflection, which Rust lacks, so the instance is passed in; this test-visible constructor is the only Java one taking it
-
 # --- C-only handles: a Java collection, `Properties` or `String` crossing FFI ---
 
 kafka_admin_AdminClientProperties  # the `Properties` passed to the admin client constructor

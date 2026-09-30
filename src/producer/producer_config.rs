@@ -20,7 +20,9 @@
 //! reflection framework. The field names and default values match the Java
 //! config keys.
 
+use std::any::{Any, type_name};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
@@ -205,13 +207,18 @@ pub struct ProducerConfig {
     /// with the Java `ConfigException` "could not be found" message. Java loads
     /// the named class reflectively; Rust has no reflection, so only the built-in
     /// names above resolve here, and a user-written
-    /// [`Partitioner`](crate::producer::Partitioner) is instead passed as an
-    /// instance through
-    /// [`KafkaProducer`](crate::producer::KafkaProducer)'s
-    /// `with_partitioner` constructor. Unlike Java, this Rust
-    /// client's default key hash is CRC-32, not murmur2 — see
+    /// [`Partitioner`](crate::producer::Partitioner) is instead set with
+    /// [`set_partitioner`](Self::set_partitioner). Unlike Java, this
+    /// Rust client's default key hash is CRC-32, not murmur2 — see
     /// `design/current/partitioner.md`.
     pub(crate) partitioner_class: Option<String>,
+
+    /// The [`Partitioner`] set with [`set_partitioner`](Self::set_partitioner),
+    /// the value of Java's `partitioner.class`. Its record types are erased,
+    /// because `ProducerConfig` is not generic over them;
+    /// [`resolve_partitioner`](Self::resolve_partitioner) recovers them for the
+    /// producer being built.
+    pub(crate) partitioner: Option<ConfiguredPartitioner>,
 
     // --- Transactions ---
     /// `transactional.id` - TransactionalId for transactional delivery.
@@ -267,6 +274,20 @@ pub struct ProducerConfig {
     pub(crate) originals: HashMap<String, String>,
 }
 
+/// The [`Partitioner`] set with [`ProducerConfig::set_partitioner`], with its
+/// record types erased.
+///
+/// No Java counterpart: Java holds the `partitioner.class` value in the config
+/// map as an `Object`. It is needed because [`ProducerConfig`] is not generic
+/// over the record types the partitioner is written for.
+#[derive(Clone, Debug)]
+pub(crate) struct ConfiguredPartitioner {
+    /// An `Arc<dyn Partitioner<K, V>>`.
+    partitioner: Arc<dyn Any + Send + Sync>,
+    /// `dyn Partitioner<K, V>`, named in the type mismatch error.
+    type_name: &'static str,
+}
+
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
@@ -302,6 +323,7 @@ impl Default for ProducerConfig {
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
             partitioner_class: None,
+            partitioner: None,
             transactional_id: None,
             transaction_timeout_ms: 60_000,
             metrics_sample_window_ms: 30_000,
@@ -676,22 +698,68 @@ impl ProducerConfig {
     /// - the two [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner)
     ///   spellings ([`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) and
     ///   [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN)) →
-    ///   `Some(Box::new(RoundRobinPartitioner::new()))`;
+    ///   `Some(Arc::new(RoundRobinPartitioner::new()))`;
     /// - every other accepted value (unset, `ConsistentRandomPartitioner`,
     ///   `Murmur2RandomPartitioner`) → `None`, meaning the built-in default
     ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
     ///
-    /// A user-supplied `Partitioner` is instead passed as an instance through
-    /// [`KafkaProducer::with_partitioner`](crate::producer::KafkaProducer::with_partitioner).
+    /// The partitioner set with [`set_partitioner`](Self::set_partitioner)
+    /// takes precedence over a `partitioner.class` name.
     ///
     /// `from_properties` has already rejected any value that is neither a
     /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
     /// here.
-    pub(crate) fn resolve_partitioner<K, V>(&self) -> Option<Box<dyn Partitioner<K, V>>> {
-        match self.partitioner_class.as_deref() {
-            Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
-            _ => None,
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KafkaError`] when the partitioner set with
+    /// `set_partitioner` partitions records of other types than the producer's
+    /// `K` / `V`: Java's `getConfiguredInstance` throws
+    /// `KafkaException(c.getName() + " is not an instance of " + t.getName())`
+    /// when the configured value does not implement the requested type.
+    pub(crate) fn resolve_partitioner<K: 'static, V: 'static>(
+        &self,
+    ) -> Result<Option<Arc<dyn Partitioner<K, V>>>, Error> {
+        if let Some(configured) = &self.partitioner {
+            let Some(partitioner) = configured.partitioner.downcast_ref::<Arc<dyn Partitioner<K, V>>>() else {
+                return Err(Error::kafka_message(format!(
+                    "{} is not an instance of {}",
+                    configured.type_name,
+                    type_name::<dyn Partitioner<K, V>>()
+                )));
+            };
+            return Ok(Some(Arc::clone(partitioner)));
         }
+        Ok(match self.partitioner_class.as_deref() {
+            Some(value) if Self::is_round_robin_partitioner(value) => Some(Arc::new(RoundRobinPartitioner::new())),
+            _ => None,
+        })
+    }
+
+    /// Sets the [`Partitioner`] that determines which partition each record
+    /// goes to: the value of Java's `partitioner.class`.
+    ///
+    /// Java names a class, which the producer instantiates by reflection; here
+    /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
+    /// `configure`s it with the user configs plus the resolved `client.id`, as
+    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// with any configured partitioner, adaptive partitioning is then disabled.
+    /// Every producer built from this config, or from a clone of it, shares
+    /// the same instance.
+    ///
+    /// This replaces a `partitioner.class` given in the properties passed to
+    /// [`new`](Self::new), as a later value for the same key would.
+    ///
+    /// The partitioner's `K` / `V` must be the record types of the producer built
+    /// from this config; otherwise `KafkaProducer::new` fails with
+    /// "`<partitioner>` is not an instance of `<expected>`".
+    pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Arc<dyn Partitioner<K, V>>) -> Self {
+        self.partitioner_class = None;
+        self.partitioner = Some(ConfiguredPartitioner {
+            partitioner: Arc::new(partitioner),
+            type_name: type_name::<dyn Partitioner<K, V>>(),
+        });
+        self
     }
 
     /// Whether the user set `key` explicitly.
@@ -1114,7 +1182,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
-        assert!(config.resolve_partitioner::<String, String>().is_some());
+        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
 
     /// `resolve_partitioner` also resolves the fully-qualified Java class name,
@@ -1127,7 +1195,7 @@ mod tests {
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
         );
         let config = ProducerConfig::new(&props).unwrap();
-        assert!(config.resolve_partitioner::<String, String>().is_some());
+        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
 
     /// With no `partitioner.class`, `resolve_partitioner` returns `None`: the
@@ -1137,7 +1205,7 @@ mod tests {
     fn test_resolve_partitioner_default_none() {
         let config = ProducerConfig::new(&HashMap::new()).unwrap();
         assert!(config.partitioner_class.is_none());
-        assert!(config.resolve_partitioner::<String, String>().is_none());
+        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_none());
     }
 
     /// The other accepted `partitioner.class` values name Java's built-in
@@ -1152,7 +1220,7 @@ mod tests {
             props.insert("partitioner.class".to_string(), name.to_string());
             let config = ProducerConfig::new(&props).unwrap();
             assert!(
-                config.resolve_partitioner::<String, String>().is_none(),
+                config.resolve_partitioner::<String, String>().expect("resolves").is_none(),
                 "{name} must not resolve to a Partitioner instance"
             );
         }
