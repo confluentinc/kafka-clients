@@ -46,6 +46,12 @@ async fn run() -> Result<(), Error> {
     consumer.subscribe_with_topics(vec![TOPIC_NAME.to_string()]).await?;
     println!("Subscribed to topic: {TOPIC_NAME}");
 
+    let handle = consumer.handle();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await; // needs tokio's "signal" feature
+        handle.wakeup();
+    });
+
     let result = consume_loop(&mut *consumer).await;
     let close_result = consumer.close().await;
     result.and(close_result)
