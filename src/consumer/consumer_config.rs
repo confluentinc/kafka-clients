@@ -34,9 +34,11 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::Error;
+use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -72,7 +74,7 @@ pub struct ConsumerConfig {
     /// `bootstrap.servers` — initial connection list.
     pub(crate) bootstrap_servers: Vec<String>,
     /// `client.dns.lookup` — DNS lookup behavior.
-    pub(crate) client_dns_lookup: String,
+    pub(crate) client_dns_lookup: ClientDnsLookup,
     /// `client.id` — the client identifier. Empty by default.
     pub(crate) client_id: String,
     /// `client.rack` — the rack identifier for rack-aware fetching.
@@ -199,7 +201,7 @@ impl Default for ConsumerConfig {
             heartbeat_interval_ms: 3_000,
 
             bootstrap_servers: Vec::new(),
-            client_dns_lookup: "use_all_dns_ips".to_string(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             client_rack: String::new(),
 
@@ -283,8 +285,9 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup`.
-    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = "client.dns.lookup";
+    /// Config key: `client.dns.lookup`. Java's `ConsumerConfig.java` declares it as its
+    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
@@ -397,6 +400,10 @@ impl ConsumerConfig {
     /// `bootstrap.servers`.
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
+    }
+    /// `client.dns.lookup`.
+    pub(crate) fn client_dns_lookup(&self) -> ClientDnsLookup {
+        self.client_dns_lookup
     }
     /// `client.id`.
     pub fn client_id(&self) -> &str {
@@ -566,13 +573,25 @@ impl ConsumerConfig {
         // and the string-enum keys.
         let mut config = Self::default();
 
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so
+        // `ConfigDef.parseValue` rejects a missing key at parse time
+        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // check runs before any other value is parsed, as in Java.
+        if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
+            return Err(Error::config_message(format!(
+                "Missing required configuration \"{}\" which has no default value.",
+                Self::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
+
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = split_csv(value);
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`).
+                    config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
-                    config.client_dns_lookup = value.clone();
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.clone();
@@ -641,7 +660,8 @@ impl ConsumerConfig {
                 },
                 Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG => {
                     // Accepted silently per scope §20.
-                    config.partition_assignment_strategy = split_csv(value);
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:449`).
+                    config.partition_assignment_strategy = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
                     // Java attaches `new AutoOffsetResetStrategy.Validator()` to
@@ -792,10 +812,11 @@ impl ConsumerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
-                    config.config_providers = split_csv(value);
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:707`).
+                    config.config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 _ => {
                     warn!("Unknown consumer configuration key: {key}");
@@ -803,18 +824,11 @@ impl ConsumerConfig {
             }
         }
 
+        config
+            .client_dns_lookup
+            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
-}
-
-fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .filter_map(|s| {
-            let t = s.trim();
-            (!t.is_empty()).then(|| t.to_string())
-        })
-        .collect()
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
@@ -837,6 +851,12 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
 mod tests {
     use super::*;
 
+    /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
+    /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
+    fn base_props() -> HashMap<String, String> {
+        HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())])
+    }
+
     #[test]
     fn test_default_values() {
         let c = ConsumerConfig::default();
@@ -855,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_new_basic() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093".to_string());
         props.insert("group.id".to_string(), "g".to_string());
         props.insert("client.id".to_string(), "my-consumer".to_string());
@@ -869,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_new_unknown_key_ignored() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("unknown.key".to_string(), "value".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
@@ -881,13 +901,13 @@ mod tests {
     #[test]
     fn test_metrics_num_samples_validator() {
         // Valid: >= 1.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "3".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_num_samples, 3);
 
         // Invalid: 0 (< 1).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "0".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -897,7 +917,7 @@ mod tests {
         );
 
         // Invalid: negative.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
     }
@@ -907,18 +927,18 @@ mod tests {
     #[test]
     fn test_metrics_sample_window_ms_validator() {
         // Valid: >= 0 (0 is allowed).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 0);
 
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 60_000);
 
         // Invalid: negative.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
@@ -935,14 +955,14 @@ mod tests {
     #[test]
     fn test_metrics_recording_level_validator() {
         for level in ["INFO", "DEBUG", "TRACE"] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("metrics.recording.level".to_string(), level.to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.metrics_recording_level, level);
         }
 
         // Lowercase is rejected (case-sensitive membership check).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "debug".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         assert!(
@@ -954,7 +974,7 @@ mod tests {
         );
 
         // A wholly unknown value is rejected too.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
     }
@@ -968,7 +988,7 @@ mod tests {
             ("SASL_PLAINTEXT", SecurityProtocol::SaslPlaintext),
             ("SASL_SSL", SecurityProtocol::SaslSsl),
         ] {
-            let mut props = HashMap::new();
+            let mut props = base_props();
             props.insert("security.protocol".to_string(), input.to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.security_protocol, expected, "for input {input}");
@@ -979,7 +999,7 @@ mod tests {
     /// `security.protocol` parsing is case-insensitive (mirrors Java/`for_name`).
     #[test]
     fn test_security_protocol_case_insensitive() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.security_protocol, SecurityProtocol::SaslSsl);
@@ -990,7 +1010,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
         let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = format!("{}", err);
@@ -999,10 +1019,52 @@ mod tests {
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
     }
 
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so a config
+    /// without it fails at parse time with `ConfigDef.parseValue`'s message.
+    #[test]
+    fn test_missing_bootstrap_servers_rejected_with_exact_message() {
+        let err = ConsumerConfig::new(&HashMap::new()).unwrap_err();
+        let Error::Config(config_err) = &err else {
+            panic!("expected a config error, got: {err:?}");
+        };
+        assert_eq!(
+            config_err.message(),
+            "Missing required configuration \"bootstrap.servers\" which has no default value."
+        );
+    }
+
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `ConsumerConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
+        assert_eq!(
+            ConsumerConfig::new(&base_props()).unwrap().client_dns_lookup(),
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        let mut props = base_props();
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
+    }
+
     /// `sasl.mechanism` and `sasl.jaas.config` land on `sasl_config`.
     #[test]
     fn test_sasl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
             "sasl.jaas.config".to_string(),
@@ -1018,7 +1080,7 @@ mod tests {
     /// Empty `sasl.jaas.config` → `None`.
     #[test]
     fn test_sasl_jaas_config_empty_is_none() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("sasl.jaas.config".to_string(), String::new());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.jaas_config, None);
@@ -1027,7 +1089,7 @@ mod tests {
     /// `ssl.*` keys land on `ssl_config` via the shared helper.
     #[test]
     fn test_ssl_config_from_properties() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
@@ -1052,7 +1114,7 @@ mod tests {
         use crate::common::utils::LogContext;
 
         // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "SASL_PLAINTEXT".to_string());
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
@@ -1074,7 +1136,7 @@ mod tests {
 
         // SASL_SSL with no ssl_config supplied at all → error: the
         // `channel_builders` SASL_SSL arm requires ssl_config to be present.
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("security.protocol".to_string(), "SASL_SSL".to_string());
         props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert(
@@ -1106,7 +1168,7 @@ mod tests {
     /// fails much later and much less legibly.
     #[test]
     fn test_new_keeps_an_empty_group_id() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
         props.insert("group.id".to_string(), String::new());
         let c = ConsumerConfig::new(&props).unwrap();
@@ -1116,9 +1178,109 @@ mod tests {
     /// An absent `group.id` is still `None` — the two cases stay distinct.
     #[test]
     fn test_new_absent_group_id_is_none() {
-        let mut props = HashMap::new();
+        let mut props = base_props();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.group_id(), None);
+    }
+
+    /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the
+    /// value and splits it on `\\s*,\\s*`, so whitespace around the commas
+    /// and at the ends never reaches `ClientUtils.parseAndValidateAddresses`
+    /// (which does not trim, and rejects it).
+    #[test]
+    fn test_bootstrap_servers_list_parsing() {
+        for value in [
+            "localhost:1,localhost:2",
+            "localhost:1, localhost:2",
+            " localhost:1 ,localhost:2 ",
+        ] {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            let config = ConsumerConfig::new(&props).unwrap();
+            assert_eq!(
+                config.bootstrap_servers(),
+                ["localhost:1".to_string(), "localhost:2".to_string()],
+                "{value:?}"
+            );
+            let addresses = crate::ClientUtils::parse_and_validate_addresses(
+                config.bootstrap_servers(),
+                config.client_dns_lookup(),
+            )
+            .unwrap();
+            assert_eq!(addresses.len(), 2, "{value:?}");
+        }
+    }
+
+    /// `bootstrap.servers` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
+    /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
+    #[test]
+    fn test_bootstrap_servers_valid_list() {
+        let error_message = |value: &str| {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            match ConsumerConfig::new(&props) {
+                Err(Error::Config(e)) => e.message().to_string(),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        };
+        for value in ["localhost:9092,,localhost:9093", "a:1, ,b:1", "a:1,"] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' values must not be empty.",
+                "{value:?}"
+            );
+        }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_servers(), ["a:1".to_string()]);
+        assert_eq!(
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
+        );
+        for value in ["", "  "] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' must not be empty. Valid values include: any non-empty value",
+                "{value:?}"
+            );
+        }
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,b:1".to_string())]);
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap().bootstrap_servers(),
+            ["a:1".to_string(), "b:1".to_string()]
+        );
+    }
+
+    /// The consumer's other list keys use
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
+    /// 449, 707): empty elements are rejected, duplicates are removed, and an
+    /// empty list is allowed.
+    #[test]
+    fn test_other_list_configs_valid_list() {
+        for key in [
+            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
+            ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
+        ] {
+            let with = |value: &str| {
+                HashMap::from([
+                    ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                    (key.to_string(), value.to_string()),
+                ])
+            };
+            for (value, expected) in [
+                ("a,,b", format!("Configuration '{key}' values must not be empty.")),
+                (",,", format!("Configuration '{key}' values must not be empty.")),
+            ] {
+                match ConsumerConfig::new(&with(value)) {
+                    Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{key}={value:?}"),
+                    other => panic!("expected a ConfigError for {key}={value:?}, got {other:?}"),
+                }
+            }
+            assert!(ConsumerConfig::new(&with("")).is_ok(), "{key}");
+            assert!(ConsumerConfig::new(&with("a, b")).is_ok(), "{key}");
+            // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
+            assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
+        }
     }
 }

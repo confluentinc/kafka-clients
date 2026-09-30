@@ -29,6 +29,9 @@
 //! - `ssl.cipher.suites` — rustls has sensible defaults
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
 
+use crate::common::Error;
+use crate::common::config::config_def::ValidList;
+
 // ---------------------------------------------------------------------------
 // Config key constants (matching Java SslConfigs constant values)
 // ---------------------------------------------------------------------------
@@ -209,7 +212,13 @@ impl SslConfigs {
     ///
     /// The caller is responsible for matching the `"ssl."` prefix before calling
     /// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
-    pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfigs, key: &str, value: &str) {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if `ssl.enabled.protocols` or `ssl.cipher.suites`
+    /// fails Java's `ValidList.anyNonDuplicateValues(true, false)`
+    /// (`SslConfigs.java:129-130`): an empty element (duplicates are removed).
+    pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfigs, key: &str, value: &str) -> Result<(), Error> {
         match key {
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
                 ssl.truststore_location = Some(value.to_string());
@@ -245,12 +254,27 @@ impl SslConfigs {
                 ssl.endpoint_identification_algorithm = value.to_string();
             },
             SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG => {
-                ssl.enabled_protocols = value.split(',').map(|s| s.trim().to_string()).collect();
+                ssl.enabled_protocols = ValidList::parse_any_non_duplicate_values(key, value, true)?;
+            },
+            SslConfigs::SSL_CIPHER_SUITES_CONFIG => {
+                // Not modelled (the TLS provider picks the suites), but Java
+                // still validates it with `ValidList.anyNonDuplicateValues(true,
+                // false)` (`SslConfigs.java:129`), so a value Java rejects is
+                // rejected here too before the key is ignored. An empty list
+                // is Java's default (`List.of()`, meaning the provider's
+                // defaults), so only a non-empty list is actually ignored.
+                if !ValidList::parse_any_non_duplicate_values(key, value, true)?.is_empty() {
+                    log::warn!(
+                        "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
+                        key
+                    );
+                }
             },
             _ => {
                 log::warn!("Unknown SSL configuration key: {}", key);
             },
         }
+        Ok(())
     }
 }
 
@@ -373,26 +397,31 @@ mod tests {
     #[test]
     fn test_apply_ssl_config_key_sets_each_field() {
         let mut ssl = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass");
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass").unwrap();
         SslConfigs::apply_ssl_config_key(
             &mut ssl,
             SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
             "-----BEGIN CERTIFICATE-----",
-        );
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----");
+        )
+        .unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----")
+            .unwrap();
         SslConfigs::apply_ssl_config_key(
             &mut ssl,
             SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
             "-----BEGIN CERTIFICATE-----",
-        );
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "");
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3");
+        )
+        .unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "")
+            .unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3")
+            .unwrap();
 
         assert_eq!(ssl.truststore_location.as_deref(), Some("/ts.pem"));
         assert_eq!(ssl.truststore_password.as_deref(), Some("ts-pass"));
@@ -412,8 +441,70 @@ mod tests {
     fn test_apply_ssl_config_key_unknown_key_is_ignored() {
         let mut ssl = SslConfigs::default();
         // Unknown key must not panic and must leave defaults untouched.
-        SslConfigs::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value");
+        SslConfigs::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value").unwrap();
         assert_eq!(ssl.truststore_type, "PEM");
         assert!(ssl.truststore_location.is_none());
+    }
+
+    /// `ssl.enabled.protocols` is a `Type.LIST`, parsed like every list by
+    /// `ConfigDef::parse_list`: whitespace around commas and at the ends is
+    /// dropped, and a blank value is the empty list.
+    #[test]
+    fn test_enabled_protocols_list_parsing() {
+        for value in ["TLSv1.2,TLSv1.3", "TLSv1.2, TLSv1.3", " TLSv1.2 ,TLSv1.3 "] {
+            let mut ssl = SslConfigs::default();
+            SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value).unwrap();
+            assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"], "{value:?}");
+        }
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, " ").unwrap();
+        assert!(ssl.enabled_protocols.is_empty());
+    }
+
+    /// `ssl.enabled.protocols` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:130`):
+    /// an empty protocol is rejected with `ConfigDef`'s exact message,
+    /// duplicates are removed, and an empty list is allowed.
+    #[test]
+    fn test_enabled_protocols_valid_list() {
+        for (value, expected) in [
+            (
+                "TLSv1.2,,TLSv1.3",
+                "Configuration 'ssl.enabled.protocols' values must not be empty.",
+            ),
+            (",,", "Configuration 'ssl.enabled.protocols' values must not be empty."),
+        ] {
+            let mut ssl = SslConfigs::default();
+            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value) {
+                Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        }
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "").unwrap();
+        assert!(ssl.enabled_protocols.is_empty());
+        // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")
+            .unwrap();
+        assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2".to_string()]);
+    }
+
+    /// `ssl.cipher.suites` is not modelled, but is validated like Java
+    /// (`SslConfigs.java:129`) before being ignored.
+    #[test]
+    fn test_cipher_suites_valid_list() {
+        for (value, expected) in [
+            ("A,,B", "Configuration 'ssl.cipher.suites' values must not be empty."),
+            (",,", "Configuration 'ssl.cipher.suites' values must not be empty."),
+        ] {
+            let mut ssl = SslConfigs::default();
+            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, value) {
+                Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        }
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
     }
 }

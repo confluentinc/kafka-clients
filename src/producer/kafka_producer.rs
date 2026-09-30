@@ -877,7 +877,7 @@ impl<K, V> KafkaProducer<K, V> {
         kafka_trace!(log_context, "Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
-        let addresses = ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers)?;
+        let addresses = ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers, config.client_dns_lookup)?;
 
         // 2. Validate delivery timeout configuration
         //    Translated from KafkaProducer.configureDeliveryTimeout().
@@ -3363,7 +3363,7 @@ mod tests {
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
     ) -> KafkaProducer<String, String> {
-        let mut props = HashMap::new();
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         props.insert("partitioner.type".to_string(), "Murmur2RandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).expect("murmur2 partitioner config is valid");
         create_producer_with_config(config, metadata, accumulator)
@@ -3468,7 +3468,7 @@ mod tests {
     /// non-empty key would otherwise hash, under murmur2 as well as the default.
     #[test]
     fn test_partition_ignore_keys_overrides_murmur2() {
-        let mut props = HashMap::new();
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         props.insert("partitioner.type".to_string(), "Murmur2RandomPartitioner".to_string());
         props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
         let config = ProducerConfig::new(&props).unwrap();
@@ -7131,6 +7131,13 @@ mod tests {
             error.source().is_some(),
             "the underlying failure must be the wrapper's cause, not lost"
         );
+        // The cause is `parseAndValidateAddresses`' `ConfigException`, with its
+        // single-message text.
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
     }
 
     /// `doSend`'s inner `catch (KafkaException e)` around `waitOnMetadata`

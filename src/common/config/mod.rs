@@ -14,12 +14,14 @@
 
 //! Configuration types for Kafka clients (org.apache.kafka.common.config).
 
+pub(crate) mod config_def;
 mod config_error;
 pub mod config_resource;
 mod sasl_configs;
 mod ssl_client_auth;
 mod ssl_configs;
 
+pub(crate) use config_def::ConfigDef;
 pub use config_error::ConfigError;
 pub use config_resource::ConfigResource;
 pub use sasl_configs::SaslConfigs;

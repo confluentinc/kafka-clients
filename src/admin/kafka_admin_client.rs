@@ -302,7 +302,7 @@ impl KafkaAdminClient {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
-        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap)?;
+        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -6826,6 +6826,13 @@ mod tests {
         assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
         assert!(!error.is_api_error(), "a bare Kafka error is not an API error: {error:?}");
         assert!(error.source().is_some(), "the underlying failure must be the wrapper's cause");
+        // The cause is `parseAndValidateAddresses`' `ConfigException`, with its
+        // single-message text.
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
     }
 
     /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1459-1476`)
