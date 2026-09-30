@@ -11819,28 +11819,32 @@ mod tests {
             }
         }
 
-        let props = HashMap::from([
-            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
-            ("group.id".to_string(), String::new()),
-        ]);
-        let config = ConsumerConfig::new(&props).expect("config itself validates");
+        // A whitespace-only id trims to "" at parse (`ConfigDef.parseType`),
+        // so it takes the same rejection.
+        for group_id in ["", " "] {
+            let props = HashMap::from([
+                ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+                ("group.id".to_string(), group_id.to_string()),
+            ]);
+            let config = ConsumerConfig::new(&props).expect("config itself validates");
 
-        let err = AsyncKafkaConsumer::<String, String>::new(
-            config,
-            Box::new(TestStringDeserializer),
-            Box::new(TestStringDeserializer),
-        )
-        .err()
-        .expect("an empty group.id must fail construction");
+            let err = AsyncKafkaConsumer::<String, String>::new(
+                config,
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("group.id {group_id:?} must fail construction"));
 
-        // Wrapped as Java wraps every constructor failure.
-        assert_eq!("Failed to construct kafka consumer", err.message());
-        let cause = err.source().expect("the InvalidGroupId is the cause");
-        assert_eq!(cause.error(), crate::common::Errors::InvalidGroupId);
-        assert_eq!(
-            "The configured group.id should not be an empty string or whitespace.",
-            cause.message()
-        );
+            // Wrapped as Java wraps every constructor failure.
+            assert_eq!("Failed to construct kafka consumer", err.message());
+            let cause = err.source().expect("the InvalidGroupId is the cause");
+            assert_eq!(cause.error(), crate::common::Errors::InvalidGroupId);
+            assert_eq!(
+                "The configured group.id should not be an empty string or whitespace.",
+                cause.message()
+            );
+        }
     }
 
     /// A `group.id` that is absent, or non-empty, still constructs — so the

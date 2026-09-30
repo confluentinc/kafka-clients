@@ -629,7 +629,9 @@ impl ConsumerConfig {
                     config.client_rack = value.clone();
                 },
                 Self::GROUP_ID_CONFIG => {
-                    // Kept verbatim, INCLUDING the empty string. Java's
+                    // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
+                    // value (`ConfigDef.java:729-731`), so `" "` becomes `""`.
+                    // The empty string is then kept, not coerced to `None`. Java's
                     // `ConfigDef` defines `group.id` as `Type.STRING` with a
                     // `null` default and does not coerce `""` to null, so
                     // `config.getString(GROUP_ID_CONFIG)` returns `""` and
@@ -641,7 +643,7 @@ impl ConsumerConfig {
                     // configuration error into "no group", so a consumer
                     // configured with an empty `group.id` became a groupless
                     // consumer instead of failing fast.
-                    config.group_id = Some(value.clone());
+                    config.group_id = Some(value.trim().to_string());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     // `ConfigDef.parseType` trims the value (`ConfigDef.java:729-731`)
@@ -1484,5 +1486,18 @@ mod tests {
 
         let padded = props_with(&[(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, " inst ")]);
         assert_eq!(ConsumerConfig::new(&padded).unwrap().group_instance_id(), Some("inst"));
+    }
+
+    /// `ConfigDef.parseType` trims `group.id`, so the padding reaches neither
+    /// the group id nor the generated `client.id` embedding it.
+    #[test]
+    fn test_group_id_is_trimmed() {
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, " g ")])).unwrap();
+        assert_eq!(config.group_id(), Some("g"));
+        sequence_suffix(config.client_id(), "consumer-g-");
+        // A whitespace-only id trims to the empty string, kept as `Some("")`
+        // so the consumer constructor rejects it as Java does.
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, " ")])).unwrap();
+        assert_eq!(config.group_id(), Some(""));
     }
 }
