@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# Job-scoped .NET SDK provisioning, shared by the verify-dotnet job in the
-# "Verify language bindings (Linux amd64)" CI block (M10/P1, Decision 1) and
-# the "verify-dotnet (macOS arm64)" job in "Build + unit test bindings
-# (macOS)". This lives OUTSIDE the shared dependency-install scripts --
-# `.semaphore/dependencies.sh` on Linux, `.semaphore/dependencies-macos.sh` on
-# macOS -- and outside either block's shared task prologue, on purpose: no
-# other job in either block needs a .NET SDK, so the install stays local to
-# the one job that does. The official `dotnet-install.sh` this script fetches
+# Job-scoped .NET SDK provisioning, shared by the "verify-dotnet (Linux amd64)
+# — plaintext" job in the "Verify language bindings (Linux amd64)" CI block
+# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" job in "Verify
+# language bindings (macOS arm64)". The Linux "verify-dotnet (Linux amd64) —
+# ssl" and "— sasl_ssl (plain)" jobs (M17/P1) do NOT run this script: they run
+# only the gRPC multilanguage arm, whose .NET server runs inside the gRPC Docker
+# images, so they need no host .NET. This lives OUTSIDE the shared
+# dependency-install scripts -- `.semaphore/dependencies.sh` on Linux,
+# `.semaphore/dependencies-macos.sh` on macOS -- and outside either block's
+# shared task prologue, on purpose: no other job in either block needs a host
+# .NET SDK, so the install stays local to the one job per block that does. The
+# official `dotnet-install.sh` this script fetches
 # is cross-platform (Linux + macOS, both have bash + curl), so the same
 # script and the same job-level export sequence work unmodified on both.
 #
@@ -20,11 +24,17 @@ set -euo pipefail
 #                            by default, so SDK 10 alone cannot execute
 #                            `dotnet test -f net8.0`. The lean base runtime
 #                            (Microsoft.NETCore.App) is all a net8.0 *unit* test
-#                            needs; the ASP.NET Core runtime is only used inside
-#                            the gRPC Docker images, which bundle their own
-#                            aspnet:8.0. (CKD installs both as full SDKs; the lean
-#                            runtime is a smaller, faster CI install and
-#                            sufficient here — deliberate, not an omission.)
+#                            needs; the ASP.NET Core 8 runtime is needed only
+#                            inside the gRPC Docker images, which bundle their
+#                            own aspnet:8.0. (The native, host-process gRPC
+#                            server on the macOS job is built for net10.0 and
+#                            runs on the ASP.NET Core 10 runtime that install 1,
+#                            SDK 10, already brings -- M17/P1 D3 -- so SDK 10 is
+#                            that job's ASP.NET Core runtime as well as its
+#                            build toolchain.) (CKD installs both as full SDKs;
+#                            the lean runtime is a smaller, faster CI install
+#                            and sufficient here — deliberate, not an
+#                            omission.)
 #
 # DOTNET_MULTILEVEL_LOOKUP=0 + one DOTNET_ROOT keep runtime resolution
 # deterministic (both installs are found under $HOME/.dotnet only), mirroring
