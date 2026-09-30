@@ -792,8 +792,12 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.DescribeFeaturesCallback callback,
         IntPtr userData);
 
-    /// <summary>The <c>update_features_async</c> submit shape — <c>short</c> version levels.</summary>
-    internal delegate void NativeUpdateFeaturesSubmit(
+    /// <summary>
+    /// The <c>update_features_async</c> submit shape — <c>short</c> version levels, and an
+    /// owned <c>kafka_common_Error_t *</c> return: non-zero means nothing was submitted and no
+    /// callback will ever fire (see <see cref="NativeMethods.AdminClientUpdateFeaturesAsync"/>).
+    /// </summary>
+    internal delegate IntPtr NativeUpdateFeaturesSubmit(
         IntPtr admin,
         IntPtr[] features,
         short[] maxVersionLevels,
@@ -1098,9 +1102,10 @@ internal sealed class NativeAdminClient : IDisposable
                 handles[i] = NewTopicMarshal.Build(requested[i]);
             }
 
-            // Result shape 4a: one callback per topic. The ABI fires "exactly `count`
-            // times (once per requested topic, minus NULL entries in `topics`)"; no entry
-            // is null here (a null NewTopic was rejected above), so `count` is the number.
+            // Result shape 4a: one callback per topic. The ABI fires "once per distinct
+            // requested topic name" (NULL entries skipped); no entry is null here (a null
+            // NewTopic was rejected above) and `requested` is already distinct by name,
+            // ordinally, as the core compares it (`seen` above), so `count` is the number.
             // Armed before the submit — every key can fire inline on this thread.
             operation.SetPendingCallbacks(handles.Length);
 
@@ -1188,8 +1193,9 @@ internal sealed class NativeAdminClient : IDisposable
                         (admin, pinned, count, callbackUserData) =>
                         {
                             // Result shape 4b: one callback per topic. The ABI fires
-                            // "exactly `count` times (minus NULL entries in `names`)", and
-                            // a pinned key is never NULL — so `count` is the number. Armed
+                            // "once per distinct name in `names`" (NULL entries skipped); a
+                            // pinned key is never NULL and `keys` is DistinctNames (ordinal,
+                            // the core's equality) — so `count` is the number. Armed
                             // before the submit: every key can fire inline on this thread.
                             operation.SetPendingCallbacks(count);
                             submitByName(
@@ -1220,8 +1226,9 @@ internal sealed class NativeAdminClient : IDisposable
                         ToBase64(keys),
                         (admin, pinned, count, callbackUserData) =>
                         {
-                            // Shape 4b: "exactly `count` times"; `keys` is already
-                            // DistinctIds, so `count` is the number.
+                            // Shape 4b: "once per distinct id"; `keys` is already
+                            // DistinctIds, and distinct ids render as distinct base64
+                            // strings, so `count` is the number.
                             operation.SetPendingCallbacks(count);
                             submitByIds(
                                 admin,
@@ -1300,8 +1307,9 @@ internal sealed class NativeAdminClient : IDisposable
                         keys,
                         (admin, pinned, count, callbackUserData) =>
                         {
-                            // Shape 4a: the ABI fires "exactly `count` times (minus NULL
-                            // entries in `names`)" and a pinned key is never NULL, so
+                            // Shape 4a: the ABI fires "once per distinct name in `names`"
+                            // (NULL entries skipped); a pinned key is never NULL and `keys`
+                            // is DistinctNames (ordinal, the core's equality), so
                             // `count` is the number. Armed before the submit — every key
                             // can fire inline on this thread; the submit's own token is
                             // released after, which is what makes an EMPTY collection
@@ -1334,9 +1342,10 @@ internal sealed class NativeAdminClient : IDisposable
                         ToBase64(keys),
                         (admin, pinned, count, callbackUserData) =>
                         {
-                            // Shape 4a: the ABI fires "exactly `count` times", including
+                            // Shape 4a: the ABI fires "once per distinct id", including
                             // when a base64 id fails to parse (the whole call then fails
-                            // and every key gets that error). See the by-name arm.
+                            // and every key gets that error); `keys` is DistinctIds. See
+                            // the by-name arm.
                             operation.SetPendingCallbacks(count);
                             submitByIds(
                                 admin,
@@ -1456,6 +1465,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         List<string> keys = new List<string>(newPartitions.Count);
         List<NewPartitions> requested = new List<NewPartitions>(newPartitions.Count);
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (KeyValuePair<string, NewPartitions> entry in newPartitions)
         {
             // The header requires `count` valid C strings and `count` valid entries, and
@@ -1472,6 +1482,15 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 throw new ArgumentException(
                     $"The new-partitions entry for topic '{entry.Key}' must not be null.", nameof(newPartitions));
+            }
+
+            // ⚠ De-duplicated by the CORE's equality (ordinal), first occurrence kept, as the
+            // core keeps it (M15/P13.3 F4). The map's comparer is the caller's and need not be
+            // ordinal, so two of its keys can be one topic to the core — which then calls back
+            // once for both, and a countdown armed per row would never reach zero.
+            if (!seen.Add(entry.Key))
+            {
+                continue;
             }
 
             keys.Add(entry.Key);
@@ -1515,8 +1534,8 @@ internal sealed class NativeAdminClient : IDisposable
             }
 
             // Shape 4b: one callback per distinct topic, skipping NULL-paired entries —
-            // and neither side can be null here (both are rejected above), so the row
-            // count is the number. `newPartitions` is a map, so its keys are distinct.
+            // and neither side can be null here (both are rejected above), and the rows are
+            // de-duplicated by the core's own equality above, so the row count is the number.
             operation.SetPendingCallbacks(handles.Length);
 
             submit(
@@ -1605,6 +1624,7 @@ internal sealed class NativeAdminClient : IDisposable
         List<TopicPartition> keys = new List<TopicPartition>(recordsToDelete.Count);
         int[] partitions = new int[recordsToDelete.Count];
         long[] beforeOffsets = new long[recordsToDelete.Count];
+        HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         int next = 0;
         foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
         {
@@ -1625,11 +1645,23 @@ internal sealed class NativeAdminClient : IDisposable
                     nameof(recordsToDelete));
             }
 
+            // ⚠ De-duplicated by the CORE's equality — (topic, partition) by value, the
+            // struct's own IEquatable — first occurrence kept, as the core keeps it (M15/P13.3
+            // F4, closing STATUS open item (a)). The map's comparer is the caller's, so two of
+            // its keys can be one partition to the core, which then calls back once for both.
+            if (!seen.Add(entry.Key))
+            {
+                continue;
+            }
+
             keys.Add(entry.Key);
             partitions[next] = entry.Key.Partition;
             beforeOffsets[next] = entry.Value.BeforeOffset();
             next++;
         }
+
+        partitions = TrimToCount(partitions, next);
+        beforeOffsets = TrimToCount(beforeOffsets, next);
 
         // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
         // IEquatable implementation (ordinal on the topic), so it neither boxes nor
@@ -1662,8 +1694,9 @@ internal sealed class NativeAdminClient : IDisposable
             }
 
             // Shape 4a: the ABI fires once per distinct (topic, partition) pair, skipping
-            // NULL topics — and `keys` is already distinct (a map's key set) with no null
-            // topic (rejected above), so that is keys.Count. Armed before the submit —
+            // NULL topics — and `keys` is already distinct by that same equality (the `seen`
+            // set above; a map's key set is distinct only by the CALLER's comparer) with no
+            // null topic (rejected above), so that is keys.Count. Armed before the submit —
             // every key can fire inline on this thread; the submit's own token is released
             // after, which is what makes an EMPTY map (zero callbacks) release instead of
             // leaking.
@@ -2378,6 +2411,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         List<TopicPartitionReplica> keys = new List<TopicPartitionReplica>(replicaAssignment.Count);
         List<string> logDirs = new List<string>(replicaAssignment.Count);
+        HashSet<TopicPartitionReplica> seen = new HashSet<TopicPartitionReplica>(s_replicaComparer);
         foreach (KeyValuePair<TopicPartitionReplica, string> entry in replicaAssignment)
         {
             if (entry.Key is null)
@@ -2393,6 +2427,15 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 throw new ArgumentException(
                     $"The log directory for '{entry.Key}' must not be null.", nameof(replicaAssignment));
+            }
+
+            // ⚠ De-duplicated by the CORE's equality — the (topic, partition, broker id)
+            // triple by value — first occurrence kept, as the core keeps it (M15/P13.3 F4,
+            // closing STATUS open item (a)). The map's comparer is the caller's, so two of its
+            // keys can be one replica to the core, which then calls back once for both.
+            if (!seen.Add(entry.Key))
+            {
+                continue;
             }
 
             keys.Add(entry.Key);
@@ -2436,7 +2479,8 @@ internal sealed class NativeAdminClient : IDisposable
 
             // Shape 4b: one callback per distinct (topic, partition, broker) triple,
             // skipping entries with a NULL topic or log dir — neither is possible here, and
-            // `replicaAssignment` is a map, so the key count is the number.
+            // the keys are de-duplicated by that same equality above, so the key count is
+            // the number.
             operation.SetPendingCallbacks(keys.Count);
 
             submit(
@@ -2799,6 +2843,7 @@ internal sealed class NativeAdminClient : IDisposable
         int[] partitions = new int[reassignments.Count];
         int[] targetReplicaCounts = new int[reassignments.Count];
         int[]?[] targetReplicas = new int[reassignments.Count][];
+        HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         int next = 0;
         foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
         {
@@ -2812,6 +2857,15 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException(
                     "The reassignments map must not contain a topic partition with a null topic.",
                     nameof(reassignments));
+            }
+
+            // ⚠ De-duplicated by the CORE's equality — (topic, partition) by value, the
+            // struct's own IEquatable — first occurrence kept, as the core keeps it (M15/P13.3
+            // F4). The map's comparer is the caller's, so two of its keys can be one partition
+            // to the core, which since PR #201 round 70 calls back once for both.
+            if (!seen.Add(entry.Key))
+            {
+                continue;
             }
 
             keys.Add(entry.Key);
@@ -2836,6 +2890,11 @@ internal sealed class NativeAdminClient : IDisposable
 
             next++;
         }
+
+        cancel = TrimToCount(cancel, next);
+        partitions = TrimToCount(partitions, next);
+        targetReplicaCounts = TrimToCount(targetReplicaCounts, next);
+        targetReplicas = TrimToCount(targetReplicas, next);
 
         // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
         // IEquatable implementation (ordinal on the topic), so it neither boxes nor
@@ -2884,7 +2943,8 @@ internal sealed class NativeAdminClient : IDisposable
             }
 
             // Shape 4b: one callback per distinct (topic, partition) pair, skipping entries
-            // with a NULL topic — rejected above — and `reassignments` is a map.
+            // with a NULL topic — rejected above — and the keys are de-duplicated by that same
+            // equality above, so the key count is the number.
             operation.SetPendingCallbacks(keys.Count);
 
             submit(
@@ -3491,9 +3551,10 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = AclRowMarshal.Pin(keys);
 
-            // Shape 4b, owned key: "exactly `count` times", and `keys` is already
-            // DistinctBindings, so the row count is the number. A binding the core rejects
-            // locally still arrives as its own callback carrying an INVALID_REQUEST error.
+            // Shape 4b, owned key: "once per distinct binding", and `keys` is already
+            // DistinctBindings (value equality), so the row count is the number. A binding
+            // the core rejects locally still arrives as its own callback carrying an
+            // INVALID_REQUEST error.
             operation.SetPendingCallbacks(rows.Count);
 
             submit(
@@ -3585,9 +3646,9 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = AclRowMarshal.Pin(keys);
 
-            // Shape 4a: one callback per DISTINCT filter. ⚠ delete_acls_async's own doc says
-            // "exactly `count` times", but its body de-duplicates before the fan-out — and
-            // `keys` is already DistinctFilters, so the two agree here. Armed before the
+            // Shape 4a: one callback per DISTINCT filter — delete_acls_async's own doc says so
+            // since PR #201 round 70 — and `keys` is already DistinctFilters (value equality),
+            // so the row count is the number. Armed before the
             // submit (every key can fire inline on this thread); the submit's own token is
             // released after, which is what makes an EMPTY filter list release rather than
             // leak.
@@ -4504,13 +4565,36 @@ internal sealed class NativeAdminClient : IDisposable
     /// features family.
     /// </para>
     /// <para>
-    /// ⚠⚠ <b>The empty-map and blank-name guards are load-bearing, not defensive.</b> With zero
-    /// keys the bridge mints zero awaitables, so <c>All()</c> is <c>WhenAll(&lt;empty&gt;)</c> and
-    /// reports <b>success</b> — the whole-call error the ABI delivers has nowhere to go. Java
-    /// rejects both inputs before it enqueues anything
-    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>).
+    /// ⚠⚠ <b>The core refuses a bad request synchronously, and so does this method</b> (PR #201
+    /// round 70). The entry point returns an owned error instead of submitting, and then never
+    /// calls back (header, <c>kafka_admin_AdminClient_update_features_async</c>) — the core's
+    /// form of the <c>IllegalArgumentException</c> Java's <c>updateFeatures</c> throws from the
+    /// call itself. So a non-NULL return is read and freed
+    /// (<see cref="KafkaException.FromHandle(IntPtr)"/>), the operation is released here — no
+    /// callback ever will — and the error is <b>thrown</b> from this call; no result is handed
+    /// out. The gRPC servicer already maps a synchronous throw to the top-level error.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The empty-map, null- and blank-name and null-update guards stay, and run first.</b>
+    /// They throw Java's own <see cref="ArgumentException"/> messages
+    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — a precondition exception,
+    /// where the core's refusal of the same input would be a <see cref="KafkaException"/>. They
+    /// also hold on a mock, whose core entry point accepts an empty map (Java's
+    /// <c>MockAdminClient.updateFeatures</c> validates nothing), as they did before. What
+    /// reaches the synchronous refusal through this surface is therefore only what these
+    /// guards cannot see: a name <b>repeated</b> under the caller's own dictionary comparer —
+    /// the core's <c>LOCAL_ILLEGAL_ARGUMENT</c> "feature update at index <em>i</em> repeats
+    /// feature …" — and anything the core refuses in the future.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>So a repeated name is not de-duplicated here</b> (M15/P13.3 F4), and it is left to
+    /// the core to refuse rather than rejected by this method. It cannot hang the countdown:
+    /// the core refuses the whole call before any callback is registered. De-duplicating would
+    /// instead send one of two updates the caller wrote for one feature and silently drop the
+    /// other, where a Java <c>Map</c> could never have held both.
     /// </para>
     /// </remarks>
+    /// <exception cref="KafkaException">The core refused the request before submitting it.</exception>
     internal UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options,
@@ -4573,6 +4657,7 @@ internal sealed class NativeAdminClient : IDisposable
         operation.SetGcHandle(gcHandle);
 
         List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+        KafkaException? refused;
         try
         {
             bool handleRefAdded = false;
@@ -4582,12 +4667,14 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.SetHandleRef(_handle);
             }
 
-            // Shape 4b: one callback per feature. `featureUpdates` is a map, and an empty
-            // one is rejected above, so the key count is the number and the ABI's
-            // never-invoked `count == 0` case is unreachable through this surface.
+            // Shape 4b: one callback per distinct feature, and only when the submit returns
+            // NULL. An empty map is rejected above; a name the caller's comparer repeats is not
+            // de-duplicated, because the core refuses it synchronously (see the remarks) and a
+            // refused call makes no callback at all — so a repeat never leaves this countdown
+            // waiting on a callback that cannot come.
             operation.SetPendingCallbacks(keys.Count);
 
-            submit(
+            refused = KafkaException.FromHandle(submit(
                 _handle.DangerousGetHandle(),
                 PinNames(keys, pinned),
                 maxVersionLevels,
@@ -4596,9 +4683,18 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 validateOnly,
                 AdminCallbacks.UpdateFeatures,
-                GCHandle.ToIntPtr(gcHandle));
+                GCHandle.ToIntPtr(gcHandle)));
 
-            operation.ReleaseSubmitToken();
+            if (refused is null)
+            {
+                operation.ReleaseSubmitToken();
+            }
+            else
+            {
+                // Nothing was submitted and no callback will ever fire, so ownership of the
+                // GCHandle and the span-the-op reference never transferred: release both here.
+                operation.AbandonBeforeSubmit();
+            }
         }
         catch
         {
@@ -4611,6 +4707,11 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 pin.Dispose();
             }
+        }
+
+        if (refused is not null)
+        {
+            throw refused;
         }
 
         return new UpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
@@ -5360,6 +5461,7 @@ internal sealed class NativeAdminClient : IDisposable
         int[] partitionIds = new int[topicPartitionOffsets.Count];
         bool[] isTimestamp = new bool[topicPartitionOffsets.Count];
         long[] specTimestamps = new long[topicPartitionOffsets.Count];
+        HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         int next = 0;
         foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
         {
@@ -5380,25 +5482,34 @@ internal sealed class NativeAdminClient : IDisposable
                     nameof(topicPartitionOffsets));
             }
 
-            keys.Add(entry.Key);
-            partitionIds[next] = entry.Key.Partition;
-
             // ⚠ The pair, never the value alone. A TimestampSpec sets the flag and carries
             // its own number whatever that number is; every other kind clears the flag and
-            // carries its wire sentinel.
-            if (entry.Value is OffsetSpec.TimestampSpec timestamp)
+            // carries its wire sentinel. Resolved before the de-duplication below, so a spec
+            // this binding cannot send is rejected wherever it sits in the map.
+            bool timestampFlag = entry.Value is OffsetSpec.TimestampSpec;
+            long specTimestamp = entry.Value is OffsetSpec.TimestampSpec timestamp
+                ? timestamp.Timestamp
+                : SentinelFor(entry.Value, nameof(topicPartitionOffsets));
+
+            // ⚠ De-duplicated by the CORE's equality — (topic, partition) by value, the
+            // struct's own IEquatable — first occurrence kept, as the core keeps it (M15/P13.3
+            // F4). The map's comparer is the caller's, so two of its keys can be one partition
+            // to the core, which since PR #201 round 70 calls back once for both.
+            if (!seen.Add(entry.Key))
             {
-                isTimestamp[next] = true;
-                specTimestamps[next] = timestamp.Timestamp;
-            }
-            else
-            {
-                isTimestamp[next] = false;
-                specTimestamps[next] = SentinelFor(entry.Value, nameof(topicPartitionOffsets));
+                continue;
             }
 
+            keys.Add(entry.Key);
+            partitionIds[next] = entry.Key.Partition;
+            isTimestamp[next] = timestampFlag;
+            specTimestamps[next] = specTimestamp;
             next++;
         }
+
+        partitionIds = TrimToCount(partitionIds, next);
+        isTimestamp = TrimToCount(isTimestamp, next);
+        specTimestamps = TrimToCount(specTimestamps, next);
 
         // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
         // IEquatable implementation, so it neither boxes nor disagrees with the public
@@ -5429,11 +5540,12 @@ internal sealed class NativeAdminClient : IDisposable
                 topics[i] = topic.Pointer;
             }
 
-            // Shape 4a: the ABI fires once per (topic, partition) pair in the input —
+            // Shape 4a: the ABI fires once per distinct (topic, partition) pair in the input —
             // including on the inline whole-call failure (an unknown isolation level or an
-            // unrecognised sentinel), which fires for every key — and `keys` is already
-            // distinct (a map's key set) with no null topic, so that is keys.Count. The
-            // submit's own token is released after, so an empty map releases.
+            // unrecognised sentinel), which fires for every distinct key — and `keys` is
+            // already distinct by that same equality (the `seen` set above; a map's key set is
+            // distinct only by the CALLER's comparer) with no null topic, so that is
+            // keys.Count. The submit's own token is released after, so an empty map releases.
             operation.SetPendingCallbacks(keys.Count);
 
             submit(
@@ -6237,6 +6349,31 @@ internal sealed class NativeAdminClient : IDisposable
         _ => throw new ArgumentException(
             $"Unsupported offset spec '{spec.GetType().Name}'.", parameterName),
     };
+
+    /// <summary>
+    /// Shortens a parallel request array, sized for every entry of the caller's map, to the
+    /// <paramref name="count"/> entries that survived de-duplication, so every array a submit
+    /// hands native is exactly as long as the count it passes beside it.
+    /// </summary>
+    /// <remarks>
+    /// Returns <paramref name="array"/> itself when nothing was dropped — the common case, in
+    /// which a map's comparer agrees with the core's equality — so it copies only when a
+    /// caller's comparer let two equal keys in.
+    /// </remarks>
+    /// <typeparam name="T">The element type.</typeparam>
+    /// <param name="array">The array, filled from index 0.</param>
+    /// <param name="count">How many leading entries are in use.</param>
+    /// <returns>An array of exactly <paramref name="count"/> entries.</returns>
+    private static T[] TrimToCount<T>(T[] array, int count)
+    {
+        if (count == array.Length)
+        {
+            return array;
+        }
+
+        Array.Resize(ref array, count);
+        return array;
+    }
 
     /// <summary>
     /// De-duplicates a partition selection, preserving request order, and rejects a null

@@ -98,9 +98,11 @@ internal abstract class AdminOperation
     /// </summary>
     /// <param name="callbacks">
     /// The callback count taken from <em>that RPC's own ABI doc comment</em> — not the key
-    /// count and not blindly the request-array length (<c>incremental_alter_configs</c>
-    /// fires once per distinct resource; <c>create_topics</c> fires <c>count</c> times
-    /// minus NULL entries).
+    /// count and not blindly the request-array length. Since PR #201 round 70 every per-key
+    /// RPC fires once per <b>distinct</b> key by the core's equality, skipping NULL entries
+    /// (<c>incremental_alter_configs</c>: once per distinct resource named across its rows),
+    /// so a caller-supplied map whose comparer is not the core's equality must be
+    /// de-duplicated by that equality before its keys are counted.
     /// </param>
     /// <remarks>
     /// ⚠ <b>The submit token is how <paramref name="callbacks"/> == 0 is made safe, once,

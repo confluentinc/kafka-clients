@@ -3988,11 +3988,28 @@ internal static partial class NativeMethods
     // ---- M15/P7: updateFeatures (result shape 2) ----
 
     /// <summary>
+    /// Submits <c>updateFeatures</c>, or refuses it synchronously.
+    /// <para>
     /// ⚠ <paramref name="maxVersionLevels"/> is <c>const int16_t *</c> — <c>short</c>, not
-    /// <c>int</c>, throughout the features family (<c>confluent_kafka.h:9342</c>).
+    /// <c>int</c>, throughout the features family (header,
+    /// <c>kafka_admin_AdminClient_update_features_async</c>).
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>Returns an owned <c>kafka_common_Error_t *</c>, not <c>void</c></b> (PR #201
+    /// round 70). Non-NULL means <b>nothing was submitted and <paramref name="callback"/> will
+    /// never be invoked</b> — the core's form of the <c>IllegalArgumentException</c> Java's
+    /// <c>updateFeatures</c> throws from the call itself. The caller owns the error and frees it
+    /// (<see cref="KafkaException.FromHandle(IntPtr)"/>), and since no callback will ever
+    /// release the operation, the submitter must release it too. NULL means submitted: the
+    /// callback then fires once per distinct feature. The header lists what the core refuses
+    /// this way: Java's own argument checks — an empty map and a blank name, on a real client
+    /// only, since Java's mock validates neither — the C-only marshaling failures — a NULL or
+    /// <b>repeated</b> feature name, an update <c>FeatureUpdate</c>'s constructor rejects — and
+    /// a NULL <c>admin</c>.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_update_features_async", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AdminClientUpdateFeaturesAsync(
+    internal static extern IntPtr AdminClientUpdateFeaturesAsync(
         IntPtr admin,
         IntPtr[] features,
         short[] maxVersionLevels,

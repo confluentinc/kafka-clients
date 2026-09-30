@@ -685,6 +685,9 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.UpgradeTypes = upgradeTypes;
                 captured.ValidateOnly = validateOnly;
                 captured.UserData = userData;
+
+                // Accepted: NULL is "submitted", so the callbacks below are owed.
+                return IntPtr.Zero;
             });
 
         // M15/P9 CP6: one callback per feature name — the map's keys are already distinct.

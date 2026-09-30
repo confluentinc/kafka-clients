@@ -1285,6 +1285,12 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
+    /// <exception cref="KafkaException">
+    /// The native client refused the request before submitting anything — as Java's
+    /// <c>updateFeatures</c> throws from the call itself — so no result is returned. Through
+    /// this surface that is a feature name <paramref name="featureUpdates"/>' own comparer lets
+    /// appear twice (<see cref="KafkaException.Code"/> <c>-3</c>, local illegal argument).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,

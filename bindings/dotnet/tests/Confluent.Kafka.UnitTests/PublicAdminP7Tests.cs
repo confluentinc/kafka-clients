@@ -187,11 +187,13 @@ public sealed class PublicAdminP7Tests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>An empty map is REJECTED, and the rejection is load-bearing.</b> With zero keys
-    /// the bridge mints zero awaitables, so <c>All()</c> is <c>WhenAll(&lt;empty&gt;)</c> and
-    /// reports <b>success</b> — the ABI's whole-call error would be silently swallowed and the
-    /// caller told the updates were applied. Java rejects it before enqueuing anything
-    /// (<c>KafkaAdminClient.java:4590-4592</c>).
+    /// ⚠⚠ <b>An empty map is REJECTED, with Java's own exception kind and message</b>
+    /// (<c>KafkaAdminClient.java:4590-4592</c>), before anything is enqueued. The binding's
+    /// guard is what makes it an <see cref="ArgumentException"/>: the core refuses an empty map
+    /// only on a real client, and then as a <see cref="KafkaException"/> it returns from the
+    /// submit (M15/P13.3 F6); against this mock its entry point would accept the map and never
+    /// call back, as Java's mock validates nothing — so zero awaitables, and an <c>All()</c>
+    /// that reports success.
     /// </summary>
     [Fact]
     public void UpdateFeatures_RejectsAnEmptyMap()
