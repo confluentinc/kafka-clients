@@ -13,6 +13,11 @@ sources are the `kafka/` submodule at the repository root).
   bindings in `../c/` and `../python/` are built on; the build writes its header
   to `target/include/confluent_kafka.h`
 
+## Status
+
+**Preview:** the Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
+
+
 ## Directory Structure
 
 ```

@@ -13,6 +13,11 @@ links the Rust library's C API (`../rust`, feature `ffi`).
 - **Mocks:** `MockProducer`, `MockConsumer`, `MockAdminClient` and their async
   variants, backed by the Rust client's in-memory mocks.
 
+## Status
+
+**In Development:** the API is subject to large changes and the stability is not guaranteed.
+
+
 ## Directory Structure
 
 ```

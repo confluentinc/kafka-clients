@@ -15,6 +15,11 @@ the multilanguage tests.
   function and an `*_async` variant that delivers its result through a
   `*_callback_t` plus `user_data`.
 
+## Status
+
+**In Development:** the API is subject to large changes and the stability is not guaranteed.
+
+
 ## Directory Structure
 
 ```
