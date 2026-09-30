@@ -12,47 +12,18 @@ MAX_LATENCY_MS = 10000
 
 def recreate_topic(bootstrap_servers, topic, sasl_conf=None, partitions=-1):
     """Delete `topic` (ignoring "does not exist"), wait 10s, re-create it, wait
-    10s — using confluent-kafka's AdminClient (librdkafka). Replication factor
-    and (unless `partitions` > 0) partition count use the broker default
-    (`-1`), so this works on Confluent Cloud where RF=1 is rejected. The two
-    sleeps let the delete/create metadata propagate across the cluster.
+    10s — using confluent-kafka's AdminClient (librdkafka), for either
+    CLIENT_VERSION. Replication factor and (unless `partitions` > 0) partition
+    count use the broker default (`-1`).
 
     `sasl_conf` is the librdkafka-form SASL dict (security.protocol,
     sasl.mechanism, sasl.username, sasl.password) or None/empty for PLAINTEXT.
+    Runs through :func:`librdkafka_helpers.call`, i.e. in the librdkafka
+    baseline venv (see that module).
     """
-    from confluent_kafka.admin import AdminClient, NewTopic
-    from confluent_kafka import KafkaException, KafkaError
-
-    admin = AdminClient({"bootstrap.servers": bootstrap_servers, **(sasl_conf or {})})
-
-    print(f">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...", flush=True)
-    for _t, fut in admin.delete_topics([topic], operation_timeout=30).items():
-        try:
-            fut.result()
-            print(f">>> deleted '{_t}'", flush=True)
-        except KafkaException as e:
-            if e.args[0].code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
-                print(f">>> '{_t}' did not exist (ok)", flush=True)
-            else:
-                raise
-    print(">>> waiting 10s after delete ...", flush=True)
-    time.sleep(10)
-
-    print(f">>> CREATE_TOPIC: creating topic '{topic}' "
-          f"(partitions={'broker-default' if partitions < 0 else partitions}, "
-          f"rf=broker-default) ...", flush=True)
-    new_topic = NewTopic(topic, num_partitions=partitions, replication_factor=-1)
-    for _t, fut in admin.create_topics([new_topic]).items():
-        try:
-            fut.result()
-            print(f">>> created '{_t}'", flush=True)
-        except KafkaException as e:
-            if e.args[0].code() == KafkaError.TOPIC_ALREADY_EXISTS:
-                print(f">>> '{_t}' already exists (ok)", flush=True)
-            else:
-                raise
-    print(">>> waiting 10s after create ...", flush=True)
-    time.sleep(10)
+    import librdkafka_helpers
+    librdkafka_helpers.call("recreate_topic", bootstrap_servers=bootstrap_servers,
+                            topic=topic, sasl_conf=sasl_conf or {}, partitions=partitions)
 
 
 def percentile_from_hist(hist, p):

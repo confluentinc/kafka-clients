@@ -12,6 +12,7 @@ tools/java-perf-test/bin/
 bin
 build
 venv
+venv-librdkafka
 COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
 /COMMENTS*\.md
