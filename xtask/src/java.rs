@@ -55,7 +55,7 @@ pub const JAVA_TEST_ROOT: &str = "kafka/clients/src/test/java/org/apache/kafka";
 
 /// The Kafka versions whose `@Deprecated`s count (CLAUDE.md §3: deprecated API
 /// is not translated): the source reference and the next release.
-pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc2"];
+pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc3"];
 
 /// The checked-in list of the deprecated items of [`DEPRECATION_REFS`],
 /// written by `cargo xtask java-deprecated`. The lint reads it because CI's
@@ -472,7 +472,7 @@ pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
 
 /// The Kafka version whose `@InterfaceAudience.Public` annotations and
 /// unsupported-API disclaimers decide what the crate may make public.
-pub const AUDIENCE_REF: &str = "4.4.0-rc2";
+pub const AUDIENCE_REF: &str = "4.4.0-rc3";
 
 /// The sentence a `package-info.java` carries when its package is not part of
 /// the supported API ("This package is not a supported Kafka API; the

@@ -1,4 +1,4 @@
-# Types annotated @InterfaceAudience.Public in Apache Kafka 4.4.0-rc2
+# Types annotated @InterfaceAudience.Public in Apache Kafka 4.4.0-rc3
 # (clients/src/main/java), one fully-qualified name per line.
 # The annotation targets top-level types only; a nested class takes its
 # declaring class's audience. Unannotated types are Private.
