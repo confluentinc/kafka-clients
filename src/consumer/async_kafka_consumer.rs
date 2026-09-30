@@ -1759,7 +1759,7 @@ where
     /// (`AsyncKafkaConsumer.java:390-508`). See [`Self::new`] for the
     /// `catch (Throwable t)` wrap applied to every error it returns.
     fn new_inner(
-        config: ConsumerConfig,
+        mut config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
     ) -> Result<Self, Error> {
@@ -1786,6 +1786,13 @@ where
         use crate::consumer::internals::TopicMetadataRequestManager;
 
         log::debug!("Initializing the Kafka consumer");
+
+        // A config built with `ConsumerConfig::default()` and the fluent
+        // setters never went through `ConsumerConfig::new`, so it may still
+        // carry an empty `client.id`. Java's config is immutable and always
+        // finalised by `postProcessParsedConfig`; construction is the Rust
+        // equivalent point, so apply the same `maybeOverrideClientId` rule.
+        config.maybe_override_client_id()?;
 
         // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
         // (`AsyncKafkaConsumer.java:470-473`) validates a set
@@ -6766,6 +6773,42 @@ mod tests {
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
         );
+    }
+
+    /// A config built with `ConsumerConfig::default()` and the setters skips
+    /// `ConsumerConfig::new`, so the constructor derives the `client.id` with
+    /// the same `maybeOverrideClientId` rule instead of sending an empty id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_built_config_gets_generated_client_id() {
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // A refused localhost port, so the ctor does not block on network IO.
+        let config = ConsumerConfig::default()
+            .set_bootstrap_servers(vec!["127.0.0.1:1".to_string()])
+            .set_group_id("g");
+        assert_eq!(config.client_id(), "", "precondition: the setter path leaves client.id unset");
+
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        let client_id = consumer.client_id().to_string();
+        let n = client_id
+            .strip_prefix("consumer-g-")
+            .unwrap_or_else(|| panic!("unexpected generated id {client_id:?}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
+
+        consumer.close().await.expect("close should succeed");
     }
 
     /// Java validates `group.instance.id` again in the constructor
