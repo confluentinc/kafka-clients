@@ -313,6 +313,7 @@ impl KafkaAdminClient {
     /// Translated from `KafkaAdminClient.generateClientId`
     /// (`KafkaAdminClient.java:478-483`); `<n>` comes from the process-wide
     /// [`ADMIN_CLIENT_ID_SEQUENCE`], starting at 1.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#generateClientId")]
     pub(crate) fn generate_client_id(config: &AdminClientConfig) -> String {
         let client_id = config.client_id();
         if !client_id.is_empty() {

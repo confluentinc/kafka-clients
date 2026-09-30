@@ -115,6 +115,7 @@ impl ValidList {
     /// Java's `ValidList.anyNonDuplicateValues(isEmptyAllowed, isNullAllowed)`:
     /// any elements are allowed, provided none is empty or duplicated.
     /// `is_empty_allowed` decides whether the list itself may be empty.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ValidList#anyNonDuplicateValues")]
     pub(crate) fn any_non_duplicate_values(is_empty_allowed: bool, is_null_allowed: bool) -> Self {
         Self { is_empty_allowed, is_null_allowed }
     }
@@ -130,6 +131,7 @@ impl ValidList {
     /// [`Error::Config`] with Java's exact message when the value is null and
     /// nulls are not allowed, the list is empty and empty lists are not
     /// allowed, an element is repeated, or an element is the empty string.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ValidList#ensureValid")]
     pub(crate) fn ensure_valid(&self, name: &str, value: Option<&[String]>) -> Result<(), Error> {
         let Some(values) = value else {
             if self.is_null_allowed {

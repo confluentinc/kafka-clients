@@ -872,6 +872,7 @@ impl ConsumerConfig {
     /// Java formats a missing `group.id` with `String.format("%s", null)`, which
     /// yields the literal `null`; that is preserved here (`consumer-null-1`) so
     /// the wire `client_id` matches a Java consumer with the same configuration.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#maybeOverrideClientId")]
     pub(crate) fn maybe_override_client_id(&mut self) -> Result<(), Error> {
         if !self.client_id.is_empty() {
             return Ok(());

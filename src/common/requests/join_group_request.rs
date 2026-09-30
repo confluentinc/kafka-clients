@@ -65,6 +65,7 @@ impl JoinGroupRequest {
     /// `InvalidConfigurationException` with the message
     /// `"Group instance id is invalid: <reason>"`. Here the `Topic.validate`
     /// callback form collapses into returning the error directly.
+    #[doc(alias = "org.apache.kafka.common.requests.JoinGroupRequest#validateGroupInstanceId")]
     pub fn validate_group_instance_id(id: &str) -> Result<(), Error> {
         match Topic::detect_invalid_topic(id) {
             Some(reason_invalid) => Err(Error::InvalidConfiguration(InvalidConfigurationError::new(format!(

@@ -71,6 +71,7 @@ impl ClientDnsLookup {
     /// throws (with the same message text).
     // Translated in full (DoD #2); the client parses the key with
     // `parse_config_value`, so only the tests call this.
+    #[doc(alias = "org.apache.kafka.clients.ClientDnsLookup#forConfig")]
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn for_config(config: &str) -> Result<Self, Error> {
         let upper = config.to_uppercase();
