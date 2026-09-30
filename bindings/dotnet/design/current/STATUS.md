@@ -7,6 +7,38 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 17 / Phase 1 — ".NET gRPC harness: merge master #204, then SSL / SASL_SSL runs and native mode, with CI jobs": DONE locally (2026-09-30); four CI-only items are pending the user's push. N=88. Mode A.** Branch `prashah_dev_dotnet_binding`. The base is `3b885c1a`, which the user pushed at 19:57 IST, so `origin` already carries P13.4 and its two PM-1 follow-ups. The commits after it are not squashed and not pushed:
+  - `35064058` is the approved plan. D1–D9 were taken as recommended.
+  - S1: `7690945a` merges `origin/master` `d6bf7c76` (`e565ca74`, `d334cf6e`, `d6bf7c76`, merge-base `7ac1391b`). It resolves 3 textual conflicts (`Makefile`, `semaphore.yml`, the `backend_pool.rs` port-list doc) and 2 semantic ones: a transitional panicking dotnet arm in `native_command`, and the 5 dotnet factories returning `uses_containers()`.
+  - S2: `1641bacf` (server contract), `8bac2d2a` (harness native launcher), `08eddcba` (Make targets) and `076041ed` (CI).
+  - The `fixup!` commits `95d95074`, `f7a99ad9` and `8226b62a` fix Critic 88.1–88.3. `cc045b34` fixes an extra sweep hit. All four are comment-only.
+  - Then this close.
+
+  Plan and review record: `design/history/M17/P1-grpc-harness-ssl-and-native/` (`PLAN.md`, `COMMENTS.DONE.88.md`). Proof of Mode A: the header SHA-1 is unchanged at `41f48ea8…`, the merge touches no `src/ffi`, `cbindgen.toml`, `build.rs` or `bindings/dotnet` file, and `git diff 7690945a..cc045b34 -- src/ cbindgen.toml generator/ build.rs Cargo.toml Cargo.lock bindings/python bindings/c` is empty. The one `tests/` file S2 touches is `tests/common/backend_pool.rs` (PLAN §5).
+  - **Why.** Master's #204 gave the Python and C gRPC arms protocol-scoped SSL / SASL_SSL runs and a native (non-container) mode, with CI jobs. The .NET arms had neither. The merge also had to keep the container-mode .NET arms behaving exactly as before on master's new harness.
+  - **What changed:**
+    - **Server contract (`grpc-server/Program.cs`).** `GRPC_HOST` defaults to `127.0.0.1` and accepts an IP literal or `localhost`. The Dockerfiles set `0.0.0.0`. `GRPC_PORT` defaults to 50053, and `0` binds dynamically. An invalid value exits 1 (D8, mirroring master's C and Python servers). After `Start()` the server writes `listening on {host}:{bound port}` to stderr, which matches the harness's `parse_listening_port` and the container wait strategy. The project multi-targets `net8.0;net10.0` (D3/T2): native runs on net10.0 because ASP.NET Core 8 is absent locally and in CI, and both images stay on net8.0 (`-f net8.0`).
+    - **Harness (`backend_pool.rs`).** `native_command` launches `dotnet <dll>` for both dotnet kinds (`MULTILANG_DOTNET`, `MULTILANG_DOTNET_GRPC_SERVER`) and sets `CONSUMER_FLAVOR` explicitly. It uses master's `require_native_artifact` with the hint `build-grpc-native-dotnet`.
+    - **Make.** `DOTNET_GRPC_SKIPS` defines the three .NET-only transaction skips once (D9). New targets: `test-integration-dotnet-ssl`, `test-integration-dotnet-sasl-ssl`, `build-grpc-native-dotnet` (Release, net10.0, into `target/grpc-native/dotnet/`) and `test-integration-dotnet-native`. `verify-dotnet-macos-docker` now ends with the native arm.
+    - **CI.** The Linux job becomes "verify-dotnet (Linux amd64) — plaintext", with sibling "— ssl" and "— sasl_ssl (plain)" jobs that install no host .NET (D6). The macOS dotnet job runs the native arm with `MACOS_ENSURE_ROSETTA` and a guarded `softwareupdate --install-rosetta` in `dependencies-macos.sh` (D4). The two full verify-dotnet jobs get a job-level 60-minute limit, and the protocol jobs inherit the block's 30 (D5).
+    - **Corrected claims.** Grpc.Tools has no macOS-arm64 protoc. On Apple Silicon it runs `macosx_x64` under Rosetta, and the SIGSEGV is `linux_arm64`-only. The stale "no .NET gRPC on macOS / arm64 protoc" wording is corrected in every file this phase touches, and so are the services and flavors each image hosts.
+  - **Gates, verified by the Manager at each sub-stage and at close.**
+    - **P/Invokes: 668 throughout.** The "697" in older entries predates `3b885c1a`, which removed 29 unused flattened-result P/Invokes (recorded in the P13.4 entry below).
+    - Unit tests: 2927/2927 on both net10.0 and net8.0, on the base, after the merge and after S2.
+    - Arms: 152 `__grpc_dotnet*` arms (116 sync, of which 80 are admin and 36 producer/consumer; 36 async). The three skips remove 6, so 146 execute. That count was predicted before each run and reconciled by name after it.
+    - **Native, local (macOS arm64):** 146 passed and 0 failed on plaintext, ssl and sasl_ssl alike.
+    - **Container, local (linux/amd64 emulated):** 146 passed and 0 failed on plaintext, ssl and sasl_ssl alike. The fresh `.so` (`9864fc96…`) resolves all 668 entry points, and both images carry it.
+    - Build and format: grpc-server builds for both TFMs with 0 warnings and 0 errors, and its `dotnet format --verify-no-changes` is clean. `cargo xtask format-check` and `lint` pass, and the YAML parses.
+  - **Critic 88.** One review of `3b885c1a..076041ed` (D7), merge included. It found three low issues, 88.1–88.3, all stale statements: the `ResolveAsyncFlavor` doc, `install-dotnet.sh`'s block name and ASP.NET claim, and the Dockerfiles' "ConsumerService only". All three were fixed comment-only, and the re-check of `076041ed..cc045b34` was clean. The Critic also re-ran container ssl and native plaintext (146/146 each) itself.
+  - **Pending, CI-only (PLAN §7.3).** None of these can run locally. They are checked on the user's push, and a red result becomes a `fixup!` inside this phase:
+    1. A job-level 60-minute limit inside a 30-minute block. Semaphore does not document whether that is allowed, and this is the highest risk.
+    2. Rosetta and `sudo` on the macOS agent.
+    3. Real job durations. After the first green run, tighten the limits to about twice the measured time.
+    4. Linux native mode, which no CI job runs, as for master.
+  - **Critic observations, recorded rather than acted on.** The grpc-server csproj description omits AdminService (pre-existing and incomplete, but not false). The binding-root `COMMENTS.DONE.<N>.md` is untracked, not gitignored, as §8.4 of the rulebook already says.
+  - **Rule suggestions** (for the user) are listed in the archived review record: libtest `--list` parsing, `grep -c` exit codes, the protoc fact and native gate for the rulebook, a grpc-server format gate, contract-keyed stale-claim sweeps, and one authoritative list of hosted services.
+  - **Out of scope, carried:** .NET producer transactions (the 3 skips stay), a Linux native CI job, native SSL / SASL_SSL CI jobs, and a `__grpc_dotnet_async` admin arm (M15/P12 D1).
+
 - **Milestone 15 / Phase 13.4 — ".NET Admin: one C-string guard for every admin string, plus ten low parity fixes": DONE (2026-09-30). N=87. Mode A.** Branch `prashah_dev_dotnet_binding`. The scope is exactly 15 findings from the admin parity audit at `de51d14b`: five medium ones with one root cause (S1) and ten low ones (S2). The commits are not squashed and not pushed:
   - `d24fe14e` is the approved plan.
   - S1: `3f5e42b7` (the rename, message and scope note) and `293caf17` (the guards A1–A22 and their tests).

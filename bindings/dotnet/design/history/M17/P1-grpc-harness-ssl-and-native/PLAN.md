@@ -525,3 +525,33 @@ record, not a new phase.
   generalization spread to at least 6 comment sites.
 - The same file could list `grpc-server` among the projects outside the `.sln` that need their
   own `dotnet format --verify-no-changes`, as `test-soak-dotnet` does for the soak projects.
+
+---
+
+## 12. Close-out record (Manager, 2026-09-30)
+
+**Outcome: done locally, with the four §7.3 items pending CI.**
+- The commits are S1 `7690945a`; S2 `1641bacf`, `8bac2d2a`, `08eddcba` and `076041ed`; and the
+  `fixup!` commits `95d95074`, `f7a99ad9`, `8226b62a` and `cc045b34`, all comment-only.
+- §3.6 and §7.2 were green at every step:
+  - The header SHA-1 is `41f48ea8…`, and there are 668 externs.
+  - Unit tests pass 2927/2927 on both TFMs.
+  - There are 152 arms and 146 execute.
+  - Native and container runs each pass 146/146 on plaintext, ssl and sasl_ssl.
+- Critic 88's three low findings are fixed, and the re-check was clean. The full record is
+  `COMMENTS.DONE.88.md` in this directory.
+
+**Premises in the planning brief that turned out wrong.** They were corrected before or during
+planning, and none reached the code:
+- The branch was already pushed (`3b885c1a`, by the user).
+- The P/Invoke count was 668, not 697.
+- `~/.dotnet` can run the net8.0 tests.
+- The arm64 protoc crash is Linux-only.
+
+**The §2 facts held.** In particular, SSL / SASL_SSL needed **no C# change** (row 8): the harness
+injects the security config per connection, and the .NET arms passed on all three protocols
+without any library edit.
+
+**One Manager error, recorded.** The briefs called the binding-root `COMMENTS.DONE.88.md`
+"gitignored". It is untracked, not ignored (CLAUDE.md §8.4). The file stayed out of every commit
+anyway.
