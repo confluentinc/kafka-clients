@@ -1330,7 +1330,28 @@ where
     /// async commit have been enqueued — the actual commit result is
     /// delivered via the registered [`crate::consumer::OffsetCommitCallback`],
     /// not via this receiver.
+    ///
+    /// Exception: after an empty-offsets `commit_async` this is an
+    /// already-completed receiver covering only that commit, as Java's
+    /// `completedFuture(null)` replaces `lastPendingAsyncCommit`. The earlier
+    /// in-flight commits it displaced are kept in
+    /// [`async_commit_ordering_tail`](Self::async_commit_ordering_tail).
     last_pending_async_commit: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Rust-specific, no Java counterpart. The in-flight async commit that an
+    /// empty-offsets `commit_async` displaced from
+    /// [`last_pending_async_commit`](Self::last_pending_async_commit), which
+    /// the next non-empty `commit_async` chains behind instead.
+    ///
+    /// Needed because Rust enqueues each async commit's callbacks from its own
+    /// spawned task, which the runtime may schedule in any order, so each
+    /// continuation awaits its predecessor to keep callbacks in commit order
+    /// (`KafkaConsumer.java:1122-1123`). Java needs no equivalent: its
+    /// `whenComplete` actions run on the single background thread in
+    /// completion order. Without this, a non-empty commit issued after an
+    /// empty one would chain behind the already-completed empty commit, and
+    /// its callbacks could be enqueued before those of an earlier, still
+    /// in-flight commit.
+    async_commit_ordering_tail: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Tracks the state of the currently-inflight `AsyncPoll` event.
@@ -2656,6 +2677,7 @@ where
             config: components.config,
             time: components.time,
             last_pending_async_commit: None,
+            async_commit_ordering_tail: None,
         }
     }
 
@@ -4656,12 +4678,20 @@ where
         // earlier in-flight commits: a later `commitSync` / `close` does not
         // wait for them, and they still enqueue their own callbacks when they
         // complete.
+        //
+        // The displaced in-flight commit moves to `async_commit_ordering_tail`
+        // rather than being dropped, so the next non-empty commit still chains
+        // behind it. If the tail is already set, an earlier empty commit has
+        // displaced it and the pending commit is an already-completed one.
         if offsets.as_ref().is_some_and(HashMap::is_empty) {
             self.offset_commit_callback_invoker
                 .enqueue_interceptor_invocation(HashMap::new());
             if let Some(cb) = callback {
                 self.offset_commit_callback_invoker
                     .enqueue_user_callback_invocation(cb, HashMap::new(), None);
+            }
+            if self.async_commit_ordering_tail.is_none() {
+                self.async_commit_ordering_tail = self.last_pending_async_commit.take();
             }
             let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
             let _ = pending_tx.send(());
@@ -4681,9 +4711,14 @@ where
         // callbacks are enqueued in commit order, as the `commitAsync` javadoc
         // requires (`KafkaConsumer.java:1122-1123`), and `pending_rx`
         // resolving implies every earlier callback is enqueued, which is why
-        // `commit_sync` and `close` await only the most recent commit.
+        // `commit_sync` and `close` await only the most recent commit. The
+        // predecessor is the commit an empty-offsets commit displaced, if any
+        // (the empty commit itself has already enqueued its callbacks).
         let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
-        let previous_pending = self.last_pending_async_commit.take();
+        let previous_pending = self
+            .async_commit_ordering_tail
+            .take()
+            .or_else(|| self.last_pending_async_commit.take());
         let invoker = Arc::clone(&self.offset_commit_callback_invoker);
         tokio::spawn(async move {
             let result = receiver.await;
@@ -9870,6 +9905,88 @@ mod tests {
 
         assert!(completer.await.expect("task ok"));
         assert_eq!(*order.lock().unwrap(), vec![1, 2], "callbacks must fire in commit order");
+    }
+
+    /// An empty-offsets commit skips ahead of an in-flight commit (as in Java),
+    /// but a non-empty commit issued after it must still chain behind that
+    /// in-flight commit. With commits 1, empty, 3 and commit 3 completing before
+    /// commit 1, the last pending commit must not resolve while commit 1 is
+    /// outstanding, and callbacks must be invoked as empty, 1, 3.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_async_after_empty_offsets_commit_still_waits_for_earlier_commit() {
+        struct LabelCallback {
+            order: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for LabelCallback {
+            async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+                assert!(error.is_none(), "unexpected commit error: {error:?}");
+                let label = offsets
+                    .values()
+                    .next()
+                    .map_or_else(|| "empty".to_string(), |o| o.offset().to_string());
+                self.order.lock().unwrap().push(label);
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("my-topic".to_string(), 0);
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // The empty commit enqueues no event, so commit 3 is the second
+        // CommitAsync event. Complete it immediately and defer commit 1 until
+        // the test releases it, reversing the submission order.
+        let completer = tokio::spawn(async move {
+            let mut first = None;
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, offsets, .. } = env.event {
+                    offsets_ready.complete(());
+                    let offsets = offsets.expect("explicit offsets");
+                    match first.take() {
+                        None => first = Some((handle, offsets)),
+                        Some((first_handle, first_offsets)) => {
+                            handle.complete(offsets);
+                            let _ = release_first_rx.await;
+                            first_handle.complete(first_offsets);
+                            return true;
+                        },
+                    }
+                }
+            }
+            false
+        });
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb: Arc<dyn crate::consumer::OffsetCommitCallback> = Arc::new(LabelCallback { order: Arc::clone(&order) });
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 1), Arc::clone(&cb))
+            .await
+            .expect("commit 1");
+        consumer
+            .commit_async_with_offsets_callback(HashMap::new(), Arc::clone(&cb))
+            .await
+            .expect("empty commit");
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp, 3), cb)
+            .await
+            .expect("commit 3");
+
+        let mut last = consumer.last_pending_async_commit.take().expect("pending async commit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut last).await.is_err(),
+            "last pending commit must not resolve while an earlier commit is outstanding"
+        );
+
+        release_first_tx.send(()).expect("completer alive");
+        let _ = last.await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+
+        assert!(completer.await.expect("task ok"));
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["empty", "1", "3"],
+            "only the empty commit may skip ahead; the others fire in commit order"
+        );
     }
 
     /// Consumer with an in-flight async commit, built by
