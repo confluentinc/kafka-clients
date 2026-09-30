@@ -671,6 +671,32 @@ commit; the full suite is green only after CP1b.
 - Report `N passed; 0 failed` per filter, store the logs in the phase folder's untracked
   area (excluded via `.git/info/exclude`), and record the numbers in STATUS.
 
+> **Close-out record (2026-09-30).** The scenario counts above were right: `--list` shows
+> 43 per arm for the touched families, 36 for the other admin families, and 34 for the
+> non-admin sync set. The gate ran on `cfb71be6` and every filter passed:
+> - touched families, 129 passed; 0 failed (43 × `__rust` / `__grpc_python` / `__grpc_dotnet`,
+>   the 4 `list_transactions_*` `__grpc_dotnet` arms included);
+> - other admin `__grpc_dotnet`, 36 passed; 0 failed;
+> - non-admin sync `__grpc_dotnet`, 34 passed; 0 failed.
+>
+> The `.so` was proven fresh: `kafka_common_Error_cause` is exported, and all 697 of the
+> binding's entry points resolve. The sync .NET image was rebuilt from it. So was the sync
+> Python image, because PR #201 changed `bindings/python`, and an image built before the
+> merge would not have been a valid oracle.
+>
+> **Premise errors in this plan, found during the phase:**
+> - **F4 (row above, §4.4).** The symptom is a **leak, not a hang**. `KeyedAdminOperation`'s
+>   Tasks are keyed by the core's comparer, so every Task still completes. Only the countdown
+>   is stranded, together with the `GCHandle` and the client reference (CP2 commit).
+> - **§4.8.** The core **mock** does not fail every resource. Only the BROKER resource gets
+>   (-3, `For input string: "x"`). BROKER_LOGGER is refused with (35, "Not implemented yet"),
+>   and TOPIC is answered normally. Only the real client fails every resource (CP4 commit).
+> - **D16.** .NET did not throw `ArgumentNullException("s")` from `Encoding.UTF8`. It threw its
+>   own `ArgumentException` from the `CreateTopics` precheck, which CP4 removed.
+> - **D17.** The "10 cites in `.claude/` + `CLAUDE.md`" are **3** rule-file cites. The other 7
+>   are in agent-memory notes. The 15 in `design/current` are right, plus 2 bare `:NNNN`
+>   continuations, and the Manager replaced all of them at close.
+
 ---
 
 ## 8. Decisions for the user

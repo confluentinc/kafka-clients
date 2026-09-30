@@ -1031,15 +1031,15 @@ precisely these):
 
 | Entry point | Header |
 |---|---|
-| `kafka_consumer_ConsumerRebalanceListener_new` | `h:2078` |
-| `kafka_consumer_Consumer_commit_async_with_callback` | `h:2505` |
-| `kafka_consumer_Consumer_commit_async_offsets_with_callback` | `h:2538` |
+| `kafka_consumer_ConsumerRebalanceListener_new` | takes `user_data_destroy` |
+| `kafka_consumer_Consumer_commit_async_with_callback` | takes `user_data_destroy` |
+| `kafka_consumer_Consumer_commit_async_offsets_with_callback` | takes `user_data_destroy` |
 
 **Nothing else does** — not any of the ~8 one-shot completions, not the producer's
 `send_async`. So the rule is total, not a heuristic: *a hook present ⇒ the hook is
 the sole free site; no hook ⇒ the callback frees.* Now §B6's third Rule.
 
-**The decisive citation is the ordering, `confluent_kafka.h:524-528`:** the hook
+**The decisive citation is the ordering, in the header's `kafka_consumer_Consumer_commit_async_user_data_destroy_t` doc:** the hook
 fires *"after the registration is dropped by the consumer (i.e. **after the commit
 completed and the callback returned**, or immediately if the call failed before the
 callback could be registered)."* P7's brief only established the **failure** path
@@ -1140,8 +1140,8 @@ The header proves the asymmetry directly:
 
 | Call | Contract |
 |---|---|
-| `kafka_consumer_Consumer_assignment` (`h:2810`) | *"or **null on a concurrent-access rejection** (the guard could not be acquired)"* — guard-protected |
-| `kafka_consumer_ConsumerHandle_assignment` (`h:2950`) | *"Returns … a **non-null** …"*, *"Always empty on a `MockConsumer`-derived handle"* — **no guard**, and it works on a mock |
+| `kafka_consumer_Consumer_assignment` | *"or **null on a concurrent-access rejection** (the guard could not be acquired)"* — guard-protected |
+| `kafka_consumer_ConsumerHandle_assignment` | *"Returns … a **non-null** …"*, *"Always empty on a `MockConsumer`-derived handle"* — **no guard**, and it works on a mock |
 
 So inside a listener fired synchronously by `MockConsumer.Rebalance` (which holds
 the guard on the app thread for the whole call):
@@ -1164,7 +1164,8 @@ actually lands"), which needs a real broker → **O3**.
 > `handle.Assignment()` successfully while the same listener's
 > `consumer.Assignment()` is rejected as concurrent access — establishing that the
 > reentrancy handle bypasses the access guard that makes the consumer's own API
-> unusable from a callback (`confluent_kafka.h:2810` vs `:2950`). **The
+> unusable from a callback (header, `kafka_consumer_Consumer_assignment` vs
+> `kafka_consumer_ConsumerHandle_assignment`). **The
 > end-to-end half** — a listener whose `commitSync` through the handle actually
 > commits — requires a real broker and a cross-backend harness change, and is
 > tracked as follow-up **O3** (roadmap §5.10) alongside O1/O2. This is a scoped
