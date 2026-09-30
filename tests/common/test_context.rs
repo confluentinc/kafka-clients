@@ -228,17 +228,31 @@ impl TestContext {
         }
     }
 
+    /// The bootstrap address a backend can reach over the run's selected
+    /// protocol: [`container_protocol_bootstrap_servers`](Self::container_protocol_bootstrap_servers)
+    /// when it `needs_container_bootstrap` (the gRPC backends in container
+    /// mode, which reach the broker via its CONTAINER-family listener by
+    /// container hostname), otherwise the host-loopback
+    /// [`protocol_bootstrap_servers`](Self::protocol_bootstrap_servers) (the
+    /// in-process Rust backend and natively run gRPC servers).
+    pub fn protocol_bootstrap_servers_for(&self, needs_container_bootstrap: bool) -> &str {
+        if needs_container_bootstrap {
+            self.container_protocol_bootstrap_servers()
+        } else {
+            self.protocol_bootstrap_servers()
+        }
+    }
+
     /// Inject the client-side security config keys for the selected
     /// [`protocol`](Self::protocol) into `cfg`.
     ///
     /// - PLAINTEXT: no-op (client defaults to `security.protocol=PLAINTEXT`).
-    /// - SSL: `security.protocol=SSL`, PEM truststore from
-    ///   [`ca_cert_pem`](Self::ca_cert_pem), and an empty
-    ///   `ssl.endpoint.identification.algorithm`, disabling hostname
-    ///   verification to match the dedicated `ssl_sasl_test` /
-    ///   `sasl_ssl_consumer_test` fixtures (the certificate itself does not
-    ///   require it: its SANs cover `127.0.0.1`, `localhost` and every broker
-    ///   container name, see [`super::test_certs`]).
+    /// - SSL: `security.protocol=SSL` and a PEM truststore from
+    ///   [`ca_cert_pem`](Self::ca_cert_pem). `ssl.endpoint.identification.algorithm`
+    ///   is left at its default (`https`), so the protocol runs exercise
+    ///   hostname verification: the broker certificate's SANs cover
+    ///   `127.0.0.1`, `localhost` and every broker container name, see
+    ///   [`super::test_certs`].
     /// - SASL_SSL: the SSL keys plus SASL/PLAIN (`sasl.mechanism=PLAIN` and a
     ///   `sasl.jaas.config` for `admin` / `admin-secret`).
     ///
@@ -251,14 +265,12 @@ impl TestContext {
             TestProtocol::Ssl => {
                 cfg.insert("security.protocol".to_string(), "SSL".to_string());
                 cfg.insert("ssl.truststore.certificates".to_string(), self.ca_cert_pem().to_string());
-                cfg.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
             },
             TestProtocol::SaslSsl => {
                 cfg.insert("security.protocol".to_string(), "SASL_SSL".to_string());
                 cfg.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
                 cfg.insert("sasl.jaas.config".to_string(), plain_jaas_config(SASL_USERNAME, SASL_PASSWORD));
                 cfg.insert("ssl.truststore.certificates".to_string(), self.ca_cert_pem().to_string());
-                cfg.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
             },
         }
     }

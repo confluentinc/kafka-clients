@@ -68,21 +68,12 @@ fn consumer_config_for<F: ConsumerBackendFactory>(
     ctx: &TestContext,
     group_id: &str,
 ) -> HashMap<String, String> {
-    let mut config = consumer_config(&bootstrap_for(factory, ctx), group_id);
+    let mut config = consumer_config(
+        ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()),
+        group_id,
+    );
     ctx.apply_security(&mut config);
     config
-}
-
-/// Pick the bootstrap address the backend can reach, over the run's selected
-/// protocol: gRPC backends reach the broker via its CONTAINER-family listener
-/// (PLAINTEXT / SSL / SASL_SSL by container hostname), native Rust via the host
-/// loopback.
-fn bootstrap_for<F: ConsumerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
-    if factory.needs_container_bootstrap() {
-        ctx.container_protocol_bootstrap_servers().to_string()
-    } else {
-        ctx.protocol_bootstrap_servers().to_string()
-    }
 }
 
 /// Produce `records` to `topic` with a native in-process Rust producer on the

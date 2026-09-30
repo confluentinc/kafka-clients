@@ -1919,27 +1919,14 @@ pub fn admin_config(bootstrap: &str) -> HashMap<String, String> {
     ])
 }
 
-/// Pick the bootstrap address this factory's backend can actually reach, over
-/// the run's selected protocol: a backend that needs container addresses (the
-/// gRPC backends in container mode) reaches the broker via its CONTAINER-family
-/// listener (PLAINTEXT / SSL / SASL_SSL by container hostname); the in-process
-/// Rust backend and natively run gRPC servers use the host loopback. See
-/// [`plaintext_bootstrap_for`] for the variant that forces PLAINTEXT regardless
-/// of the run's protocol.
-pub fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
-    if factory.needs_container_bootstrap() {
-        ctx.container_protocol_bootstrap_servers().to_string()
-    } else {
-        ctx.protocol_bootstrap_servers().to_string()
-    }
-}
-
-/// [`admin_config`] for the factory's reachable bootstrap, with the selected
+/// [`admin_config`] for the factory's reachable bootstrap
+/// ([`TestContext::protocol_bootstrap_servers_for`]), with the selected
 /// protocol's security keys injected. The keys are injected for every backend:
 /// the gRPC backends forward them through the config map to the client they
-/// create.
+/// create. See [`plaintext_bootstrap_for`] for the bootstrap that forces
+/// PLAINTEXT regardless of the run's protocol.
 pub fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
-    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    let mut config = admin_config(ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()));
     ctx.apply_security(&mut config);
     config
 }

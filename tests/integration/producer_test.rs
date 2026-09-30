@@ -56,24 +56,13 @@ fn make_config(bootstrap_servers: &str) -> HashMap<String, String> {
     ])
 }
 
-/// Pick the bootstrap address the factory's backend can actually reach, over the
-/// run's selected protocol. gRPC backends run in containers and reach the broker
-/// via its CONTAINER-family listener (PLAINTEXT / SSL / SASL_SSL by container
-/// hostname); native Rust uses the host loopback for the same protocol.
-fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
-    if factory.needs_container_bootstrap() {
-        ctx.container_protocol_bootstrap_servers().to_string()
-    } else {
-        ctx.protocol_bootstrap_servers().to_string()
-    }
-}
-
-/// [`make_config`] for the factory's reachable bootstrap, with the selected
+/// [`make_config`] for the factory's reachable bootstrap
+/// ([`TestContext::protocol_bootstrap_servers_for`]), with the selected
 /// protocol's security keys injected. The keys are injected for every backend:
 /// the gRPC backends forward them through the config map to the client they
 /// create, so no cert files need mounting.
 fn make_config_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config(ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()));
     ctx.apply_security(&mut config);
     config
 }

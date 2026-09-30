@@ -61,17 +61,15 @@ const SELECTOR_MAX_POLL_ITERATIONS: usize = 100;
 /// for this run (`INTEGRATION_TEST_PROTOCOL`), for tests that drive the network
 /// layer directly rather than through a client config.
 ///
-/// PLAINTEXT uses a plain channel. SSL and SASL_SSL mirror the dedicated
-/// `ssl_sasl_test` helpers: the broker certificate is trusted through the
-/// cluster CA, hostname verification is disabled to match those helpers (the
-/// certificate itself does not require it: its SANs cover `127.0.0.1`,
-/// `localhost` and the broker container names), and SASL_SSL authenticates
-/// with SASL/PLAIN as `admin` / `admin-secret`.
+/// PLAINTEXT uses a plain channel. For SSL and SASL_SSL the broker certificate
+/// is trusted through the cluster CA and hostname verification stays at its
+/// default (enabled), since the certificate's SANs cover `127.0.0.1`,
+/// `localhost` and the broker container names. SASL_SSL authenticates with
+/// SASL/PLAIN as `admin` / `admin-secret`.
 pub fn protocol_selector(ctx: &TestContext) -> Selector {
     let ssl_factory = || {
         let ssl_config = SslConfig {
             truststore_certificates: Some(ctx.ca_cert_pem().to_string()),
-            endpoint_identification_algorithm: String::new(),
             ..SslConfig::default()
         };
         SslFactory::new(&ssl_config).expect("valid test SSL config")

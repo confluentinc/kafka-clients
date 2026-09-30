@@ -506,8 +506,9 @@ fn parse_listening_port(line: &str) -> Option<u16> {
 /// Copy `stream`'s lines into `output`, keeping the last [`NATIVE_OUTPUT_LINES`],
 /// until the stream reaches EOF or fails to read. Lines that are not valid UTF-8
 /// are kept lossily rather than ending the drain, which would leave the server to
-/// block on a full pipe. With `ready`, sends it the first line containing
-/// "listening".
+/// block on a full pipe. With `ready`, sends it the first "listening on" line
+/// that carries a bound port, so an unrelated line that merely mentions
+/// "listening" cannot be taken as the readiness signal.
 fn drain_output(
     stream: impl Read + Send + 'static,
     output: Arc<Mutex<VecDeque<String>>>,
@@ -524,7 +525,8 @@ fn drain_output(
                 Ok(_) => {},
             }
             let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
-            if line.contains("listening")
+            if line.contains("listening on ")
+                && parse_listening_port(&line).is_some()
                 && let Some(ready) = ready.take()
             {
                 let _ = ready.send(line.clone());

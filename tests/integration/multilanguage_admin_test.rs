@@ -44,23 +44,11 @@ fn admin_config(bootstrap: &str) -> HashMap<String, String> {
     ])
 }
 
-fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
-    if factory.needs_container_bootstrap() {
-        // Container backends (Python/C gRPC) reach the broker over the
-        // protocol-specific CONTAINER listener (plaintext/ssl/sasl_ssl).
-        ctx.container_protocol_bootstrap_servers().to_string()
-    } else {
-        // The in-process Rust backend uses the host-loopback listener for the
-        // active protocol.
-        ctx.protocol_bootstrap_servers().to_string()
-    }
-}
-
 /// Admin config for the backend under test, with the active protocol's security
 /// settings (TLS truststore / SASL) applied. Under PLAINTEXT the config is left
 /// unchanged.
 fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
-    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    let mut config = admin_config(ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()));
     ctx.apply_security(&mut config);
     config
 }
