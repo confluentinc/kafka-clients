@@ -56,6 +56,7 @@ mod network_client;
 mod network_client_utils;
 #[cfg_attr(not(test), expect(dead_code))]
 mod node_api_versions;
+mod preview_warning;
 pub mod producer;
 #[cfg(test)]
 mod test_alloc_tracker;

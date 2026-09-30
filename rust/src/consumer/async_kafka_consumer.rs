@@ -1967,7 +1967,7 @@ where
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
-            log_context,
+            log_context.clone(),
         );
         network_client.set_time(Arc::clone(&time));
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
@@ -2454,6 +2454,7 @@ where
         ));
 
         // Java line 506 — `config.logUnused()` → `log::debug!(...)`.
+        crate::preview_warning::log_preview_warning(&log_context);
         log::debug!("Kafka consumer initialized");
 
         // ── Bg-task spawn ──
