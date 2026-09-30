@@ -15,6 +15,7 @@ In some cases, the derivation of the Rust client is evident in the detail of the
 
 * **Crate:** published to `crates.io`
 * **Install:** `cargo add confluent-kafka-rust`
+* **Import:** `confluent_kafka`, e.g. `use confluent_kafka::producer::KafkaProducer;`
 
 ## API shape
 
@@ -127,7 +128,7 @@ producer.close().await?;
 
 ### Consumer example - subscribe to topics and poll a batch of records in a loop
 
-Java's subscribe has six overloads with an empty parameter-name intersection, so no Rust method keeps the plain name subscribe: the topic-collection form is `subscribe_topics`.
+Java's subscribe has six overloads with an empty parameter-name intersection, so no Rust method keeps the plain name subscribe: the topic-collection form is `subscribe_with_topics`.
 
 #### Java
 
@@ -145,10 +146,10 @@ while (true) {
 #### Rust
 
 ```rust
-let mut consumer = KafkaConsumer::new<Vec<u8>, Vec<u8>>(
+let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
     config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer),
 )?;
-consumer.subscribe_topics(vec!["foo".into(), "bar".into()]).await?;
+consumer.subscribe_with_topics(vec!["foo".into(), "bar".into()]).await?;
 loop {
     let records = consumer.poll(Duration::from_millis(100)).await?;
     for record in &records {
@@ -213,7 +214,7 @@ loop {
 
 ### AdminClient - Create a topic and block until the request completes or fails.
 
-Java declares each admin operation as a pair — a default `<method_name>(args)` forwarding to `<method_name>(args, new <MethodName>Options())` — so Rust has a pair too: the no-options form owns the plain name and the options-taking form carries the `_options suffix`. `NewTopic's (name, int, short)` and `(name, Optional<Integer>, Optional<Short>)` constructors differ only by `Optional`, so they collapse to a single Rust constructor taking `Option`.
+Java declares each admin operation as a pair — a default `<method_name>(args)` forwarding to `<method_name>(args, new <MethodName>Options())` — so Rust has a pair too: the no-options form owns the plain name and the options-taking form carries the `_with_options` suffix. `NewTopic`'s `(name, int, short)` and `(name, Optional<Integer>, Optional<Short>)` constructors differ only by `Optional`, so they collapse to a single Rust constructor taking `Option`.
 
 #### Java
 
