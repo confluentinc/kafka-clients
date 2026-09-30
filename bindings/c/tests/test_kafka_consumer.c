@@ -215,6 +215,33 @@ void test_kafka_consumer_destroy_without_close(void) {
 }
 
 // ---------------------------------------------------------------------------
+// close(Duration) with a negative timeout
+// ---------------------------------------------------------------------------
+
+/* Java's KafkaConsumer.close(Duration) is close(CloseOptions.timeout(timeout)),
+ * which throws IllegalArgumentException("The timeout cannot be negative.") and
+ * leaves the consumer open (AsyncKafkaConsumer.close(CloseOptions)). */
+void test_kafka_consumer_close_with_negative_timeout_rejected(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_t *consumer =
+        create_consumer("localhost:9092", "test-group", "consumer", &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(consumer);
+
+    kafka_common_Error_t *close_err = kafka_consumer_Consumer_close_with_timeout(consumer, -1);
+    TEST_ASSERT_NOT_NULL(close_err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+                            kafka_common_Error_code(close_err));
+    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.",
+                             kafka_common_Error_message(close_err));
+    kafka_common_Error_destroy(close_err);
+
+    /* Still open: a valid close succeeds. */
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_close_with_timeout(consumer, 0));
+    kafka_consumer_Consumer_destroy(consumer);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -228,6 +255,7 @@ int main(void) {
     RUN_TEST(test_kafka_consumer_wakeup_before_poll);
     RUN_TEST(test_kafka_consumer_wakeup_from_other_thread);
     RUN_TEST(test_kafka_consumer_destroy_without_close);
+    RUN_TEST(test_kafka_consumer_close_with_negative_timeout_rejected);
 
     return UNITY_END();
 }
