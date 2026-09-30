@@ -122,17 +122,26 @@ public sealed class TopicMetadataAndConfig
     }
 
     /// <summary>
-    /// Java's <c>ensureSuccess()</c>: rethrows the metadata failure wrapped in a fresh
-    /// <see cref="KafkaException"/> (Java wraps in <c>new KafkaException(exception)</c>),
-    /// so the original stays available as
-    /// <see cref="System.Exception.InnerException"/> and each accessor call gets its own
-    /// stack trace.
+    /// Java's <c>ensureSuccess()</c>: throws the metadata failure.
     /// </summary>
+    /// <remarks>
+    /// Java rethrows the stored exception <b>itself</b> (<c>throw exception;</c>,
+    /// <c>CreateTopicsResult.java:151-154</c>), so every accessor surfaces the same
+    /// instance with its identity fields intact. The .NET shape is a deliberate, recorded
+    /// deviation (M15/P13.4 D7): it throws a <b>fresh</b> <see cref="KafkaException"/>
+    /// that copies the stored error's <see cref="KafkaException.Code"/>,
+    /// <see cref="System.Exception.Message"/> and <see cref="KafkaException.IsRetriable"/>,
+    /// and carries the stored instance as
+    /// <see cref="System.Exception.InnerException"/>. Rethrowing one stored instance from
+    /// several call sites would overwrite its stack trace on every throw; the fresh
+    /// exception gives each accessor call its own trace while a caller that branches on
+    /// the code or the retriable flag sees exactly what Java's caller would.
+    /// </remarks>
     private void EnsureSuccess()
     {
         if (_exception is not null)
         {
-            throw new KafkaException(_exception.Message, _exception);
+            throw new KafkaException(_exception.Code, _exception.Message, _exception.IsRetriable, _exception);
         }
     }
 }

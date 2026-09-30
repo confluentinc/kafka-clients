@@ -125,6 +125,37 @@ public sealed class PublicTopicCollectionTests
     }
 
     /// <summary>
+    /// The returned views are read-only at runtime, not merely by their declared type —
+    /// Java returns <c>Collections.unmodifiableCollection(...)</c>
+    /// (<c>TopicCollection.java:58-59</c>, <c>:77-78</c>). Returning the backing
+    /// <c>List&lt;T&gt;</c> under an <c>IReadOnlyCollection&lt;T&gt;</c> declaration would let
+    /// a caller cast it back and mutate a collection that was already handed to a request.
+    /// </summary>
+    [Fact]
+    public void Accessors_ReturnViewsThatCannotBeCastBackAndMutated()
+    {
+        TopicCollection.TopicNameCollection names = TopicCollection.OfTopicNames(new[] { "alpha", "beta" });
+
+        IReadOnlyCollection<string> nameView = names.TopicNames();
+        Assert.False(nameView is List<string>);
+        ICollection<string> nameCollection = Assert.IsAssignableFrom<ICollection<string>>(nameView);
+        Assert.True(nameCollection.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => nameCollection.Add("x"));
+        Assert.Equal(new[] { "alpha", "beta" }, names.TopicNames());
+
+        Uuid first = new Uuid(1L, 2L);
+        Uuid second = new Uuid(3L, 4L);
+        TopicCollection.TopicIdCollection ids = TopicCollection.OfTopicIds(new[] { first, second });
+
+        IReadOnlyCollection<Uuid> idView = ids.TopicIds();
+        Assert.False(idView is List<Uuid>);
+        ICollection<Uuid> idCollection = Assert.IsAssignableFrom<ICollection<Uuid>>(idView);
+        Assert.True(idCollection.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => idCollection.Add(new Uuid(5L, 6L)));
+        Assert.Equal(new[] { first, second }, ids.TopicIds());
+    }
+
+    /// <summary>
     /// A null collection is rejected at the factory, as Java's <c>new ArrayList&lt;&gt;</c>
     /// throws <c>NullPointerException</c> — and it is rejected naming <b>this API's own</b>
     /// parameter.

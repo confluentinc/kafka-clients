@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 
 namespace Confluent.Kafka;
 
@@ -86,7 +87,7 @@ public abstract class TopicCollection
     /// </summary>
     public sealed class TopicIdCollection : TopicCollection
     {
-        private readonly List<Uuid> _topicIds;
+        private readonly ReadOnlyCollection<Uuid> _topicIds;
 
         /// <summary>
         /// Copies the caller's collection, as Java's <c>new ArrayList&lt;&gt;(topics)</c>
@@ -112,14 +113,19 @@ public abstract class TopicCollection
                 throw new ArgumentNullException(nameof(topics));
             }
 
-            _topicIds = new List<Uuid>(topics);
+            _topicIds = new ReadOnlyCollection<Uuid>(new List<Uuid>(topics));
         }
 
         /// <summary>
         /// The topic ids — Java's <c>topicIds()</c>. A <b>method</b>, not a property,
         /// because Java's is a method and it hands back a snapshot view.
         /// </summary>
-        /// <returns>The topic ids, in the order supplied.</returns>
+        /// <returns>
+        /// The topic ids, in the order supplied, as a read-only view: Java returns
+        /// <c>Collections.unmodifiableCollection(topicIds)</c>
+        /// (<c>TopicCollection.java:58-59</c>), so the view cannot be cast back to a mutable
+        /// list and changed. The wrapper is built once, over the constructor's copy.
+        /// </returns>
         public IReadOnlyCollection<Uuid> TopicIds() => _topicIds;
     }
 
@@ -128,7 +134,7 @@ public abstract class TopicCollection
     /// </summary>
     public sealed class TopicNameCollection : TopicCollection
     {
-        private readonly List<string> _topicNames;
+        private readonly ReadOnlyCollection<string> _topicNames;
 
         /// <inheritdoc cref="TopicIdCollection(IEnumerable{Uuid})"/>
         internal TopicNameCollection(IEnumerable<string> topics)
@@ -138,14 +144,18 @@ public abstract class TopicCollection
                 throw new ArgumentNullException(nameof(topics));
             }
 
-            _topicNames = new List<string>(topics);
+            _topicNames = new ReadOnlyCollection<string>(new List<string>(topics));
         }
 
         /// <summary>
         /// The topic names — Java's <c>topicNames()</c>. A <b>method</b>, not a property,
         /// for the same reason as <see cref="TopicIdCollection.TopicIds"/>.
         /// </summary>
-        /// <returns>The topic names, in the order supplied.</returns>
+        /// <returns>
+        /// The topic names, in the order supplied, as a read-only view — Java's
+        /// <c>Collections.unmodifiableCollection(topicNames)</c>
+        /// (<c>TopicCollection.java:77-78</c>); see <see cref="TopicIdCollection.TopicIds"/>.
+        /// </returns>
         public IReadOnlyCollection<string> TopicNames() => _topicNames;
     }
 }

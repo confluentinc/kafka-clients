@@ -404,6 +404,43 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     /// <summary>
+    /// A <see cref="TopicMetadataAndConfig"/> built from an error throws, from every
+    /// accessor, a <see cref="KafkaException"/> that keeps the stored error's identity
+    /// fields — Java rethrows the stored exception itself (<c>CreateTopicsResult.java:151-154</c>),
+    /// so a caller branching on the code or the retriable flag must see the stored values.
+    /// The stored error has a <b>non-zero</b> code and is retriable, so neither assertion
+    /// can pass against a default <see cref="KafkaException"/> (code 0, not retriable).
+    /// </summary>
+    [Fact]
+    public void TopicMetadataAndConfig_FromAnError_EveryAccessorKeepsTheStoredIdentity()
+    {
+        const int Code = 7;
+        const string Message = "Topic metadata unavailable: request timed out.";
+        KafkaException stored = new KafkaException(Code, Message, isRetriable: true);
+        TopicMetadataAndConfig metadata = new TopicMetadataAndConfig(stored);
+
+        Assert.False(metadata.HasMetadata);
+
+        (string Name, Action Call)[] accessors =
+        {
+            (nameof(TopicMetadataAndConfig.Config), () => metadata.Config()),
+            (nameof(TopicMetadataAndConfig.TopicId), () => metadata.TopicId()),
+            (nameof(TopicMetadataAndConfig.NumPartitions), () => metadata.NumPartitions()),
+            (nameof(TopicMetadataAndConfig.ReplicationFactor), () => metadata.ReplicationFactor()),
+        };
+
+        foreach ((string name, Action call) in accessors)
+        {
+            KafkaException thrown = Assert.Throws<KafkaException>(call);
+            Assert.True(Code == thrown.Code, name);
+            Assert.True(thrown.IsRetriable, name);
+            Assert.Equal(Message, thrown.Message);
+            Assert.Same(stored, thrown.InnerException);
+            Assert.NotSame(stored, thrown);
+        }
+    }
+
+    /// <summary>
     /// Reference equality over strings, built by hand so it compiles on the net462 leg
     /// (<c>ReferenceEqualityComparer</c> is net5+).
     /// </summary>
