@@ -127,7 +127,8 @@ impl AdminClientConfig {
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
-                Self::CLIENT_ID_CONFIG => config.client_id = value.to_string(),
+                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                Self::CLIENT_ID_CONFIG => config.client_id = value.trim().to_string(),
                 Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
                 Self::DEFAULT_API_TIMEOUT_MS_CONFIG => config.default_api_timeout_ms = parse_i32(key, value)?,
                 Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,

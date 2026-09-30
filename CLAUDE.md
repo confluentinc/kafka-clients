@@ -43,8 +43,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Java interfaces become traits in Rust, except those translated to std traits or to functions, default method implementation on an interface become a default trait function implementation in Rust
     If a Java class implements multiple interfaces and that have a function in common with same signature, implement the function on the struct and delegate to it in both implementations.
     Constants that should be associated to the trait are exported through the module containing the trait, also nested structs, enums or static methods
-   - The configuration values MUST NOT take "classes" a class is Java terminology and we don't use
-     reflection here, every time there a property with a class the corresponding value needs to be set in the properties struct through a setter and the value must be a a trait.
+   - The configuration MUST NOT take classes as values or "class" in the property name. A class is Java terminology and we don't use reflection here, every time there's a property with a class the corresponding value needs to be set in the properties struct through a setter and the value must be a trait.
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
    - Overloaded methods: make sure there's:
      - a method with same name (after translation) that has the intersection of parameters from all overloaded methods, if that method exists in Java.

@@ -18,7 +18,12 @@
 //! members required by the admin client (`removeMembersFromConsumerGroup`) are
 //! translated here: the classic-protocol `JoinGroupRequest` itself is out of
 //! scope (see `.claude/rules/consumer-threading.md` §20). This file carries the
-//! `UNKNOWN_MEMBER_ID` sentinel and the shared reason-truncation utility.
+//! `UNKNOWN_MEMBER_ID` sentinel, the shared reason-truncation utility and the
+//! `group.instance.id` validator used by `ConsumerConfig`.
+
+use crate::common::Error;
+use crate::common::errors::InvalidConfigurationError;
+use crate::common::internals::Topic;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.requests.JoinGroupRequest`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -52,11 +57,78 @@ impl JoinGroupRequest {
             reason.to_string()
         }
     }
+
+    /// Validates a `group.instance.id` with the topic-name rules.
+    ///
+    /// Corresponds to `JoinGroupRequest.validateGroupInstanceId`, which calls
+    /// `Topic.validate(id, "Group instance id", ...)` and throws
+    /// `InvalidConfigurationException` with the message
+    /// `"Group instance id is invalid: <reason>"`. Here the `Topic.validate`
+    /// callback form collapses into returning the error directly.
+    pub fn validate_group_instance_id(id: &str) -> Result<(), Error> {
+        match Topic::detect_invalid_topic(id) {
+            Some(reason_invalid) => Err(Error::InvalidConfiguration(InvalidConfigurationError::new(format!(
+                "Group instance id is invalid: {reason_invalid}"
+            )))),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Translated from `JoinGroupRequestTest.shouldAcceptValidGroupInstanceIds`.
+    ///
+    /// Java builds the max-length id with `TestUtils.randomString(249)`, i.e.
+    /// 249 characters drawn from `LETTERS_AND_DIGITS`; cycling through that
+    /// same alphabet gives a deterministic string of the same shape.
+    #[test]
+    fn should_accept_valid_group_instance_ids() {
+        const LETTERS_AND_DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let max_length_string: String = (0..249)
+            .map(|i| LETTERS_AND_DIGITS[i % LETTERS_AND_DIGITS.len()] as char)
+            .collect();
+        let valid_group_instance_ids = [
+            "valid",
+            "INSTANCE",
+            "gRoUp",
+            "ar6",
+            "VaL1d",
+            "_0-9_.",
+            "...",
+            max_length_string.as_str(),
+        ];
+
+        for instance_id in valid_group_instance_ids {
+            JoinGroupRequest::validate_group_instance_id(instance_id)
+                .unwrap_or_else(|e| panic!("{instance_id:?} should be valid, got {e:?}"));
+        }
+    }
+
+    /// Translated from `JoinGroupRequestTest.shouldThrowOnInvalidGroupInstanceIds`.
+    #[test]
+    fn should_throw_on_invalid_group_instance_ids() {
+        let long_string = "a".repeat(250);
+        let invalid_group_instance_ids = ["", "foo bar", "..", "foo:bar", "foo=bar", ".", long_string.as_str()];
+
+        for instance_id in invalid_group_instance_ids {
+            let err = JoinGroupRequest::validate_group_instance_id(instance_id).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidConfiguration(_)),
+                "InvalidConfigurationError expected as instance id {instance_id:?} is invalid, got {err:?}"
+            );
+        }
+    }
+
+    /// Beyond Java's tests: the message is `Topic.validate`'s
+    /// `"<thing> is invalid: <reason>"` form.
+    #[test]
+    fn invalid_group_instance_id_carries_java_message() {
+        let err = JoinGroupRequest::validate_group_instance_id("..").unwrap_err();
+        assert_eq!(err.message(), "Group instance id is invalid: '..' is not allowed");
+    }
 
     /// A short reason is returned unchanged.
     #[test]
