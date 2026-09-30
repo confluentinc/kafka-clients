@@ -27,8 +27,9 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Entry point for the .NET gRPC backend used by the Rust multilanguage integration-test
-/// harness. Hosts BOTH a producer and a consumer servicer on Kestrel serving h2c (HTTP/2
-/// cleartext, no TLS) — the Rust client dials <c>http://</c>.
+/// harness. Hosts a producer and a consumer servicer (plus the admin servicer, sync flavor
+/// only — M15/P12 D1) on Kestrel serving h2c (HTTP/2 cleartext, no TLS) — the Rust client
+/// dials <c>http://</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,13 +37,15 @@ namespace Confluent.Kafka.GrpcServer;
 /// asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c>
 /// + <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c>); anything else
 /// (including unset, the sync default) hosts the synchronous servicers
-/// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/>). Each image bakes its
+/// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/> +
+/// <see cref="AdminServiceImpl"/>; admin is sync-only, M15/P12 D1). Each image bakes its
 /// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
 /// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
 /// the harness sets it explicitly for each backend kind instead (backend_pool.rs
-/// <c>native_command</c>). One server per flavor hosts both services (Python-parity —
-/// <c>grpc_server.py</c> registers both); the env name stays <c>CONSUMER_FLAVOR</c> to avoid
-/// Dockerfile churn.
+/// <c>native_command</c>). One server per flavor hosts the producer and consumer services
+/// together (Python-parity — <c>grpc_server.py</c> registers them in one server; Python also
+/// registers admin in its async server, where .NET does not); the env name stays
+/// <c>CONSUMER_FLAVOR</c> to avoid Dockerfile churn.
 /// </para>
 /// <para>
 /// <b>Listen address and readiness line (M17/P1)</b> — the same contract as the Python and C
@@ -97,7 +100,8 @@ internal static class Program
         // request, so the map would be empty on every call after Create* (Python registers one
         // servicer instance per service — grpc_server.py). Registering them here makes
         // MapGrpcService resolve those single instances. The CONSUMER_FLAVOR selector (see the
-        // type remarks) picks the sync or async servicers; both flavors host BOTH services.
+        // type remarks) picks the sync or async servicers; both flavors host the producer and
+        // consumer services, and only the sync flavor hosts admin.
         if (useAsync)
         {
             builder.Services.AddSingleton<AsyncProducerServiceImpl>();

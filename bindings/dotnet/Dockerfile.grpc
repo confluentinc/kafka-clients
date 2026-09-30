@@ -7,7 +7,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Multi-stage build for the .NET gRPC consumer-backend image used by the
+# Multi-stage build for the .NET gRPC backend image used by the
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
 # bindings/dotnet/design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md.
@@ -18,8 +18,10 @@
 #
 # Tags the result as confluent-kafka-rust/dotnet-grpc-server:dev.
 #
-# The image serves ConsumerService only (consumer-side backend); it drives the
-# binding's synchronous KafkaConsumer<byte[],byte[]> over the C ABI. Requires
+# The image serves ProducerService + ConsumerService + AdminService (Admin in
+# this sync image only, M15/P12 D1 — see Program.cs); it drives the binding's
+# synchronous KafkaProducer<byte[],byte[]> / KafkaConsumer<byte[],byte[]> and
+# KafkaAdminClient over the C ABI. Requires
 # `cargo build --features ffi --release` to have produced the LINUX
 # libconfluent_kafka.so under target/release/ first (build-grpc-images: build).
 
@@ -81,7 +83,8 @@ COPY --from=builder /src/target/release/libconfluent_kafka.so /app/libconfluent_
 # wins (mirrors the Python image).
 ENV LD_LIBRARY_PATH=/app
 
-# Pin the consumer flavor for this image (M8/P2). Program.cs's CONSUMER_FLAVOR
+# Pin the servicer flavor for this image (M8/P2; despite its name, CONSUMER_FLAVOR
+# picks the whole servicer set Program.cs hosts). Program.cs's CONSUMER_FLAVOR
 # selector defaults to sync, so this is behavior-preserving — it just makes the
 # sync image self-describing, isolated from the async image (Dockerfile.grpc.async).
 ENV CONSUMER_FLAVOR=sync

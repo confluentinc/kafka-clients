@@ -7,11 +7,12 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Multi-stage build for the *async* .NET gRPC consumer-backend image used by the
+# Multi-stage build for the *async* .NET gRPC backend image used by the
 # multilanguage integration test harness (the dotnet_async backend, M8/P2). It is
 # the async twin of Dockerfile.grpc: identical builder + runtime stages, differing
-# only by ENV CONSUMER_FLAVOR=async (Program.cs then hosts AsyncConsumerServiceImpl,
-# driving the binding's asynchronous AsyncKafkaConsumer<byte[],byte[]>).
+# only by ENV CONSUMER_FLAVOR=async (Program.cs then hosts AsyncProducerServiceImpl
+# + AsyncConsumerServiceImpl, driving the binding's asynchronous
+# AsyncKafkaProducer<byte[],byte[]> / AsyncKafkaConsumer<byte[],byte[]>).
 #
 # Kept STANDALONE (its own FROM, NOT `FROM confluent-kafka-rust/dotnet-grpc-server:dev`)
 # so it has no build-ordering dependency on the sync image and can be rebuilt
@@ -23,8 +24,10 @@
 #
 # Tags the result as confluent-kafka-rust/dotnet-async-grpc-server:dev.
 #
-# The image serves ConsumerService only (consumer-side backend); it drives the
-# binding's asynchronous AsyncKafkaConsumer<byte[],byte[]> over the C ABI. Requires
+# The image serves ProducerService + ConsumerService (no AdminService: that is
+# hosted by the sync image only, M15/P12 D1 — see Program.cs); it drives the
+# binding's asynchronous AsyncKafkaProducer<byte[],byte[]> /
+# AsyncKafkaConsumer<byte[],byte[]> over the C ABI. Requires
 # `cargo build --features ffi --release` to have produced the LINUX
 # libconfluent_kafka.so under target/release/ first (build-grpc-images: build).
 
@@ -86,9 +89,11 @@ COPY --from=builder /src/target/release/libconfluent_kafka.so /app/libconfluent_
 # wins (mirrors the Python image).
 ENV LD_LIBRARY_PATH=/app
 
-# Pin the consumer flavor for this image (M8/P2) — the ONLY behavioral difference
-# from Dockerfile.grpc. Program.cs's CONSUMER_FLAVOR selector then hosts
-# AsyncConsumerServiceImpl (AsyncKafkaConsumer). Mirrors python_async.
+# Pin the servicer flavor for this image (M8/P2) — the ONLY behavioral difference
+# from Dockerfile.grpc. Despite its name, Program.cs's CONSUMER_FLAVOR selector
+# picks the whole servicer set: here AsyncProducerServiceImpl +
+# AsyncConsumerServiceImpl (AsyncKafkaProducer / AsyncKafkaConsumer). Mirrors
+# python_async.
 ENV CONSUMER_FLAVOR=async
 
 # The server defaults to 127.0.0.1; bind all interfaces so it is reachable
