@@ -539,7 +539,17 @@ impl NodeConnectionState {
         // that IP (such as a load balancer instance failure). Check the first address in the
         // list and skip it if it was the last address we tried and there are multiple addresses
         // to choose from.
-        if self.addresses.len() > 1 && Some(self.addresses[self.address_index as usize]) == self.last_attempted_address
+        //
+        // Deviation: the skip only lands on an address of the same IP family. Java's list is
+        // always a single family (`ClientUtils.filterPreferredAddresses` drops the other one),
+        // so its skip never changes family. Here the IPv6 addresses are kept after the IPv4
+        // ones as a fallback (see `ClientUtils::filter_preferred_addresses`); without this
+        // guard every reconnect after an established IPv4 connection to a dual-stack host
+        // would be sent to IPv6 first. A failed attempt still moves on to IPv6 through
+        // `move_to_next_address`.
+        if self.addresses.len() > 1
+            && Some(self.addresses[0]) == self.last_attempted_address
+            && self.addresses[0].is_ipv4() == self.addresses[1].is_ipv4()
         {
             self.address_index += 1;
         }
@@ -570,7 +580,7 @@ impl fmt::Display for NodeConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     /// A concrete instantiation used purely to name the associated constants.
     /// They do not depend on `H`, but a generic type cannot infer it (E0282).
@@ -982,6 +992,88 @@ mod tests {
         connection_states.connecting(NODE_ID1, time.milliseconds(), HOST_TWO_IPS);
         let addr3 = connection_states.current_address(NODE_ID1).await.unwrap();
         assert_ne!(addr1, addr3);
+    }
+
+    /// A dual-stack host whose resolver lists IPv6 first: the IPv4 address is
+    /// tried first, and after that attempt fails the next attempt uses the
+    /// IPv6 address instead of retrying IPv4 forever (the IPv6 fallback of
+    /// `ClientUtils::filter_preferred_addresses`).
+    #[tokio::test]
+    async fn test_dual_stack_falls_back_to_ipv6_after_ipv4_fails() {
+        struct DualStackIpv6First;
+        impl HostResolver for DualStackIpv6First {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                Ok(vec![IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)])
+            }
+        }
+        let mut connection_states = ClusterConnectionStates::new(
+            RECONNECT_BACKOFF_MS,
+            RECONNECT_BACKOFF_MAX,
+            CONNECTION_SETUP_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            LogContext::empty(),
+            DualStackIpv6First,
+        );
+        let mut time = MockTime::new();
+
+        connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+        assert_eq!(
+            connection_states.current_address(NODE_ID1).await.unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        // The IPv4 connection attempt fails.
+        connection_states.disconnected(NODE_ID1, time.milliseconds());
+        time.sleep(RECONNECT_BACKOFF_MAX + 1);
+
+        connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+        assert_eq!(
+            connection_states.current_address(NODE_ID1).await.unwrap(),
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        );
+    }
+
+    /// A dual-stack host whose established IPv4 connection drops: the re-resolved
+    /// list is `[IPv4, IPv6]`, and the "skip the last attempted address" rule must
+    /// not send the reconnect to IPv6, since Java's single-family list never
+    /// switches family there. With a second IPv4 address the skip still applies,
+    /// within IPv4.
+    #[tokio::test]
+    async fn test_dual_stack_reconnect_after_established_connection_stays_on_ipv4() {
+        struct DualStack(Vec<IpAddr>);
+        impl HostResolver for DualStack {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                Ok(self.0.clone())
+            }
+        }
+        let v4_a = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let v4_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+
+        for (resolved, expected_reconnect) in [(vec![v6, v4_a], v4_a), (vec![v6, v4_a, v4_b], v4_b)] {
+            let mut connection_states = ClusterConnectionStates::new(
+                RECONNECT_BACKOFF_MS,
+                RECONNECT_BACKOFF_MAX,
+                CONNECTION_SETUP_TIMEOUT_MS,
+                CONNECTION_SETUP_TIMEOUT_MAX_MS,
+                LogContext::empty(),
+                DualStack(resolved.clone()),
+            );
+            let mut time = MockTime::new();
+
+            connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+            assert_eq!(v4_a, connection_states.current_address(NODE_ID1).await.unwrap());
+            // The IPv4 connection is established, then drops.
+            connection_states.ready(NODE_ID1);
+            connection_states.disconnected(NODE_ID1, time.milliseconds());
+            time.sleep(RECONNECT_BACKOFF_MAX + 1);
+
+            connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
+            assert_eq!(
+                expected_reconnect,
+                connection_states.current_address(NODE_ID1).await.unwrap(),
+                "resolved {resolved:?}"
+            );
+        }
     }
 
     /// Translated from `ClusterConnectionStatesTest.testHostResolveChange`

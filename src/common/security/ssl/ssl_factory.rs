@@ -341,7 +341,16 @@ fn load_client_identity(
 }
 
 /// Resolves TLS protocol version strings to rustls `SupportedProtocolVersion` references.
+///
+/// An empty list means the provider's defaults, as in Java:
+/// `DefaultSslEngineFactory.configure` leaves `enabledProtocols` `null` for an
+/// empty `ssl.enabled.protocols`, and `createSslEngine` then skips
+/// `setEnabledProtocols`, so the JSSE provider's default protocols apply. The
+/// rustls counterpart is [`rustls::DEFAULT_VERSIONS`].
 fn resolve_tls_versions(enabled_protocols: &[String]) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
+    if enabled_protocols.is_empty() {
+        return Ok(rustls::DEFAULT_VERSIONS.to_vec());
+    }
     let mut versions = Vec::new();
     for proto in enabled_protocols {
         match proto.as_str() {
@@ -357,9 +366,6 @@ fn resolve_tls_versions(enabled_protocols: &[String]) -> io::Result<Vec<&'static
                 ));
             },
         }
-    }
-    if versions.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "No TLS protocol versions enabled"));
     }
     Ok(versions)
 }
@@ -645,6 +651,20 @@ B2V9lhUZNk+pRjtJw9unpXsM
         let result = SslFactory::new(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported TLS protocol version"));
+    }
+
+    /// An empty `ssl.enabled.protocols` passes config validation (Java's
+    /// `ValidList.anyNonDuplicateValues(true, false)` allows it) and means
+    /// the provider's default protocols, as Java's `DefaultSslEngineFactory`
+    /// does, rather than failing every TLS connection.
+    #[test]
+    fn test_empty_enabled_protocols_uses_provider_defaults() {
+        assert_eq!(resolve_tls_versions(&[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
+
+        let mut config = SslConfig::default();
+        SslConfig::apply_ssl_config_key(&mut config, "ssl.enabled.protocols", "").unwrap();
+        assert!(config.enabled_protocols.is_empty());
+        assert!(SslFactory::new(&config).is_ok());
     }
 
     #[test]
