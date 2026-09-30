@@ -646,8 +646,7 @@ Verified against `Cargo.toml`.
 | async-trait | 0.1 | `Consumer` / `Admin` dispatch traits, `ConsumerRebalanceListener`, `OffsetCommitCallback` (not `Producer` — see above) |
 | futures-util | 0.3 | Future combinators |
 | tokio-rustls | 0.26 | Async TLS |
-| rustls | 0.23 | TLS implementation (TLS 1.2 + 1.3) |
-| rustls-pemfile | 2 | PEM file parsing |
+| rustls | 0.23 | TLS implementation (TLS 1.2 + 1.3); PEM cert/key parsing via its re-exported `pki_types::pem::PemObject` |
 | webpki-roots | 0.26 | Root CA certificates |
 | aws-lc-rs | 1 | rustls crypto provider; PBKDF2-HMAC for `ScramFormatter::hi` (no new compiled crate — already transitive via rustls) |
 | bytes | 1 | Buffer handling on the receive path |
