@@ -221,6 +221,8 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         cls = KafkaError
     _lib.KafkaError_destroy(handle)
     error = construct(cls, message, payload)
+    # Set after construction, so the constructor arguments do not carry it;
+    # ``__reduce__`` (``_throwable.reduce``) keeps it for ``copy`` / ``pickle``.
     if cause is not None:
         error.__cause__ = cause
     elif source_cause is not None:
