@@ -7,7 +7,8 @@ done and what is not is tracked in [status.md](status.md).
 
 **Last verified against the tree:** 2026-08-13
 **Coverage:** Producer, Consumer (KIP-848) and AdminClient are all translated;
-the C FFI and the Python bindings cover producer + consumer, not admin.
+the C FFI covers all three. The `confluent_kafka` Python package covers producer
++ consumer; admin has a separate, older module (`bindings/python/admin.py`).
 
 ---
 
@@ -725,41 +726,73 @@ outside the Rust client library proper.
 ### C FFI (`src/ffi/`, feature `ffi`)
 
 Feature-gated on `ffi`, which also turns on the `cbindgen` build-dependency
-that emits the C header. Three files: `common.rs` (the
-`kafka_common_KafkaError_t` surface and the shared callback machinery — 5
-exported symbols), `producer.rs` (34) and `consumer.rs` (149). There is **no
-admin FFI**: `grep -r kafka_admin_ src/ffi/` returns nothing.
+that emits the C header. Five files export 839 symbols: `common.rs` (the
+`kafka_common_Error_t` surface and the shared callback machinery — 61),
+`producer.rs` (65), `consumer.rs` (182), `consumer_handle.rs` (23) and
+`admin.rs` (508).
 
 Every operation that can block is exposed twice. The sync form drives the async
 API with `block_on` on a runtime the handle owns and returns
-`*mut kafka_common_KafkaError_t` (null on success). The `*_async` form takes a
+`*mut kafka_common_Error_t` (null on success). The `*_async` form takes a
 `*_callback_t` plus a `void *user_data`, spawns the future on the same runtime
 and delivers the result through a dispatcher thread — `CompletionJob`,
-`spawn_dispatcher`, `enqueue_or_run_inline` (`src/ffi/common.rs:214-241`).
+`spawn_dispatcher`, `enqueue_or_run_inline` (`src/ffi/common.rs:2075-2102`).
 `kafka_consumer_Consumer_subscribe` / `_subscribe_async`
-(`src/ffi/consumer.rs:2935`, `:2953`) are the canonical pair. 20 of the
-consumer's 149 symbols and 7 of the producer's 34 are `*_async` variants; the
-remainder are the sync forms, accessors and destructors.
+(`src/ffi/consumer.rs:3657`, `:3677`) are the canonical pair. 30 of the
+consumer's 182 symbols, 13 of the producer's 65, 49 of admin's 508 and 1 of
+`consumer_handle.rs`'s 23 are `*_async` variants; the remainder are the sync
+forms, accessors and destructors.
 
 The consumer handle keeps its `ConsumerKind` in an `UnsafeCell` behind a
 non-reentrant single-owner guard: a second thread entering while another holds
 it gets a `ConcurrentModification` error rather than being serialized, which is
 Java's `KafkaConsumer.acquire()/release()` contract. `wakeup()` deliberately
 bypasses the guard — it has to work *while* another thread holds it
-(`src/ffi/consumer.rs:163-172`). The `ConsumerHandle` the binding keeps also
-carries the reentrant-safe ops (`assign` / `seek` / `commit_*`), but the C
-surface does not expose them; adding them would be purely additive to the ABI.
+(`src/ffi/consumer.rs:574`). The reentrant-safe ops (`assign`, `seek*`, `pause`,
+`position`, `committed`, `commit_*`) go through the core's `ConsumerHandle`
+instead, exported by `consumer_handle.rs`: that is how a rebalance listener calls
+back into the consumer that is delivering it.
 
-### Python bindings (`bindings/python/`)
+A rebalance listener or commit callback can also run on the caller's thread
+rather than the dispatcher thread (`consumer-threading.md` §31). The binding
+registers a notify with `kafka_consumer_Consumer_set_pending_callback_notify`
+(`src/ffi/consumer.rs:1908`) and subscribes through the
+`subscribe_*_caller_thread_listener_async` forms (`:1937`, `:1971`). The core
+then queues each callback and fires the notify; the waiting call takes the entry
+with `next_pending_callback`, runs it on its own thread and reports the result
+with `ack_pending_callback` (`:2011`, `:2072`). A caller that registers no
+notify keeps the dispatcher-thread behaviour.
 
-`producer.py` and `consumer.py` sit over a hand-written CPython extension
-(`_confluentkafka.c`) that links the `confluent_kafka` cdylib
-(`bindings/python/setup.py:29-32`). Each module offers both shapes: a
-synchronous class returning `concurrent.futures.Future` and an async class
-whose methods are coroutines (`consumer.py:666` onward), matching the two C
-entry points underneath. `grpc_server.py`, `grpc_server_async.py` and
-`grpc_translate.py` back the Python arm of the multilanguage tests. There is no
-admin Python module.
+### Python client (`bindings/python/`)
+
+The `confluent_kafka` package is the Java producer and consumer surface in
+Python, generated from CLAUDE.md's `## Python Binding Conventions`, the Java
+source and the C header; [bindings/python/README.md](../../bindings/python/README.md)
+is its user guide. It mirrors Java's packages with `clients` dropped
+(`confluent_kafka.producer`, `.consumer`, `.common`, `.common.errors`,
+`.common.serialization`, …), one file per Java class. Each family has a
+non-instantiable base, a `Kafka*` client, a `Mock*` and an `Async*` peer of each.
+`MockProducer` is plain Python translated from Java's mock; the other clients
+call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+marshalling layer that links the `confluent_kafka` cdylib
+(`bindings/python/setup.py:36-39`). The error classes and the config key-type
+table (`_config_types.py`) are generated from the Java sources by
+`cargo xtask generate-error-codes`.
+
+A blocking method submits the entry point's `_async` form and waits on the
+calling thread or event loop, never inside a native `block_on`, so Ctrl+C and
+task cancellation stay deliverable: they call `wakeup()`, let the call end and
+re-raise. While it waits, a consumer call drains the caller-thread callback
+queue above and runs the listener or commit callback itself (`_run_sync` /
+`_run_async`, `confluent_kafka/consumer/_base.py:686-778`). With a listener
+registered, `commit_nowait()` runs its C call on a per-consumer helper thread,
+because `commit_async` has no `_async` form.
+
+`admin.py` is the older admin binding. It is paused and outside the
+conventions, and keeps its flat `KafkaError` and positional value types through
+the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+`grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
+multilanguage tests, and `soak/` holds the long-running soak client.
 
 ### Multilanguage test harness
 
