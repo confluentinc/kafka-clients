@@ -374,11 +374,6 @@ impl ConsumerConfig {
     pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = "metrics.num.samples";
     /// Config key: `metrics.recording.level`.
     pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = "metrics.recording.level";
-    /// Config key: `metric.reporters`.
-    pub const METRIC_REPORTER_CLASSES_CONFIG: &'static str = "metric.reporters";
-
-    /// Config key: `interceptor.classes`.
-    pub const INTERCEPTOR_CLASSES_CONFIG: &'static str = "interceptor.classes";
 
     /// Config key: `share.acknowledgement.mode`.
     pub const SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: &'static str = "share.acknowledgement.mode";
@@ -769,10 +764,6 @@ impl ConsumerConfig {
                         ));
                     }
                     config.metrics_recording_level = value.clone();
-                },
-                Self::METRIC_REPORTER_CLASSES_CONFIG | Self::INTERCEPTOR_CLASSES_CONFIG => {
-                    // Accepted silently: both name classes, which this client
-                    // does not load (no reflection).
                 },
                 Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => {
                     // Accepted silently per scope §20.

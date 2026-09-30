@@ -43,8 +43,7 @@
 //! - `configuredConsumerInterceptors` — relies on Java's reflection-based
 //!   class-name-to-instance machinery. Phase 2 made the decision to take
 //!   interceptors as already-constructed `Vec<Box<dyn ConsumerInterceptor>>`
-//!   from the user. The `interceptor.classes` config key is still accepted
-//!   (no rejection) but yields an empty list.
+//!   from the user. `ConsumerConfig` has no `interceptor.classes` key.
 //! - `getResult(Future<T>, …)` — Java's blocking `Future.get()` translates
 //!   to `tokio::time::timeout(...).await` at the call site in Rust; the
 //!   wrapper does not add value.
