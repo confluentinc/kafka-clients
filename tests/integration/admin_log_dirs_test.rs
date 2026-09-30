@@ -65,7 +65,7 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, DescribeClusterOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::TopicPartitionReplica;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -92,9 +92,12 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-            .expect("build producer");
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("build producer");
     let mut last = None;
     for i in 0..num {
         let record = ProducerRecord::with_partition_key(
@@ -268,11 +271,10 @@ async fn alter_replica_log_dirs_nonexistent_dir_errors<F: AdminBackendFactory>(c
         .expect_err(&format!("{backend} backend: moving to an unknown dir must fail"));
     assert!(
         matches!(
-            err.error(),
-            Errors::LogDirNotFound | Errors::KafkaStorageError | Errors::ReplicaNotAvailable
+            err,
+            Error::LogDirNotFound(_) | Error::KafkaStorage(_) | Error::ReplicaNotAvailable(_)
         ),
-        "{backend} backend: unexpected error for unknown log dir: {:?}",
-        err.error()
+        "{backend} backend: unexpected error for unknown log dir: {err:?}"
     );
 
     admin

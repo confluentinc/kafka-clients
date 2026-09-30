@@ -34,15 +34,18 @@ pub use internals::{RecordHeader, RecordHeaders};
 /// A header is a key-value pair.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.header.Header`.
+#[doc(alias = "org.apache.kafka.common.header.Header")]
 pub trait Header {
     /// Returns the key of the header.
     ///
     /// The key must not be null (always returns a valid string reference).
+    #[doc(alias = "org.apache.kafka.common.header.Header#key")]
     fn key(&self) -> &str;
 
     /// Returns the value of the header.
     ///
     /// The value may be `None` (corresponding to Java's null).
+    #[doc(alias = "org.apache.kafka.common.header.Header#value")]
     fn value(&self) -> Option<&[u8]>;
 }
 
@@ -52,6 +55,7 @@ pub trait Header {
 /// is preserved in the order they were added.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.header.Headers`.
+#[doc(alias = "org.apache.kafka.common.header.Headers")]
 pub trait Headers {
     /// Adds a header (key inside), to the end, returning if the operation succeeded.
     ///
@@ -84,9 +88,11 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
+    #[doc(alias = "org.apache.kafka.common.header.Headers#remove")]
     fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError>;
 
     /// Returns just one (the very last) header for the given key, if present.
+    #[doc(alias = "org.apache.kafka.common.header.Headers#lastHeader")]
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;
 
     /// Returns all headers for the given key, in the order they were added in.
@@ -94,11 +100,13 @@ pub trait Headers {
     /// Translates Java's `Iterable<Header> headers(String key)`
     /// (`Headers.java:71`), which is not overloaded — so the plain translated
     /// name is the whole name (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.header.Headers#headers")]
     fn headers(&self, key: &str) -> Vec<&RecordHeader>;
 
     /// Returns all headers as a slice.
     ///
     /// If no headers are present an empty slice is returned.
+    #[doc(alias = "org.apache.kafka.common.header.Headers#toArray")]
     fn to_array(&self) -> &[RecordHeader];
 
     /// Returns an iterator over the headers.

@@ -109,6 +109,7 @@ enum SslState {
 ///   fast path: encrypt synchronously, push as much ciphertext as the kernel
 ///   accepts, and surface `OP_WRITE` interest via `has_pending_writes()` for
 ///   the remainder.
+#[doc(alias = "org.apache.kafka.common.network.SslTransportLayer")]
 pub struct SslTransportLayer {
     /// Current state of the TLS connection.
     state: SslState,
@@ -134,6 +135,7 @@ impl SslTransportLayer {
     ///   shared `Arc<ClientConfig>`); must be in handshaking state
     /// * `_server_name` - The server name used to construct `conn`. Retained
     ///   for symmetry with the Java API; rustls already records it on `conn`.
+    #[doc(alias = "org.apache.kafka.common.network.SslTransportLayer#SslTransportLayer")]
     pub fn new(tcp: TcpStream, conn: rustls::ClientConnection, _server_name: ServerName<'static>) -> Self {
         let peer_addr = tcp.peer_addr().ok();
         Self {
@@ -868,13 +870,13 @@ impl io::Read for TryReadAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::config::SslConfig;
+    use crate::common::config::SslConfigs;
     use crate::common::network::is_authentication_error;
-    use crate::common::security::SslFactory;
+    use crate::common::security::ssl::SslFactory;
     use std::sync::Arc;
 
     fn create_test_factory() -> SslFactory {
-        SslFactory::new(&SslConfig::default()).unwrap()
+        SslFactory::new(&SslConfigs::default()).unwrap()
     }
 
     fn make_client_conn(factory: &SslFactory) -> rustls::ClientConnection {
@@ -1485,7 +1487,7 @@ mod tests {
         let (cert_der, key_der, cert_pem) = make_self_signed();
 
         let client_factory =
-            SslFactory::new(&SslConfig { truststore_certificates: Some(cert_pem), ..SslConfig::default() })
+            SslFactory::new(&SslConfigs { truststore_certificates: Some(cert_pem), ..SslConfigs::default() })
                 .expect("client SslFactory");
 
         let cert = rustls::pki_types::CertificateDer::from(cert_der);

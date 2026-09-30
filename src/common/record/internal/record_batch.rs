@@ -14,8 +14,8 @@
 
 //! Record batch constants.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.RecordBatch` (interface)
-//! and `org.apache.kafka.common.record.DefaultRecordBatch` (constants).
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.RecordBatch` (interface)
+//! and `org.apache.kafka.common.record.internal.DefaultRecordBatch` (constants).
 //!
 //! This module defines the wire-protocol constants for record batch headers.
 //! The full `RecordBatch` trait will be implemented in a later phase when
@@ -25,7 +25,8 @@ use crate::common::header::RecordHeader;
 
 /// Constants for record batch magic values and sentinel values.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.RecordBatch` interface constants.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.RecordBatch` interface constants.
+#[doc(alias = "org.apache.kafka.common.record.internal.RecordBatch")]
 pub struct RecordBatch;
 
 impl RecordBatch {

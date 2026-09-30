@@ -106,7 +106,7 @@ static kafka_admin_AdminClient_t *create_admin_no_broker(void) {
 // ---------------------------------------------------------------------------
 
 /* The delicate part of construction: the tokio runtime is built and *entered*
- * so `new_admin_client` can `tokio::spawn` the admin background task. On
+ * so `KafkaAdminClient::new` can `tokio::spawn` the admin background task. On
  * success `*out_error` is explicitly cleared. */
 static void test_kafka_admin_new_succeeds(void) {
     kafka_admin_AdminClient_t *admin = create_admin();

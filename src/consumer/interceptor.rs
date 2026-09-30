@@ -32,7 +32,7 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// # Sync, not async
 ///
 /// Java's `onConsume` and `onCommit` are synchronous; this trait mirrors
-/// that exactly. Per CLAUDE.md §11, the interceptor chain runs per-batch
+/// that exactly. Per CLAUDE.md §13, the interceptor chain runs per-batch
 /// inside `poll()` — not on a hot per-record path — so per-call boxed-dyn
 /// dispatch is acceptable, but `#[async_trait]` is forbidden because
 /// Java's API does not allow asynchrony here and adding it would change
@@ -54,6 +54,7 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// `records` value. The Rust analog: `ConsumerInterceptors` wraps each
 /// call in `std::panic::catch_unwind` and passes the previous-good batch
 /// to the next interceptor on panic.
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor")]
 pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Called just before records are returned by
     /// [`Consumer::poll`](crate::consumer::Consumer::poll).
@@ -141,6 +142,7 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// the interceptor produced — undefined-by-the-framework. Java has
     /// the same caveat (its `synchronized` and atomic state are likewise
     /// the interceptor's responsibility).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#onConsume")]
     fn on_consume(&self, records: &mut ConsumerRecords<K, V>);
 
     /// Called when offsets get committed.
@@ -151,6 +153,7 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Takes `&HashMap` because Java's signature is also read-only for the
     /// interceptor (interceptors should not mutate the commit map; if they
     /// do, behavior is undefined in Java too).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#onCommit")]
     fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>);
 
     /// Configure this interceptor. The default implementation is a no-op.
@@ -161,5 +164,6 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Close this interceptor. The default implementation is a no-op.
     ///
     /// Corresponds to Java's `void close()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#close")]
     fn close(&mut self) {}
 }

@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedInstanceIdException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The broker rejected this static consumer since another consumer with the
     /// same group.instance.id has registered with a different member.id.
     ///
-    /// Corresponds to Java's `FencedInstanceIdException`, error code [`Errors::FencedInstanceId`].
+    /// Corresponds to Java's `FencedInstanceIdException`, error code `Errors::FencedInstanceId`.
     ///
     /// Java `extends` chain:
     ///    `FencedInstanceIdException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FencedInstanceIdException")]
     FencedInstanceIdError,
     code: Errors::FencedInstanceId,
     extends: [

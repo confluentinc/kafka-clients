@@ -49,6 +49,7 @@ use crate::common::header::Headers;
 /// side and its background task hold the same `Arc`). `Arc<T>: Send`
 /// requires `T: Send + Sync`; that requirement transits the `Box<dyn>`
 /// boundary to the trait.
+#[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
 pub trait Deserializer<T>: Send + Sync + 'static {
     /// Deserialize a record value from a byte slice.
     ///
@@ -70,6 +71,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// passes an empty slice or skips the call entirely — so the trait
     /// surface only models the happy path. Deserialization errors are
     /// reported via the `Result`.
+    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
 
     /// Deserialize a record value with access to its headers.
@@ -141,6 +143,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// Corresponds to Java's
     /// `default void configure(Map<String, ?> configs, boolean isKey)`.
+    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
     fn configure(&mut self, _configs: &HashMap<String, String>, _is_key: bool) {
         // intentionally left blank — Java default
     }
@@ -148,6 +151,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Close this deserializer. The default implementation is a no-op.
     ///
     /// Corresponds to Java's `default void close()`.
+    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
     fn close(&mut self) {
         // intentionally left blank — Java default
     }

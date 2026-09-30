@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.protocol.types.SchemaException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Raised if the protocol schema validation fails while parsing a request or
     /// response.
     ///
@@ -36,6 +36,13 @@ kafka_error_class! {
     /// site in the client that raises it: a buffer underflow while parsing a
     /// response, and a correlation-id mismatch on a response that is unrelated
     /// to a SASL request.
+    ///
+    /// Crate-private although `Error::Schema` is public: Java's class sits in
+    /// `common.protocol.types`, which is "not a supported API". Callers match
+    /// the variant and use `Display` / `source()`; the payload itself is not
+    /// reachable by name.
+    #[expect(unnameable_types)]
+    #[doc(alias = "org.apache.kafka.common.protocol.types.SchemaException")]
     SchemaError,
     extends: [
         is_kafka_error,
@@ -46,7 +53,7 @@ kafka_error_class! {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     /// `SchemaException extends KafkaException` and stops there — it bypasses
     /// `ApiException`, so a `catch (ApiException)` does not see it while a

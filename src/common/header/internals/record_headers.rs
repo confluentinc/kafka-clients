@@ -30,6 +30,7 @@ use crate::common::header::{Header, Headers};
 ///
 /// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders")]
 pub struct RecordHeaders {
     headers: Vec<RecordHeader>,
     is_read_only: bool,
@@ -42,6 +43,7 @@ impl RecordHeaders {
     /// The three Java constructors have no parameter in common, and the no-arg
     /// one matches that empty intersection, so it keeps the plain name under
     /// CLAUDE.md §2 — its two siblings are suffixed below.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn new() -> Self {
         Self { headers: Vec::new(), is_read_only: false }
     }
@@ -59,6 +61,7 @@ impl RecordHeaders {
     /// This corresponds to the Java behavior where null entries in the array
     /// cause a NullPointerException. In Rust, the Option type prevents null
     /// headers so this is safe by construction.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_slice(headers: &[RecordHeader]) -> Self {
         Self { headers: headers.to_vec(), is_read_only: false }
     }
@@ -69,6 +72,7 @@ impl RecordHeaders {
     /// (`RecordHeaders.java:43`) — see
     /// [`with_header_slice`](RecordHeaders::with_header_slice) for why the type,
     /// not the parameter name, supplies the suffix.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_iter(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
         Self { headers: headers.into_iter().collect(), is_read_only: false }
     }
@@ -83,6 +87,7 @@ impl RecordHeaders {
     /// bound. The suffix follows the type, as the sibling overloads do.
     ///
     /// The new instance is writable regardless of the source's read-only state.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_record_headers(other: &RecordHeaders) -> Self {
         Self { headers: other.headers.clone(), is_read_only: false }
     }
@@ -90,16 +95,19 @@ impl RecordHeaders {
     /// Set the headers to read-only mode.
     ///
     /// After calling this, all mutating operations will return an error.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#setReadOnly")]
     pub fn set_read_only(&mut self) {
         self.is_read_only = true;
     }
 
     /// Returns whether the headers are in read-only mode.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#isReadOnly")]
     pub fn is_read_only(&self) -> bool {
         self.is_read_only
     }
 
     /// Check whether writing is allowed.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#canWrite")]
     fn can_write(&self) -> Result<(), LocalIllegalStateError> {
         if self.is_read_only {
             Err(LocalIllegalStateError::new("RecordHeaders has been closed."))
@@ -209,6 +217,7 @@ mod tests {
 
     /// Corresponds to Java's testAdd.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testAdd")]
     fn test_add() {
         let mut headers = RecordHeaders::new();
         headers
@@ -228,6 +237,7 @@ mod tests {
 
     /// Corresponds to Java's testAddHeadersPreserveOrder.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testAddHeadersPreserveOrder")]
     fn test_add_headers_preserve_order() {
         let mut headers = RecordHeaders::new();
         headers
@@ -250,6 +260,7 @@ mod tests {
 
     /// Corresponds to Java's testRemove.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testRemove")]
     fn test_remove() {
         let mut headers = RecordHeaders::new();
         headers
@@ -265,6 +276,7 @@ mod tests {
 
     /// Corresponds to Java's testPreserveOrderAfterRemove.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testPreserveOrderAfterRemove")]
     fn test_preserve_order_after_remove() {
         let mut headers = RecordHeaders::new();
         headers
@@ -295,6 +307,7 @@ mod tests {
 
     /// Corresponds to Java's testAddRemoveInterleaved.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testAddRemoveInterleaved")]
     fn test_add_remove_interleaved() {
         let mut headers = RecordHeaders::new();
         headers
@@ -361,6 +374,7 @@ mod tests {
 
     /// Corresponds to Java's testLastHeader.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testLastHeader")]
     fn test_last_header() {
         let mut headers = RecordHeaders::new();
         headers
@@ -379,6 +393,7 @@ mod tests {
 
     /// Corresponds to Java's testReadOnly.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testReadOnly")]
     fn test_read_only() {
         let mut headers = RecordHeaders::new();
         headers
@@ -397,6 +412,7 @@ mod tests {
 
     /// Corresponds to Java's testHeaders.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeadersTest#testHeaders")]
     fn test_headers() {
         let mut headers = RecordHeaders::new();
         headers

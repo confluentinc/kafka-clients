@@ -14,25 +14,39 @@
 
 // Fail on warnings in development
 #![deny(warnings)]
+// The public-surface leak detector: a `pub` item inside a `pub(crate)` module
+// that still escapes through a public signature. `private_interfaces` misses
+// that shape, and `xtask`'s `check-public-audience` relies on this lint for it.
+#![warn(unnameable_types)]
 
 pub mod admin;
-pub mod api_versions;
+// The `org.apache.kafka.clients` classes below are not
+// `@InterfaceAudience.Public`, so they are crate-private. They are translated
+// in full (DoD #2) though the client calls only part of them, hence the
+// `dead_code` allowances.
+#[expect(dead_code)]
+mod api_versions;
 mod client_dns_lookup;
 mod client_request;
 mod client_response;
 mod client_utils;
+#[cfg_attr(not(test), expect(dead_code))]
 mod cluster_connection_states;
 pub mod common;
 mod common_client_configs;
 mod connection_state;
 pub mod consumer;
 mod default_host_resolver;
-pub mod fetch_session_handler;
+mod fetch_session_handler;
 mod host_resolver;
+#[cfg_attr(not(test), expect(dead_code))]
 mod in_flight_requests;
+#[cfg_attr(not(test), expect(dead_code))]
 mod kafka_client;
 mod least_loaded_node;
-pub mod metadata;
+#[expect(dead_code)]
+mod metadata;
+#[cfg_attr(not(test), expect(dead_code))]
 mod metadata_recovery_strategy;
 mod metadata_snapshot;
 mod metadata_updater;
@@ -40,6 +54,7 @@ mod metadata_updater;
 mod mock_client;
 mod network_client;
 mod network_client_utils;
+#[cfg_attr(not(test), expect(dead_code))]
 mod node_api_versions;
 pub mod producer;
 #[cfg(test)]
@@ -56,31 +71,33 @@ pub mod ffi;
 ///
 /// The callback receives a mutable reference to the [`client_response::ClientResponse`]
 /// so it can inspect the response (e.g., extract the response body).
-pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
+#[doc(alias = "org.apache.kafka.clients.RequestCompletionHandler")]
+pub(crate) type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
-pub use api_versions::ApiVersions;
-pub use client_dns_lookup::ClientDnsLookup;
-pub use client_request::ClientRequest;
-pub use client_response::ClientResponse;
+pub(crate) use api_versions::ApiVersions;
+pub(crate) use client_dns_lookup::ClientDnsLookup;
+pub(crate) use client_request::ClientRequest;
+pub(crate) use client_response::ClientResponse;
 pub(crate) use client_utils::ClientUtils;
-pub use cluster_connection_states::ClusterConnectionStates;
+pub(crate) use cluster_connection_states::ClusterConnectionStates;
 pub(crate) use common_client_configs::CommonClientConfigs;
-pub use connection_state::ConnectionState;
-pub use default_host_resolver::DefaultHostResolver;
-pub use host_resolver::HostResolver;
-pub use in_flight_requests::{InFlightRequest, InFlightRequests};
-pub use kafka_client::KafkaClient;
-pub use least_loaded_node::LeastLoadedNode;
-pub use metadata::Metadata;
-pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
-pub use metadata_snapshot::MetadataSnapshot;
-pub use metadata_updater::MetadataUpdater;
-pub use node_api_versions::NodeApiVersions;
+pub(crate) use connection_state::ConnectionState;
+pub(crate) use default_host_resolver::DefaultHostResolver;
+pub(crate) use host_resolver::HostResolver;
+pub(crate) use in_flight_requests::{InFlightRequest, InFlightRequests};
+pub(crate) use kafka_client::KafkaClient;
+pub(crate) use least_loaded_node::LeastLoadedNode;
+pub(crate) use metadata::Metadata;
+pub(crate) use metadata_recovery_strategy::MetadataRecoveryStrategy;
+pub(crate) use metadata_snapshot::MetadataSnapshot;
+pub(crate) use metadata_updater::MetadataUpdater;
+pub(crate) use node_api_versions::NodeApiVersions;
 // Only the outer class is re-exported: `FetchRequestData` (Rust
 // `FetchSessionRequestData`) and `Builder` are Java nested classes
 // (`FetchSessionHandler.java:95,231`), so per CLAUDE.md §2 they keep the
 // file-module path that plays the outer-class qualifier.
-pub use fetch_session_handler::FetchSessionHandler;
+#[expect(unused_imports)]
+pub(crate) use fetch_session_handler::FetchSessionHandler;
 #[cfg(test)]
 pub(crate) use mock_client::{MockClient, RequestMatcher};
 pub(crate) use network_client::{NetworkClient, NetworkClientStatics};
@@ -88,10 +105,25 @@ pub(crate) use network_client_utils::NetworkClientUtils;
 #[cfg(test)]
 pub(crate) use test_alloc_tracker::AllocTrackingGuard;
 
-// Include generated message definitions
-#[allow(dead_code, clippy::all)]
-pub mod generated {
+// Include generated message definitions. They translate Java's generated
+// `org.apache.kafka.common.message` classes, whose package is not Public API.
+#[expect(dead_code, unused_imports, clippy::all)]
+pub(crate) mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
 }
 
-pub use generated::*;
+pub(crate) use generated::*;
+
+// Test-only message definitions from `generator/test-messages/`, for in-crate
+// tests that also need `pub(crate)` types (e.g. `common::message`'s
+// `RecordsSerdeTest`). `build.rs` always generates them.
+#[cfg(test)]
+#[expect(unused_imports, clippy::all)]
+pub(crate) mod test_generated {
+    include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
+}
+
+// Docker-backed integration tests that need crate-internal types; see the
+// module docs. The public-API suites stay in `tests/integration`.
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;

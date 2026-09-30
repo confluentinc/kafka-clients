@@ -19,14 +19,15 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::FindCoordinatorRequestData;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
-    ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
+    ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };
 use crate::common::{Error, Node};
 
@@ -74,6 +75,7 @@ pub(crate) struct CoordinatorRequestManagerInner {
 /// methods take `&self` and route through the interior `Mutex` slots.
 ///
 /// Java: `org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager")]
 pub(crate) struct CoordinatorRequestManager {
     inner: Arc<CoordinatorRequestManagerInner>,
 }
@@ -92,6 +94,7 @@ impl CoordinatorRequestManager {
     /// Panics if `group_id` is empty — Java's constructor takes a
     /// `requireNonNull(groupId)` check; an empty string is treated as a
     /// programmer error here.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#CoordinatorRequestManager")]
     pub(crate) fn new(retry_backoff_ms: i64, retry_backoff_max_ms: i64, group_id: impl Into<String>) -> Self {
         let group_id = group_id.into();
         assert!(!group_id.is_empty(), "group_id must not be empty");
@@ -113,6 +116,7 @@ impl CoordinatorRequestManager {
     ///
     /// Java: `coordinator()`. Clones the node because the interior
     /// `Mutex` cannot lend out a borrow that outlives the guard.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#coordinator")]
     pub(crate) fn coordinator(&self) -> Option<Node> {
         self.inner.coordinator.lock().expect("coordinator poisoned").clone()
     }
@@ -131,6 +135,7 @@ impl CoordinatorRequestManager {
     /// `fatalError()` (which returns the field reference; the Rust
     /// translation clones to avoid handing out a `MutexGuard`-borrowed
     /// reference).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#fatalError")]
     pub(crate) fn fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").clone()
     }
@@ -138,6 +143,7 @@ impl CoordinatorRequestManager {
     /// Returns and clears the most recent fatal error.
     ///
     /// Java: `getAndClearFatalError()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#getAndClearFatalError")]
     pub(crate) fn get_and_clear_fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").take()
     }
@@ -159,6 +165,7 @@ impl CoordinatorRequestManager {
     /// Java: `handleCoordinatorDisconnect(Throwable, long)`. Matches
     /// against `Errors::NetworkError` (the Rust analog of
     /// `DisconnectException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#handleCoordinatorDisconnect")]
     pub(crate) fn handle_coordinator_disconnect(&self, error: &Error, current_time_ms: i64) {
         if matches!(error.error(), Errors::NetworkError) {
             self.mark_coordinator_unknown(error.message(), current_time_ms);
@@ -172,6 +179,7 @@ impl CoordinatorRequestManager {
     /// since the last warning.
     ///
     /// Java: `markCoordinatorUnknown(String, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#markCoordinatorUnknown")]
     pub(crate) fn mark_coordinator_unknown(&self, cause: &str, current_time_ms: i64) {
         Self::mark_coordinator_unknown_inner(&self.inner, cause, current_time_ms);
     }
@@ -241,6 +249,7 @@ impl CoordinatorRequestManager {
     /// response arrives. Dispatches on the per-key error code.
     ///
     /// Java: private `onResponse(long, FindCoordinatorResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#onResponse")]
     pub(crate) fn on_response(&self, current_time_ms: i64, response: &FindCoordinatorResponse) {
         Self::on_response_inner(&self.inner, current_time_ms, response);
     }
@@ -296,6 +305,7 @@ impl CoordinatorRequestManager {
     /// fatal authorization error, etc.).
     ///
     /// Java: private `onFailedResponse(long, Throwable)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#onFailedResponse")]
     pub(crate) fn on_failed_response(&self, current_time_ms: i64, error: Error) {
         Self::on_failed_response_inner(&self.inner, current_time_ms, error);
     }
@@ -335,6 +345,7 @@ impl CoordinatorRequestManager {
     /// `unsent.whenComplete((clientResponse, throwable) -> { ... })`
     /// callback (Java: `makeFindCoordinatorRequest(long)`, lines
     /// 113-132).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#makeFindCoordinatorRequest")]
     fn make_find_coordinator_request(
         inner: &Arc<CoordinatorRequestManagerInner>,
         current_time_ms: i64,
@@ -347,15 +358,16 @@ impl CoordinatorRequestManager {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_key(inner.group_id.clone());
-        let builder: Box<dyn RequestBuilder> = Box::new(FindCoordinatorRequestBuilder::new(data));
+        let builder: Box<dyn RequestBuilder> = Box::new(find_coordinator_request::Builder::new(data));
         let mut unsent = UnsentRequest::new(builder, None);
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let inner_for_handler = Arc::clone(inner);
+        // The completion-time cell, not a handler clone: a clone would keep the
+        // sender alive, so `response_rx` could never see the request dropped
+        // uncompleted (`NetworkClient::close` with it in flight) and this
+        // task would never exit.
+        let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
             // Java: `CoordinatorRequestManager.java:124` —
             // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
             // of the `whenComplete` lambda, before branching on success
@@ -369,23 +381,34 @@ impl CoordinatorRequestManager {
             // on the next heartbeat poll).
             inner_for_handler.fatal_error.lock().expect("fatal_error poisoned").take();
             match response_rx.await {
-                Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                    Some(ConcreteResponse::FindCoordinator(resp)) => {
-                        Self::on_response_inner(&inner_for_handler, now_ms, &resp);
-                    },
-                    _ => {
-                        Self::on_failed_response_inner(
-                            &inner_for_handler,
-                            now_ms,
-                            Error::new(Errors::UnknownServerError),
-                        );
-                    },
+                // Java: `onResponse(clientResponse.receivedTimeMs(), response)`
+                // on success, `onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable)`
+                // on failure — the time the response arrived, not the time
+                // the request was sent.
+                Ok(Ok(mut client_response)) => {
+                    let received_time_ms = client_response.received_time_ms();
+                    match client_response.take_response_body() {
+                        Some(ConcreteResponse::FindCoordinator(resp)) => {
+                            Self::on_response_inner(&inner_for_handler, received_time_ms, &resp);
+                        },
+                        _ => {
+                            Self::on_failed_response_inner(
+                                &inner_for_handler,
+                                received_time_ms,
+                                Error::new(Errors::UnknownServerError),
+                            );
+                        },
+                    }
                 },
                 Ok(Err(err)) => {
-                    Self::on_failed_response_inner(&inner_for_handler, now_ms, err);
+                    Self::on_failed_response_inner(&inner_for_handler, completion_time_ms.load(Ordering::Acquire), err);
                 },
                 Err(_recv) => {
-                    Self::on_failed_response_inner(&inner_for_handler, now_ms, Error::new(Errors::NetworkError));
+                    Self::on_failed_response_inner(
+                        &inner_for_handler,
+                        completion_time_ms.load(Ordering::Acquire),
+                        Error::new(Errors::NetworkError),
+                    );
                 },
             }
         });
@@ -480,8 +503,8 @@ impl CoordinatorRequestManager {
 mod tests {
     use super::*;
     use crate::ClientResponse;
-    use crate::common::ApiKeys;
-    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
+    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::{AbstractRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
     const RETRY_BACKOFF_MS: i64 = 500;
     const GROUP_ID: &str = "group-1";
@@ -504,7 +527,7 @@ mod tests {
             .latest_allowed_version();
         // Drive the builder forward to produce a concrete request so we
         // can grab the version for the header.
-        let _abstract_request: ConcreteRequest = unsent
+        let _abstract_request: AbstractRequest = unsent
             .request_builder_mut()
             .expect("builder still present")
             .build_version(api_version)
@@ -565,6 +588,7 @@ mod tests {
     /// running runtime even when the test does not depend on the
     /// forwarder's effect.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testSuccessfulResponse")]
     async fn test_successful_response() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
@@ -612,6 +636,9 @@ mod tests {
     /// `60000`, and at two minutes it reports `120000` — exactly what Java's
     /// `firstLogMs`/`secondLogMs` assertions check.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testMarkCoordinatorUnknownLoggingAccuracy"
+    )]
     fn test_mark_coordinator_unknown_logging_accuracy() {
         let one_minute = CoordinatorRequestManager::COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
         let manager = setup_manager();
@@ -714,6 +741,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknown`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testMarkCoordinatorUnknown"
+    )]
     async fn test_mark_coordinator_unknown() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
@@ -731,6 +761,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testBackoffAfterRetriableFailure`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testBackoffAfterRetriableFailure"
+    )]
     async fn test_backoff_after_retriable_failure() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::CoordinatorLoadInProgress, 0);
@@ -756,6 +789,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testBackoffAfterFatalError`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testBackoffAfterFatalError"
+    )]
     async fn test_backoff_after_fatal_error() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::GroupAuthorizationFailed, 0);
@@ -787,6 +823,9 @@ mod tests {
     /// the manager — but the Java test lives in this file, so we
     /// mirror it here.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testFindCoordinatorResponseVersions"
+    )]
     fn test_find_coordinator_response_versions() {
         // v4+
         let resp_new = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &node());
@@ -804,6 +843,7 @@ mod tests {
     /// Drives a `TimeoutException` through the request's handler and
     /// asserts the backoff path.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testNetworkTimeout")]
     async fn test_network_timeout() {
         let mut manager = setup_manager();
         let result = manager.poll(0);
@@ -964,6 +1004,33 @@ mod tests {
         // Coordinator stays unknown (it was never set), and the
         // mark-coordinator-unknown anchor is recorded by the forwarder.
         assert!(manager.coordinator().is_none());
+    }
+
+    /// A request dropped without being completed — as `NetworkClient::close`
+    /// drops the requests in flight — must still end the forwarder: its
+    /// `Err(_recv)` arm runs, and the task releases the manager state it
+    /// holds. Before the forwarder held only the completion-time cell, its
+    /// handler clone kept the sender alive, so the receiver never resolved
+    /// and the task and `inner` leaked.
+    #[tokio::test]
+    async fn test_forwarder_exits_when_request_dropped_uncompleted() {
+        let mut manager = setup_manager();
+        let result = manager.poll(0);
+        assert_eq!(1, result.unsent_requests.len());
+        assert_eq!(
+            2,
+            Arc::strong_count(&manager.inner),
+            "the forwarder holds `inner` while the request is live"
+        );
+
+        drop(result);
+
+        wait_until(|| Arc::strong_count(&manager.inner) == 1).await;
+        assert_ne!(
+            -1,
+            *manager.inner.time_marked_unknown_ms.lock().unwrap(),
+            "the forwarder's `Err(_recv)` arm must mark the coordinator unknown"
+        );
     }
 
     /// Phase 12.5 regression — fatal-error clearing on the failure

@@ -34,6 +34,8 @@ use crate::common::serialization::Deserializer;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.serialization.StringDeserializer`.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.serialization.StringDeserializer")]
 pub struct StringDeserializer;
 
 impl StringDeserializer {

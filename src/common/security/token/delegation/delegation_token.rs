@@ -54,6 +54,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Corresponds to
 /// `org.apache.kafka.common.security.token.delegation.DelegationToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken")]
 pub struct DelegationToken {
     token_information: TokenInformation,
     hmac: Vec<u8>,
@@ -61,6 +62,7 @@ pub struct DelegationToken {
 
 impl DelegationToken {
     /// Creates a delegation token from its information and HMAC bytes.
+    #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#DelegationToken")]
     pub fn new(token_information: TokenInformation, hmac: Vec<u8>) -> Self {
         Self { token_information, hmac }
     }
@@ -68,6 +70,7 @@ impl DelegationToken {
     /// Returns the token information.
     ///
     /// Mirrors `DelegationToken.tokenInfo`.
+    #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#tokenInfo")]
     pub fn token_info(&self) -> &TokenInformation {
         &self.token_information
     }
@@ -83,6 +86,7 @@ impl DelegationToken {
     /// Returns the HMAC bytes.
     ///
     /// Mirrors `DelegationToken.hmac`.
+    #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmac")]
     pub fn hmac(&self) -> &[u8] {
         &self.hmac
     }
@@ -90,6 +94,7 @@ impl DelegationToken {
     /// Returns the HMAC bytes as a standard Base64 string.
     ///
     /// Mirrors `DelegationToken.hmacAsBase64String`.
+    #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmacAsBase64String")]
     pub fn hmac_as_base64_string(&self) -> String {
         base64_encode(&self.hmac)
     }

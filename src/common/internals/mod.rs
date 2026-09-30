@@ -24,7 +24,6 @@ pub(crate) use kafka_future_impl::KafkaFutureImpl;
 // Re-exported per CLAUDE.md §2: internal imports of the struct must reach it
 // via the parent module re-export, not the file module path. Phase 4's
 // `SubscriptionState` is the first user; until later phases land, an
-// `#[allow(unused_imports)]` keeps `cargo build` clean.
-#[allow(unused_imports)]
+// `#[expect(unused_imports)]` keeps `cargo build` clean.
 pub(crate) use partition_states::PartitionStates;
 pub(crate) use topic::Topic;

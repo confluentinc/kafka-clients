@@ -20,7 +20,7 @@
 // Items here are consumed by Phase 7-9 managers (`CommitRequestManager`,
 // `OffsetsRequestManager`, etc.). Suppress dead-code warnings for items
 // that aren't yet referenced inside the workspace.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -49,6 +49,7 @@ use super::RequestState;
 /// `current_time_ms` through `RequestManager::poll`. We do **not** add a
 /// Rust analog of Java's `Timer` class at this surface — the
 /// `current_time_ms` parameter on every query is the contract.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestState")]
 pub(crate) struct TimedRequestState {
     state: RequestState,
     deadline_ms: i64,
@@ -60,6 +61,7 @@ impl TimedRequestState {
     ///
     /// `deadline_ms` is the absolute wall-clock millisecond timestamp at
     /// which the request expires (i.e. `now_ms + timeout_ms`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestState#TimedRequestState")]
     pub(crate) fn new(
         owner: impl Into<String>,
         retry_backoff_ms: i64,
@@ -78,6 +80,7 @@ impl TimedRequestState {
 
     /// Creates a [`TimedRequestState`] with explicit exponential-backoff
     /// parameters and an absolute deadline.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestState#TimedRequestState")]
     pub(crate) fn with_backoff_params(
         owner: impl Into<String>,
         retry_backoff_ms: i64,
@@ -102,6 +105,7 @@ impl TimedRequestState {
     ///
     /// Java: `isExpired()` (the Java version internally calls
     /// `timer.update()` then `timer.isExpired()`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestState#isExpired")]
     pub(crate) fn is_expired(&self, current_time_ms: i64) -> bool {
         current_time_ms >= self.deadline_ms
     }
@@ -111,6 +115,7 @@ impl TimedRequestState {
     ///
     /// Java: `remainingMs()` (Java version `update`s then returns the
     /// timer's `remainingMs`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestState#remainingMs")]
     pub(crate) fn remaining_ms(&self, current_time_ms: i64) -> i64 {
         (self.deadline_ms - current_time_ms).max(0)
     }
@@ -189,6 +194,7 @@ mod tests {
     /// — the Rust translation passes `now + DEFAULT_TIMEOUT_MS` as the
     /// absolute deadline.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestStateTest#testIsExpired")]
     fn test_is_expired() {
         let now = 0_i64;
         let state = TimedRequestState::new(
@@ -203,6 +209,7 @@ mod tests {
 
     /// Translated from `TimedRequestStateTest.testRemainingMs`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestStateTest#testRemainingMs")]
     fn test_remaining_ms() {
         let now = 0_i64;
         let state = TimedRequestState::new(
@@ -219,6 +226,7 @@ mod tests {
     /// Java test wraps `time.timer(...)`; we test the Rust analog
     /// `deadline_for(now, deadline_ms)` directly.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestStateTest#testDeadlineTimer")]
     fn test_deadline_timer() {
         let now = 0_i64;
         let deadline_ms = now + DEFAULT_TIMEOUT_MS;
@@ -231,6 +239,7 @@ mod tests {
     /// Translated from `TimedRequestStateTest.testAllowOverdueDeadlineTimer`.
     /// An in-the-past deadline collapses to "now" so `remaining_ms` is 0.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestStateTest#testAllowOverdueDeadlineTimer")]
     fn test_allow_overdue_deadline_timer() {
         let now = DEFAULT_TIMEOUT_MS;
         let deadline_ms = now - DEFAULT_TIMEOUT_MS; // in the past
@@ -243,6 +252,7 @@ mod tests {
     /// `update()`; the Rust translation uses `to_string_with(now)` because
     /// `Display::fmt` cannot consult wall-clock time deterministically.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TimedRequestStateTest#testToStringUpdatesTimer")]
     fn test_to_string_updates_timer() {
         let now = 0_i64;
         let state = TimedRequestState::new(

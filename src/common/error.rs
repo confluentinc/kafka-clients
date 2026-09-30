@@ -17,7 +17,7 @@
 //! [`Error`] is the single type every fallible API returns. It has no Java
 //! counterpart: Rust cannot express Java's exception hierarchy, so one enum
 //! holds both `KafkaException`'s subclasses and the generic `java.lang` /
-//! `java.util` runtime exceptions that sit beside it (CLAUDE.md §10.3).
+//! `java.util` runtime exceptions that sit beside it (CLAUDE.md §12.3).
 //!
 //! Flattening the hierarchy destroys the `extends` chain, so the traits and
 //! macros that reconstruct it live here too, next to the enum they serve:
@@ -25,7 +25,7 @@
 //!  - [`ErrorHierarchy`] recovers each intermediate Java class as a predicate;
 //!    [`ErrorCode`], [`ErrorName`], [`ErrorMessage`] and [`ErrorSource`] are the
 //!    per-payload answers [`Error`] delegates to.
-//!  - [`kafka_error_class`] and [`message_only_error`] declare the two shapes of
+//!  - [`kafka_error_type`] and [`message_only_error`] declare the two shapes of
 //!    error class that carry nothing beyond a message, one per Java class.
 //!
 //! Java's `KafkaException` base class is a *different* type: the `KafkaError`
@@ -36,6 +36,14 @@
 //! "the variant for Kafka errors"; [`Error::Timeout`](Error::Timeout) and the
 //! rest are Kafka errors too. See [`Error::is_kafka_error`] for that test.
 
+// `#[delegatable_trait_remote]` (below) expands to a helper trait,
+// `MatchDisplay`, that the `Delegate` derive on `Error` makes reachable without
+// being nameable. It is macro plumbing, not API, and ambassador neither forwards
+// attributes to it nor lets it move into a submodule, so the allowance is
+// file-wide. It covers only items defined in this file: a crate-private type
+// leaking from elsewhere is still reported at its own definition.
+#![expect(unnameable_types)]
+
 use std::collections::HashSet;
 // Imported unqualified so that `#[delegate(Display)]` on `Error` resolves to
 // the std trait; the `#[delegatable_trait_remote]` stub below only registers
@@ -44,7 +52,7 @@ use std::fmt::Display;
 
 use ambassador::{Delegate, delegatable_trait, delegatable_trait_remote};
 
-use super::Errors;
+use super::protocol::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::KafkaError;
 use crate::common::LocalConcurrentModificationError;
@@ -67,13 +75,13 @@ use crate::common::errors::{
     InterruptError, InvalidCommitOffsetSizeError, InvalidConfigurationError, InvalidFetchSessionEpochError,
     InvalidFetchSizeError, InvalidGroupIdError, InvalidOffsetError, InvalidPartitionsError, InvalidPidMappingError,
     InvalidPrincipalTypeError, InvalidProducerEpochError, InvalidRecordStateError, InvalidRegistrationError,
-    InvalidRegularExpressionError, InvalidReplicaAssignmentError, InvalidReplicationFactorError, InvalidRequestError,
+    InvalidRegularExpression, InvalidReplicaAssignmentError, InvalidReplicationFactorError, InvalidRequestError,
     InvalidRequiredAcksError, InvalidSessionTimeoutError, InvalidShareSessionEpochError, InvalidTimestampError,
     InvalidTopicError, InvalidTxnStateError, InvalidTxnTimeoutError, InvalidUpdateVersionError, InvalidVoterKeyError,
     KafkaStorageError, LeaderNotAvailableError, ListenerNotFoundError, LogDirNotFoundError, MemberIdRequiredError,
     MismatchedEndpointTypeError, NetworkError, NewLeaderElectedError, NoReassignmentInProgressError,
     NotControllerError, NotCoordinatorError, NotEnoughReplicasAfterAppendError, NotEnoughReplicasError,
-    NotLeaderOrFollowerError, OffsetMetadataTooLargeError, OffsetMovedToTieredStorageError, OffsetNotAvailableError,
+    NotLeaderOrFollowerError, OffsetMetadataTooLarge, OffsetMovedToTieredStorageError, OffsetNotAvailableError,
     OffsetOutOfRangeError, OperationNotAttemptedError, OutOfOrderSequenceError, PolicyViolationError,
     PositionOutOfRangeError, PreferredLeaderNotAvailableError, PrincipalDeserializationError, ProducerFencedError,
     ReassignmentInProgressError, RebalanceInProgressError, RebootstrapRequiredError, RecordBatchTooLargeError,
@@ -124,7 +132,7 @@ trait Display {
 /// carry the public documentation for each predicate.
 ///
 /// It has no Java counterpart — it is the Rust encoding of the `extends` chain
-/// that [`Error`] flattens away (CLAUDE.md §10.3/§10.4). One method per
+/// that [`Error`] flattens away (CLAUDE.md §12.3/§12.4). One method per
 /// **intermediate** class in Java's tree; leaf classes need no predicate,
 /// because they are a single [`Error`] variant or a single error code.
 ///
@@ -355,7 +363,7 @@ pub(crate) trait ErrorName {
 /// => extends: [is_kafka_error, is_api_error, is_retriable_error,
 ///              is_refresh_retriable_error, is_invalid_metadata_error]
 /// ```
-macro_rules! kafka_error_class {
+macro_rules! kafka_error_type {
     // No `code:` — the class has no entry in `Errors.java`, and walking its
     // superclasses (Java's `Errors.forException`) finds none either, so
     // `ErrorCode` takes its default of `Errors::UnknownServerError`.
@@ -364,10 +372,10 @@ macro_rules! kafka_error_class {
         $name:ident,
         extends: [$($predicate:ident),* $(,)?] $(,)?
     ) => {
-        kafka_error_class! {
+        kafka_error_type! {
             $(#[$meta])*
             $name,
-            code: $crate::common::Errors::UnknownServerError,
+            code: $crate::common::protocol::Errors::UnknownServerError,
             extends: [$($predicate),*],
         }
     };
@@ -464,7 +472,7 @@ macro_rules! kafka_error_class {
         }
 
         impl $crate::common::error::ErrorCode for $name {
-            fn error(&self) -> $crate::common::Errors {
+            fn error(&self) -> $crate::common::protocol::Errors {
                 $code
             }
         }
@@ -479,7 +487,7 @@ macro_rules! kafka_error_class {
     };
 }
 
-pub(crate) use kafka_error_class;
+pub(crate) use kafka_error_type;
 
 /// The message an error carries, translating Java's `Throwable.getMessage()`.
 ///
@@ -634,7 +642,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 /// preserving the strings the previous hand-written `Display` produced.
 ///
 /// Every path in the expansion is `$crate`-qualified, as in
-/// [`kafka_error_class`], so an invoking file needs nothing in scope but the
+/// [`kafka_error_type`], so an invoking file needs nothing in scope but the
 /// macro itself. The four `Local*` classes each live in their own file per
 /// CLAUDE.md §2 and invoke this from there.
 ///
@@ -654,7 +662,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 ///     outside the repository (CLAUDE.md §1) — hence the macro's name. A
 ///     null-message constructor and a cause-only constructor would be public API
 ///     with no caller and no Kafka contract behind them (DoD #7).
-///   - [`kafka_error_class`] cannot follow suit: it declares 141 classes from one
+///   - [`kafka_error_type`] cannot follow suit: it declares 141 classes from one
 ///     body, and only ~19 of their Java counterparts have a no-arg constructor.
 ///     Were `new` to mean the no-arg form here and the message form there,
 ///     `SomeError::new("msg")` would compile or not depending on which macro
@@ -674,7 +682,7 @@ macro_rules! message_only_error {
             /// mirroring the `(String message)` constructor.
             ///
             /// Keeps the plain name under CLAUDE.md §2, for consistency with
-            /// `kafka_error_class!` — see the note on this macro about the
+            /// `kafka_error_type!` — see the note on this macro about the
             /// constructors these classes deliberately do not model.
             /// (Deliberately not an intra-doc link: this doc comment expands
             /// into each declaring module, where that macro is not in scope.)
@@ -760,7 +768,7 @@ pub(crate) use message_only_error;
 // `extends` chain
 // ---------------------------------------------------------------------------
 
-// The fifteen payloads that are neither `kafka_error_class!` nor
+// The fifteen payloads that are neither `kafka_error_type!` nor
 // `message_only_error!` declarations: each adds subclass state, so it is
 // hand-written in its own file. `ErrorName` is a crate-local trait, so the impls
 // live here rather than in fifteen files — keeping the one place a reader can
@@ -826,12 +834,21 @@ impl ErrorHierarchy for LocalTimeoutError {}
 /// Java families into one enum is what makes
 /// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
-/// `error()`, `code()`, `message()` and `is_retriable_error()` are delegated to
-/// the inner [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and
+/// **Classify by variant, not by code.** Java callers write
+/// `e instanceof TopicAuthorizationException`; Rust callers write
+/// `matches!(e, Error::TopicAuthorization(_))`, and the `is_*_error()`
+/// predicates stand in for the intermediate classes. There is no public numeric
+/// error code: the wire-level `Errors` enum lives in `common.protocol`, a
+/// package Java marks "not a supported API", so the crate keeps it
+/// `pub(crate)`. The C bindings expose the class as the
+/// `kafka_common_ErrorCode_t` enum instead.
+///
+/// `message()` and `is_retriable_error()` are delegated to the inner
+/// [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and
 /// `is_transaction_abortable_error()`
 /// live only here: `KafkaError` mirrors Java's `KafkaException`, which has
 /// neither — they are librdkafka-style predicates required by CLAUDE.md
-/// §10.3, so they belong on this enum rather than on the Java-shaped base.
+/// §12.3, so they belong on this enum rather than on the Java-shaped base.
 ///
 /// This type is used in `Result` return types and `Option` storage where
 /// any kind of Kafka error may occur.
@@ -842,6 +859,7 @@ impl ErrorHierarchy for LocalTimeoutError {}
 #[delegate(ErrorName)]
 #[delegate(ErrorSource)]
 #[delegate(Display)]
+#[non_exhaustive]
 pub enum Error {
     // Payloads defined in this file: the bare `KafkaException` and the
     // generic `java.lang` / `java.util` runtime errors, which have no
@@ -902,7 +920,7 @@ pub enum Error {
     CoordinatorLoadInProgress(CoordinatorLoadInProgressError),
     /// See [`CoordinatorNotAvailableError`](crate::common::errors::CoordinatorNotAvailableError).
     CoordinatorNotAvailable(CoordinatorNotAvailableError),
-    /// See [`CorrelationIdMismatchError`](crate::common::requests::CorrelationIdMismatchError).
+    /// See `CorrelationIdMismatchError`.
     ///
     /// Lives in `common.requests`, not `common.errors`, and extends
     /// `IllegalStateException` rather than `KafkaException` — so like
@@ -1001,8 +1019,8 @@ pub enum Error {
     InvalidRecordState(InvalidRecordStateError),
     /// See [`InvalidRegistrationError`](crate::common::errors::InvalidRegistrationError).
     InvalidRegistration(InvalidRegistrationError),
-    /// See [`InvalidRegularExpressionError`](crate::common::errors::InvalidRegularExpressionError).
-    InvalidRegularExpression(InvalidRegularExpressionError),
+    /// See [`InvalidRegularExpression`](crate::common::errors::InvalidRegularExpression).
+    InvalidRegularExpression(InvalidRegularExpression),
     /// See [`InvalidReplicaAssignmentError`](crate::common::errors::InvalidReplicaAssignmentError).
     InvalidReplicaAssignment(InvalidReplicaAssignmentError),
     /// See [`InvalidReplicationFactorError`](crate::common::errors::InvalidReplicationFactorError).
@@ -1055,8 +1073,8 @@ pub enum Error {
     NotEnoughReplicasAfterAppend(NotEnoughReplicasAfterAppendError),
     /// See [`NotLeaderOrFollowerError`](crate::common::errors::NotLeaderOrFollowerError).
     NotLeaderOrFollower(NotLeaderOrFollowerError),
-    /// See [`OffsetMetadataTooLargeError`](crate::common::errors::OffsetMetadataTooLargeError).
-    OffsetMetadataTooLarge(OffsetMetadataTooLargeError),
+    /// See [`OffsetMetadataTooLarge`](crate::common::errors::OffsetMetadataTooLarge).
+    OffsetMetadataTooLarge(OffsetMetadataTooLarge),
     /// See [`OffsetMovedToTieredStorageError`](crate::common::errors::OffsetMovedToTieredStorageError).
     OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError),
     /// See [`OffsetNotAvailableError`](crate::common::errors::OffsetNotAvailableError).
@@ -1102,7 +1120,7 @@ pub enum Error {
     RecordDeserialization(Box<RecordDeserializationError>),
     /// See [`RecordTooLargeError`](crate::common::errors::RecordTooLargeError).
     RecordTooLarge(RecordTooLargeError),
-    /// See [`InvalidReceiveError`](crate::common::network::InvalidReceiveError).
+    /// See `InvalidReceiveError`.
     InvalidReceive(InvalidReceiveError),
     /// See [`ConfigError`](crate::common::config::ConfigError).
     Config(ConfigError),
@@ -1125,7 +1143,7 @@ pub enum Error {
     ResourceNotFound(ResourceNotFoundError),
     /// See [`SaslAuthenticationError`](crate::common::errors::SaslAuthenticationError).
     SaslAuthentication(SaslAuthenticationError),
-    /// See [`SchemaError`](crate::common::protocol::types::SchemaError).
+    /// See `SchemaError`.
     ///
     /// Lives in `common.protocol.types`, not `common.errors`.
     Schema(SchemaError),
@@ -1219,7 +1237,7 @@ impl Error {
     // -- Convenience constructors ------------------------------------------
 
     /// Create a bare Kafka error from an error code.
-    pub fn new(error: Errors) -> Self {
+    pub(crate) fn new(error: Errors) -> Self {
         // Java's `Errors.exception()`: the code names a class, and that class —
         // not this enum — knows its ancestry. The fallback covers `Errors::None`,
         // which Java maps to a null exception.
@@ -1227,7 +1245,7 @@ impl Error {
     }
 
     /// Create a bare Kafka error with a custom message.
-    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
+    pub(crate) fn with_message(error: Errors, message: impl Into<String>) -> Self {
         // Java's `Errors.exception(String)`.
         let message = message.into();
         error
@@ -1243,8 +1261,8 @@ impl Error {
     /// and the no-arg form matches it, so under CLAUDE.md §2 this one keeps the
     /// plain name and the others are suffixed with their parameters.
     ///
-    /// This is deliberately NOT [`new`](Self::new) with
-    /// [`Errors::UnknownServerError`]: that constructor resolves the code to the
+    /// This is deliberately NOT `new` with
+    /// `Errors::UnknownServerError`: that constructor resolves the code to the
     /// class Java associates with it and yields
     /// [`UnknownServer`](Self::UnknownServer), an `ApiException`. Java's bare
     /// `KafkaException` is a *sibling* of `ApiException`, not a subclass, so it
@@ -1254,7 +1272,7 @@ impl Error {
     /// exactly that (`catch (ApiException e)` returns a failed future,
     /// `catch (KafkaException e)` rethrows).
     ///
-    /// The wire code stays [`Errors::UnknownServerError`] because a
+    /// The wire code stays `Errors::UnknownServerError` because a
     /// client-constructed `KafkaException` has no protocol code of its own.
     ///
     /// Java's no-arg form leaves the message null; Rust reports the code's
@@ -1268,7 +1286,7 @@ impl Error {
     /// `new KafkaException(String message)` (`KafkaException.java:30`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_message(message: impl Into<String>) -> Self {
         Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
     }
@@ -1278,7 +1296,7 @@ impl Error {
     /// (`KafkaException.java:34`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_source(source: Error) -> Self {
         Self::KafkaError(KafkaError::with_source(Errors::UnknownServerError, source))
     }
@@ -1288,7 +1306,7 @@ impl Error {
     /// (`KafkaException.java:26`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_message_source(message: impl Into<String>, source: Error) -> Self {
         Self::KafkaError(KafkaError::with_message_source(Errors::UnknownServerError, message, source))
     }
@@ -1344,11 +1362,11 @@ impl Error {
     /// Create an invalid group ID error.
     ///
     /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
-    /// subclass carrying error code [`Errors::InvalidGroupId`]). Thrown
+    /// subclass carrying error code `Errors::InvalidGroupId`). Thrown
     /// by group-management / offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::InvalidGroupId, message))
+        Self::InvalidGroupId(InvalidGroupIdError::new(message))
     }
 
     /// Create a throttling quota exceeded error.
@@ -1453,6 +1471,16 @@ impl Error {
         ))
     }
 
+    /// Create an invalid-receive error.
+    ///
+    /// Corresponds to Java's `InvalidReceiveException(String)`. The class is not
+    /// public API (`common.network`), so this constructor is how code outside
+    /// the crate — e.g. a test backend decoding an error sent over the wire —
+    /// builds the variant.
+    pub fn invalid_receive(message: impl Into<String>) -> Self {
+        Self::InvalidReceive(InvalidReceiveError::new(message))
+    }
+
     /// Create a protocol-schema error.
     ///
     /// Corresponds to Java's `SchemaException(String)`.
@@ -1480,8 +1508,10 @@ impl Error {
     }
 
     /// Create an unsupported version error.
+    ///
+    /// Corresponds to Java's `UnsupportedVersionException`.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::UnsupportedVersion, message))
+        Self::UnsupportedVersion(UnsupportedVersionError::new(message))
     }
 
     /// Create a wakeup error.
@@ -1535,7 +1565,7 @@ impl Error {
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
     pub fn record_batch_too_large(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::MessageTooLarge, message))
+        Self::RecordBatchTooLarge(RecordBatchTooLargeError::new(message))
     }
 
     // -- Base access -------------------------------------------------------
@@ -1549,11 +1579,11 @@ impl Error {
             Self::KafkaError(e) => Some(e),
             // The only other payloads that embed one: Java gives these three
             // subclass state on top of the base, so they compose rather than
-            // being declared by `kafka_error_class!`.
+            // being declared by `kafka_error_type!`.
             Self::TopicAuthorization(e) => Some(e.kafka_error()),
             Self::InvalidTopic(e) => Some(e.kafka_error()),
             Self::GroupAuthorization(e) => Some(e.kafka_error()),
-            // Every other variant is a `kafka_error_class!` declaration holding
+            // Every other variant is a `kafka_error_type!` declaration holding
             // only its message; it answers its code through [`ErrorCode`] and
             // its ancestry through [`ErrorHierarchy`], with no base to expose.
             // A catch-all is safe here precisely because there is nothing
@@ -1569,15 +1599,10 @@ impl Error {
     ///
     /// Returns [`Errors::UnknownServerError`] for variants without a
     /// [`KafkaError`].
-    pub fn error(&self) -> Errors {
+    pub(crate) fn error(&self) -> Errors {
         // Delegated to the payload: Java associates a code with an exception
         // *class* (`Errors.forException`), not with an instance.
         ErrorCode::error(self)
-    }
-
-    /// The numeric error code (i16).
-    pub fn code(&self) -> i16 {
-        self.error().code()
     }
 
     /// The error message, translating Java's `Throwable.getMessage()`.
@@ -1612,10 +1637,10 @@ impl Error {
 
     /// Whether the transaction must be aborted because of this error.
     ///
-    /// Named for the Java class it tests, per CLAUDE.md §10.4's uniform
+    /// Named for the Java class it tests, per CLAUDE.md §12.4's uniform
     /// `is_` + class + `_error` shape, even though `TransactionAbortableException`
     /// is a **leaf**: it has no subclasses, so §10.4 puts no predicate on
-    /// [`ErrorHierarchy`] for it and this stays an inherent test on the variant.
+    /// `ErrorHierarchy` for it and this stays an inherent test on the variant.
     ///
     /// That is what Java does too — `TransactionManager` compares the code
     /// (`error == Errors.TRANSACTION_ABORTABLE`, four sites) or tests the class
@@ -1629,7 +1654,7 @@ impl Error {
     // -- Hierarchy predicates ----------------------------------------------
     //
     // Java's exception hierarchy is flattened into this enum, so each
-    // intermediate class becomes a predicate (CLAUDE.md §10.4). The answers
+    // intermediate class becomes a predicate (CLAUDE.md §12.4). The answers
     // come from the variant's payload via `ErrorHierarchy`, which is crate
     // -internal; these forwarders are the public surface.
     //
@@ -1699,8 +1724,8 @@ impl Error {
     ///
     /// `false` for the bare [`KafkaError`](Self::KafkaError) — `KafkaException`
     /// is `ApiException`'s *parent*, not an instance of it, and since
-    /// [`Error::new`] resolves every code to its own class that variant is now
-    /// reached only for [`Errors::None`] and for
+    /// `Error::new` resolves every code to its own class that variant is now
+    /// reached only for `Errors::None` and for
     /// [`Error::kafka`](Self::kafka). Also `false` for
     /// [`LocalIllegalArgument`](Self::LocalIllegalArgument) and
     /// [`LocalIllegalState`](Self::LocalIllegalState) (plain `RuntimeException`s),
@@ -1727,7 +1752,7 @@ impl Error {
     /// [`ProducerBufferExhausted`](Self::ProducerBufferExhausted) (through
     /// `BufferExhaustedException extends TimeoutException`).
     ///
-    /// Since [`Error::new`] resolves every code to its own class, the set of
+    /// Since `Error::new` resolves every code to its own class, the set of
     /// *codes* answering `true` is pinned in both directions — against the Java
     /// `extends` chain, over every code — by `errors.rs`'s
     /// `test_retriable_errors_match_java_hierarchy`.
@@ -1741,7 +1766,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `RefreshRetriableException`
-    /// (CLAUDE.md §10.4) — retriable, and a metadata / coordinator refresh is
+    /// (CLAUDE.md §12.4) — retriable, and a metadata / coordinator refresh is
     /// what clears it.
     ///
     /// Fifteen payloads name it in their `extends:` list: the thirteen that also
@@ -1759,7 +1784,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `TimeoutException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than the [`Timeout`](Self::Timeout) variant:
     /// `BufferExhaustedException extends TimeoutException`, so
@@ -1774,7 +1799,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `InvalidMetadataException`
-    /// (CLAUDE.md §10.4) — the client's cached metadata may be stale.
+    /// (CLAUDE.md §12.4) — the client's cached metadata may be stale.
     ///
     /// Nested inside [`is_refresh_retriable_error`](Self::is_refresh_retriable_error),
     /// which is nested inside [`is_retriable_error`](Self::is_retriable_error).
@@ -1786,7 +1811,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `InvalidConfigurationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than its name suggests: in Kafka 4.2 **both**
     /// `AuthenticationException` and `AuthorizationException` extend
@@ -1795,48 +1820,48 @@ impl Error {
     /// [`is_authentication_error`](Self::is_authentication_error) or
     /// [`is_authorization_error`](Self::is_authorization_error) answers `true`
     /// here too. The remaining members are the configuration errors proper —
-    /// [`Errors::InvalidConfig`], [`Errors::InvalidReplicationFactor`],
-    /// [`Errors::InvalidRequiredAcks`], [`Errors::InvalidTopicError`],
-    /// [`Errors::RecordListTooLarge`], [`Errors::UnsupportedForMessageFormat`]
-    /// and [`Errors::UnsupportedVersion`].
+    /// `Errors::InvalidConfig`, `Errors::InvalidReplicationFactor`,
+    /// `Errors::InvalidRequiredAcks`, `Errors::InvalidTopicError`,
+    /// `Errors::RecordListTooLarge`, `Errors::UnsupportedForMessageFormat`
+    /// and `Errors::UnsupportedVersion`.
     pub fn is_invalid_configuration_error(&self) -> bool {
         ErrorHierarchy::is_invalid_configuration_error(self)
     }
 
     /// Whether this error's Java class extends `ApplicationRecoverableException`
-    /// (CLAUDE.md §10.4) — the application can recover, but only by
+    /// (CLAUDE.md §12.4) — the application can recover, but only by
     /// re-initialising its producer or rejoining its group; the current epoch or
     /// session is gone.
     ///
     /// 6 codes, covering the transaction and group-membership fencing paths:
-    /// [`Errors::FencedInstanceId`], [`Errors::IllegalGeneration`],
-    /// [`Errors::InvalidProducerEpoch`], [`Errors::InvalidProducerIdMapping`],
-    /// [`Errors::ProducerFenced`] and [`Errors::UnknownMemberId`].
+    /// `Errors::FencedInstanceId`, `Errors::IllegalGeneration`,
+    /// `Errors::InvalidProducerEpoch`, `Errors::InvalidProducerIdMapping`,
+    /// `Errors::ProducerFenced` and `Errors::UnknownMemberId`.
     pub fn is_application_recoverable_error(&self) -> bool {
         ErrorHierarchy::is_application_recoverable_error(self)
     }
 
     /// Whether this error's Java class extends `InvalidOffsetException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
-    /// [`Errors::OffsetOutOfRange`] is the only member carrying a protocol code;
+    /// `Errors::OffsetOutOfRange` is the only member carrying a protocol code;
     /// the sibling `NoOffsetForPartitionException` is raised client-side.
     pub fn is_invalid_offset_error(&self) -> bool {
         ErrorHierarchy::is_invalid_offset_error(self)
     }
 
     /// Whether this error's Java class extends `OutOfOrderSequenceException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
-    /// Two codes: [`Errors::OutOfOrderSequenceNumber`] itself and
-    /// [`Errors::UnknownProducerId`], its only subclass.
+    /// Two codes: `Errors::OutOfOrderSequenceNumber` itself and
+    /// `Errors::UnknownProducerId`, its only subclass.
     pub fn is_out_of_order_sequence_error(&self) -> bool {
         ErrorHierarchy::is_out_of_order_sequence_error(self)
     }
 
     /// Whether this error's Java class extends
     /// `org.apache.kafka.clients.consumer.InvalidOffsetException`
-    /// (CLAUDE.md §10.4) — no offset is usable for the partition.
+    /// (CLAUDE.md §12.4) — no offset is usable for the partition.
     ///
     /// Covers
     /// [`ConsumerNoOffsetForPartition`](Self::ConsumerNoOffsetForPartition),
@@ -1856,7 +1881,7 @@ impl Error {
 
     /// Whether this error's Java class extends
     /// `org.apache.kafka.clients.consumer.OffsetOutOfRangeException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than the [`ConsumerOffsetOutOfRange`](Self::ConsumerOffsetOutOfRange)
     /// variant: `LogTruncationException` extends that class, so
@@ -1873,7 +1898,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `SerializationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// No protocol code maps here — `SerializationException` and its subclass
     /// `RecordDeserializationException` are raised client-side — so only
@@ -1885,12 +1910,12 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `AuthenticationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Five payloads name it in their `extends:` list:
     /// [`Authentication`](Self::Authentication) — the concrete base class, which
     /// has no entry in `Errors` of its own but inherits
-    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus
+    /// `Errors::InvalidConfig` from `InvalidConfigurationException` — plus
     /// [`SaslAuthentication`](Self::SaslAuthentication),
     /// [`SslAuthentication`](Self::SslAuthentication),
     /// [`IllegalSaslState`](Self::IllegalSaslState) and
@@ -1915,12 +1940,12 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `AuthorizationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Six payloads name it in their `extends:` list:
     /// [`Authorization`](Self::Authorization) — the concrete base class, which
     /// has no entry in `Errors` of its own but inherits
-    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus the five
+    /// `Errors::InvalidConfig` from `InvalidConfigurationException` — plus the five
     /// that do carry one,
     /// [`TopicAuthorization`](Self::TopicAuthorization),
     /// [`GroupAuthorization`](Self::GroupAuthorization),
@@ -2081,7 +2106,7 @@ mod tests {
         let ise = Error::local_illegal_state("bad state");
 
         assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
-        assert_eq!(cme.code(), ise.code());
+        assert_eq!(cme.error().code(), ise.error().code());
         assert_eq!(cme.error(), ise.error());
         assert_eq!(cme.is_retriable_error(), ise.is_retriable_error());
         assert!(!cme.is_retriable_error());
@@ -2490,7 +2515,7 @@ mod tests {
         let timeout = Error::timeout("late");
         assert_eq!(timeout.error(), Errors::RequestTimedOut);
         // Java: `TimeoutException` carries `Errors.REQUEST_TIMED_OUT`.
-        assert_eq!(timeout.code(), 7, "a timeout error is Errors.REQUEST_TIMED_OUT");
+        assert_eq!(timeout.error().code(), 7, "a timeout error is Errors.REQUEST_TIMED_OUT");
         assert_eq!(timeout.message(), "late");
         assert!(timeout.is_retriable_error());
 
@@ -2552,7 +2577,7 @@ mod tests {
     fn transaction_abortable_is_a_leaf_variant_test() {
         let abortable = Error::new(Errors::TransactionAbortable);
         assert!(abortable.is_transaction_abortable_error());
-        assert_eq!(abortable.code(), 120);
+        assert_eq!(abortable.error().code(), 120);
 
         // Different class, despite the near-identical name.
         let aborted = Error::TransactionAborted(TransactionAbortedError::new("aborted"));

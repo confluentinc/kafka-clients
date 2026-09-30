@@ -34,6 +34,7 @@ use super::AbstractResponse;
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeDelegationTokenResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse")]
 pub struct DescribeDelegationTokenResponse {
     data: DescribeDelegationTokenResponseData,
 }
@@ -56,13 +57,13 @@ pub struct DescribeDelegationTokenResponse {
 #[non_exhaustive]
 pub struct DescribeDelegationTokenResponseOptions<'a> {
     /// Java's `version`.
-    pub version: i16,
+    pub(crate) version: i16,
     /// Java's `throttleTimeMs`.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
     /// Java's `error`.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// Java's `tokens`. Starts empty, as in `:69`.
-    pub tokens: &'a [DelegationToken],
+    pub(crate) tokens: &'a [DelegationToken],
 }
 
 /// Fluent builder for [`DescribeDelegationTokenResponseOptions`].
@@ -152,6 +153,7 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's
     /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`
     /// (`DescribeDelegationTokenResponse.java:73`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_data(data: DescribeDelegationTokenResponseData) -> Self {
         Self { data }
     }
@@ -161,6 +163,7 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
     /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
     /// token requester is only encoded on v3+.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
         let DescribeDelegationTokenResponseOptions { version, throttle_time_ms, error, tokens } = options;
         let described: Vec<DescribedDelegationToken> = tokens
@@ -204,6 +207,7 @@ impl DescribeDelegationTokenResponse {
     ///
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
     /// (`DescribeDelegationTokenResponse.java:69`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
         Self::with_options(
             DescribeDelegationTokenResponseOptionsBuilder::new()
@@ -221,6 +225,7 @@ impl DescribeDelegationTokenResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#data")]
     pub fn data(&self) -> &DescribeDelegationTokenResponseData {
         &self.data
     }
@@ -233,6 +238,7 @@ impl DescribeDelegationTokenResponse {
     /// Returns the top-level error.
     ///
     /// Mirrors `DescribeDelegationTokenResponse.error`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -240,6 +246,7 @@ impl DescribeDelegationTokenResponse {
     /// Whether this response carries an error.
     ///
     /// Mirrors `DescribeDelegationTokenResponse.hasError`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#hasError")]
     pub fn has_error(&self) -> bool {
         self.error() != Errors::None
     }
@@ -247,6 +254,7 @@ impl DescribeDelegationTokenResponse {
     /// Reconstructs the delegation tokens described in this response.
     ///
     /// Mirrors `DescribeDelegationTokenResponse.tokens`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#tokens")]
     pub fn tokens(&self) -> Vec<DelegationToken> {
         self.data
             .tokens
@@ -275,16 +283,19 @@ impl DescribeDelegationTokenResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.throttle_time_ms = throttle_time_ms;
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(self.error())
     }
@@ -294,12 +305,14 @@ impl DescribeDelegationTokenResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeDelegationTokenResponseData::read(readable, version)?;
         Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

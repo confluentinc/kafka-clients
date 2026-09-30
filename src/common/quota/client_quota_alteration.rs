@@ -22,6 +22,7 @@ use crate::common::quota::ClientQuotaEntity;
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaAlteration.Op`.
 #[derive(Clone, Debug, PartialEq)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op")]
 pub struct Op {
     key: String,
     value: Option<f64>,
@@ -33,6 +34,7 @@ impl Op {
     /// If `value` is `Some`, the existing value is updated; if `value` is
     /// `None`, the existing value is cleared (quota removal). This mirrors
     /// Java's nullable `Double value`, where `null` signals removal.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op#Op")]
     pub fn new(key: impl Into<String>, value: Option<f64>) -> Self {
         Self { key: key.into(), value }
     }
@@ -40,6 +42,7 @@ impl Op {
     /// Returns the quota type to alter.
     ///
     /// Mirrors `Op.key()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op#key")]
     pub fn key(&self) -> &str {
         &self.key
     }
@@ -47,6 +50,7 @@ impl Op {
     /// Returns the value to set, or `None` to clear the existing value.
     ///
     /// Mirrors `Op.value()`, where `null` means the existing value is cleared.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op#value")]
     pub fn value(&self) -> Option<f64> {
         self.value
     }
@@ -65,6 +69,7 @@ impl std::fmt::Display for Op {
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaAlteration`.
 #[derive(Clone, Debug, PartialEq)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration")]
 pub struct ClientQuotaAlteration {
     entity: ClientQuotaEntity,
     ops: Vec<Op>,
@@ -74,6 +79,7 @@ impl ClientQuotaAlteration {
     /// Constructs an alteration for the given entity.
     ///
     /// Mirrors `ClientQuotaAlteration(ClientQuotaEntity, Collection<Op>)`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration#ClientQuotaAlteration")]
     pub fn new(entity: ClientQuotaEntity, ops: Vec<Op>) -> Self {
         Self { entity, ops }
     }
@@ -81,6 +87,7 @@ impl ClientQuotaAlteration {
     /// Returns the entity whose config will be modified.
     ///
     /// Mirrors `ClientQuotaAlteration.entity()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration#entity")]
     pub fn entity(&self) -> &ClientQuotaEntity {
         &self.entity
     }
@@ -88,6 +95,7 @@ impl ClientQuotaAlteration {
     /// Returns the alterations to perform.
     ///
     /// Mirrors `ClientQuotaAlteration.ops()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration#ops")]
     pub fn ops(&self) -> &[Op] {
         &self.ops
     }

@@ -22,6 +22,8 @@ use std::fmt;
 /// Defines the strategies which clients can follow to deal with the situation
 /// when none of the known nodes is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.MetadataRecoveryStrategy")]
 pub enum MetadataRecoveryStrategy {
     /// No recovery strategy.
     None,
@@ -42,6 +44,7 @@ impl MetadataRecoveryStrategy {
     ///
     /// # Errors
     /// Returns an error if the name does not match any known strategy.
+    #[doc(alias = "org.apache.kafka.clients.MetadataRecoveryStrategy#forName")]
     pub fn for_name(name: &str) -> Result<Self, String> {
         match name.to_uppercase().as_str() {
             "NONE" => Ok(Self::None),

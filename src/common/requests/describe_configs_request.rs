@@ -23,12 +23,13 @@ use crate::DescribeConfigsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_configs_response_data::DescribeConfigsResult;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeConfigsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeConfigsResponse, RequestBuilder};
 
 /// A DescribeConfigs request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeConfigsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest")]
 pub struct DescribeConfigsRequest {
     data: DescribeConfigsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeConfigsRequest {
 
 impl DescribeConfigsRequest {
     /// Creates a new `DescribeConfigsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#DescribeConfigsRequest")]
     pub fn new(data: DescribeConfigsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#data")]
     pub fn data(&self) -> &DescribeConfigsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl DescribeConfigsRequest {
     /// Mirrors `DescribeConfigsRequest.getErrorResponse` (Java uses
     /// `Errors.forException`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = DescribeConfigsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -92,6 +96,7 @@ impl DescribeConfigsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeConfigsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -108,14 +113,16 @@ impl std::fmt::Display for DescribeConfigsRequest {
 ///
 /// Corresponds to `DescribeConfigsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct DescribeConfigsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest$Builder")]
+pub struct Builder {
     data: DescribeConfigsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeConfigsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest$Builder#Builder")]
     pub fn new(data: DescribeConfigsRequestData) -> Self {
         Self {
             data,
@@ -125,7 +132,7 @@ impl DescribeConfigsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeConfigsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_CONFIGS
     }
@@ -138,8 +145,8 @@ impl RequestBuilder for DescribeConfigsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeConfigs(DescribeConfigsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeConfigs(DescribeConfigsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -183,9 +190,9 @@ mod tests {
         data.set_resources(vec![resource("topic", 2)]);
         data.set_include_synonyms(true);
         data.set_include_documentation(true);
-        let mut request = ConcreteRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
+        let mut request = AbstractRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeConfigsRequest::parse(&mut readable, 4).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "topic");
@@ -208,7 +215,7 @@ mod tests {
     fn serialize_known_byte_vector_v4() {
         let mut data = DescribeConfigsRequestData::new();
         data.set_resources(vec![resource("t", 2)]);
-        let mut request = ConcreteRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
+        let mut request = AbstractRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // resources array length + 1

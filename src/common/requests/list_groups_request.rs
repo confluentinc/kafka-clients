@@ -28,7 +28,7 @@ use crate::ListGroupsResponseData;
 use crate::common::GroupType;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::ListGroupsResponse;
 use super::RequestBuilder;
@@ -37,6 +37,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListGroupsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest")]
 pub struct ListGroupsRequest {
     data: ListGroupsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ pub struct ListGroupsRequest {
 
 impl ListGroupsRequest {
     /// Creates a new `ListGroupsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#ListGroupsRequest")]
     pub fn new(data: ListGroupsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#data")]
     pub fn data(&self) -> &ListGroupsRequestData {
         &self.data
     }
@@ -70,6 +73,7 @@ impl ListGroupsRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `ListGroupsRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = ListGroupsResponseData::new();
         data.set_groups(Vec::new()).set_error_code(error.code());
@@ -84,6 +88,7 @@ impl ListGroupsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListGroupsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -100,15 +105,17 @@ impl std::fmt::Display for ListGroupsRequest {
 ///
 /// Corresponds to `ListGroupsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct ListGroupsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest$Builder")]
+pub struct Builder {
     data: ListGroupsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ListGroupsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest$Builder#Builder")]
     pub fn new(data: ListGroupsRequestData) -> Self {
         Self {
             data,
@@ -123,7 +130,7 @@ impl ListGroupsRequestBuilder {
     }
 }
 
-impl RequestBuilder for ListGroupsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_GROUPS
     }
@@ -136,7 +143,7 @@ impl RequestBuilder for ListGroupsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `ListGroupsRequest.Builder.build(short version)`.
         if !self.data.states_filter.is_empty() && version < 4 {
             return Err(io::Error::new(
@@ -169,9 +176,9 @@ impl RequestBuilder for ListGroupsRequestBuilder {
             }
             let mut data = self.data.clone();
             data.set_types_filter(Vec::new());
-            return Ok(ConcreteRequest::ListGroups(ListGroupsRequest::new(data, version)));
+            return Ok(AbstractRequest::ListGroups(ListGroupsRequest::new(data, version)));
         }
-        Ok(ConcreteRequest::ListGroups(ListGroupsRequest::new(self.data.clone(), version)))
+        Ok(AbstractRequest::ListGroups(ListGroupsRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -189,7 +196,7 @@ mod tests {
     fn test_serialize_known_byte_vector_v4() {
         let mut data = ListGroupsRequestData::new();
         data.set_states_filter(vec!["Stable".to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(4).unwrap();
         let expected: &[u8] = &[0x02, 0x07, 0x53, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x00];
         assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
@@ -197,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_api_key() {
-        let builder = ListGroupsRequestBuilder::new(ListGroupsRequestData::new());
+        let builder = Builder::new(ListGroupsRequestData::new());
         assert_eq!(builder.api_key(), &ApiKeys::LIST_GROUPS);
     }
 
@@ -206,7 +213,7 @@ mod tests {
     fn test_states_filter_requires_v4() {
         let mut data = ListGroupsRequestData::new();
         data.set_states_filter(vec!["Stable".to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(3).expect_err("states filter must require v4");
         assert!(
             err.to_string().contains("v4 or newer to request groups by states"),
@@ -219,10 +226,10 @@ mod tests {
     fn test_classic_only_types_filter_omitted_pre_v5() {
         let mut data = ListGroupsRequestData::new();
         data.set_types_filter(vec![GroupType::Classic.to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let built = builder.build_version(4).expect("classic-only filter omitted");
         match built {
-            ConcreteRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
+            AbstractRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
             other => panic!("expected ListGroups variant, got {other:?}"),
         }
     }
@@ -232,10 +239,10 @@ mod tests {
     fn test_classic_and_consumer_types_filter_omitted_pre_v5() {
         let mut data = ListGroupsRequestData::new();
         data.set_types_filter(vec![GroupType::Classic.to_string(), GroupType::Consumer.to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let built = builder.build_version(4).expect("classic+consumer filter omitted");
         match built {
-            ConcreteRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
+            AbstractRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
             other => panic!("expected ListGroups variant, got {other:?}"),
         }
     }
@@ -245,7 +252,7 @@ mod tests {
     fn test_consumer_only_types_filter_rejected_pre_v5() {
         let mut data = ListGroupsRequestData::new();
         data.set_types_filter(vec![GroupType::Consumer.to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder
             .build_version(4)
             .expect_err("consumer-only filter must be rejected pre-v5");
@@ -257,7 +264,7 @@ mod tests {
     fn test_share_types_filter_rejected_pre_v5() {
         let mut data = ListGroupsRequestData::new();
         data.set_types_filter(vec![GroupType::Share.to_string()]);
-        let mut builder = ListGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(4).expect_err("share filter must be rejected pre-v5");
         assert!(err.to_string().contains("v5 or newer"), "got: {err}");
     }

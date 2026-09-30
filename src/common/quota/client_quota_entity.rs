@@ -32,6 +32,7 @@ use std::hash::{Hash, Hasher};
 /// name), and `Some(name)` is a concretely-named entity (`Some(String::new())`
 /// is the entity literally named `""`, which is distinct from the default).
 #[derive(Clone, Debug, Eq)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity")]
 pub struct ClientQuotaEntity {
     entries: HashMap<String, Option<String>>,
 }
@@ -49,6 +50,7 @@ impl ClientQuotaEntity {
     /// Returns whether the given entity type is one of the built-in types.
     ///
     /// Mirrors `ClientQuotaEntity.isValidEntityType`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#isValidEntityType")]
     pub fn is_valid_entity_type(entity_type: &str) -> bool {
         entity_type == ClientQuotaEntity::USER
             || entity_type == ClientQuotaEntity::CLIENT_ID
@@ -60,6 +62,7 @@ impl ClientQuotaEntity {
     /// name.
     ///
     /// Mirrors `ClientQuotaEntity(Map<String, String>)`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#ClientQuotaEntity")]
     pub fn new(entries: HashMap<String, Option<String>>) -> Self {
         Self { entries }
     }
@@ -68,6 +71,7 @@ impl ClientQuotaEntity {
     /// built-in default entity (Java's `null` name).
     ///
     /// Mirrors `ClientQuotaEntity.entries()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#entries")]
     pub fn entries(&self) -> &HashMap<String, Option<String>> {
         &self.entries
     }

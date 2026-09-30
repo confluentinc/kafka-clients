@@ -22,6 +22,7 @@ use crate::common::Node;
 ///
 /// Contains the node (if available) and whether at least one connection is ready.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.LeastLoadedNode")]
 pub struct LeastLoadedNode {
     node: Option<Node>,
     at_least_one_connection_ready: bool,
@@ -33,11 +34,13 @@ impl LeastLoadedNode {
     /// # Arguments
     /// * `node` - The least loaded node, or `None` if no node is available.
     /// * `at_least_one_connection_ready` - Whether at least one connection to a live node is ready.
+    #[doc(alias = "org.apache.kafka.clients.LeastLoadedNode#LeastLoadedNode")]
     pub fn new(node: Option<Node>, at_least_one_connection_ready: bool) -> Self {
         Self { node, at_least_one_connection_ready }
     }
 
     /// Returns a reference to the node, if available.
+    #[doc(alias = "org.apache.kafka.clients.LeastLoadedNode#node")]
     pub fn node(&self) -> Option<&Node> {
         self.node.as_ref()
     }
@@ -47,6 +50,7 @@ impl LeastLoadedNode {
     /// There may be no node available while ready connections to live nodes exist. This may happen
     /// when the connections are overloaded with in-flight requests. This function takes this into
     /// account.
+    #[doc(alias = "org.apache.kafka.clients.LeastLoadedNode#hasNodeAvailableOrConnectionReady")]
     pub fn has_node_available_or_connection_ready(&self) -> bool {
         self.node.is_some() || self.at_least_one_connection_ready
     }

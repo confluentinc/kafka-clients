@@ -11,7 +11,7 @@ else
   CFLAGS_NATIVE = -mtune=generic
 endif
 
-.PHONY: build build-all \
+.PHONY: build build-all check-generated \
 	build-rust build-rust-integration-tests build-rust-all-features \
 	submodules build-c init-venv build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
@@ -25,7 +25,7 @@ endif
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -161,6 +161,9 @@ test-rust-all-features: build-rust-all-features
 # integration` cannot schedule them alongside the functional suite.
 test-integration: build-rust-integration-tests
 	cargo test --features integration-tests --test integration
+	# The integration tests that drive crate internals live in the lib test
+	# binary (src/integration_tests), since those types are not public API.
+	cargo test --features integration-tests --lib -- integration_tests::
 
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #
@@ -311,7 +314,7 @@ test-python-macos-docker: build-python
 	(pip install .[dev] || pip install --no-dependencies .[dev]) && \
 	python -m pytest test/unit -v)
 
-verify: build format-check lint test check-bindings
+verify: build format-check check-generated lint test check-bindings
 
 verify-c: test-c
 
@@ -326,14 +329,14 @@ MACOS_P99_LIMIT_MS ?= 150
 # macOS verify-python: unit tests.
 verify-python-macos-docker: test-python-macos-docker
 
-verify-rust: build-rust-all-features format-check lint test-rust-all-features
+verify-rust: build-rust-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
 # macOS verify-rust; perf tail uses MACOS_P99_LIMIT_MS.
-verify-rust-macos-docker: build-rust-all-features format-check lint test-rust-all-features
+verify-rust-macos-docker: build-rust-all-features format-check check-generated lint test-rust-all-features
 	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-rust
 
-verify-sandbox: build-rust build-c format-check lint test-integration test-c
+verify-sandbox: build-rust build-c format-check check-generated lint test-integration test-c
 
 init-hooks:
 	@git config core.hooksPath .githooks
@@ -355,8 +358,20 @@ install-rust-analyzer:
 format-check:
 	cargo xtask format-check
 
+# Checks the generated protocol code's formatting and that the checked-in
+# error-code tables are current; it reads the build's output, so it follows
+# a build in every verify target.
+check-generated:
+	cargo xtask check-generated
+
 lint:
 	cargo xtask lint
+
+# Build the rustdoc of every workspace crate with warnings denied, so a broken
+# or private intra-doc link fails CI instead of surfacing only when someone
+# runs `cargo doc`. The doctests themselves run as part of `cargo test`.
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 # Static arity check of the hand-written CPython extension's variadic calls.
 # A Py_BuildValue / PyArg_Parse* format one unit short of its argument list

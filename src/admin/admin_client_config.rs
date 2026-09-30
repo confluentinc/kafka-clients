@@ -20,8 +20,8 @@ use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
-use crate::common::security::SecurityProtocol;
+use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Configuration for the admin client.
@@ -29,6 +29,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
     client_dns_lookup: ClientDnsLookup,
@@ -50,10 +51,10 @@ pub struct AdminClientConfig {
     security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    sasl_config: SaslConfig,
+    sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    ssl_config: SslConfig,
+    ssl_config: SslConfigs,
 }
 
 impl AdminClientConfig {
@@ -63,9 +64,8 @@ impl AdminClientConfig {
     /// but connecting through controllers is not implemented, so setting it
     /// makes [`Self::new`] fail (see there).
     pub const BOOTSTRAP_CONTROLLERS_CONFIG: &'static str = "bootstrap.controllers";
-    /// Config key: `client.dns.lookup` (see
-    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `AdminClientConfig.java`
-    /// declares its own public alias of the `CommonClientConfigs` constant.
+    /// Config key: `client.dns.lookup`. Java's `AdminClientConfig.java` declares it as its
+    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
@@ -109,6 +109,7 @@ impl AdminClientConfig {
     /// accepts it (KIP-919), but this client does not implement bootstrapping
     /// through controllers, and silently ignoring the key would leave the
     /// client with no bootstrap address at all.
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_controllers: Vec<String> = Vec::new();
@@ -159,7 +160,7 @@ impl AdminClientConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
@@ -207,7 +208,7 @@ impl AdminClientConfig {
     }
 
     /// `client.dns.lookup`.
-    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+    pub(crate) fn client_dns_lookup(&self) -> ClientDnsLookup {
         self.client_dns_lookup
     }
 
@@ -272,12 +273,12 @@ impl AdminClientConfig {
     }
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub fn sasl_config(&self) -> &SaslConfig {
+    pub fn sasl_config(&self) -> &SaslConfigs {
         &self.sasl_config
     }
 
     /// SSL/TLS configuration.
-    pub fn ssl_config(&self) -> &SslConfig {
+    pub fn ssl_config(&self) -> &SslConfigs {
         &self.ssl_config
     }
 }
@@ -300,8 +301,8 @@ impl Default for AdminClientConfig {
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
         }
     }
 }

@@ -15,13 +15,15 @@
 //! A gauge metric is an instantaneous reading of a particular value
 //! (`org.apache.kafka.common.metrics.Gauge`).
 
-use crate::common::metrics::{MetricConfig, MetricValue};
+use crate::common::MetricValue;
+use crate::common::metrics::MetricConfig;
 
 /// A gauge metric is an instantaneous reading of a particular value.
 ///
 /// In Java `Gauge<T> extends MetricValueProvider<T>` and is a functional
 /// interface producing a value of type `T`. Because the public metric value is
 /// type-erased, the Rust gauge produces a [`MetricValue`].
+#[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
 pub trait Gauge: Send + Sync {
     /// Returns the current value associated with this gauge.
     ///

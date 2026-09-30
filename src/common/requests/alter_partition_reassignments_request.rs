@@ -23,13 +23,14 @@ use crate::AlterPartitionReassignmentsRequestData;
 use crate::AlterPartitionReassignmentsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{AlterPartitionReassignmentsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterPartitionReassignmentsResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterPartitionReassignments request.
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest")]
 pub struct AlterPartitionReassignmentsRequest {
     data: AlterPartitionReassignmentsRequestData,
     version: i16,
@@ -37,11 +38,15 @@ pub struct AlterPartitionReassignmentsRequest {
 
 impl AlterPartitionReassignmentsRequest {
     /// Creates a new `AlterPartitionReassignmentsRequest` from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#AlterPartitionReassignmentsRequest"
+    )]
     pub fn new(data: AlterPartitionReassignmentsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#data")]
     pub fn data(&self) -> &AlterPartitionReassignmentsRequestData {
         &self.data
     }
@@ -66,6 +71,7 @@ impl AlterPartitionReassignmentsRequest {
     /// Mirrors `AlterPartitionReassignmentsRequest.getErrorResponse`, which sets
     /// only the top-level error code and message and returns no per-partition
     /// results.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = AlterPartitionReassignmentsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -79,6 +85,7 @@ impl AlterPartitionReassignmentsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterPartitionReassignmentsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -99,14 +106,16 @@ impl std::fmt::Display for AlterPartitionReassignmentsRequest {
 ///
 /// Corresponds to `AlterPartitionReassignmentsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct AlterPartitionReassignmentsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest$Builder")]
+pub struct Builder {
     data: AlterPartitionReassignmentsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterPartitionReassignmentsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest$Builder#Builder")]
     pub fn new(data: AlterPartitionReassignmentsRequestData) -> Self {
         Self {
             data,
@@ -116,7 +125,7 @@ impl AlterPartitionReassignmentsRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterPartitionReassignmentsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_PARTITION_REASSIGNMENTS
     }
@@ -129,8 +138,8 @@ impl RequestBuilder for AlterPartitionReassignmentsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterPartitionReassignments(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterPartitionReassignments(
             AlterPartitionReassignmentsRequest::new(self.data.clone(), version),
         ))
     }
@@ -173,7 +182,7 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path.
     #[test]
     fn serialize_parse_round_trip() {
@@ -182,9 +191,9 @@ mod tests {
         data.set_allow_replication_factor_change(true);
         data.set_topics(vec![topic("A", &[(0, vec![1, 2, 3])])]);
         let mut request =
-            ConcreteRequest::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(data, 0));
+            AbstractRequest::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterPartitionReassignmentsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().timeout_ms, 30000);
         assert!(parsed.data().allow_replication_factor_change);
@@ -211,7 +220,7 @@ mod tests {
         data.set_timeout_ms(100);
         data.set_topics(vec![topic("A", &[(0, vec![1])])]);
         let mut request =
-            ConcreteRequest::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(data, 0));
+            AbstractRequest::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x00, 0x00, 0x00, 0x64, // timeout_ms = 100

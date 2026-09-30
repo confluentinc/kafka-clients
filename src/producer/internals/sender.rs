@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! The background task that handles sending produce requests to the Kafka cluster.
 //!
 //! This task makes metadata requests to renew its view of the cluster and then
@@ -55,7 +55,6 @@ use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::NetworkClient;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
@@ -63,10 +62,11 @@ use crate::common::errors::AuthenticationError;
 use crate::common::metrics::stats::{Avg, Max, Meter};
 use crate::common::metrics::{ClosureMeasurable, Sensor};
 use crate::common::network;
+use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::CoordinatorType;
-use crate::common::requests::ProduceRequestBuilder;
+use crate::common::requests::ProduceRequest;
 use crate::common::requests::{PartitionResponse, PartitionResponseOptionsBuilder, RecordError};
 
 /// Names one concrete instantiation of [`Sender`] so its client-independent
@@ -85,6 +85,7 @@ use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
 use crate::common::utils::LogContext;
+use crate::common::utils::Time;
 
 use super::Caller;
 use super::InFlightBatchPool;
@@ -121,7 +122,7 @@ enum BatchAction {
 /// topic-partition set and topic names here and process responses after
 /// `client.poll()` returns. The actual batches remain in `in_flight_batches`.
 ///
-/// This follows CLAUDE.md rule 9: translate callbacks to code executed after
+/// This follows CLAUDE.md rule 11: translate callbacks to code executed after
 /// awaiting the corresponding call.
 struct PendingProduceRequest {
     /// The topic-partitions whose batches were sent in this request, each paired with
@@ -149,7 +150,8 @@ struct PendingProduceRequest {
 ///
 /// Translated from Java's `Sender.SenderMetrics` inner class. All recording is
 /// per-drained-batch / per-response (amortized over many records) — not on the
-/// per-record hot path (CLAUDE.md §11).
+/// per-record hot path (CLAUDE.md §13).
+#[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics")]
 struct SenderMetrics {
     retry_sensor: Arc<Sensor>,
     error_sensor: Arc<Sensor>,
@@ -161,9 +163,8 @@ struct SenderMetrics {
     max_record_size_sensor: Arc<Sensor>,
     batch_split_sensor: Arc<Sensor>,
     metrics: SenderMetricsRegistry,
-    /// Provider of current wall-clock time in milliseconds. Java's
-    /// `SenderMetrics` holds a `Time time` and calls `time.milliseconds()`.
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `SenderMetrics`' `private final Time time`.
+    time: Arc<dyn Time>,
     /// Contextual log message prefix (for the unreachable registration-error path).
     log_context: LogContext,
 }
@@ -177,11 +178,12 @@ impl SenderMetrics {
     /// in-flight-request counter (Java's gauge captures the `KafkaClient` and
     /// calls `inFlightRequestCount()`; the client moves into the sender task, so
     /// the gauge reads a shared atomic instead).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#SenderMetrics")]
     fn new(
         metrics: SenderMetricsRegistry,
         metadata: Arc<ProducerMetadata>,
         in_flight_count: Arc<AtomicI32>,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<Self, Error> {
         let batch_size_sensor = metrics.sensor("batch-size")?;
@@ -256,7 +258,7 @@ impl SenderMetrics {
             max_record_size_sensor,
             batch_split_sensor,
             metrics,
-            time_provider,
+            time,
             log_context,
         })
     }
@@ -264,6 +266,7 @@ impl SenderMetrics {
     /// Lazily registers the per-topic sensors for `topic`. Idempotent: if one
     /// sensor exists for the topic, all do. Translates
     /// `SenderMetrics.maybeRegisterTopicMetrics`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#maybeRegisterTopicMetrics")]
     fn maybe_register_topic_metrics(&self, topic: &str) -> Result<(), Error> {
         // If one sensor of the metrics has been registered for the topic, then
         // all other sensors should have been registered; and vice versa.
@@ -308,8 +311,9 @@ impl SenderMetrics {
 
     /// Records per-drained-batch metrics for a produce request. Translates
     /// `SenderMetrics.updateProduceRequestMetrics(Map<Integer, List<ProducerBatch>>)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#updateProduceRequestMetrics")]
     fn update_produce_request_metrics(&self, batches: &HashMap<i32, Vec<ProducerBatch>>) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         for node_batch in batches.values() {
             let mut records: i32 = 0;
             for batch in node_batch {
@@ -357,8 +361,9 @@ impl SenderMetrics {
 
     /// Records `count` retried record sends for `topic`. Translates
     /// `SenderMetrics.recordRetries`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordRetries")]
     fn record_retries(&self, topic: &str, count: i32) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.retry_sensor.record_value_time_ms(count as f64, now);
         let topic_retry_name = format!("topic.{topic}.record-retries");
         if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
@@ -368,8 +373,9 @@ impl SenderMetrics {
 
     /// Records `count` errored record sends for `topic`. Translates
     /// `SenderMetrics.recordErrors`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordErrors")]
     fn record_errors(&self, topic: &str, count: i32) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.error_sensor.record_value_time_ms(count as f64, now);
         let topic_error_name = format!("topic.{topic}.record-errors");
         if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
@@ -380,8 +386,9 @@ impl SenderMetrics {
     /// Records a produce request's latency against the client-level sensor and,
     /// if it exists, the per-node latency sensor. Translates
     /// `SenderMetrics.recordLatency`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordLatency")]
     fn record_latency(&self, node: &str, latency: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.request_time_sensor.record_value_time_ms(latency as f64, now);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
@@ -393,6 +400,7 @@ impl SenderMetrics {
 
     /// Records one batch split. Translates `SenderMetrics.recordBatchSplit`
     /// (Java's no-arg `Sensor.record()` records the value `1.0`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordBatchSplit")]
     fn record_batch_split(&self) {
         self.batch_split_sensor.record_value(1.0);
     }
@@ -404,6 +412,7 @@ impl SenderMetrics {
 /// produce requests to the appropriate nodes.
 ///
 /// Translated from `org.apache.kafka.clients.producer.internals.Sender`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.Sender")]
 pub struct Sender<C: KafkaClient> {
     /// The client for sending requests to the Kafka cluster.
     client: C,
@@ -422,7 +431,6 @@ pub struct Sender<C: KafkaClient> {
     /// The max time to wait for the server to respond to the request.
     request_timeout_ms: i32,
     /// The max time to wait before retrying a request which has failed.
-    #[allow(dead_code)]
     retry_backoff_ms: i64,
     /// True while the sender task is still running.
     running: Arc<AtomicBool>,
@@ -539,7 +547,7 @@ pub struct Sender<C: KafkaClient> {
     /// `RequestCompletionHandler` cannot capture `&mut self`, so the handler is
     /// parked here and matched against the response's correlation id after
     /// `poll()` returns — the same shape [`PendingProduceRequest`] already uses for
-    /// produce responses (CLAUDE.md §9.2).
+    /// produce responses (CLAUDE.md §11.2).
     ///
     /// An [`Option`] rather than a map because Java allows at most one in-flight
     /// transactional request: `maybeSendAndPollTransactionalRequest` returns early
@@ -578,8 +586,8 @@ pub struct Sender<C: KafkaClient> {
     batches_awaiting_response: Vec<ProducerBatch>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
     pending_produce_responses: HashMap<i32, PendingProduceRequest>,
-    /// Provider of current wall-clock time in milliseconds (epoch).
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Sender`.
@@ -616,7 +624,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Suspends the Sender task for `duration_ms`, translating Java's
     /// `time.sleep(retryBackoffMs)` (`Sender.java:501`, `:525`).
     ///
-    /// Java blocks the Sender thread; CLAUDE.md §9.1 makes that an `.await` here. Both
+    /// Java blocks the Sender thread; CLAUDE.md §11.1 makes that an `.await` here. Both
     /// call sites exist to prevent a tight retry loop and neither holds a
     /// `TransactionManager` guard (rules §4).
     ///
@@ -624,7 +632,7 @@ impl<C: KafkaClient> Sender<C> {
     /// passes through instantly. Tokio's timer is real unless the test opts into
     /// `#[tokio::test(start_paused = true)]`, which auto-advances when the runtime is
     /// idle. That is a difference in test *duration* only — the Sender's own clock is
-    /// the injected `time_provider` either way.
+    /// the injected `time` either way.
     async fn sleep_ms(duration_ms: i64) {
         if duration_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(duration_ms as u64)).await;
@@ -651,7 +659,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Java rethrows the exception object with its message untouched.
     ///
     /// `Error::Authentication` is the class `run_once`'s `is_authentication_error()`
-    /// arm tests for (CLAUDE.md §10.4) — a codeless `UnknownServerError` would answer
+    /// arm tests for (CLAUDE.md §12.4) — a codeless `UnknownServerError` would answer
     /// `false` to it and therefore to `request_utils::RequestUtils::is_fatal_error` too.
     fn authentication_error_from_io(error: &std::io::Error) -> Error {
         let message = network::authentication_error_message(error)
@@ -666,6 +674,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Java models this as a `static` method on `Sender`; in Rust it is a free
     /// function in the sender module, because a static-like associated function on
     /// the generic `Sender<C>` cannot infer `C` at the call site.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#throttleTimeSensor")]
     pub(crate) fn throttle_time_sensor(metrics: &SenderMetricsRegistry) -> Result<Arc<Sensor>, Error> {
         let produce_throttle_time_sensor = metrics.sensor("produce-throttle-time")?;
         produce_throttle_time_sensor
@@ -676,7 +685,8 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Creates a new `Sender`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#Sender")]
     pub fn new(
         client: C,
         metadata: Arc<ProducerMetadata>,
@@ -690,7 +700,7 @@ impl<C: KafkaClient> Sender<C> {
         metrics: SenderMetricsRegistry,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
         log_context: LogContext,
@@ -703,7 +713,7 @@ impl<C: KafkaClient> Sender<C> {
             metrics,
             Arc::clone(&metadata),
             in_flight_count,
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             log_context.clone(),
         )
         .expect("registering sender sensors");
@@ -728,7 +738,7 @@ impl<C: KafkaClient> Sender<C> {
             in_flight_batches: HashMap::new(),
             batches_awaiting_response: Vec::new(),
             pending_produce_responses: HashMap::new(),
-            time_provider,
+            time,
             log_context,
             sensors,
         }
@@ -888,6 +898,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Translated from `Sender.hasPendingTransactionalRequests()` (Java 233-235).
     /// Reachable for a purely idempotent producer — see
     /// [`TransactionManager::has_ongoing_transaction`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#hasPendingTransactionalRequests")]
     fn has_pending_transactional_requests(&self) -> bool {
         match &self.transaction_manager {
             Some(transaction_manager) => {
@@ -900,6 +911,7 @@ impl<C: KafkaClient> Sender<C> {
     /// The main run loop for the sender task.
     ///
     /// Translated from `Sender.run()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#run")]
     pub async fn run(&mut self) {
         kafka_debug!(self.log_context, "Starting Kafka producer I/O task.");
 
@@ -956,7 +968,7 @@ impl<C: KafkaClient> Sender<C> {
                 // it: `close()` only ever targets `FATAL_ERROR`, which is always a
                 // valid transition, and always supplies an error. Logged rather than
                 // unwrapped so an unreachable failure cannot panic the task
-                // (CLAUDE.md §10.1).
+                // (CLAUDE.md §12.1).
                 // `pending_requests` before the manager, per its field docs.
                 let mut pending_requests = self.pending_requests.lock().unwrap();
                 if let Err(error) = transaction_manager.lock().unwrap().close(&mut pending_requests, Caller::Sender) {
@@ -1102,6 +1114,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Java's `runOnce` throws and `Sender.run` catches-and-logs; the Rust
     /// equivalent returns the error and [`Self::run_once_logging_errors`] logs it
     /// at the same point.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#runOnce")]
     pub(crate) async fn run_once(&mut self) -> Result<(), Error> {
         if self.transaction_manager.is_some() {
             match self.run_transaction_phase().await {
@@ -1114,7 +1127,7 @@ impl<C: KafkaClient> Sender<C> {
                 // `sendProducerData` at `:343`, which this `match` arm preserves by
                 // falling through.
                 //
-                // The test is `is_authentication_error()` — CLAUDE.md §10.4's
+                // The test is `is_authentication_error()` — CLAUDE.md §12.4's
                 // translation of `instanceof AuthenticationException`. Java's `catch`
                 // covers the *whole* `try` block (`:308-335`), so it fires for an
                 // authentication failure raised by ANY statement in it, not just by
@@ -1134,7 +1147,7 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
-        let current_time_ms = (self.time_provider)();
+        let current_time_ms = self.time.milliseconds();
         let poll_timeout = self.send_producer_data(current_time_ms).await?;
         self.poll_and_dispatch(poll_timeout, current_time_ms).await;
         Ok(())
@@ -1170,7 +1183,7 @@ impl<C: KafkaClient> Sender<C> {
     /// cancel-safe).
     async fn poll_and_dispatch(&mut self, timeout: i64, now: i64) {
         let responses = self.client.poll(timeout, now).await;
-        let dispatch_time_ms = (self.time_provider)();
+        let dispatch_time_ms = self.time.milliseconds();
         self.handle_client_responses(&responses, dispatch_time_ms);
     }
 
@@ -1358,7 +1371,7 @@ impl<C: KafkaClient> Sender<C> {
                 // with no manager lock held — rules §3's order is unaffected.
                 self.maybe_abort_batches(error);
             }
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
@@ -1502,6 +1515,7 @@ impl<C: KafkaClient> Sender<C> {
     /// or if a `FindCoordinator` request is enqueued — i.e. exactly when `runOnce`
     /// must return at `:334`. Java has one `return false` (`:474`, empty queue) and
     /// six `return true`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeSendAndPollTransactionalRequest")]
     async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
@@ -1510,7 +1524,7 @@ impl<C: KafkaClient> Sender<C> {
         // Java 460-464: as long as there are outstanding transactional requests, we
         // simply wait for them to return.
         if self.has_in_flight_request() {
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
@@ -1557,7 +1571,7 @@ impl<C: KafkaClient> Sender<C> {
         let target_node = match coordinator_type {
             Some(coordinator_type) => self.coordinators.coordinator(coordinator_type)?.cloned(),
             None => {
-                let now = (self.time_provider)();
+                let now = self.time.milliseconds();
                 self.client.least_loaded_node(now).node().cloned()
             },
         };
@@ -1587,7 +1601,7 @@ impl<C: KafkaClient> Sender<C> {
                     .unwrap()
                     .retry(&mut pending_requests, next_request_handler);
             }
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         };
@@ -1642,7 +1656,7 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         // Java 503-510.
-        let current_time_ms = (self.time_provider)();
+        let current_time_ms = self.time.milliseconds();
         // Java hands the builder itself to `newClientRequest`, keeping the handler's
         // own reference alive for a possible retry. This crate only exposes builders
         // as `Box<dyn RequestBuilder>` at that boundary, so the builder is cloned
@@ -1663,7 +1677,7 @@ impl<C: KafkaClient> Sender<C> {
             // Java attaches `nextRequestHandler` itself as the completion handler; a
             // Rust callback cannot capture `&mut self`, so the handler is parked in
             // `pending_transactional_response` and matched by correlation id in
-            // `handle_client_responses` (CLAUDE.md §9.2).
+            // `handle_client_responses` (CLAUDE.md §11.2).
             None,
         );
         let correlation_id = client_request.correlation_id();
@@ -1677,7 +1691,7 @@ impl<C: KafkaClient> Sender<C> {
         self.pending_transactional_response = Some((correlation_id, next_request_handler));
         self.client.send(client_request, current_time_ms);
         self.set_in_flight_correlation_id(correlation_id);
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.poll_and_dispatch(self.retry_backoff_ms, now).await;
         Ok(true)
     }
@@ -1686,6 +1700,7 @@ impl<C: KafkaClient> Sender<C> {
     /// re-enqueues the request either way.
     ///
     /// Translated from `Sender.maybeFindCoordinatorAndRetry()` (Java 520-530).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeFindCoordinatorAndRetry")]
     async fn maybe_find_coordinator_and_retry(&mut self, next_request_handler: TxnRequestHandler) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
@@ -1728,6 +1743,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// The manager lock is taken *after* the await completes and dropped before
     /// returning, so no guard crosses it (rules §4).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#awaitNodeReady")]
     async fn await_node_ready(
         &mut self,
         node: &crate::common::Node,
@@ -1735,8 +1751,7 @@ impl<C: KafkaClient> Sender<C> {
     ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
         let (responses, result) =
-            crate::NetworkClientUtils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
-                .await;
+            crate::NetworkClientUtils::await_ready(&mut self.client, node, &*self.time, request_timeout_ms).await;
         // Route the responses collected while awaiting readiness through the same
         // path `poll_and_dispatch` uses, **before** propagating any error. This
         // crate's `NetworkClient::poll` does not self-dispatch (PLAN §9.28) —
@@ -1751,7 +1766,7 @@ impl<C: KafkaClient> Sender<C> {
         // so it loses nothing on the error paths either. No manager guard is held
         // across the await above or this dispatch (rules §4).
         if !responses.is_empty() {
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.handle_client_responses(&responses, now);
         }
         let ready = result?;
@@ -1772,6 +1787,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Must not be called while the `TransactionManager` guard is held: it takes the
     /// accumulator's per-partition deque locks, and rules §3 fixes the order as
     /// deque → manager.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeAbortBatches")]
     fn maybe_abort_batches(&mut self, error: &Error) {
         if !self.accumulator.has_incomplete() {
             return;
@@ -1791,7 +1807,7 @@ impl<C: KafkaClient> Sender<C> {
     /// [`ProduceRequestResult`]s rather than batches — a `ProducerBatch` has exactly
     /// one owner (rules §7) — so the accumulator can only reach what is still in its
     /// deques. Without this, the record futures of drained batches are never
-    /// completed, which CLAUDE.md §5 forbids.
+    /// completed, which CLAUDE.md §7 forbids.
     ///
     /// Applies Java's in-flight fork (`:1160-1167`): a batch still marked in flight
     /// keeps its pooled buffer until its response arrives (KAFKA-19012), so it moves
@@ -1817,6 +1833,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Returns the in-flight batches for a topic partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#inFlightBatches")]
     pub fn in_flight_batches(&self, tp: &TopicPartition) -> Vec<&ProducerBatch> {
         self.in_flight_batches
             .get(tp)
@@ -1830,11 +1847,13 @@ impl<C: KafkaClient> Sender<C> {
     /// the batch is already extracted from `in_flight_batches` by the caller
     /// (`handle_produce_responses` or `get_expired_inflight_batches`) before
     /// completion is called, so no removal is needed here.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeRemoveAndDeallocateBatch")]
     fn maybe_remove_and_deallocate_batch(&mut self, batch: &mut ProducerBatch) {
         self.accumulator.complete_and_deallocate_batch(batch);
     }
 
     /// Get the in-flight batches that have reached delivery timeout.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#getExpiredInflightBatches")]
     fn get_expired_inflight_batches(&mut self, now: i64) -> Vec<ProducerBatch> {
         let mut expired_batches = Vec::new();
         let delivery_timeout_ms = self.accumulator.delivery_timeout_ms() as i64;
@@ -1872,6 +1891,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Add batches to the in-flight tracking map (takes ownership).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#addToInflightBatches")]
     fn add_to_inflight_batches(&mut self, batches: &mut HashMap<i32, Vec<ProducerBatch>>) {
         for batch_list in batches.values_mut() {
             // Drain the list to take ownership of each batch
@@ -1894,6 +1914,7 @@ impl<C: KafkaClient> Sender<C> {
     /// ids, epochs and sequence numbers when idempotence is enabled. Java lets the
     /// corresponding `IllegalStateException` escape `runOnce` to `Sender.run`'s
     /// catch-and-log; [`Self::run_once_logging_errors`] is the same boundary.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#sendProducerData")]
     async fn send_producer_data(&mut self, now: i64) -> Result<i64, Error> {
         let metadata_snapshot = self.metadata.fetch_metadata_snapshot();
 
@@ -1999,6 +2020,7 @@ impl<C: KafkaClient> Sender<C> {
     /// pooled buffer is released only when the produce response arrives, so the batch
     /// has to be moved into [`Self::batches_awaiting_response`] rather than dropped
     /// at the end of the caller's scope.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failExpiredBatches")]
     fn fail_expired_batches(&mut self, expired_batches: Vec<ProducerBatch>, now: i64, deallocate_buffer: bool) {
         if !expired_batches.is_empty() {
             kafka_trace!(self.log_context, "Expired {} batches in accumulator", expired_batches.len());
@@ -2044,6 +2066,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Start closing the sender (won't actually complete until all data is sent out).
     ///
     /// Translated from `Sender.initiateClose()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#initiateClose")]
     pub fn initiate_close(&self) {
         self.accumulator.close();
         self.running.store(false, Ordering::Release);
@@ -2053,12 +2076,14 @@ impl<C: KafkaClient> Sender<C> {
     /// Closes the sender without sending out any pending messages.
     ///
     /// Translated from `Sender.forceClose()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#forceClose")]
     pub fn force_close(&self) {
         self.force_close.store(true, Ordering::Release);
         self.initiate_close();
     }
 
     /// Returns `true` if the sender is still running.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#isRunning")]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -2070,6 +2095,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Returns a list of `(TopicPartition, BatchAction)` for batches that require
     /// ownership transfer (reenqueue or split). The caller owns the batches and
     /// must process these actions.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#handleProduceResponse")]
     fn handle_produce_response(
         &mut self,
         response: &ClientResponse,
@@ -2234,6 +2260,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Returns a [`BatchAction`] indicating whether the caller should reenqueue
     /// the batch, split-and-reenqueue it, or do nothing (already completed).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#completeBatch")]
     fn complete_batch(
         &mut self,
         batch: &mut ProducerBatch,
@@ -2377,6 +2404,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Format the error from a `PartitionResponse` in a user-friendly string.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#formatErrMsg")]
     fn format_err_msg(response: &PartitionResponse) -> String {
         Self::format_partition_response_err(response)
     }
@@ -2401,6 +2429,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failBatch")]
     fn fail_batch(
         &mut self,
         batch: &mut ProducerBatch,
@@ -2489,6 +2518,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failBatch")]
     fn fail_batch_with_error(
         &mut self,
         batch: &mut ProducerBatch,
@@ -2513,6 +2543,7 @@ impl<C: KafkaClient> Sender<C> {
     /// branch (`Sender.java:861`) and the pooled buffer has *not* been returned. See
     /// [`Self::batches_awaiting_response`].
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failBatch")]
     fn fail_batch_with_record_errors(
         &mut self,
         batch: &mut ProducerBatch,
@@ -2596,6 +2627,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Check if a batch can be retried.
     ///
     /// Translated from `Sender.canRetry()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#canRetry")]
     fn can_retry(&mut self, batch: &mut ProducerBatch, response: &PartitionResponse, now: i64) -> Result<bool, Error> {
         if batch.has_reached_delivery_timeout(self.accumulator.delivery_timeout_ms() as i64, now)
             || batch.attempts() >= self.retries
@@ -2652,6 +2684,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Transfer the record batches into a list of produce requests on a per-node basis.
     ///
     /// Translated from `Sender.sendProduceRequests()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#sendProduceRequests")]
     fn send_produce_requests(&mut self, request_data: Vec<(i32, Vec<RequestBatchInfo>)>, now: i64) {
         for (destination, batch_infos) in request_data {
             self.send_produce_request(now, destination, self.acks, self.request_timeout_ms, batch_infos);
@@ -2667,6 +2700,7 @@ impl<C: KafkaClient> Sender<C> {
     /// `&mut self` in a callback, so instead we store the batch metadata in
     /// `pending_produce_responses` and process the response after `poll()`
     /// returns in `run_once()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#sendProduceRequest")]
     fn send_produce_request(
         &mut self,
         now: i64,
@@ -2768,8 +2802,7 @@ impl<C: KafkaClient> Sender<C> {
         // the version at the last Transaction V1 one when the flag is set, so a
         // broker that has not finalized `transaction.version` 2 is not sent a v12+
         // produce request.
-        let request_builder =
-            ProduceRequestBuilder::builder_use_transaction_v1_version(data, use_transaction_v1_version);
+        let request_builder = ProduceRequest::builder_with_use_transaction_v1_version(data, use_transaction_v1_version);
 
         // Capture debug representation before request_builder is moved into Box.
         let request_debug = if log::log_enabled!(log::Level::Trace) {
@@ -2816,6 +2849,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Wake up the selector associated with this send task.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#wakeup")]
     pub fn wakeup(&self) {
         self.client.wakeup();
     }
@@ -2864,14 +2898,14 @@ mod tests {
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
+    use crate::common::utils::MockTime;
     use crate::common::utils::ProducerIdAndEpoch;
-    use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
+    use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
     use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::FutureRecordMetadata;
     use crate::producer::internals::PartitionerConfig;
     use crate::producer::internals::{Caller, InFlightBatchPool, TransactionalRequestResult};
-    use std::sync::atomic::AtomicI64;
     use std::time::Duration;
 
     // Constants matching Java's SenderTest
@@ -2898,51 +2932,14 @@ mod tests {
         m
     }
 
-    /// Shared mock time: atomically advancing clock.
-    struct MockTime {
-        now_ms: AtomicI64,
-        /// Milliseconds to advance on every [`Self::milliseconds`] call.
-        ///
-        /// Java's `MockTime(autoTickMs)` does the same, and `milliseconds()` sleeps
-        /// *before* reading, so the returned value already includes the tick. Zero
-        /// (the default) leaves the clock under the test's explicit control, which is
-        /// what every test but `test_node_not_ready` wants.
-        ///
-        /// Some code cannot make progress without it. `NetworkClientUtils.awaitReady`
-        /// loops on `attempt_start_time - start_time < timeout_ms` and advances that
-        /// difference only by re-reading the clock, so with a frozen clock and an
-        /// unready node it never terminates — the Sender is driven synchronously by
-        /// the test, so no other task can advance time for it.
-        auto_tick_ms: AtomicI64,
-    }
-
-    impl MockTime {
-        fn new(initial: i64) -> Arc<Self> {
-            Arc::new(Self { now_ms: AtomicI64::new(initial), auto_tick_ms: AtomicI64::new(0) })
-        }
-
-        /// Advances the clock by `ms` on every read, mirroring Java's
-        /// `new MockTime(autoTickMs)`.
-        fn set_auto_tick(&self, ms: i64) {
-            self.auto_tick_ms.store(ms, Ordering::Release);
-        }
-
-        fn milliseconds(&self) -> i64 {
-            let tick = self.auto_tick_ms.load(Ordering::Acquire);
-            if tick == 0 {
-                return self.now_ms.load(Ordering::Acquire);
-            }
-            self.now_ms.fetch_add(tick, Ordering::AcqRel) + tick
-        }
-
-        fn sleep(&self, ms: i64) {
-            self.now_ms.fetch_add(ms, Ordering::AcqRel);
-        }
-
-        fn as_provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
-            let time = Arc::clone(self);
-            Arc::new(move || time.milliseconds())
-        }
+    /// Java's `new MockTime()` started at `initial_ms`, with a frozen monotonic clock.
+    ///
+    /// Start at a non-zero time: Java's MockTime uses `System.currentTimeMillis()`,
+    /// which is always > 0.
+    fn mock_time(initial_ms: i64) -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, initial_ms, 0,
+        ))
     }
 
     /// Builds an idempotent (non-transactional) [`TransactionManager`], mirroring
@@ -2978,7 +2975,7 @@ mod tests {
         let api_versions = Arc::new(crate::ApiVersions::new());
         let mut init_producer_id = ApiVersion::new();
         init_producer_id
-            .set_api_key(crate::common::ApiKeys::INIT_PRODUCER_ID.id())
+            .set_api_key(crate::common::protocol::ApiKeys::INIT_PRODUCER_ID.id())
             .set_min_version(0)
             .set_max_version(6);
         api_versions.update(
@@ -3124,8 +3121,8 @@ mod tests {
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
             // not_throttled(0) returns false when throttled_until_ms is also 0.
-            let time = MockTime::new(1000);
-            let time_provider = time.as_provider();
+            let time = mock_time(1000);
+            let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
             let batch_size = 16 * 1024;
             let total_size = 1024 * 1024;
@@ -3140,7 +3137,7 @@ mod tests {
 
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
-                Compression::none(),
+                Compression::none().build(),
                 linger_ms,
                 accumulator_retry_backoff_ms,
                 accumulator_retry_backoff_ms * 10,
@@ -3152,7 +3149,7 @@ mod tests {
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-            let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+            let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -3179,7 +3176,7 @@ mod tests {
                 sender_metrics_registry,
                 running,
                 force_close,
-                time_provider,
+                clock,
                 transaction_manager.clone(),
                 Arc::new(Mutex::new(PendingRequests::new())),
                 LogContext::empty(),
@@ -3268,7 +3265,7 @@ mod tests {
         /// The wire version the enqueued `EndTxn` will be sent at.
         ///
         /// Java reads `endTxnRequest.version()` from inside a `RequestMatcher`, i.e. at
-        /// send time. `EndTxnRequestBuilder::new(.., is_transaction_v2_enabled)` fixes the
+        /// send time. `end_txn_request::Builder::new(.., is_transaction_v2_enabled)` fixes the
         /// bound when `beginCompletingTransaction` enqueues the handler
         /// (`TransactionManager.java:1737`), so reading it off the queued handler gives
         /// the same answer earlier — and reads the builder rather than restating the
@@ -3400,7 +3397,7 @@ mod tests {
             Vec::with_capacity(1024),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
             0,
@@ -3424,7 +3421,7 @@ mod tests {
             Vec::with_capacity(256),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0, // base_offset
             0, // log_append_time
@@ -3455,7 +3452,7 @@ mod tests {
     /// so the broker received B's records addressed as A.
     #[tokio::test]
     async fn test_send_produce_request_does_not_merge_topics_with_unresolved_ids() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let mut ctx = SenderTestContext::new();
         let now = ctx.time.milliseconds();
@@ -3487,7 +3484,7 @@ mod tests {
             .request_builder_mut()
             .build()
             .expect("produce request builds");
-        let ConcreteRequest::Produce(produce_request) = built else {
+        let AbstractRequest::Produce(produce_request) = built else {
             panic!("expected a Produce request");
         };
         let topic_data = &produce_request.data().topic_data;
@@ -3779,7 +3776,7 @@ mod tests {
     fn test_get_expired_inflight_batches() {
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             1024 * 1024,
-            Compression::none(),
+            Compression::none().build(),
             0,
             RETRY_BACKOFF_MS,
             RETRY_BACKOFF_MS * 10,
@@ -3831,6 +3828,7 @@ mod tests {
     /// to connect + send, receive a response, and confirm the future completes
     /// with the correct offset.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSimple")]
     async fn test_simple() {
         let mut ctx = SenderTestContext::new();
         let offset = 0i64;
@@ -4007,6 +4005,7 @@ mod tests {
     /// Verifies that a non-retriable error (TOPIC_AUTHORIZATION_FAILED) completes
     /// the future with the correct error type.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCanRetryWithoutIdempotence")]
     async fn test_can_retry_without_idempotence() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4051,6 +4050,7 @@ mod tests {
     /// Verifies that once a batch has expired (delivery timeout exceeded), a
     /// retriable error does NOT cause a retry.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiredBatchDoesNotRetry")]
     async fn test_expired_batch_does_not_retry() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4085,6 +4085,9 @@ mod tests {
     /// Verifies that an expired batch that gets a MESSAGE_TOO_LARGE error is
     /// not split and resent.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiredBatchDoesNotSplitOnMessageTooLargeError"
+    )]
     async fn test_expired_batch_does_not_split_on_message_too_large_error() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4122,6 +4125,7 @@ mod tests {
     /// Verifies that an in-flight batch expires when the delivery timeout
     /// is reached, even if the server responds with success.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInflightBatchesExpireOnDeliveryTimeout")]
     async fn test_inflight_batches_expire_on_delivery_timeout() {
         let mut ctx = SenderTestContext::with_options(true, i32::MAX);
         let tp0 = ctx.tp0.clone();
@@ -4161,6 +4165,9 @@ mod tests {
     /// Verifies that when guarantee_message_order is true, the partition is muted
     /// while a batch is in-flight, preventing the second batch from being sent.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testWhenFirstBatchExpireNoSendSecondBatchIfGuaranteeOrder"
+    )]
     async fn test_when_first_batch_expire_no_send_second_batch_if_guarantee_order() {
         let mut ctx = SenderTestContext::with_options(true, i32::MAX);
         let tp0 = ctx.tp0.clone();
@@ -4281,6 +4288,7 @@ mod tests {
     /// Verifies that the default error message from the Errors enum is propagated
     /// to the application.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testDefaultErrorMessage")]
     async fn test_default_error_message() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4307,6 +4315,7 @@ mod tests {
     /// Verifies that a custom error message from the server response is propagated
     /// to the application.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCustomErrorMessage")]
     async fn test_custom_error_message() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4343,6 +4352,7 @@ mod tests {
     /// Verifies that expired batches in multiple partitions are all correctly
     /// failed with timeout errors.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiredBatchesInMultiplePartitions")]
     async fn test_expired_batches_in_multiple_partitions() {
         let mut ctx = SenderTestContext::with_options(true, i32::MAX);
         let tp0 = ctx.tp0.clone();
@@ -4392,6 +4402,7 @@ mod tests {
     /// Verifies that topics are added to the metadata list when messages are
     /// available to send and expired if not used during a metadata refresh interval.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testMetadataTopicExpiry")]
     async fn test_metadata_topic_expiry() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4443,6 +4454,7 @@ mod tests {
     /// Verifies that per-record errors from the server are correctly propagated
     /// to each individual record's future.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testRecordErrorPropagatedToApplication")]
     async fn test_record_error_propagated_to_application() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4552,6 +4564,7 @@ mod tests {
     ///    successfully sent on retry.
     /// 2. When retries are exhausted, the batch fails with the appropriate error.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testRetries")]
     async fn test_retries() {
         let max_retries = 1;
         let mut ctx = SenderTestContext::with_options(false, max_retries);
@@ -4649,6 +4662,7 @@ mod tests {
     /// while a batch is in-flight, preventing out-of-order sends. After the first
     /// batch completes, the second batch is sent.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSendInOrder")]
     async fn test_send_in_order() {
         let max_retries = 1;
         let mut ctx = SenderTestContext::with_options(true, max_retries);
@@ -4710,6 +4724,7 @@ mod tests {
     /// Verifies that when a batch times out, its buffer is deallocated exactly
     /// once, not doubled.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testNoDoubleDeallocation")]
     async fn test_no_double_deallocation() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4772,6 +4787,7 @@ mod tests {
     /// `allocate` pops from it, returning the same allocation. The §9.18 half of the
     /// blockage was real and is now fixed.)
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testNoBufferReuseWhenBatchExpires")]
     async fn test_no_buffer_reuse_when_batch_expires() {
         // Java 3606-3608: `batchSize` is 16 KiB (Java 171), `totalSize` 1 MiB.
         const BATCH_SIZE: usize = 16 * 1024;
@@ -4818,6 +4834,7 @@ mod tests {
     /// we verify the behavior by checking that expired batches are properly
     /// detected and failed.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testResetNextBatchExpiry")]
     async fn test_reset_next_batch_expiry() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -4842,11 +4859,12 @@ mod tests {
     /// Verifies that node latency statistics (readyTimeMs, drainTimeMs) are
     /// updated correctly as the sender operates.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testNodeLatencyStats")]
     async fn test_node_latency_stats() {
         // Create a new record accumulator with non-0 partitionAvailabilityTimeoutMs
         // otherwise it wouldn't update the stats.
-        let time = MockTime::new(1000);
-        let time_provider = time.as_provider();
+        let time = mock_time(1000);
+        let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
         let batch_size = 16 * 1024;
         let total_size = 1024 * 1024;
@@ -4861,7 +4879,7 @@ mod tests {
 
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::none().build(),
             0, // linger_ms
             0,
             0,
@@ -4872,7 +4890,7 @@ mod tests {
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-        let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
@@ -4893,7 +4911,7 @@ mod tests {
             sender_metrics_registry,
             running,
             force_close,
-            time_provider,
+            clock,
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
             LogContext::empty(),
@@ -5047,6 +5065,7 @@ mod tests {
     /// verifies every registered metric (except `kafka-metrics-count`) has a
     /// matching template in `SenderMetricsRegistry.all_templates()`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSenderMetricsTemplates")]
     async fn test_sender_metrics_templates() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
@@ -5101,7 +5120,7 @@ mod tests {
             registry,
             metadata,
             Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            Arc::new(|| 0),
+            mock_time(0),
             LogContext::empty(),
         )
         .expect("sender metrics");
@@ -5152,7 +5171,7 @@ mod tests {
             registry,
             metadata,
             Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            Arc::new(|| 0),
+            mock_time(0),
             LogContext::empty(),
         )
         .expect("sender metrics");
@@ -5212,7 +5231,7 @@ mod tests {
         error: Option<Errors>,
     ) -> ClientResponse {
         use crate::InitProducerIdResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
         let header = RequestHeader::with_options(
@@ -5624,6 +5643,7 @@ mod tests {
     ///
     /// [`test_idempotent_init_producer_id_with_max_in_flight_one`]: fn@test_idempotent_init_producer_id_with_max_in_flight_one
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInitProducerIdWithMaxInFlightOne")]
     async fn test_init_producer_id_with_max_in_flight_one() {
         const PRODUCER_ID: i64 = 123_456;
         let mut ctx = SenderTestContext::transactional();
@@ -5638,7 +5658,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::builder(data)),
+            Box::new(ProduceRequest::builder(data)),
             now,
             true,
         );
@@ -5722,6 +5742,7 @@ mod tests {
     /// pins *which* iteration does not poll, where Java's aggregate would also pass if
     /// iteration 1 polled and iteration 3 did not.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testDoNotPollWhenNoRequestSent")]
     async fn test_do_not_poll_when_no_request_sent() {
         const PRODUCER_ID: i64 = 123_456;
         let mut ctx = SenderTestContext::transactional();
@@ -5793,7 +5814,7 @@ mod tests {
     ///   1. **Making `awaitReady` time out at all.** `NetworkClientUtils.awaitReady`
     ///      advances its own deadline only by re-reading the clock, so with a frozen
     ///      clock and an unready node it spins forever. So the auto-tick is kept, via
-    ///      [`MockTime::set_auto_tick`].
+    ///      [`MockTime::set_auto_tick_ms`].
     ///   2. **Letting the delay expire afterwards.** Java's delay is
     ///      `REQUEST_TIMEOUT + 20`, i.e. two ticks longer than the await window, so
     ///      whether the node is still unready when the window closes depends on how
@@ -5809,12 +5830,13 @@ mod tests {
     ///
     /// [`test_lookup_coordinator_on_disconnect_before_send`]: fn@test_lookup_coordinator_on_disconnect_before_send
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testNodeNotReady")]
     async fn test_node_not_ready() {
         const PRODUCER_ID: i64 = 123_456;
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         // Java: `time = new MockTime(10)`.
-        ctx.time.set_auto_tick(10);
+        ctx.time.set_auto_tick_ms(10);
 
         let result = ctx
             .initialize_transactions()
@@ -6046,7 +6068,7 @@ mod tests {
         );
         assert_eq!(
             *ctx.sender.client().requests().front().expect("in flight").api_key(),
-            crate::common::ApiKeys::INIT_PRODUCER_ID
+            crate::common::protocol::ApiKeys::INIT_PRODUCER_ID
         );
         assert!(ctx.sender.has_in_flight_request());
         assert_eq!(
@@ -6086,7 +6108,7 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(
             *ctx.sender.client().requests().front().expect("in flight").api_key(),
-            crate::common::ApiKeys::PRODUCE
+            crate::common::protocol::ApiKeys::PRODUCE
         );
         let in_flight = ctx.sender.in_flight_batches(&tp0);
         assert_eq!(in_flight.len(), 1);
@@ -6265,6 +6287,9 @@ mod tests {
     /// `times(1)` on `close()` needs a call count, not a flag, so
     /// `TransactionManager::close_call_count` is `#[cfg(test)]`-gated.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSenderShouldCloseWhenTransactionManagerInErrorState"
+    )]
     async fn test_sender_should_close_when_transaction_manager_in_error_state() {
         let mut ctx = SenderTestContext::idempotent();
         ctx.sender
@@ -6337,7 +6362,7 @@ mod tests {
 
         let builder = crate::common::record::internal::MemoryRecords::builder_with_initial_capacity(
             64,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -6837,7 +6862,7 @@ mod tests {
         log_start_offset: i64,
     ) {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         {
             let request = ctx
@@ -6847,7 +6872,7 @@ mod tests {
                 .front_mut()
                 .expect("a produce request must be in flight");
             let built = request.request_builder_mut().build().expect("the request builds");
-            let ConcreteRequest::Produce(produce_request) = built else {
+            let AbstractRequest::Produce(produce_request) = built else {
                 panic!("expected a produce request, got {built}");
             };
             let partition_data = produce_request
@@ -6940,6 +6965,7 @@ mod tests {
 
     /// Translated from `SenderTest.testInitProducerIdRequest` (Java 620-628).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInitProducerIdRequest")]
     async fn test_init_producer_id_request() {
         let mut ctx = SenderTestContext::idempotent();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
@@ -6957,7 +6983,7 @@ mod tests {
     /// Critic 44 note 2: `abort_incomplete_batches` walks the deques only, because
     /// Rust's `IncompleteBatches` tracks `ProduceRequestResult`s rather than batches,
     /// so a drained batch's records were never completed on a force close — a
-    /// CLAUDE.md §5 hanging future.
+    /// CLAUDE.md §7 hanging future.
     #[tokio::test]
     async fn test_force_close_aborts_the_senders_in_flight_batches() {
         let mut ctx = SenderTestContext::idempotent();
@@ -6993,6 +7019,7 @@ mod tests {
     /// Translated from `SenderTest.testIdempotenceWithMultipleInflights`
     /// (Java 762-807).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotenceWithMultipleInflights")]
     async fn test_idempotence_with_multiple_inflights() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7039,6 +7066,9 @@ mod tests {
     /// `firstInFlightSequence` gate exists to guarantee, and that the `0b8c3d0`
     /// response-routing fix serves.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotenceWithMultipleInflightsRetriedInOrder"
+    )]
     async fn test_idempotence_with_multiple_inflights_retried_in_order() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7185,6 +7215,9 @@ mod tests {
     /// Translated from `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatch`
     /// (Java 971-1016).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatch"
+    )]
     async fn test_epoch_bump_on_out_of_order_sequence_for_next_batch() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7303,6 +7336,9 @@ mod tests {
     /// only the *next* batch drained for `tp1` may bump the epoch and reset the
     /// sequence.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails"
+    )]
     async fn test_epoch_bump_on_out_of_order_sequence_for_next_batch_when_batch_in_flight_fails() {
         const PRODUCER_ID: i64 = 343_434;
         // `setupWithTransactionState(transactionManager, false, null, true, 1, 0)`
@@ -7393,6 +7429,7 @@ mod tests {
     /// reverse order, and the batches must still be re-queued and re-sent in sequence
     /// order.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCorrectHandlingOfOutOfOrderResponses")]
     async fn test_correct_handling_of_out_of_order_responses() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7469,6 +7506,9 @@ mod tests {
     /// last-acked sequence jumps to 1 and must not move back when the first is retried
     /// and finally succeeds.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds"
+    )]
     async fn test_correct_handling_of_out_of_order_responses_when_second_succeeds() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7525,6 +7565,9 @@ mod tests {
     /// (Java 1394-1414): a batch that expires before it was ever sent has no sequence,
     /// so it must not leave the partition unresolved.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences"
+    )]
     async fn test_expiry_of_unsent_batches_should_not_cause_unresolved_sequences() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7548,6 +7591,9 @@ mod tests {
     /// (Java 1575-1610): when every sent batch expires, the partition is unresolved and
     /// the next iteration bumps the epoch to clear it.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences"
+    )]
     async fn test_expiry_of_all_sent_batches_should_cause_unresolved_sequences() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent();
@@ -7589,6 +7635,9 @@ mod tests {
     /// the partition stays unresolved — blocking new drains — until the later batch
     /// succeeds and `maybeResolveSequences` clears it.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed"
+    )]
     async fn test_expiry_of_first_batch_should_not_cause_unresolved_sequences_if_future_batches_succeed() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7662,6 +7711,9 @@ mod tests {
     /// (Java 1484-1531): the later batch fails with `OUT_OF_ORDER_SEQUENCE_NUMBER`
     /// instead of succeeding, so the unresolved partition is cleared by an epoch bump.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail"
+    )]
     async fn test_expiry_of_first_batch_should_cause_epoch_bump_if_future_batches_fail() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7709,6 +7761,9 @@ mod tests {
     /// (Java 1720-1764): a batch drained under the old producer id still succeeds after
     /// the epoch is bumped for a different partition.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry"
+    )]
     async fn test_batches_drained_with_old_producer_id_should_succeed_on_subsequent_retry() {
         let mut ctx = SenderTestContext::idempotent_in_order(10);
         let tp0 = ctx.tp0.clone();
@@ -7757,6 +7812,9 @@ mod tests {
     /// the producer id instead, and the batch queued for the healthy partition still
     /// drains.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testResetOfProducerStateShouldAllowQueuedBatchesToDrain"
+    )]
     async fn test_reset_of_producer_state_should_allow_queued_batches_to_drain() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent_in_order(10);
@@ -7806,6 +7864,7 @@ mod tests {
     /// (Java 1689-1717): a force close while the producer id is being reset must not
     /// block, and must abort the pending batches.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testForceCloseWithProducerIdReset")]
     async fn test_force_close_with_producer_id_reset() {
         let mut ctx = SenderTestContext::idempotent_in_order(10);
         let tp0 = ctx.tp0.clone();
@@ -7840,6 +7899,7 @@ mod tests {
     /// orderly close drains the queued batches even though the close began while the
     /// producer id was being reset.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCloseWithProducerIdReset")]
     async fn test_close_with_producer_id_reset() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent_in_order(10);
@@ -7882,6 +7942,9 @@ mod tests {
     /// authorization failure on `InitProducerId` is *abortable*, so the producer
     /// recovers to `UNINITIALIZED`, retries and works again.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testClusterAuthorizationExceptionInInitProducerIdRequest"
+    )]
     async fn test_cluster_authorization_error_in_init_producer_id_request() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent();
@@ -7940,6 +8003,9 @@ mod tests {
     /// (Java 2159-2179): a cluster authorization failure on a *produce* request is
     /// fatal, and stays fatal for later sends.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testClusterAuthorizationExceptionInProduceRequest"
+    )]
     async fn test_cluster_authorization_error_in_produce_request() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7963,6 +8029,9 @@ mod tests {
     /// (Java 2223-2241): `UNSUPPORTED_FOR_MESSAGE_FORMAT` fails the batch but is *not*
     /// fatal for the producer.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnsupportedForMessageFormatInProduceRequest"
+    )]
     async fn test_unsupported_for_message_format_in_produce_request() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -7985,6 +8054,7 @@ mod tests {
     /// Translated from `SenderTest.testUnsupportedVersionInProduceRequest`
     /// (Java 2244-2262): a version mismatch is fatal and stays fatal.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnsupportedVersionInProduceRequest")]
     async fn test_unsupported_version_in_produce_request() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8002,6 +8072,7 @@ mod tests {
 
     /// Translated from `SenderTest.testSequenceNumberIncrement` (Java 2265-2303).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSequenceNumberIncrement")]
     async fn test_sequence_number_increment() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent_in_order(10);
@@ -8025,6 +8096,7 @@ mod tests {
     /// with the epoch maxed out, a disconnect resets the producer id, and the batch is
     /// retried under the new one.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testRetryWhenProducerIdChanges")]
     async fn test_retry_when_producer_id_changes() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent_in_order(10);
@@ -8074,6 +8146,7 @@ mod tests {
     /// Translated from `SenderTest.testBumpEpochWhenOutOfOrderSequenceReceived`
     /// (Java 2341-2369).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testBumpEpochWhenOutOfOrderSequenceReceived")]
     async fn test_bump_epoch_when_out_of_order_sequence_received() {
         let mut ctx = SenderTestContext::idempotent_in_order(10);
         let tp0 = ctx.tp0.clone();
@@ -8115,6 +8188,9 @@ mod tests {
     /// transactional slot), and the property under test is node availability, not the
     /// request's type.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotentInitProducerIdWithMaxInFlightOne"
+    )]
     async fn test_idempotent_init_producer_id_with_max_in_flight_one() {
         const PRODUCER_ID: i64 = 123_456;
         let mut ctx = SenderTestContext::idempotent();
@@ -8131,7 +8207,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::builder(data)),
+            Box::new(ProduceRequest::builder(data)),
             now,
             true,
         );
@@ -8196,6 +8272,9 @@ mod tests {
     /// still faithful to Java; it is the *test* that cannot tell them apart, and saying
     /// so here is cheaper than a reader inferring coverage that is not there.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails"
+    )]
     async fn test_unknown_producer_error_should_be_retried_for_future_batches_when_first_fails() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8285,6 +8364,7 @@ mod tests {
     /// the leak: before the fix, `maybe_abort_batches` dropped the batch and the buffer
     /// was never returned at all.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCancelInFlightRequestAfterFatalError")]
     async fn test_cancel_in_flight_request_after_fatal_error() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8382,6 +8462,7 @@ mod tests {
     /// reported to the user as a success with no offset, and must not move the
     /// last-acked sequence backwards.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCorrectHandlingOfDuplicateSequenceError")]
     async fn test_correct_handling_of_duplicate_sequence_error() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8433,6 +8514,9 @@ mod tests {
     /// retried *without* resetting the sequence numbers, because the broker could not
     /// report where the log starts (`TransactionManager.java:1969-1977`).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown"
+    )]
     async fn test_unknown_producer_error_should_be_retried_when_log_start_offset_is_unknown() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8486,6 +8570,9 @@ mod tests {
     /// offset, so the producer state was lost to retention — bump the epoch and restart
     /// the sequence at 0 (`TransactionManager.java:1990-2010`).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotentUnknownProducerHandlingWhenRetentionLimitReached"
+    )]
     async fn test_idempotent_unknown_producer_handling_when_retention_limit_reached() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8542,6 +8629,9 @@ mod tests {
     /// offset, so the idempotent producer still bumps the epoch and retries rather than
     /// failing the batch.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated"
+    )]
     async fn test_should_raise_out_of_order_sequence_error_to_user_if_log_was_not_truncated() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
@@ -8594,6 +8684,7 @@ mod tests {
     /// small records land in a *single* sub-batch. Java asserts no sub-batch count at
     /// all.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTooLargeBatchesAreSafelyRemoved")]
     async fn test_too_large_batches_are_safely_removed() {
         // Java 3005-3010. `new TransactionManager(logContext, "testSplitBatchAndSend",
         // 60000, 100, apiVersions, false)` plus
@@ -8682,7 +8773,7 @@ mod tests {
     /// --test-threads=8` failed 8 runs out of 8.
     ///
     /// A `tokio::sync::Mutex` rather than a `std` one because the guard is necessarily
-    /// held across the driver's `.await` points (CLAUDE.md §9.6.2 / clippy's
+    /// held across the driver's `.await` points (CLAUDE.md §11.6.2 / clippy's
     /// `await_holding_lock`).
     static SPLIT_BATCH_AND_SEND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -8739,8 +8830,8 @@ mod tests {
     ///     `Sender` mid-test would *lose* it and the driver's first `run_once` would
     ///     re-issue FindCoordinator — a divergence the swap is supposed to avoid.
     fn split_batch_and_send_context(transaction_manager: Arc<Mutex<TransactionManager>>) -> SenderTestContext {
-        let time = MockTime::new(1000);
-        let time_provider = time.as_provider();
+        let time = mock_time(1000);
+        let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
         let batch_size = 16 * 1024;
         let total_size = 1024 * 1024;
@@ -8760,7 +8851,7 @@ mod tests {
         // retry backoffs `0`.
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
-            Compression::gzip(),
+            Compression::gzip().build(),
             0,
             0,
             0,
@@ -8776,7 +8867,7 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1969),
             Node::new(1, "localhost".to_string(), 1970),
         ];
-        let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
         // Build metrics with a `client-id` tag, matching Java's
         // `SenderTest.testSenderMetricsTemplates` (`clientA`) and the default rig.
@@ -8802,7 +8893,7 @@ mod tests {
             sender_metrics_registry,
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
-            time_provider,
+            clock,
             Some(Arc::clone(&transaction_manager)),
             Arc::new(Mutex::new(PendingRequests::new())),
             LogContext::empty(),
@@ -9052,12 +9143,12 @@ mod tests {
         sequence: i32,
         is_transactional: bool,
     ) -> crate::RequestMatcher {
-        use crate::common::record::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::record::internal::MemoryRecords;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 return false;
             };
             let Some(records) = produce_request
@@ -9090,6 +9181,7 @@ mod tests {
     ///
     /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotentSplitBatchAndSend")]
     async fn test_idempotent_split_batch_and_send() {
         let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
 
@@ -9108,6 +9200,7 @@ mod tests {
     /// Was blocked on PLAN §9.18 — the same panic, reached through the transactional
     /// entry point.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionalSplitBatchAndSend")]
     async fn test_transactional_split_batch_and_send() {
         let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
 
@@ -9182,6 +9275,9 @@ mod tests {
     /// `test_exponential_retry_backoff_leader_change` exercises only at the accumulator
     /// level.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testProducerBatchRetriesWhenPartitionLeaderChanges"
+    )]
     async fn test_producer_batch_retries_when_partition_leader_changes() {
         // Java 3317-3324: `lingerMs = 0`, `retryBackoffMs = 10`,
         // `retryBackoffMaxMs = 100`, `retries = 10`, and no transaction manager.
@@ -10123,7 +10219,7 @@ mod tests {
     // below is unaffected:
     //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
-    //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Fn() -> i64>` with no
+    //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Time>`, which has no
     //     `sleep`, so `sleep_ms` uses `tokio::time::sleep` and does not move the test's
     //     `MockTime` — the assertion is unrepresentable. Needs Java's `Time` interface (a
     //     `sleep` that advances the injected clock) threaded through `Sender`, which is a
@@ -10323,6 +10419,7 @@ mod tests {
     /// whose condition includes `hasPendingTransactionalRequests()`) can send it. That
     /// is the behaviour under test.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionalRequestsSentOnShutdown")]
     async fn test_transactional_requests_sent_on_shutdown() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
@@ -10370,6 +10467,7 @@ mod tests {
     /// the property the test is named for: the shutdown ends the transaction without
     /// anyone asking it to.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIncompleteTransactionAbortOnShutdown")]
     async fn test_incomplete_transaction_abort_on_shutdown() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
@@ -10391,6 +10489,7 @@ mod tests {
     /// The commit is requested and then the Sender is force-closed, so the `EndTxn` is
     /// never sent and `TransactionManager.close` fails the pending request.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testForceShutdownWithIncompleteTransaction")]
     async fn test_force_shutdown_with_incomplete_transaction() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
@@ -10423,6 +10522,9 @@ mod tests {
     /// (`Sender.java:468-470`) must fail the undrained batch with
     /// `TransactionAbortedException` rather than send it.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionAbortedExceptionOnAbortWithoutError"
+    )]
     async fn test_transaction_aborted_error_on_abort_without_error() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
@@ -10491,7 +10593,7 @@ mod tests {
     /// re-publish features mid-run pass their own epoch.
     fn txn_mgr_test_manager(transaction_v2_enabled: bool) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
 
         fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
             let mut version = ApiVersion::new();
@@ -10595,11 +10697,11 @@ mod tests {
     /// `produceRequestMatcher(producerId, epoch, tp)` (Java 4109-4133).
     fn produce_request_matcher(producer_id: i64, epoch: i16, tp: &TopicPartition) -> crate::RequestMatcher {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 panic!("expected a produce request, got {request}");
             };
             let records = produce_request
@@ -10656,12 +10758,12 @@ mod tests {
         expected_base_sequence: i32,
     ) {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let response = txn_produce_response(ctx, tp, 0, error);
         let tp = tp.clone();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 panic!("expected a produce request, got {request}");
             };
             let records = produce_request
@@ -10721,11 +10823,11 @@ mod tests {
     /// `prepareAddPartitionsToTxn(Map<TopicPartition, Errors>)` (Java 4028-4036): the
     /// matcher asserts the request's partition *set* equals the response's key set.
     fn prepare_add_partitions_to_txn(ctx: &mut SenderTestContext, errors: &[(TopicPartition, Errors)]) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let expected: HashSet<TopicPartition> = errors.iter().map(|(tp, _)| tp.clone()).collect();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             let actual: HashSet<TopicPartition> = partitions_from_v3_request(request.data()).into_iter().collect();
@@ -10742,11 +10844,11 @@ mod tests {
     /// asserts the producer id / epoch / transactional id too, and compares the
     /// partitions as an ordered `List`.
     fn add_partitions_request_matcher(tp: &TopicPartition, epoch: i16, producer_id: i64) -> crate::RequestMatcher {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             assert_eq!(request.data().v3_and_below_producer_id, producer_id);
@@ -10789,10 +10891,10 @@ mod tests {
 
     /// `endTxnMatcher(result, producerId, epoch)` (Java 4262-4271).
     fn end_txn_matcher(result: TransactionResult, producer_id: i64, epoch: i16) -> crate::RequestMatcher {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         Box::new(move |request| {
-            let ConcreteRequest::EndTxn(request) = request else {
+            let AbstractRequest::EndTxn(request) = request else {
                 panic!("expected an EndTxn request, got {request}");
             };
             assert_eq!(request.data().transactional_id, TRANSACTIONAL_ID);
@@ -10813,12 +10915,12 @@ mod tests {
         request_producer_id: i64,
         request_producer_epoch: i16,
     ) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let inner = end_txn_matcher(result, request_producer_id, request_producer_epoch);
         let matcher: crate::RequestMatcher = Box::new(move |request| {
             assert!(inner(request));
-            let ConcreteRequest::EndTxn(end_txn) = request else {
+            let AbstractRequest::EndTxn(end_txn) = request else {
                 unreachable!()
             };
             assert!(
@@ -10891,11 +10993,11 @@ mod tests {
         producer_epoch: i16,
     ) {
         use crate::AddOffsetsToTxnResponseData;
-        use crate::common::requests::{AddOffsetsToTxnResponse, ConcreteRequest};
+        use crate::common::requests::{AbstractRequest, AddOffsetsToTxnResponse};
 
         let consumer_group_id = consumer_group_id.to_string();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddOffsetsToTxn(request) = request else {
+            let AbstractRequest::AddOffsetsToTxn(request) = request else {
                 panic!("expected an AddOffsetsToTxn request, got {request}");
             };
             assert_eq!(request.data().group_id, consumer_group_id);
@@ -10935,7 +11037,7 @@ mod tests {
         ctx: &mut SenderTestContext,
         producer_id: i64,
         producer_epoch: i16,
-        group_metadata: &ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
         responses: &[(TopicPartition, Errors)],
     ) {
         prepare_txn_offset_commit_response_inner(
@@ -10963,11 +11065,11 @@ mod tests {
         group_metadata: Option<(String, String, i32)>,
         responses: &[(TopicPartition, Errors)],
     ) {
-        use crate::common::requests::{ConcreteRequest, TxnOffsetCommitResponse};
+        use crate::common::requests::{AbstractRequest, TxnOffsetCommitResponse};
 
         let consumer_group_id = consumer_group_id.to_string();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::TxnOffsetCommit(request) = request else {
+            let AbstractRequest::TxnOffsetCommit(request) = request else {
                 panic!("expected a TxnOffsetCommit request, got {request}");
             };
             assert_eq!(request.data().group_id, consumer_group_id);
@@ -10997,13 +11099,13 @@ mod tests {
         coordinator_type: CoordinatorType,
         coordinator_key: &str,
     ) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let key = coordinator_key.to_string();
         let expected_key = key.clone();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::FindCoordinator(request) = request else {
+            let AbstractRequest::FindCoordinator(request) = request else {
                 panic!("expected a FindCoordinator request, got {request}");
             };
             assert_eq!(
@@ -11036,10 +11138,10 @@ mod tests {
         producer_epoch: i16,
     ) {
         use crate::InitProducerIdResponseData;
-        use crate::common::requests::{ConcreteRequest, InitProducerIdResponse};
+        use crate::common::requests::{AbstractRequest, InitProducerIdResponse};
 
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::InitProducerId(request) = request else {
+            let AbstractRequest::InitProducerId(request) = request else {
                 panic!("expected an InitProducerId request, got {request}");
             };
             assert_eq!(request.data().transactional_id.as_deref(), Some(TRANSACTIONAL_ID));
@@ -11151,7 +11253,7 @@ mod tests {
     fn send_offsets_to_transaction(
         ctx: &SenderTestContext,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: ConsumerGroupMetadataImpl,
     ) -> Arc<TransactionalRequestResult> {
         let pending_requests = ctx.pending_requests();
         let mut pending_requests = pending_requests.lock().unwrap();
@@ -11163,16 +11265,14 @@ mod tests {
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId)`.
-    fn consumer_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::new(CONSUMER_GROUP_ID)
+    fn consumer_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID)
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId, generationId, memberId,
     /// Optional.of(groupInstanceId))` (Java 2691).
-    fn full_consumer_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+    fn full_consumer_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             MEMBER_ID,
@@ -11263,7 +11363,10 @@ mod tests {
     /// the mid-test `apiVersions.update("0", new NodeApiVersions(..))` several entries in
     /// this group perform to cap `InitProducerId` / `Produce` / `EndTxn` below the
     /// versions the fixture installed.
-    fn update_node0_api_versions(ctx: &SenderTestContext, versions: &[(&'static crate::common::ApiKeys, i16)]) {
+    fn update_node0_api_versions(
+        ctx: &SenderTestContext,
+        versions: &[(&'static crate::common::protocol::ApiKeys, i16)],
+    ) {
         use crate::api_versions_response_data::ApiVersion;
 
         let entries: Vec<ApiVersion> = versions
@@ -11652,7 +11755,7 @@ mod tests {
     /// (Java 1553-1599).
     #[tokio::test]
     async fn test_commit_with_topic_authorization_failure_in_add_partitions_in_flight() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let foo0 = TopicPartition::new("foo".to_string(), 0);
         let bar0 = TopicPartition::new("bar".to_string(), 0);
@@ -11684,7 +11787,7 @@ mod tests {
         ];
         let expected: HashSet<TopicPartition> = errors.iter().map(|(tp, _)| tp.clone()).collect();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             let actual: HashSet<TopicPartition> = partitions_from_v3_request(request.data()).into_iter().collect();
@@ -12274,8 +12377,7 @@ mod tests {
         manager
             .begin_abort(&mut pending_requests, Caller::App)
             .expect_err("beginAbort is refused");
-        #[allow(deprecated)]
-        let dummy = ConsumerGroupMetadata::new("dummyId");
+        let dummy = ConsumerGroupMetadataImpl::new("dummyId");
         manager
             .send_offsets_to_transaction(HashMap::new(), dummy, &mut pending_requests)
             .expect_err("sendOffsetsToTransaction is refused");
@@ -12332,7 +12434,7 @@ mod tests {
     /// (Java 2155-2186).
     #[tokio::test]
     async fn test_invalid_producer_epoch_from_produce() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13415,11 +13517,11 @@ mod tests {
     /// at v7. Only the first is load-bearing here — it is what makes
     /// `coordinatorSupportsBumpingEpoch` false, so the expired retried batch becomes a
     /// *fatal* error instead of an epoch bump. The `PRODUCE` cap has no analogue to
-    /// reproduce: the produce version is chosen by `ProduceRequestBuilder`, not from
+    /// reproduce: the produce version is chosen by `produce_request::Builder`, not from
     /// `ApiVersions`, and nothing in the assertions depends on it.
     #[tokio::test]
     async fn test_transition_to_fatal_error_when_retried_batch_is_expired() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13576,13 +13678,13 @@ mod tests {
     /// Java's `apiVersions.update("0", ..)` caps `INIT_PRODUCER_ID` at v1, `END_TXN` at
     /// v4 and `PRODUCE` at v7. The first is load-bearing (no epoch-bump support, so the
     /// sequence is *reused* rather than reset). The `END_TXN` cap already holds here — a
-    /// Transaction-V1 manager builds its `EndTxnRequestBuilder` with
+    /// Transaction-V1 manager builds its `end_txn_request::Builder` with
     /// `is_transaction_v2_enabled = false`, which bounds it at v4 — and the `PRODUCE` cap
     /// has no analogue, as `test_transition_to_fatal_error_when_retried_batch_is_expired`
     /// explains.
     #[tokio::test]
     async fn test_abort_transaction_and_reuse_sequence_number_on_error() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13668,7 +13770,7 @@ mod tests {
     /// Java's three `apiVersions` caps are load-bearing.
     #[tokio::test]
     async fn test_abort_transaction_and_reset_sequence_number_on_unknown_producer_id() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -14216,18 +14318,18 @@ mod tests {
 
     /// `SenderTest.respondToProduce(tp, error, offset)` (Java 2880-2886).
     fn respond_to_produce(ctx: &mut SenderTestContext, tp: &TopicPartition, error: Errors, offset: i64) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let response = ctx.produce_response(tp, offset, error, 0);
-        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, ConcreteRequest::Produce(_)));
+        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, AbstractRequest::Produce(_)));
         ctx.sender.client_mut().respond_matcher(matcher, response);
     }
 
     /// `SenderTest.respondToEndTxn(error)` (Java 2888-2895).
     fn respond_to_end_txn(ctx: &mut SenderTestContext, error: Errors) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
-        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, ConcreteRequest::EndTxn(_)));
+        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, AbstractRequest::EndTxn(_)));
         ctx.sender.client_mut().respond_matcher(matcher, end_txn_response(error));
     }
 
@@ -14254,7 +14356,7 @@ mod tests {
         init_producer_id_max_version: i16,
     ) -> SenderTestContext {
         use crate::api_versions_response_data::ApiVersion;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
 
         let mut init_producer_id = ApiVersion::new();
         init_producer_id
@@ -14297,6 +14399,7 @@ mod tests {
 
     /// Translated from `SenderTest.testUnresolvedSequencesAreNotFatal` (Java 1534-1572).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnresolvedSequencesAreNotFatal")]
     async fn test_unresolved_sequences_are_not_fatal() {
         let mut ctx = sender_test_transactional_context("testUnresolvedSeq", 100, 0, i32::MAX, 3);
         let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
@@ -14353,6 +14456,9 @@ mod tests {
     /// `Sender::in_flight_batches`, and the failing batch) so the rewrite succeeds and
     /// the batch is retried, so the test is un-ignored.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionalUnknownProducerHandlingWhenRetentionLimitReached"
+    )]
     async fn test_transactional_unknown_producer_handling_when_retention_limit_reached() {
         const PRODUCER_ID: i64 = 343434;
 
@@ -14426,6 +14532,9 @@ mod tests {
     /// `SenderTest.testRecordsFlushedImmediatelyOnTransactionCompletion`
     /// (Java 2771-2826).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testRecordsFlushedImmediatelyOnTransactionCompletion"
+    )]
     async fn test_records_flushed_immediately_on_transaction_completion() {
         use crate::producer::internals::ProducerTestUtils;
 
@@ -14485,6 +14594,9 @@ mod tests {
     /// Translated from `SenderTest.testAwaitPendingRecordsBeforeCommittingTransaction`
     /// (Java 2829-2871).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testAwaitPendingRecordsBeforeCommittingTransaction"
+    )]
     async fn test_await_pending_records_before_committing_transaction() {
         use crate::producer::internals::ProducerTestUtils;
 
@@ -14677,6 +14789,7 @@ mod tests {
     /// `send_idempotent_producer_response` call fails the first of them, where the previous
     /// revision of this test (which used the retaining disconnect) still passed.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testReceiveFailedBatchTwiceWithTransactions")]
     async fn test_receive_failed_batch_twice_with_transactions() {
         let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
         let mut ctx = sender_test_transactional_context("testFailTwice", 100, 0, i32::MAX, 3);
@@ -14752,6 +14865,7 @@ mod tests {
     /// Translated from `SenderTest.testInvalidTxnStateIsAnAbortableError`
     /// (Java 3176-3212).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInvalidTxnStateIsAnAbortableError")]
     async fn test_invalid_txn_state_is_an_abortable_error() {
         run_abortable_produce_error(Errors::InvalidTxnState, "testInvalidTxnState").await;
     }
@@ -14759,6 +14873,9 @@ mod tests {
     /// Translated from `SenderTest.testTransactionAbortableExceptionIsAnAbortableError`
     /// (Java 3215-3251).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionAbortableExceptionIsAnAbortableError"
+    )]
     async fn test_transaction_abortable_error_is_an_abortable_error() {
         run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableError").await;
     }
@@ -14797,6 +14914,9 @@ mod tests {
     /// `SenderTest.testAbortableErrorIsConvertedToFatalErrorDuringAbort`
     /// (Java 3254-3305).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.SenderTest#testAbortableErrorIsConvertedToFatalErrorDuringAbort"
+    )]
     async fn test_abortable_error_is_converted_to_fatal_error_during_abort() {
         let mut ctx = sender_test_transactional_context(
             "testAbortableErrorIsConvertedToFatalErrorDuringAbort",

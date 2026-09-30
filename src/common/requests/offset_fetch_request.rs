@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetFetchRequest`.
 //!
 //! Wraps the auto-generated [`OffsetFetchRequestData`] and exposes the
-//! `OffsetFetchRequestBuilder` used by the consumer's fetch-committed-offsets
+//! `Builder` used by the consumer's fetch-committed-offsets
 //! path.
 //!
 //! # Version selection
@@ -45,12 +45,13 @@ use crate::offset_fetch_response_data::{
 use super::ConcreteResponse;
 use super::OffsetFetchResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetFetch` request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetFetchRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest")]
 pub struct OffsetFetchRequest {
     data: OffsetFetchRequestData,
     version: i16,
@@ -79,11 +80,13 @@ impl OffsetFetchRequest {
     /// Creates a new `OffsetFetchRequest` from data and version.
     ///
     /// Mirrors Java's private constructor.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#OffsetFetchRequest")]
     pub fn new(data: OffsetFetchRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#data")]
     pub fn data(&self) -> &OffsetFetchRequestData {
         &self.data
     }
@@ -106,6 +109,7 @@ impl OffsetFetchRequest {
     /// Returns the group id for v<8 requests (single-group form).
     ///
     /// Mirrors Java's `groupId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#groupId")]
     pub fn group_id(&self) -> &str {
         &self.data.group_id
     }
@@ -113,6 +117,7 @@ impl OffsetFetchRequest {
     /// Returns `true` if the `requireStable` flag is set.
     ///
     /// Mirrors Java's `requireStable()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#requireStable")]
     pub fn require_stable(&self) -> bool {
         self.data.require_stable
     }
@@ -123,6 +128,7 @@ impl OffsetFetchRequest {
     /// versions uniformly.
     ///
     /// Mirrors Java's `groups()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#groups")]
     pub fn groups(&self) -> Vec<OffsetFetchRequestGroup> {
         if self.version >= OffsetFetchRequest::BATCH_MIN_VERSION {
             return self.data.groups.clone();
@@ -151,6 +157,7 @@ impl OffsetFetchRequest {
 
     /// Returns a map of group id -> list of partitions requested by that
     /// group, mirroring Java's `groupIdsToPartitions()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#groupIdsToPartitions")]
     pub fn group_ids_to_partitions(&self) -> HashMap<String, Option<Vec<TopicPartition>>> {
         let mut result = HashMap::new();
         for group in &self.data.groups {
@@ -170,6 +177,7 @@ impl OffsetFetchRequest {
 
     /// Returns a map of group id -> requested topics, mirroring Java's
     /// `groupIdsToTopics()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#groupIdsToTopics")]
     pub fn group_ids_to_topics(&self) -> HashMap<String, Option<Vec<OffsetFetchRequestTopics>>> {
         let mut result = HashMap::with_capacity(self.data.groups.len());
         for group in &self.data.groups {
@@ -181,6 +189,7 @@ impl OffsetFetchRequest {
     /// Returns the list of group ids carried by this batched request.
     ///
     /// Mirrors Java's `groupIds()`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#groupIds")]
     pub fn group_ids(&self) -> Vec<String> {
         self.data.groups.iter().map(|g| g.group_id.clone()).collect()
     }
@@ -188,6 +197,7 @@ impl OffsetFetchRequest {
     /// Builds the canonical error response for this request, matching Java's
     /// `OffsetFetchRequest.getErrorResponse(int, Throwable)` over the
     /// three supported version layouts.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = OffsetFetchResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -242,6 +252,7 @@ impl OffsetFetchRequest {
 
     /// Returns `true` if the wire protocol uses topic ids at the given
     /// version (v10+).
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#useTopicIds")]
     pub fn use_topic_ids(version: i16) -> bool {
         version >= OffsetFetchRequest::TOPIC_ID_MIN_VERSION
     }
@@ -253,6 +264,7 @@ impl OffsetFetchRequest {
     /// `OffsetFetchRequest.requestAllOffsets(OffsetFetchRequestGroup)`
     /// (added in AK 4.3.1); the sole callers are broker-side (group
     /// coordinator), so this is exposed for wire-parity / future use.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#requestAllOffsets")]
     pub fn request_all_offsets(request: &OffsetFetchRequestGroup) -> bool {
         request.topics.is_none()
     }
@@ -263,6 +275,7 @@ impl OffsetFetchRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetFetchRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -279,17 +292,19 @@ impl std::fmt::Display for OffsetFetchRequest {
 ///
 /// Corresponds to `OffsetFetchRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct OffsetFetchRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest$Builder")]
+pub struct Builder {
     data: OffsetFetchRequestData,
     throw_on_fetch_stable_offsets_unsupported: bool,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetFetchRequestBuilder {
+impl Builder {
     /// Build a request that can use either topic ids or topic names.
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(OffsetFetchRequestData, boolean)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest$Builder#forTopicIdsOrNames")]
     pub fn for_topic_ids_or_names(
         data: OffsetFetchRequestData,
         throw_on_fetch_stable_offsets_unsupported: bool,
@@ -305,6 +320,7 @@ impl OffsetFetchRequestBuilder {
     /// Build a request that uses topic names — capped at v9.
     ///
     /// Mirrors Java's `Builder.forTopicNames(OffsetFetchRequestData, boolean)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest$Builder#forTopicNames")]
     pub fn for_topic_names(data: OffsetFetchRequestData, throw_on_fetch_stable_offsets_unsupported: bool) -> Self {
         Self {
             data,
@@ -321,6 +337,7 @@ impl OffsetFetchRequestBuilder {
 
     /// Java: `maybeDowngrade(short)`. Converts batched (v8+) data to the
     /// single-group v<8 wire layout. Returns the (possibly rebuilt) data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest$Builder#maybeDowngrade")]
     fn maybe_downgrade(&self, version: i16) -> OffsetFetchRequestData {
         if version >= OffsetFetchRequest::BATCH_MIN_VERSION || self.data.groups.is_empty() {
             return self.data.clone();
@@ -347,7 +364,7 @@ impl OffsetFetchRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetFetchRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_FETCH
     }
@@ -360,7 +377,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -444,7 +461,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         {
             data.set_require_stable(false);
         }
-        Ok(ConcreteRequest::OffsetFetch(OffsetFetchRequest::new(data, version)))
+        Ok(AbstractRequest::OffsetFetch(OffsetFetchRequest::new(data, version)))
     }
 }
 
@@ -482,7 +499,7 @@ mod tests {
     /// `for_topic_ids_or_names` opens the full version range.
     #[test]
     fn for_topic_ids_or_names_uses_full_range() {
-        let builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(OffsetFetchRequestData::new(), false);
+        let builder = Builder::for_topic_ids_or_names(OffsetFetchRequestData::new(), false);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::OFFSET_FETCH.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::OFFSET_FETCH.latest_version());
     }
@@ -490,7 +507,7 @@ mod tests {
     /// `for_topic_names` caps the latest allowed version at v9.
     #[test]
     fn for_topic_names_caps_at_v9() {
-        let builder = OffsetFetchRequestBuilder::for_topic_names(OffsetFetchRequestData::new(), false);
+        let builder = Builder::for_topic_names(OffsetFetchRequestData::new(), false);
         assert_eq!(builder.latest_allowed_version(), OffsetFetchRequest::TOPIC_ID_MIN_VERSION - 1);
     }
 
@@ -503,7 +520,7 @@ mod tests {
         let mut g2 = OffsetFetchRequestGroup::new();
         g2.set_group_id("g2".to_string());
         data.set_groups(vec![g1, g2]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let err = builder.build_version(7).unwrap_err();
         assert!(err.to_string().contains("batching groups"));
     }
@@ -514,7 +531,7 @@ mod tests {
         let mut data = OffsetFetchRequestData::new();
         data.set_groups(vec![group_with_topics()]);
         data.set_require_stable(true);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, true);
+        let mut builder = Builder::for_topic_ids_or_names(data, true);
         let err = builder.build_version(6).unwrap_err();
         assert!(err.to_string().contains("requireStable"));
     }
@@ -526,10 +543,10 @@ mod tests {
         let mut data = OffsetFetchRequestData::new();
         data.set_groups(vec![group_with_topics()]);
         data.set_require_stable(true);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let req = builder.build_version(6).expect("falls back silently");
         match req {
-            ConcreteRequest::OffsetFetch(r) => assert!(!r.require_stable()),
+            AbstractRequest::OffsetFetch(r) => assert!(!r.require_stable()),
             other => panic!("expected OffsetFetch, got {}", other.api_key().name()),
         }
     }
@@ -545,7 +562,7 @@ mod tests {
         // name left empty
         g.set_topics(Some(vec![t]));
         data.set_groups(vec![g]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_names(data, false);
+        let mut builder = Builder::for_topic_names(data, false);
         let err = builder.build_version(8).unwrap_err();
         assert!(err.to_string().contains("topic names"));
     }
@@ -560,7 +577,7 @@ mod tests {
         t.set_name("t".to_string()); // no topic_id
         g.set_topics(Some(vec![t]));
         data.set_groups(vec![g]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let err = builder.build_version(10).unwrap_err();
         assert!(err.to_string().contains("topic ids"));
     }

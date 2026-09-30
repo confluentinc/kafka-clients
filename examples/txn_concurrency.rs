@@ -24,7 +24,7 @@
 //! 2. **Fencing while sends are in flight** — a successor `init_transactions`
 //!    lands while 300 unawaited sends race the sender. Every future must
 //!    resolve (acked or fenced) — none may hang — and the zombie's commit
-//!    must fail (KIP-890; CLAUDE.md §9.5 callback obligation).
+//!    must fail (KIP-890; CLAUDE.md §11.5 callback obligation).
 //! 3. **Transaction-per-message churn** — 90 back-to-back transactions,
 //!    every third aborted. Under `transaction.version=2` each EndTxn bumps
 //!    the producer epoch, so this exercises epoch tracking 90 times
@@ -51,6 +51,7 @@ use std::time::Duration;
 use confluent_kafka::producer::Producer;
 
 use txn_common::close_producer;
+use txn_common::is_fatal;
 use txn_common::read_partition_idle;
 use txn_common::report;
 use txn_common::send_value;
@@ -224,7 +225,7 @@ async fn fencing_in_flight_case(bootstrap: &str, suffix: &str) -> Result<bool, S
                     "{} (fatal={})",
                     first_line(error.message()),
                     // Java's `RequestUtils.isFatalException` static.
-                    confluent_kafka::common::requests::RequestUtils::is_fatal_error(&error)
+                    is_fatal(&error)
                 ),
             );
         },

@@ -29,6 +29,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeGroupsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse")]
 pub struct DescribeGroupsResponse {
     data: DescribeGroupsResponseData,
 }
@@ -56,6 +57,7 @@ impl DescribeGroupsResponse {
     pub const UNKNOWN_PROTOCOL: &str = "";
 
     /// Creates a new `DescribeGroupsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#DescribeGroupsResponse")]
     pub fn new(data: DescribeGroupsResponseData) -> Self {
         Self { data }
     }
@@ -66,6 +68,7 @@ impl DescribeGroupsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#data")]
     pub fn data(&self) -> &DescribeGroupsResponseData {
         &self.data
     }
@@ -76,11 +79,13 @@ impl DescribeGroupsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -88,6 +93,7 @@ impl DescribeGroupsResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v2+.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 2
     }
@@ -95,6 +101,7 @@ impl DescribeGroupsResponse {
     /// Returns error counts by [`Errors`], aggregated per described group.
     ///
     /// Mirrors `DescribeGroupsResponse.errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for group in &self.data.groups {
@@ -107,6 +114,7 @@ impl DescribeGroupsResponse {
     /// placeholder state/protocol fields).
     ///
     /// Mirrors `DescribeGroupsResponse.groupError(String, Errors)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#groupError")]
     pub fn group_error(group_id: impl Into<String>, error: Errors) -> DescribedGroup {
         let mut group = DescribedGroup::new();
         group
@@ -126,6 +134,7 @@ impl DescribeGroupsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeGroupsResponseData::read(readable, version)?;
         Ok(Self::new(data))

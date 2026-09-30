@@ -28,6 +28,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs, DefaultHostResolver};
 /// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.ClientUtils")]
 pub struct ClientUtils;
 
 impl ClientUtils {
@@ -40,6 +41,7 @@ impl ClientUtils {
     ///
     /// # Errors
     /// Returns an `io::Error` if the hostname cannot be resolved.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#resolve")]
     pub async fn resolve<H: HostResolver>(host: &str, host_resolver: &H) -> io::Result<Vec<IpAddr>> {
         let mut addresses = host_resolver.resolve(host).await?;
         Self::filter_preferred_addresses(&mut addresses);
@@ -85,6 +87,7 @@ impl ClientUtils {
     /// failed: where Java keeps retrying IPv4 (and a Java user would need
     /// `-Djava.net.preferIPv6Addresses=true`), this client falls back to IPv6.
     /// A host that resolves to a single family is unaffected.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#filterPreferredAddresses")]
     fn filter_preferred_addresses(addresses: &mut [IpAddr]) {
         addresses.sort_by_key(|address| Self::is_less_preferred_family(*address));
     }
@@ -174,6 +177,7 @@ impl ClientUtils {
     ///   many for an `int` are "Invalid port" in both modes.
     /// - In canonical mode, a host cannot be resolved at all.
     /// - No valid addresses can be resolved after validation.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#parseAndValidateAddresses")]
     pub fn parse_and_validate_addresses(
         urls: &[String],
         client_dns_lookup: ClientDnsLookup,
@@ -670,6 +674,7 @@ mod tests {
     /// host, in URL order — even though `localhost` may resolve to both an
     /// IPv4 and an IPv6 address.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testValidBrokerAddress")]
     fn test_valid_broker_address() {
         let addrs = check_without_lookup(&["localhost:9997", "localhost:9998", "localhost:9999"]).unwrap();
         let hosts_and_ports: Vec<(&str, u16)> = addrs.iter().map(|(h, a)| (h.as_str(), a.port())).collect();
@@ -878,6 +883,7 @@ mod tests {
 
     /// Translated from `ClientUtilsTest.testNoPort`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testNoPort")]
     fn test_no_port() {
         assert_config_error(
             check_without_lookup(&["127.0.0.1"]),
@@ -887,6 +893,7 @@ mod tests {
 
     /// Translated from `ClientUtilsTest.testInvalidPort`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testInvalidPort")]
     fn test_invalid_port() {
         assert_config_error(
             check_without_lookup(&["localhost:70000"]),

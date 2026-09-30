@@ -19,7 +19,7 @@
 use std::fmt;
 use std::io;
 
-use crate::common::ApiKeys;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder};
 
 use super::RequestCompletionHandler;
@@ -27,6 +27,7 @@ use super::RequestCompletionHandler;
 /// A request being sent to the server.
 ///
 /// This holds both the network send as well as the client-level metadata.
+#[doc(alias = "org.apache.kafka.clients.ClientRequest")]
 pub struct ClientRequest {
     /// The broker id to send the request to.
     destination: String,
@@ -62,7 +63,8 @@ impl ClientRequest {
     ///   once sent
     /// * `request_timeout_ms` - The request timeout in milliseconds
     /// * `callback` - A callback to execute when the response has been received
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#ClientRequest")]
     pub fn new(
         destination: &str,
         request_builder: Box<dyn RequestBuilder>,
@@ -86,11 +88,13 @@ impl ClientRequest {
     }
 
     /// Returns whether a response is expected for this request.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#expectResponse")]
     pub fn expect_response(&self) -> bool {
         self.expect_response
     }
 
     /// Returns the API key for this request.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#apiKey")]
     pub fn api_key(&self) -> &'static ApiKeys {
         self.request_builder.api_key()
     }
@@ -100,6 +104,7 @@ impl ClientRequest {
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#makeHeader")]
     pub fn make_header(&self, version: i16) -> io::Result<RequestHeader> {
         RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
@@ -113,6 +118,7 @@ impl ClientRequest {
     }
 
     /// Returns a reference to the request builder.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#requestBuilder")]
     pub fn request_builder(&self) -> &dyn RequestBuilder {
         self.request_builder.as_ref()
     }
@@ -123,6 +129,7 @@ impl ClientRequest {
     }
 
     /// Returns the destination broker id.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#destination")]
     pub fn destination(&self) -> &str {
         &self.destination
     }
@@ -137,16 +144,19 @@ impl ClientRequest {
     }
 
     /// Returns the creation time in milliseconds.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#createdTimeMs")]
     pub fn created_time_ms(&self) -> i64 {
         self.created_time_ms
     }
 
     /// Returns the correlation id.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#correlationId")]
     pub fn correlation_id(&self) -> i32 {
         self.correlation_id
     }
 
     /// Returns the request timeout in milliseconds.
+    #[doc(alias = "org.apache.kafka.clients.ClientRequest#requestTimeoutMs")]
     pub fn request_timeout_ms(&self) -> i32 {
         self.request_timeout_ms
     }

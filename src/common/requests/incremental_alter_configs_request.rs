@@ -23,12 +23,13 @@ use crate::IncrementalAlterConfigsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::incremental_alter_configs_response_data::AlterConfigsResourceResponse;
 
-use super::{ConcreteRequest, ConcreteResponse, IncrementalAlterConfigsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, IncrementalAlterConfigsResponse, RequestBuilder};
 
 /// An IncrementalAlterConfigs request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest")]
 pub struct IncrementalAlterConfigsRequest {
     data: IncrementalAlterConfigsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct IncrementalAlterConfigsRequest {
 
 impl IncrementalAlterConfigsRequest {
     /// Creates a new `IncrementalAlterConfigsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#IncrementalAlterConfigsRequest")]
     pub fn new(data: IncrementalAlterConfigsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#data")]
     pub fn data(&self) -> &IncrementalAlterConfigsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl IncrementalAlterConfigsRequest {
     /// Mirrors `IncrementalAlterConfigsRequest.getErrorResponse` (Java uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = IncrementalAlterConfigsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -92,6 +96,7 @@ impl IncrementalAlterConfigsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = IncrementalAlterConfigsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -120,14 +125,16 @@ impl std::fmt::Display for IncrementalAlterConfigsRequest {
 /// and this builder only wraps the pre-built data (`common::requests` must not
 /// depend on the `admin` module).
 #[derive(Debug, Clone)]
-pub struct IncrementalAlterConfigsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder")]
+pub struct Builder {
     data: IncrementalAlterConfigsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl IncrementalAlterConfigsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder#Builder")]
     pub fn with_data(data: IncrementalAlterConfigsRequestData) -> Self {
         Self {
             data,
@@ -137,7 +144,7 @@ impl IncrementalAlterConfigsRequestBuilder {
     }
 }
 
-impl RequestBuilder for IncrementalAlterConfigsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::INCREMENTAL_ALTER_CONFIGS
     }
@@ -150,8 +157,8 @@ impl RequestBuilder for IncrementalAlterConfigsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -207,9 +214,9 @@ mod tests {
         let mut data = IncrementalAlterConfigsRequestData::new();
         data.set_resources(vec![resource("t", 2, &[("retention.ms", Some("1000"), 0)])]);
         data.set_validate_only(true);
-        let mut request = ConcreteRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
+        let mut request = AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = IncrementalAlterConfigsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "t");
@@ -237,7 +244,7 @@ mod tests {
     fn serialize_known_byte_vector_v1() {
         let mut data = IncrementalAlterConfigsRequestData::new();
         data.set_resources(vec![resource("t", 2, &[("k", Some("v"), 0)])]);
-        let mut request = ConcreteRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
+        let mut request = AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // resources array length + 1

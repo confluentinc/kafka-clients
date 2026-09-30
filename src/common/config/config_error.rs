@@ -16,9 +16,9 @@
 
 use std::fmt::Display;
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// A configuration value is invalid — wrong type, out of range, or otherwise
     /// unacceptable.
     ///
@@ -34,6 +34,7 @@ kafka_error_class! {
     /// an invalid configuration is a Kafka error
     /// ([`is_kafka_error`](crate::common::Error::is_kafka_error) is `true`),
     /// unlike a `java.lang.IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException")]
     ConfigError,
     extends: [
         is_kafka_error,
@@ -49,7 +50,7 @@ impl ConfigError {
     // full parameter lists as the suffix.
     //
     // The `(String message)` form is the exception, and deliberately so: it is
-    // generated as `new` by `kafka_error_class!` above, whose single body
+    // generated as `new` by `kafka_error_type!` above, whose single body
     // declares 141 classes. Renaming it here would mean threading a per-class
     // constructor name through the macro so that exactly one of the 141 spells
     // it `with_message` — leaving `SomeError::new("msg")` valid or not depending
@@ -60,6 +61,7 @@ impl ConfigError {
     /// Create a config error naming the offending value and configuration key,
     /// mirroring Java's `ConfigException(String name, Object value)` (`:32`):
     /// `"Invalid value {value} for configuration {name}"`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value(name: impl Display, value: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}"))
     }
@@ -67,6 +69,7 @@ impl ConfigError {
     /// Create a config error naming the value, key, and a detail message,
     /// mirroring Java's `ConfigException(String name, Object value, String message)`
     /// (`:36`): `"Invalid value {value} for configuration {name}: {message}"`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}: {message}"))
     }

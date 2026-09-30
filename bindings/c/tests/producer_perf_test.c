@@ -240,11 +240,11 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 
 // Rust client C bindings backend (v3): KafkaProducer over confluent_kafka.h.
 // The producer owns an internal async runtime, so no polling thread is needed;
-// send returns a FutureRecordMetadata whose _get blocks for the result.
+// send returns a KafkaFuture_RecordMetadata whose _get blocks for the result.
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
     kafka_common_Error_t *error = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
     int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
     do {
@@ -265,17 +265,17 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
 }
 
 static bool test_v3_verify_future(test_Future_t future) {
-    kafka_producer_FutureRecordMetadata_t *f =
-        (kafka_producer_FutureRecordMetadata_t *)future;
+    kafka_common_KafkaFuture_RecordMetadata_t *f =
+        (kafka_common_KafkaFuture_RecordMetadata_t *)future;
     kafka_common_Error_t* error = NULL;
     kafka_producer_RecordMetadata_t* metadata =
-        kafka_producer_FutureRecordMetadata_get(f, &error);
+        kafka_common_KafkaFuture_RecordMetadata_get(f, &error);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
         fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
         kafka_common_Error_destroy(error);
-        kafka_producer_FutureRecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
         return false;
     }
 
@@ -283,12 +283,12 @@ static bool test_v3_verify_future(test_Future_t future) {
     if (!verify_record_metadata(metadata)) {
         fprintf(stderr, "RecordMetadata verification failed\n");
         kafka_producer_RecordMetadata_destroy(metadata);
-        kafka_producer_FutureRecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
         return false;
     }
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(f);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(f);
     return true;
 }
 

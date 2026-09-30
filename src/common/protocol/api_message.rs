@@ -24,7 +24,9 @@ use super::Message;
 /// identified by an API key.
 ///
 /// Corresponds to org.apache.kafka.common.protocol.ApiMessage
+#[doc(alias = "org.apache.kafka.common.protocol.ApiMessage")]
 pub trait ApiMessage: Message {
     /// Returns the API key of this message, or -1 if there is none.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiMessage#apiKey")]
     fn api_key(&self) -> i16;
 }

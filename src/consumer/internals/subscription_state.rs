@@ -27,9 +27,9 @@
 //! `&mut self` accordingly. Java's `IllegalStateException` /
 //! `IllegalArgumentException` paths translate to
 //! `Err(Error::local_illegal_state(...))` / `Err(Error::local_illegal_argument(...))`
-//! per CLAUDE.md §10.
+//! per CLAUDE.md §12.
 
-#![allow(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
+#![expect(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
 
 use crate::common::requests::OffsetsForLeaderEpochResponse;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -42,7 +42,8 @@ use crate::common::IsolationLevel;
 use crate::common::internals::PartitionStates;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerNoOffsetForPartitionError;
-use crate::consumer::{AutoOffsetResetStrategy, ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
+use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::consumer::{ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
 use crate::metadata::LeaderAndEpoch;
 
 const SUBSCRIPTION_ERROR_MESSAGE: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
@@ -59,6 +60,7 @@ const SUBSCRIPTION_ERROR_MESSAGE: &str = "Subscription to topics, partitions and
 /// without per-variant impls, so we collapse to a single enum with
 /// `match`-based transition tables. Behavior is identical.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$FetchStates")]
 pub(crate) enum FetchStates {
     /// No valid fetch position has been set yet.
     Initializing,
@@ -125,6 +127,7 @@ impl FetchStates {
 /// Subscription mode of the consumer. Mirrors Java's private enum
 /// `SubscriptionState.SubscriptionType`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$SubscriptionType")]
 pub(crate) enum SubscriptionType {
     /// No subscription / assignment yet.
     None,
@@ -165,6 +168,7 @@ impl std::fmt::Display for SubscriptionType {
 /// Translated from `SubscriptionState.FetchPosition`. Hashable / equatable
 /// for use in maps and sets.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$FetchPosition")]
 pub(crate) struct FetchPosition {
     /// The offset of the next record to fetch.
     pub offset: i64,
@@ -180,12 +184,14 @@ impl FetchPosition {
     /// `SubscriptionState.seek(tp, offset)`. Creates a position with no
     /// offset epoch and no current leader, mirroring Java's
     /// `LeaderAndEpoch.noLeaderOrEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$FetchPosition#FetchPosition")]
     pub(crate) fn new(offset: i64) -> Self {
         Self { offset, offset_epoch: None, current_leader: LeaderAndEpoch::no_leader_or_epoch() }
     }
 
     /// Full constructor mirroring Java's public
     /// `FetchPosition(long, Optional<Integer>, LeaderAndEpoch)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$FetchPosition#FetchPosition")]
     pub(crate) fn with_leader(offset: i64, offset_epoch: Option<i32>, current_leader: LeaderAndEpoch) -> Self {
         Self { offset, offset_epoch, current_leader }
     }
@@ -214,6 +220,7 @@ impl std::fmt::Display for FetchPosition {
 /// struct lives here alongside the rest of `SubscriptionState`'s public
 /// types.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$LogTruncation")]
 pub(crate) struct LogTruncation {
     /// Partition for which truncation was detected.
     pub topic_partition: crate::common::TopicPartition,
@@ -246,6 +253,7 @@ impl std::fmt::Display for LogTruncation {
 /// Private to this module; tests reach it through `SubscriptionState`'s
 /// public surface. Translated from
 /// `SubscriptionState.TopicPartitionState` (Java private nested class).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState")]
 pub(crate) struct TopicPartitionState {
     pub(super) fetch_state: FetchStates,
     /// Last consumed position. Always `Some` when `fetch_state.requires_position()`.
@@ -265,6 +273,9 @@ pub(crate) struct TopicPartitionState {
 
 impl TopicPartitionState {
     /// Default-constructed state, mirroring Java's no-arg constructor.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#TopicPartitionState"
+    )]
     pub(crate) fn new() -> Self {
         Self {
             fetch_state: FetchStates::Initializing,
@@ -283,15 +294,20 @@ impl TopicPartitionState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#endOffsetRequested"
+    )]
     pub(crate) fn end_offset_requested(&self) -> bool {
         self.end_offset_requested
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#requestEndOffset")]
     pub(crate) fn request_end_offset(&mut self) {
         self.end_offset_requested = true;
     }
 
     /// Java: `TopicPartitionState.clearEndOffset()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#clearEndOffset")]
     pub(crate) fn clear_end_offset(&mut self) {
         self.end_offset_requested = false;
     }
@@ -301,12 +317,13 @@ impl TopicPartitionState {
     /// parameter on `transitionState`). The closure runs only when the
     /// transition is valid.
     ///
-    /// Per CLAUDE.md §10.1, Java's
+    /// Per CLAUDE.md §12.1, Java's
     /// `IllegalStateException("...but position is null")` is translated to
     /// a `panic!` — this is a programmer-error path that cannot be reached
     /// on the happy path (the closure must leave `self.position` consistent
     /// with `new_state.requires_position()`), and the consumer cannot
     /// continue with an inconsistent fetch state.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#transitionState")]
     fn transition_state(&mut self, new_state: FetchStates, run_if_transitioned: impl FnOnce(&mut Self)) {
         let next_state = self.fetch_state.transition_to(new_state);
         if next_state == new_state {
@@ -320,6 +337,9 @@ impl TopicPartitionState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#preferredReadReplica"
+    )]
     pub(crate) fn preferred_read_replica(&mut self, time_ms: i64) -> Option<i32> {
         if let Some(expire_ms) = self.preferred_read_replica_expire_time_ms
             && time_ms > expire_ms
@@ -330,6 +350,9 @@ impl TopicPartitionState {
         self.preferred_read_replica
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#updatePreferredReadReplica"
+    )]
     pub(crate) fn update_preferred_read_replica(&mut self, preferred_read_replica: i32, time_ms: i64) {
         if self.preferred_read_replica != Some(preferred_read_replica) {
             self.preferred_read_replica = Some(preferred_read_replica);
@@ -337,12 +360,16 @@ impl TopicPartitionState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#clearPreferredReadReplica"
+    )]
     pub(crate) fn clear_preferred_read_replica(&mut self) -> Option<i32> {
         self.preferred_read_replica.take().inspect(|_| {
             self.preferred_read_replica_expire_time_ms = None;
         })
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#reset")]
     pub(crate) fn reset(&mut self, strategy: AutoOffsetResetStrategy) {
         self.transition_state(FetchStates::AwaitReset, |this| {
             this.reset_strategy = Some(strategy);
@@ -351,6 +378,7 @@ impl TopicPartitionState {
     }
 
     /// Validate `position` against the current leader and epoch.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#validatePosition")]
     fn validate_position(&mut self, position: FetchPosition) {
         if position.offset_epoch.is_some() && position.current_leader.epoch.is_some() {
             self.transition_state(FetchStates::AwaitValidation, |this| {
@@ -368,6 +396,9 @@ impl TopicPartitionState {
 
     /// Clear AWAIT_VALIDATION and enter FETCHING (caller guarantees position
     /// is set).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#completeValidation"
+    )]
     pub(crate) fn complete_validation(&mut self) {
         if self.has_position() {
             self.transition_state(FetchStates::Fetching, |this| this.next_retry_time_ms = None);
@@ -379,6 +410,9 @@ impl TopicPartitionState {
     /// Translates Java's private
     /// `TopicPartitionState.maybeValidatePosition(LeaderAndEpoch)`.
     /// Returns `true` if the partition is now awaiting validation.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#maybeValidatePosition"
+    )]
     fn maybe_validate_position(&mut self, current_leader_and_epoch: &LeaderAndEpoch) -> bool {
         if self.fetch_state == FetchStates::AwaitReset {
             return false;
@@ -402,6 +436,9 @@ impl TopicPartitionState {
     ///
     /// Translates Java's private
     /// `TopicPartitionState.updatePositionLeaderNoValidation(LeaderAndEpoch)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#updatePositionLeaderNoValidation"
+    )]
     fn update_position_leader_no_validation(&mut self, current_leader_and_epoch: &LeaderAndEpoch) {
         if let Some(position) = self.position.clone() {
             let new_position =
@@ -413,38 +450,53 @@ impl TopicPartitionState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#awaitingValidation"
+    )]
     pub(crate) fn awaiting_validation(&self) -> bool {
         self.fetch_state == FetchStates::AwaitValidation
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#awaitingRetryBackoff"
+    )]
     pub(crate) fn awaiting_retry_backoff(&self, now_ms: i64) -> bool {
         self.next_retry_time_ms.is_some_and(|t| now_ms < t)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#awaitingReset")]
     pub(crate) fn awaiting_reset(&self) -> bool {
         self.fetch_state == FetchStates::AwaitReset
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#setNextAllowedRetry"
+    )]
     pub(crate) fn set_next_allowed_retry(&mut self, next_allowed_retry_time_ms: i64) {
         self.next_retry_time_ms = Some(next_allowed_retry_time_ms);
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#requestFailed")]
     pub(crate) fn request_failed(&mut self, next_allowed_retry_time_ms: i64) {
         self.next_retry_time_ms = Some(next_allowed_retry_time_ms);
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#hasValidPosition")]
     pub(crate) fn has_valid_position(&self) -> bool {
         self.fetch_state.has_valid_position()
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#hasPosition")]
     pub(crate) fn has_position(&self) -> bool {
         self.position.is_some()
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#isPaused")]
     pub(crate) fn is_paused(&self) -> bool {
         self.paused
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#seekValidated")]
     pub(crate) fn seek_validated(&mut self, position: FetchPosition) {
         self.transition_state(FetchStates::Fetching, |this| {
             this.position = Some(position);
@@ -453,6 +505,7 @@ impl TopicPartitionState {
         });
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#seekUnvalidated")]
     pub(crate) fn seek_unvalidated(&mut self, fetch_position: FetchPosition) {
         self.seek_validated(fetch_position.clone());
         self.validate_position(fetch_position);
@@ -472,6 +525,7 @@ impl TopicPartitionState {
         Ok(())
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#validPosition")]
     pub(crate) fn valid_position(&self) -> Option<&FetchPosition> {
         if self.has_valid_position() {
             self.position.as_ref()
@@ -480,18 +534,26 @@ impl TopicPartitionState {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#pause")]
     pub(crate) fn pause(&mut self) {
         self.paused = true;
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#markPendingRevocation"
+    )]
     pub(crate) fn mark_pending_revocation(&mut self) {
         self.pending_revocation = true;
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#markPendingOnAssignedCallback"
+    )]
     pub(crate) fn mark_pending_on_assigned_callback(&mut self, pending: bool) {
         self.pending_on_assigned_callback = pending;
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#resume")]
     pub(crate) fn resume(&mut self) {
         self.paused = false;
     }
@@ -499,28 +561,34 @@ impl TopicPartitionState {
     /// Whether we should retrieve a fetch position for this partition.
     /// `true` if `fetch_state == Initializing` and revocation is not
     /// pending.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#shouldInitialize")]
     pub(crate) fn should_initialize(&self) -> bool {
         self.fetch_state == FetchStates::Initializing && !self.pending_revocation
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#isFetchable")]
     pub(crate) fn is_fetchable(&self) -> bool {
         !self.paused && !self.pending_revocation && !self.pending_on_assigned_callback && self.has_valid_position()
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#highWatermark")]
     pub(crate) fn high_watermark(&mut self, high_watermark: i64) {
         self.high_watermark = Some(high_watermark);
         self.end_offset_requested = false;
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#logStartOffset")]
     pub(crate) fn log_start_offset(&mut self, log_start_offset: i64) {
         self.log_start_offset = Some(log_start_offset);
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#lastStableOffset")]
     pub(crate) fn last_stable_offset(&mut self, last_stable_offset: i64) {
         self.last_stable_offset = Some(last_stable_offset);
         self.end_offset_requested = false;
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState$TopicPartitionState#resetStrategy")]
     pub(crate) fn reset_strategy(&self) -> Option<AutoOffsetResetStrategy> {
         self.reset_strategy.clone()
     }
@@ -538,6 +606,7 @@ impl TopicPartitionState {
 /// Java `synchronized` method maps to a `&self` (read) or `&mut self`
 /// (write) Rust method; the borrow checker enforces single-writer /
 /// multi-reader statically.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState")]
 pub(crate) struct SubscriptionState {
     subscription_type: SubscriptionType,
     subscribed_pattern: Option<Regex>,
@@ -578,6 +647,7 @@ impl SubscriptionState {
 
     /// Construct an empty `SubscriptionState` with the given default
     /// reset strategy.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#SubscriptionState")]
     pub(crate) fn new(default_reset_strategy: AutoOffsetResetStrategy) -> Self {
         Self {
             subscription_type: SubscriptionType::None,
@@ -595,10 +665,12 @@ impl SubscriptionState {
 
     /// Monotonically-increasing id incremented after every assignment
     /// change. Used by callers to detect when an assignment has changed.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignmentId")]
     pub(crate) fn assignment_id(&self) -> u32 {
         self.assignment_id
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#setSubscriptionType")]
     fn set_subscription_type(&mut self, subscription_type: SubscriptionType) -> Result<(), Error> {
         if self.subscription_type == SubscriptionType::None {
             self.subscription_type = subscription_type;
@@ -610,6 +682,7 @@ impl SubscriptionState {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#registerRebalanceListener")]
     fn register_rebalance_listener(&mut self, listener: Option<Arc<dyn ConsumerRebalanceListener>>) {
         // Java uses `Objects.requireNonNull(listener)` to reject a null
         // `Optional<T>` (different from a present-but-null value). The Rust
@@ -619,6 +692,7 @@ impl SubscriptionState {
         self.rebalance_listener = listener;
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#changeSubscription")]
     fn change_subscription(&mut self, topics_to_subscribe: BTreeSet<String>) -> bool {
         if self.subscription == topics_to_subscribe {
             return false;
@@ -628,6 +702,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscribe(Set<String>, Optional<ConsumerRebalanceListener>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscribe")]
     pub(crate) fn subscribe_with_topics(
         &mut self,
         topics: HashSet<String>,
@@ -651,6 +726,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscribe")]
     pub(crate) fn subscribe_with_pattern(
         &mut self,
         pattern: SubscriptionPattern,
@@ -665,6 +741,7 @@ impl SubscriptionState {
     /// Translates Java's `subscribeFromPattern(Set<String>)`. Only valid
     /// when subscription type is `AutoPattern` — Java throws
     /// `IllegalArgumentException` otherwise.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscribeFromPattern")]
     pub(crate) fn subscribe_from_pattern(&mut self, topics: HashSet<String>) -> Result<bool, Error> {
         if self.subscription_type != SubscriptionType::AutoPattern {
             return Err(Error::local_illegal_argument(format!(
@@ -676,6 +753,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscribeToShareGroup(Set<String>)` (KIP-932).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscribeToShareGroup")]
     pub(crate) fn subscribe_to_share_group(&mut self, topics: HashSet<String>) -> Result<bool, Error> {
         self.register_rebalance_listener(None);
         self.set_subscription_type(SubscriptionType::AutoTopicsShare)?;
@@ -686,6 +764,7 @@ impl SubscriptionState {
     ///
     /// Sets subscription type to `UserAssigned` (errors if already set to
     /// any other type). Returns `true` iff the assignment changed.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignFromUser")]
     pub(crate) fn assign_from_user(&mut self, partitions: HashSet<TopicPartition>) -> Result<bool, Error> {
         self.set_subscription_type(SubscriptionType::UserAssigned)?;
 
@@ -714,6 +793,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `checkAssignmentMatchedSubscription(Collection<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#checkAssignmentMatchedSubscription")]
     pub(crate) fn check_assignment_matched_subscription(&self, assignments: &[TopicPartition]) -> bool {
         for tp in assignments {
             if let Some(pat) = &self.subscribed_pattern {
@@ -735,6 +815,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `assignFromSubscribed(Collection<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignFromSubscribed")]
     pub(crate) fn assign_from_subscribed(&mut self, assignments: &[TopicPartition]) -> Result<(), Error> {
         if !self.has_auto_assigned_partitions() {
             return Err(Error::local_illegal_argument(
@@ -758,6 +839,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `assignFromSubscribedAwaitingCallback`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignFromSubscribedAwaitingCallback")]
     pub(crate) fn assign_from_subscribed_awaiting_callback(
         &mut self,
         full_assignment: &[TopicPartition],
@@ -768,6 +850,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `hasPatternSubscription`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasPatternSubscription")]
     pub(crate) fn has_pattern_subscription(&self) -> bool {
         self.subscription_type == SubscriptionType::AutoPattern
     }
@@ -778,11 +861,13 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `hasNoSubscriptionOrUserAssignment`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasNoSubscriptionOrUserAssignment")]
     pub(crate) fn has_no_subscription_or_user_assignment(&self) -> bool {
         self.subscription_type == SubscriptionType::None
     }
 
     /// Translates Java's `hasAutoAssignedPartitions`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasAutoAssignedPartitions")]
     pub(crate) fn has_auto_assigned_partitions(&self) -> bool {
         matches!(
             self.subscription_type,
@@ -798,6 +883,7 @@ impl SubscriptionState {
     /// Uses a *full-match* check (mirroring Java's
     /// `Matcher.matches()` rather than `Matcher.find()`) — see
     /// [`SubscriptionState::regex_full_match`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#matchesSubscribedPattern")]
     pub(crate) fn matches_subscribed_pattern(&self, topic: &str) -> bool {
         if self.has_pattern_subscription()
             && let Some(p) = &self.subscribed_pattern
@@ -808,6 +894,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `unsubscribe`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#unsubscribe")]
     pub(crate) fn unsubscribe(&mut self) {
         self.subscription = BTreeSet::new();
         self.group_subscription = HashSet::new();
@@ -821,6 +908,7 @@ impl SubscriptionState {
     /// Translates Java's `subscription()`. Returns an owned (cloneable)
     /// snapshot of the subscription so the caller can drop the outer
     /// mutex.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscription")]
     pub(crate) fn subscription(&self) -> HashSet<String> {
         if self.has_auto_assigned_partitions() {
             self.subscription.iter().cloned().collect()
@@ -842,6 +930,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscriptionPattern()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#subscriptionPattern")]
     pub(crate) fn subscription_pattern(&self) -> Option<&SubscriptionPattern> {
         if self.has_re2j_pattern_subscription() {
             self.subscribed_re2j_pattern.as_ref()
@@ -851,36 +940,43 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `assignedPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedPartitions")]
     pub(crate) fn assigned_partitions(&self) -> HashSet<TopicPartition> {
         self.assignment.partition_set().cloned().collect()
     }
 
     /// Translates Java's `assignedPartitionsList()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedPartitionsList")]
     pub(crate) fn assigned_partitions_list(&self) -> Vec<TopicPartition> {
         self.assignment.partition_set().cloned().collect()
     }
 
     /// Translates Java's `numAssignedPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#numAssignedPartitions")]
     pub(crate) fn num_assigned_partitions(&self) -> usize {
         self.assignment.size()
     }
 
     /// Translates Java's `isAssigned(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isAssigned")]
     pub(crate) fn is_assigned(&self, tp: &TopicPartition) -> bool {
         self.assignment.contains(tp)
     }
 
     /// Translates Java's `assignedTopicIds()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedTopicIds")]
     pub(crate) fn assigned_topic_ids(&self) -> &BTreeSet<Uuid> {
         &self.assigned_topic_ids
     }
 
     /// Translates Java's `setAssignedTopicIds(Set<Uuid>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#setAssignedTopicIds")]
     pub(crate) fn set_assigned_topic_ids(&mut self, ids: HashSet<Uuid>) {
         self.assigned_topic_ids = ids.into_iter().collect();
     }
 
     /// Translates Java's `isAssignedFromRe2j(Uuid)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isAssignedFromRe2j")]
     pub(crate) fn is_assigned_from_re2j(&self, topic_id: Uuid) -> bool {
         if !self.has_re2j_pattern_subscription() {
             return false;
@@ -890,11 +986,13 @@ impl SubscriptionState {
 
     /// Translates Java's `rebalanceListener()`. Clones the `Arc` so the
     /// caller can drop the lock before awaiting / invoking the listener.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#rebalanceListener")]
     pub(crate) fn rebalance_listener(&self) -> Option<Arc<dyn ConsumerRebalanceListener>> {
         self.rebalance_listener.clone()
     }
 
     /// Translates Java's `metadataTopics()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#metadataTopics")]
     pub(crate) fn metadata_topics(&self) -> HashSet<String> {
         if self.group_subscription.is_empty() {
             self.subscription.iter().cloned().collect()
@@ -908,6 +1006,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `needsMetadata(String)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#needsMetadata")]
     pub(crate) fn needs_metadata(&self, topic: &str) -> bool {
         self.subscription.contains(topic) || self.group_subscription.contains(topic)
     }
@@ -918,6 +1017,7 @@ impl SubscriptionState {
     /// not part of the local subscription (i.e. the group leader needs
     /// metadata for topics the local member is not directly subscribed to).
     /// Java: `!subscription.containsAll(groupSubscription)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#groupSubscribe")]
     pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, Error> {
         if !self.has_auto_assigned_partitions() {
             return Err(Error::local_illegal_state(SUBSCRIPTION_ERROR_MESSAGE));
@@ -927,13 +1027,15 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `resetGroupSubscription`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#resetGroupSubscription")]
     pub(crate) fn reset_group_subscription(&mut self) {
         self.group_subscription = HashSet::new();
     }
 
     /// Java's private `assignedState(tp)` — `&TopicPartitionState` or an
     /// `IllegalStateException` when the partition isn't assigned. Per
-    /// CLAUDE.md §10 we return `Err` instead of panicking.
+    /// CLAUDE.md §12 we return `Err` instead of panicking.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedState")]
     fn assigned_state(&self, tp: &TopicPartition) -> Result<&TopicPartitionState, Error> {
         self.assignment
             .state_value(tp)
@@ -946,6 +1048,7 @@ impl SubscriptionState {
             .ok_or_else(|| Error::local_illegal_state(format!("No current assignment for partition {tp}")))
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedStateOrNull")]
     fn assigned_state_or_null(&self, tp: &TopicPartition) -> Option<&TopicPartitionState> {
         self.assignment.state_value(tp)
     }
@@ -957,23 +1060,27 @@ impl SubscriptionState {
     // ── seek / position ─────────────────────────────────────────────────
 
     /// Translates Java's `seekValidated(TopicPartition, FetchPosition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#seekValidated")]
     pub(crate) fn seek_validated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.seek_validated(position);
         Ok(())
     }
 
     /// Convenience: `seek(tp, offset) == seekValidated(tp, FetchPosition::new(offset))`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#seek")]
     pub(crate) fn seek(&mut self, tp: &TopicPartition, offset: i64) -> Result<(), Error> {
         self.seek_validated(tp, FetchPosition::new(offset))
     }
 
     /// Translates Java's `seekUnvalidated(TopicPartition, FetchPosition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#seekUnvalidated")]
     pub(crate) fn seek_unvalidated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.seek_unvalidated(position);
         Ok(())
     }
 
     /// Translates Java's `maybeSeekUnvalidated(TopicPartition, FetchPosition, AutoOffsetResetStrategy)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#maybeSeekUnvalidated")]
     pub(crate) fn maybe_seek_unvalidated(
         &mut self,
         tp: &TopicPartition,
@@ -1007,12 +1114,14 @@ impl SubscriptionState {
     /// partition is not assigned. The successful return value is borrowed
     /// from the internal state — callers needing to outlive the lock must
     /// clone.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#position")]
     pub(crate) fn position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, Error> {
         Ok(self.assigned_state(tp)?.position.as_ref())
     }
 
     /// Translates Java's `positionOrNull(TopicPartition)`. Returns `None`
     /// when the partition is not assigned (matches Java's `null` return).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#positionOrNull")]
     pub(crate) fn position_or_null(&self, tp: &TopicPartition) -> Option<&FetchPosition> {
         self.assigned_state_or_null(tp).and_then(|s| s.position.as_ref())
     }
@@ -1038,16 +1147,19 @@ impl SubscriptionState {
 
     /// Translates Java's `validPosition(TopicPartition)`. The `Result`
     /// covers the not-assigned case (Java's `IllegalStateException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#validPosition")]
     pub(crate) fn valid_position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, Error> {
         Ok(self.assigned_state(tp)?.valid_position())
     }
 
     /// Translates Java's `awaitingValidation(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#awaitingValidation")]
     pub(crate) fn awaiting_validation(&self, tp: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(tp)?.awaiting_validation())
     }
 
     /// Translates Java's `completeValidation(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#completeValidation")]
     pub(crate) fn complete_validation(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.complete_validation();
         Ok(())
@@ -1062,6 +1174,9 @@ impl SubscriptionState {
     /// `SubscriptionState.maybeValidatePositionForCurrentLeader(
     /// ApiVersions, TopicPartition, LeaderAndEpoch)`. Returns `true` if
     /// the partition is now awaiting validation.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#maybeValidatePositionForCurrentLeader"
+    )]
     pub(crate) fn maybe_validate_position_for_current_leader(
         &mut self,
         api_versions: &crate::ApiVersions,
@@ -1106,6 +1221,7 @@ impl SubscriptionState {
     /// reset policy is defined; otherwise `None` (the side effect is
     /// either a `request_offset_reset` call or a `seek_validated` to the
     /// epoch's end offset).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#maybeCompleteValidation")]
     pub(crate) fn maybe_complete_validation(
         &mut self,
         tp: &TopicPartition,
@@ -1198,11 +1314,13 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `hasValidPosition(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasValidPosition")]
     pub(crate) fn has_valid_position(&self, tp: &TopicPartition) -> bool {
         self.assigned_state_or_null(tp).is_some_and(|s| s.has_valid_position())
     }
 
     /// Translates Java's `hasAllFetchPositions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasAllFetchPositions")]
     pub(crate) fn has_all_fetch_positions(&self) -> bool {
         self.assignment.state_iter().all(|s| s.has_valid_position())
     }
@@ -1210,6 +1328,7 @@ impl SubscriptionState {
     // ── Offset reset ────────────────────────────────────────────────────
 
     /// Translates Java's `requestOffsetReset(TopicPartition, AutoOffsetResetStrategy)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#requestOffsetReset")]
     pub(crate) fn request_offset_reset(
         &mut self,
         partition: &TopicPartition,
@@ -1248,6 +1367,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `isOffsetResetNeeded(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isOffsetResetNeeded")]
     pub(crate) fn is_offset_reset_needed(&self, partition: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(partition)?.awaiting_reset())
     }
@@ -1255,16 +1375,19 @@ impl SubscriptionState {
     /// Translates Java's `resetStrategy(TopicPartition)`. Returns
     /// `Option<AutoOffsetResetStrategy>` since Java may return `null`; the
     /// outer `Result` wraps the not-assigned case.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#resetStrategy")]
     pub(crate) fn reset_strategy(&self, partition: &TopicPartition) -> Result<Option<AutoOffsetResetStrategy>, Error> {
         Ok(self.assigned_state(partition)?.reset_strategy())
     }
 
     /// Translates Java's `hasDefaultOffsetResetPolicy()` (package-private).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasDefaultOffsetResetPolicy")]
     pub(crate) fn has_default_offset_reset_policy(&self) -> bool {
         self.default_reset_strategy != AutoOffsetResetStrategy::NONE
     }
 
     /// Translates Java's `initializingPartitions`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#initializingPartitions")]
     pub(crate) fn initializing_partitions(&self) -> HashSet<TopicPartition> {
         self.assignment
             .iter()
@@ -1277,6 +1400,7 @@ impl SubscriptionState {
     /// Returns `Err(Error::ConsumerNoOffsetForPartition(..))` (Java's
     /// `NoOffsetForPartitionException`) when the default reset strategy is
     /// `NONE` and any assigned partitions still require positions.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#resetInitializingPositions")]
     pub(crate) fn reset_initializing_positions(
         &mut self,
         init_partitions_to_include: impl Fn(&TopicPartition) -> bool,
@@ -1311,6 +1435,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `partitionsNeedingReset(long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionsNeedingReset")]
     pub(crate) fn partitions_needing_reset(&self, now_ms: i64) -> HashSet<TopicPartition> {
         self.assignment
             .iter()
@@ -1325,6 +1450,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `partitionsNeedingValidation(long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionsNeedingValidation")]
     pub(crate) fn partitions_needing_validation(&self, now_ms: i64) -> HashMap<TopicPartition, FetchPosition> {
         let mut result = HashMap::new();
         for (tp, s) in self.assignment.iter() {
@@ -1339,6 +1465,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `hasPartitionsNeedingValidation(long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasPartitionsNeedingValidation")]
     pub(crate) fn has_partitions_needing_validation(&self, now_ms: i64) -> bool {
         self.assignment
             .state_iter()
@@ -1348,6 +1475,7 @@ impl SubscriptionState {
     // ── Pause / resume / fetchable ──────────────────────────────────────
 
     /// Translates Java's `pausedPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#pausedPartitions")]
     pub(crate) fn paused_partitions(&self) -> HashSet<TopicPartition> {
         self.assignment
             .iter()
@@ -1356,10 +1484,12 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `isPaused(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isPaused")]
     pub(crate) fn is_paused(&self, tp: &TopicPartition) -> bool {
         self.assigned_state_or_null(tp).is_some_and(|s| s.is_paused())
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isFetchableAndSubscribed")]
     fn is_fetchable_and_subscribed(&self, tp: &TopicPartition, state: &TopicPartitionState) -> bool {
         if self.subscription_type == SubscriptionType::AutoTopics && !self.subscription.contains(tp.topic()) {
             log::trace!(
@@ -1372,6 +1502,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `isFetchable(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#isFetchable")]
     pub(crate) fn is_fetchable(&self, tp: &TopicPartition) -> bool {
         match self.assigned_state_or_null(tp) {
             Some(s) => self.is_fetchable_and_subscribed(tp, s),
@@ -1380,6 +1511,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `fetchablePartitions(Predicate<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#fetchablePartitions")]
     pub(crate) fn fetchable_partitions(&self, is_available: impl Fn(&TopicPartition) -> bool) -> Vec<TopicPartition> {
         let mut result: Vec<TopicPartition> = Vec::new();
         for (tp, state) in self.assignment.iter() {
@@ -1393,18 +1525,21 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `pause(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#pause")]
     pub(crate) fn pause(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.pause();
         Ok(())
     }
 
     /// Translates Java's `resume(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#resume")]
     pub(crate) fn resume(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.resume();
         Ok(())
     }
 
     /// Translates Java's `markPendingRevocation(Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#markPendingRevocation")]
     pub(crate) fn mark_pending_revocation(&mut self, tps: &[TopicPartition]) -> Result<(), Error> {
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_revocation();
@@ -1413,6 +1548,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `markPendingOnAssignedCallback` (package-private).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#markPendingOnAssignedCallback")]
     pub(crate) fn mark_pending_on_assigned_callback(
         &mut self,
         tps: &[TopicPartition],
@@ -1425,11 +1561,13 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `enablePartitionsAwaitingCallback`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#enablePartitionsAwaitingCallback")]
     pub(crate) fn enable_partitions_awaiting_callback(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.mark_pending_on_assigned_callback(partitions, false)
     }
 
     /// Translates Java's `movePartitionToEnd(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#movePartitionToEnd")]
     pub(crate) fn move_partition_to_end(&mut self, tp: &TopicPartition) {
         self.assignment.move_to_end(tp);
     }
@@ -1437,6 +1575,7 @@ impl SubscriptionState {
     // ── Lag / end offset / high watermark ───────────────────────────────
 
     /// Translates Java's `partitionLag(TopicPartition, IsolationLevel)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionLag")]
     pub(crate) fn partition_lag(
         &self,
         tp: &TopicPartition,
@@ -1453,6 +1592,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `partitionEndOffset(TopicPartition, IsolationLevel)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionEndOffset")]
     pub(crate) fn partition_end_offset(
         &self,
         tp: &TopicPartition,
@@ -1466,12 +1606,14 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `requestPartitionEndOffset(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#requestPartitionEndOffset")]
     pub(crate) fn request_partition_end_offset(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.request_end_offset();
         Ok(())
     }
 
     /// Translates Java's `partitionEndOffsetRequested(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionEndOffsetRequested")]
     pub(crate) fn partition_end_offset_requested(&self, tp: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(tp)?.end_offset_requested())
     }
@@ -1481,6 +1623,9 @@ impl SubscriptionState {
     ///
     /// Translates Java's `maybeClearPartitionEndOffsetRequested(TopicPartition)`
     /// (AK 4.3.1).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#maybeClearPartitionEndOffsetRequested"
+    )]
     pub(crate) fn maybe_clear_partition_end_offset_requested(&mut self, tp: &TopicPartition) -> bool {
         match self.assigned_state_or_null_mut(tp) {
             Some(state) if state.end_offset_requested() => {
@@ -1500,6 +1645,7 @@ impl SubscriptionState {
     /// Rust panics. This combination is unreachable on the happy path (the
     /// state machine guarantees `position.is_some()` whenever
     /// `log_start_offset` is updated via a fetch response).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#partitionLead")]
     pub(crate) fn partition_lead(&self, tp: &TopicPartition) -> Result<Option<i64>, Error> {
         let state = self.assigned_state(tp)?;
         Ok(state.log_start_offset.map(|lso| {
@@ -1513,12 +1659,14 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `updateHighWatermark(TopicPartition, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#updateHighWatermark")]
     pub(crate) fn update_high_watermark(&mut self, tp: &TopicPartition, hw: i64) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.high_watermark(hw);
         Ok(())
     }
 
     /// Translates Java's `tryUpdatingHighWatermark`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#tryUpdatingHighWatermark")]
     pub(crate) fn try_updating_high_watermark(&mut self, tp: &TopicPartition, hw: i64) -> bool {
         match self.assigned_state_or_null_mut(tp) {
             Some(s) => {
@@ -1530,6 +1678,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `tryUpdatingLogStartOffset`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#tryUpdatingLogStartOffset")]
     pub(crate) fn try_updating_log_start_offset(&mut self, tp: &TopicPartition, lso: i64) -> bool {
         match self.assigned_state_or_null_mut(tp) {
             Some(s) => {
@@ -1541,12 +1690,14 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `updateLastStableOffset(TopicPartition, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#updateLastStableOffset")]
     pub(crate) fn update_last_stable_offset(&mut self, tp: &TopicPartition, lso: i64) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.last_stable_offset(lso);
         Ok(())
     }
 
     /// Translates Java's `tryUpdatingLastStableOffset`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#tryUpdatingLastStableOffset")]
     pub(crate) fn try_updating_last_stable_offset(&mut self, tp: &TopicPartition, lso: i64) -> bool {
         match self.assigned_state_or_null_mut(tp) {
             Some(s) => {
@@ -1562,6 +1713,7 @@ impl SubscriptionState {
     /// Translates Java's `updatePreferredReadReplica(TopicPartition, int, LongSupplier)`.
     /// The Java `LongSupplier` collapses to an eager `i64` (called exactly
     /// once at the same point in Java; see the plan §LongSupplier).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#updatePreferredReadReplica")]
     pub(crate) fn update_preferred_read_replica(
         &mut self,
         tp: &TopicPartition,
@@ -1573,6 +1725,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `tryUpdatingPreferredReadReplica`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#tryUpdatingPreferredReadReplica")]
     pub(crate) fn try_updating_preferred_read_replica(
         &mut self,
         tp: &TopicPartition,
@@ -1589,12 +1742,14 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `preferredReadReplica(TopicPartition, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#preferredReadReplica")]
     pub(crate) fn preferred_read_replica(&mut self, tp: &TopicPartition, time_ms: i64) -> Option<i32> {
         self.assigned_state_or_null_mut(tp)
             .and_then(|s| s.preferred_read_replica(time_ms))
     }
 
     /// Translates Java's `clearPreferredReadReplica(TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#clearPreferredReadReplica")]
     pub(crate) fn clear_preferred_read_replica(&mut self, tp: &TopicPartition) -> Option<i32> {
         self.assigned_state_or_null_mut(tp)
             .and_then(|s| s.clear_preferred_read_replica())
@@ -1603,6 +1758,7 @@ impl SubscriptionState {
     // ── Retry tracking ──────────────────────────────────────────────────
 
     /// Translates Java's `setNextAllowedRetry(Set<TopicPartition>, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#setNextAllowedRetry")]
     pub(crate) fn set_next_allowed_retry(&mut self, partitions: &HashSet<TopicPartition>, next_ms: i64) {
         for tp in partitions {
             if let Some(s) = self.assigned_state_or_null_mut(tp) {
@@ -1612,6 +1768,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `requestFailed(Set<TopicPartition>, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#requestFailed")]
     pub(crate) fn request_failed(&mut self, partitions: &HashSet<TopicPartition>, next_retry_ms: i64) {
         for tp in partitions {
             if let Some(s) = self.assigned_state_or_null_mut(tp) {
@@ -1621,6 +1778,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `allConsumed()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#allConsumed")]
     pub(crate) fn all_consumed(&self) -> HashMap<TopicPartition, OffsetAndMetadata> {
         let mut result = HashMap::new();
         for (tp, state) in self.assignment.iter() {
@@ -1649,6 +1807,7 @@ impl SubscriptionState {
     // ── Display ─────────────────────────────────────────────────────────
 
     /// Translates Java's `prettyString()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#prettyString")]
     pub(crate) fn pretty_string(&self) -> String {
         match self.subscription_type {
             SubscriptionType::None => "None".to_string(),
@@ -1849,6 +2008,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testPreferredReadReplicaLease")]
     fn test_preferred_read_replica_lease() {
         let mut s = TopicPartitionState::new();
         assert!(s.preferred_read_replica(0).is_none());
@@ -2048,6 +2208,9 @@ mod tests {
 
     /// Translated from `testIsFetchableOnManualAssignment`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testIsFetchableOnManualAssignment"
+    )]
     fn test_is_fetchable_on_manual_assignment() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
@@ -2056,6 +2219,7 @@ mod tests {
 
     /// Translated from `testIsFetchableOnAutoAssignment`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testIsFetchableOnAutoAssignment")]
     fn test_is_fetchable_on_auto_assignment() {
         let mut state = new_state();
         state
@@ -2079,6 +2243,9 @@ mod tests {
 
     /// Translated from `testIsFetchableConsidersExplicitTopicSubscription`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testIsFetchableConsidersExplicitTopicSubscription"
+    )]
     fn test_is_fetchable_considers_explicit_topic_subscription() {
         let mut state = new_state();
         state
@@ -2104,6 +2271,7 @@ mod tests {
 
     /// Translated from `testGroupSubscribe`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testGroupSubscribe")]
     fn test_group_subscribe() {
         let mut state = new_state();
         state
@@ -2255,6 +2423,7 @@ mod tests {
 
     /// Translated from `testMarkingPendingRevocation`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMarkingPendingRevocation")]
     fn test_marking_pending_revocation() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2268,6 +2437,9 @@ mod tests {
 
     /// Translated from `testMarkingPendingRevocationPreventsInitializingPosition`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMarkingPendingRevocationPreventsInitializingPosition"
+    )]
     fn test_marking_pending_revocation_prevents_initializing_position() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2278,6 +2450,9 @@ mod tests {
 
     /// Translated from `testAssignedPartitionsAwaitingCallbackKeepPositionDefinedInCallback`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testAssignedPartitionsAwaitingCallbackKeepPositionDefinedInCallback"
+    )]
     fn test_assigned_partitions_awaiting_callback_keep_position_defined_in_callback() {
         let mut state = new_state();
         state
@@ -2301,6 +2476,9 @@ mod tests {
 
     /// Translated from `testAssignedPartitionsAwaitingCallbackInitializePositionsWhenCallbackCompletes`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testAssignedPartitionsAwaitingCallbackInitializePositionsWhenCallbackCompletes"
+    )]
     fn test_assigned_partitions_awaiting_callback_initialize_positions_when_callback_completes() {
         let mut state = new_state();
         state
@@ -2321,6 +2499,9 @@ mod tests {
 
     /// Translated from `testAssignedPartitionsAwaitingCallbackDoesNotAffectPreviouslyOwnedPartitions`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testAssignedPartitionsAwaitingCallbackDoesNotAffectPreviouslyOwnedPartitions"
+    )]
     fn test_assigned_partitions_awaiting_callback_does_not_affect_previously_owned_partitions() {
         let mut state = new_state();
         state
@@ -2473,6 +2654,7 @@ mod tests {
     /// arbitrary UUID before subscribing (functionally equivalent: when no
     /// subscription is set the function returns false unconditionally).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testIsAssignedFromRe2j")]
     fn test_is_assigned_from_re2j() {
         let mut state = new_state();
         let assigned_uuid = crate::common::Uuid::random_uuid();
@@ -2492,6 +2674,9 @@ mod tests {
 
     /// Translated from `testAssignedPartitionsWithTopicIdsForRe2Pattern`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testAssignedPartitionsWithTopicIdsForRe2Pattern"
+    )]
     fn test_assigned_partitions_with_topic_ids_for_re2_pattern() {
         let mut state = new_state();
         state
@@ -2514,6 +2699,9 @@ mod tests {
 
     /// Translated from `testAssignedTopicIdsPreservedWhenReconciliationCompletes`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testAssignedTopicIdsPreservedWhenReconciliationCompletes"
+    )]
     fn test_assigned_topic_ids_preserved_when_reconciliation_completes() {
         let mut state = new_state();
         state
@@ -2538,6 +2726,9 @@ mod tests {
 
     /// Translated from `testMixedPatternSubscriptionNotAllowed`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMixedPatternSubscriptionNotAllowed"
+    )]
     fn test_mixed_pattern_subscription_not_allowed() {
         let mut state = new_state();
         state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
@@ -2667,6 +2858,9 @@ mod tests {
 
     /// Translated from `testSeekUnvalidatedWithNoEpochClearsAwaitingValidation`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testSeekUnvalidatedWithNoEpochClearsAwaitingValidation"
+    )]
     fn test_seek_unvalidated_with_no_epoch_clears_awaiting_validation() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2714,6 +2908,9 @@ mod tests {
 
     /// Translated from `testSeekValidatedShouldClearAwaitingValidation`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testSeekValidatedShouldClearAwaitingValidation"
+    )]
     fn test_seek_validated_should_clear_awaiting_validation() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2742,6 +2939,9 @@ mod tests {
 
     /// Translated from `testCompleteValidationShouldClearAwaitingValidation`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testCompleteValidationShouldClearAwaitingValidation"
+    )]
     fn test_complete_validation_should_clear_awaiting_validation() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2763,6 +2963,9 @@ mod tests {
 
     /// Translated from `testOffsetResetWhileAwaitingValidation`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testOffsetResetWhileAwaitingValidation"
+    )]
     fn test_offset_reset_while_awaiting_validation() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2821,6 +3024,7 @@ mod tests {
 
     /// Translated from `testPositionOrNull`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testPositionOrNull")]
     fn test_position_or_null() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2833,6 +3037,7 @@ mod tests {
 
     /// Translated from `testTryUpdatingHighWatermark`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTryUpdatingHighWatermark")]
     fn test_try_updating_high_watermark() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2851,6 +3056,7 @@ mod tests {
 
     /// Translated from `testTryUpdatingLogStartOffset`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTryUpdatingLogStartOffset")]
     fn test_try_updating_log_start_offset() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2866,6 +3072,7 @@ mod tests {
 
     /// Translated from `testTryUpdatingLastStableOffset`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTryUpdatingLastStableOffset")]
     fn test_try_updating_last_stable_offset() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2882,6 +3089,9 @@ mod tests {
 
     /// Translated from `testTryUpdatingPreferredReadReplica`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTryUpdatingPreferredReadReplica"
+    )]
     fn test_try_updating_preferred_read_replica() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2898,6 +3108,9 @@ mod tests {
 
     /// Translated from `testRequestOffsetResetIfPartitionAssigned`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testRequestOffsetResetIfPartitionAssigned"
+    )]
     fn test_request_offset_reset_if_partition_assigned() {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
@@ -2915,6 +3128,9 @@ mod tests {
 
     /// Translated from `testFetchablePartitionsPerformsCheapChecksFirst`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testFetchablePartitionsPerformsCheapChecksFirst"
+    )]
     fn test_fetchable_partitions_performs_cheap_checks_first() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2952,7 +3168,7 @@ mod tests {
 
     use crate::ApiVersions as ApiVersionsType;
     use crate::NodeApiVersions;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
     fn epoch_end_offset(leader_epoch: i32, end_offset: i64) -> EpochEndOffset {
@@ -2964,6 +3180,7 @@ mod tests {
 
     /// Translated from `testMaybeCompleteValidation`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMaybeCompleteValidation")]
     fn test_maybe_complete_validation() {
         let mut state = new_state();
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -2993,6 +3210,9 @@ mod tests {
 
     /// Translated from `testMaybeValidatePositionForCurrentLeader`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMaybeValidatePositionForCurrentLeader"
+    )]
     fn test_maybe_validate_position_for_current_leader() {
         let mut state = new_state();
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3048,6 +3268,9 @@ mod tests {
 
     /// Translated from `testMaybeCompleteValidationAfterPositionChange`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMaybeCompleteValidationAfterPositionChange"
+    )]
     fn test_maybe_complete_validation_after_position_change() {
         let mut state = new_state();
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3086,6 +3309,9 @@ mod tests {
 
     /// Translated from `testMaybeCompleteValidationAfterOffsetReset`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testMaybeCompleteValidationAfterOffsetReset"
+    )]
     fn test_maybe_complete_validation_after_offset_reset() {
         let mut state = new_state();
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3119,6 +3345,9 @@ mod tests {
 
     /// Translated from `testTruncationDetectionWithResetPolicy`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTruncationDetectionWithResetPolicy"
+    )]
     fn test_truncation_detection_with_reset_policy() {
         let mut state = new_state(); // EARLIEST policy.
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3156,6 +3385,9 @@ mod tests {
 
     /// Translated from `testTruncationDetectionWithoutResetPolicy`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTruncationDetectionWithoutResetPolicy"
+    )]
     fn test_truncation_detection_without_reset_policy() {
         let mut state = SubscriptionState::new(AutoOffsetResetStrategy::NONE);
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3194,6 +3426,9 @@ mod tests {
 
     /// Translated from `testTruncationDetectionUnknownDivergentOffsetWithResetPolicy`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTruncationDetectionUnknownDivergentOffsetWithResetPolicy"
+    )]
     fn test_truncation_detection_unknown_divergent_offset_with_reset_policy() {
         let mut state = SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST);
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3229,6 +3464,9 @@ mod tests {
 
     /// Translated from `testTruncationDetectionUnknownDivergentOffsetWithoutResetPolicy`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#testTruncationDetectionUnknownDivergentOffsetWithoutResetPolicy"
+    )]
     fn test_truncation_detection_unknown_divergent_offset_without_reset_policy() {
         let mut state = SubscriptionState::new(AutoOffsetResetStrategy::NONE);
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
@@ -3261,6 +3499,7 @@ mod tests {
 
     /// Translated from `resetOffsetNoValidation`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionStateTest#resetOffsetNoValidation")]
     fn reset_offset_no_validation() {
         let mut state = new_state();
         let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);

@@ -19,11 +19,10 @@ mod classic_group_state;
 mod cluster;
 mod cluster_resource;
 mod cluster_resource_listener;
-pub mod compress;
+pub(crate) mod compress;
 pub mod config;
-mod consumer_group_state;
 mod election_type;
-// `pub(crate)` rather than private: `kafka_error_class!` and
+// `pub(crate)` rather than private: `kafka_error_type!` and
 // `message_only_error!` expand `$crate::common::error::ErrorSource` and eight
 // similar absolute paths at every one of their ~150 call sites, so the module
 // has to be nameable crate-wide. The types it holds are still reached through
@@ -31,7 +30,7 @@ mod election_type;
 pub(crate) mod error;
 /// Kafka's exception classes (`org.apache.kafka.common.errors`).
 pub mod errors;
-pub mod feature;
+pub(crate) mod feature;
 mod group_state;
 mod group_type;
 pub mod header;
@@ -44,18 +43,20 @@ mod local_concurrent_modification_error;
 mod local_illegal_argument_error;
 mod local_illegal_state_error;
 mod local_timeout_error;
-pub mod memory;
+pub(crate) mod memory;
+#[cfg(test)]
+mod message;
 mod metric;
 mod metric_name;
 mod metric_name_template;
 pub mod metrics;
-pub mod network;
+pub(crate) mod network;
 mod node;
 mod partition_info;
-pub mod protocol;
+pub(crate) mod protocol;
 pub mod quota;
 pub mod record;
-pub mod requests;
+pub(crate) mod requests;
 pub mod resource;
 pub mod security;
 pub mod serialization;
@@ -64,15 +65,13 @@ mod topic_id_partition;
 mod topic_partition;
 mod topic_partition_info;
 mod topic_partition_replica;
-pub mod utils;
+pub(crate) mod utils;
 mod uuid;
 
 pub use classic_group_state::ClassicGroupState;
 pub use cluster::Cluster;
 pub use cluster_resource::ClusterResource;
 pub use cluster_resource_listener::ClusterResourceListener;
-#[allow(deprecated)]
-pub use consumer_group_state::ConsumerGroupState;
 pub use election_type::ElectionType;
 pub use error::Error;
 pub use group_state::GroupState;
@@ -98,7 +97,6 @@ pub use metric_name::MetricName;
 pub use metric_name_template::MetricNameTemplate;
 pub use node::Node;
 pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
 pub use topic_collection::TopicCollection;
 pub use topic_id_partition::TopicIdPartition;
 pub use topic_partition::TopicPartition;

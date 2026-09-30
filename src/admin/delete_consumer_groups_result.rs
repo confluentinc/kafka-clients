@@ -26,12 +26,14 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult")]
 pub struct DeleteConsumerGroupsResult {
     futures: HashMap<String, KafkaFuture<()>>,
 }
 
 impl DeleteConsumerGroupsResult {
     /// Creates a result from a per-group-id future map.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#DeleteConsumerGroupsResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -40,6 +42,7 @@ impl DeleteConsumerGroupsResult {
     /// status of individual deletions.
     ///
     /// Mirrors `deletedGroups()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#deletedGroups")]
     pub fn deleted_groups(&self) -> HashMap<String, KafkaFuture<()>> {
         self.futures.clone()
     }
@@ -48,6 +51,7 @@ impl DeleteConsumerGroupsResult {
     /// succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

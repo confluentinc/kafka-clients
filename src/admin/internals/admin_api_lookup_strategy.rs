@@ -29,6 +29,7 @@ use super::ApiRequestScope;
 /// fatally, and which completed during lookup.
 ///
 /// Corresponds to `AdminApiLookupStrategy.LookupResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy$LookupResult")]
 pub(crate) struct LookupResult<K> {
     /// Keys completed by the lookup phase itself (the driver attempts neither
     /// lookup nor fulfillment for them).
@@ -41,6 +42,7 @@ pub(crate) struct LookupResult<K> {
 
 impl<K: Eq + Hash> LookupResult<K> {
     /// Creates a result with only failed and mapped keys (no completed keys).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy$LookupResult#LookupResult")]
     pub(crate) fn new(failed_keys: HashMap<K, Error>, mapped_keys: HashMap<K, i32>) -> Self {
         Self { completed_keys: Vec::new(), mapped_keys, failed_keys }
     }
@@ -65,28 +67,33 @@ impl<K: Clone + Eq + Hash> LookupResult<K> {
 ///
 /// Corresponds to `AdminApiLookupStrategy<T>`. Kept a plain (non-`async`) trait
 /// per `.claude/rules/admin-client.md` §2 — it runs on the background task.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy")]
 pub(crate) trait AdminApiLookupStrategy<K>: Send {
     /// Defines the scope of a given key for lookup, controlling how lookups are
     /// batched together.
     ///
     /// Mirrors `lookupScope`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy#lookupScope")]
     fn lookup_scope(&self, key: &K) -> ApiRequestScope;
 
     /// Builds the lookup request for a set of keys.
     ///
     /// Mirrors `buildRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy#buildRequest")]
     fn build_request(&self, keys: &std::collections::HashSet<K>) -> Box<dyn RequestBuilder>;
 
     /// Handles a successful lookup response, returning which keys mapped to a
     /// broker and which failed fatally.
     ///
     /// Mirrors `handleResponse`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy#handleResponse")]
     fn handle_response(&self, keys: &std::collections::HashSet<K>, response: &ConcreteResponse) -> LookupResult<K>;
 
     /// Handles an `UnsupportedVersionException` on a lookup request. The default
     /// maps every key to the exception (the request should not be retried).
     ///
     /// Mirrors `handleUnsupportedVersionException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy#handleUnsupportedVersionException")]
     fn handle_unsupported_version_error(&self, error: &Error, keys: &std::collections::HashSet<K>) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,

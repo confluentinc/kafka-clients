@@ -58,6 +58,7 @@ use crate::common::Cluster;
 /// - Java's `Plugin<Partitioner>` / `Monitorable` metrics wrapper (the javadoc's
 ///   "implement `Monitorable` to register metrics") has **no Rust counterpart**
 ///   and is not translated.
+#[doc(alias = "org.apache.kafka.clients.producer.Partitioner")]
 pub trait Partitioner<K, V>: Send + Sync {
     /// Configure this partitioner.
     ///
@@ -91,6 +92,7 @@ pub trait Partitioner<K, V>: Send + Sync {
     /// bytes would allocate, violating the zero-copy contract. Partitioners that
     /// need the key/value should read the `*_bytes` parameters, which are always
     /// supplied when a key/value exists.
+    #[doc(alias = "org.apache.kafka.clients.producer.Partitioner#partition")]
     fn partition(
         &self,
         topic: &str,
@@ -105,5 +107,6 @@ pub trait Partitioner<K, V>: Send + Sync {
     ///
     /// Corresponds to Java's `Closeable.close()` — "This is called when
     /// partitioner is closed." The default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.clients.producer.Partitioner#close")]
     fn close(&self) {}
 }

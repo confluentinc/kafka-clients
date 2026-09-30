@@ -567,7 +567,7 @@ one is pending.) A commit that a wakeup does abort — it lands between two poll
 
 ## `build.sh` / `run.sh`
 
-Both are shell, a deliberate deviation from CLAUDE.md §6 ("xtask instead of
+Both are shell, a deliberate deviation from CLAUDE.md §8 ("xtask instead of
 shell scripts"): what they orchestrate is a Python program in a virtualenv, an
 xtask cannot bootstrap a venv it does not yet have, and the Python soak's
 proven pair is what operators will recognise. (The earlier xtask proposal

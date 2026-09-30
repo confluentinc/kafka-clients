@@ -76,6 +76,7 @@ const _: () = {
 /// Serialization/deserialization helpers for the classic consumer protocol.
 ///
 /// Corresponds to `ConsumerProtocol`. Package `internal` → `pub(crate)`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol")]
 pub(crate) struct ConsumerProtocol;
 
 // The full `ConsumerProtocol` class is translated per DoD #2, but the admin
@@ -83,13 +84,12 @@ pub(crate) struct ConsumerProtocol;
 // just `deserialize_assignment` / `PROTOCOL_TYPE`. The serialize/subscription
 // helpers are exercised by the round-trip unit tests below and become live once
 // the classic-assignor/consumer-join paths are translated in a later milestone.
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 impl ConsumerProtocol {
     /// The consumer protocol type name.
     ///
     /// Corresponds to `ConsumerProtocol.PROTOCOL_TYPE`. Consumed by the admin
-    /// group-describe handlers landing later in this phase.
-    #[allow(dead_code)]
+    /// group-describe handlers.
     pub(crate) const PROTOCOL_TYPE: &str = "consumer";
 
     /// Translate a decode failure the way each Java `deserialize*` method's
@@ -125,6 +125,7 @@ impl ConsumerProtocol {
     /// Reads the 2-byte version header from the buffer.
     ///
     /// Mirrors `ConsumerProtocol.deserializeVersion`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeVersion")]
     pub(crate) fn deserialize_version(buffer: &mut dyn Readable) -> Result<i16, Error> {
         buffer.read_short().map_err(|e| Self::map_decode_error(e, "header"))
     }
@@ -132,6 +133,7 @@ impl ConsumerProtocol {
     /// Serializes a subscription at the highest supported version.
     ///
     /// Mirrors `ConsumerProtocol.serializeSubscription(Subscription)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#serializeSubscription")]
     pub(crate) fn serialize_subscription(subscription: &Subscription) -> Result<Vec<u8>, Error> {
         Self::serialize_subscription_versioned(
             subscription,
@@ -219,6 +221,7 @@ impl ConsumerProtocol {
     /// Deserializes a subscription, reading the version header from the buffer.
     ///
     /// Mirrors `ConsumerProtocol.deserializeSubscription(ByteBuffer)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeSubscription")]
     pub(crate) fn deserialize_subscription(bytes: &[u8]) -> Result<Subscription, Error> {
         let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
@@ -243,6 +246,9 @@ impl ConsumerProtocol {
     ///
     /// Mirrors
     /// `ConsumerProtocol.deserializeConsumerProtocolSubscription(ByteBuffer)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeConsumerProtocolSubscription"
+    )]
     pub(crate) fn deserialize_consumer_protocol_subscription(
         bytes: &[u8],
     ) -> Result<ConsumerProtocolSubscriptionData, Error> {
@@ -254,6 +260,7 @@ impl ConsumerProtocol {
     /// Serializes an assignment at the highest supported version.
     ///
     /// Mirrors `ConsumerProtocol.serializeAssignment(Assignment)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#serializeAssignment")]
     pub(crate) fn serialize_assignment(assignment: &Assignment) -> Result<Vec<u8>, Error> {
         Self::serialize_assignment_versioned(assignment, ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION)
     }
@@ -329,6 +336,7 @@ impl ConsumerProtocol {
     /// Mirrors `ConsumerProtocol.deserializeAssignment(ByteBuffer)`. This is the
     /// entry point used by the admin group-describe handlers to decode a
     /// classic member's raw assignment bytes.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeAssignment")]
     pub(crate) fn deserialize_assignment(bytes: &[u8]) -> Result<Assignment, Error> {
         let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
@@ -353,6 +361,7 @@ impl ConsumerProtocol {
     ///
     /// Mirrors
     /// `ConsumerProtocol.deserializeConsumerProtocolAssignment(ByteBuffer)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeConsumerProtocolAssignment")]
     pub(crate) fn deserialize_consumer_protocol_assignment(
         bytes: &[u8],
     ) -> Result<ConsumerProtocolAssignmentData, Error> {
@@ -365,6 +374,7 @@ impl ConsumerProtocol {
     /// version if newer.
     ///
     /// Mirrors `ConsumerProtocol.checkSubscriptionVersion`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#checkSubscriptionVersion")]
     fn check_subscription_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolSubscriptionData::LOWEST_SUPPORTED_VERSION {
             Err(Error::serialization(format!("Unsupported subscription version: {version}")))
@@ -379,6 +389,7 @@ impl ConsumerProtocol {
     /// version if newer.
     ///
     /// Mirrors `ConsumerProtocol.checkAssignmentVersion`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#checkAssignmentVersion")]
     fn check_assignment_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolAssignmentData::LOWEST_SUPPORTED_VERSION {
             Err(Error::serialization(format!("Unsupported assignment version: {version}")))
