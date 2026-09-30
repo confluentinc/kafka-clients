@@ -509,7 +509,7 @@ Code changes come first (4.3–4.9). Doc-only changes come last (4.1, 4.2, 4.5b,
 
 | Finding | Change | Kind | Pin |
 |---|---|---|---|
-| Group A | About 20 RPCs, 3 mock seeding methods and `DescribeUserScramCredentialsResult.Description` newly throw `ArgumentException` for a NUL / lone-surrogate string | behavioural contract (+ xmldoc) | `PublicAdminKeyStringTests` rows |
+| Group A | About 20 RPCs, 4 mock seeding methods (corrected at close; the draft said 3 — `UpdateBeginningOffsets`, `UpdateEndOffsets`, `UpdateConsumerGroupOffsets`, `SetFeatureLevels`, as D4's "4 rows" says) and `DescribeUserScramCredentialsResult.Description` newly throw `ArgumentException` for a NUL / lone-surrogate string | behavioural contract (+ xmldoc) | `PublicAdminKeyStringTests` rows |
 | Group A (D2) | The shared message text changes, "key" → "string" | behavioural (message) | exact-message rows |
 | G1-6 | `TopicMetadataAndConfig` accessors throw a `KafkaException` whose `Code` / `IsRetriable` equal the stored error's | behavioural | §4.3 |
 | G1-9 | `TopicIds()` / `TopicNames()` return a read-only wrapper. **Declared type unchanged** | behavioural | §4.4 |
@@ -590,6 +590,30 @@ No type, member or signature is removed. The extern count stays **697**.
 11. Close-out (PM): update `design/current/STATUS.md` (including its `AdminKeyStrings`
     reference, `:84`); archive `COMMENTS.DONE.87.md` (or `COMMENTS.87.md` as a clean-pass
     record) and this plan here; reset the binding-root `COMMENTS.87.md`.
+
+> **Close-out record (2026-09-30).**
+> - **Outcome.** S1 and S2 landed as planned, and G1-5 covered 20 files per the user's D8
+>   ruling. Critic 87 ran once over `d24fe14e..a176b86f` (D9). It found one low issue, 87.1,
+>   which was fixed comment-only in `5fa2493f`; the re-check was clean.
+> - **Gates at `5fa2493f`.** The Mode-A diff is empty, there are 697 P/Invokes, the header
+>   SHA-1 is `41f48ea8…`, the build has 0 warnings and 0 errors, and format is clean. Tests:
+>   2630 on base, 2910 after S1 and 2927 at close, on both net10.0 and net8.0. One net8.0 run
+>   after the fixup had a single failure that was not identified; the next seven passed.
+> - **Docker (item 10), run on `5fa2493f`.** `--list` confirmed the 79 admin-family arms
+>   (P13.3's 43 + 36). This gate also ran the one `multilanguage_admin_test` arm:
+>   **80 passed; 0 failed**. P13.3's `.so` was stale, because the master merge `31078aac`
+>   changed the core after P13.3's gate, so the `.so` was rebuilt at HEAD. It contains the
+>   merge's `client.dns.lookup` strings, all 697 entry points resolve in it, and the rebuilt
+>   sync image carries its sha256 (`4cc23659…`).
+> - **Premise errors in this plan, found during the phase:**
+>   - **D8 / §4.2.** G1-5 was on 20 result types, not 13 (see the header note). The PM counted
+>     siblings by one cross-reference target; the sweep should have been by the phrase.
+>   - **§4.10.** "3 mock seeding methods" was 4. The row is corrected.
+>   - **R2.** The `IsClosed`-after-`Dispose` witness proves that no client reference is left
+>     behind. It cannot see a leak of only the `GCHandle`. None is reachable today, because
+>     every guard sits before both, but the mitigation overstated the coverage (Critic O5).
+> - **Found, not fixed (for the user).** Six result docs claim the per-key error is
+>   "borrowed from the result root and is never destroyed". See `COMMENTS.DONE.87.md`, PM-1.
 
 ---
 

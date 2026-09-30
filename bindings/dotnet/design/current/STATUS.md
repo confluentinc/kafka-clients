@@ -7,6 +7,53 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 15 / Phase 13.4 — ".NET Admin: one C-string guard for every admin string, plus ten low parity fixes": DONE (2026-09-30). N=87. Mode A.** Branch `prashah_dev_dotnet_binding`. The scope is exactly 15 findings from the admin parity audit at `de51d14b`: five medium ones with one root cause (S1) and ten low ones (S2). The commits are not squashed and not pushed:
+  - `d24fe14e` is the approved plan.
+  - S1: `3f5e42b7` (the rename, message and scope note) and `293caf17` (the guards A1–A22 and their tests).
+  - S2: `8d3cceda` (G1-6, G1-7, G1-9), `c5d06350` (G2-4), `f521f636` (G2-5), `d4902bc7` (G2-8) and `81ba43c2` (docs: G1-3, G1-8, G2-6).
+  - `5fc6a5fe` records the user's D8 ruling in the plan, and `a176b86f` is G1-5.
+  - `5fa2493f` is the `fixup!` for Critic 87.1.
+  - Then this close.
+
+  Plan: `design/history/M15/P13.4-admin-string-guard-and-lows/PLAN.md`. Proof of Mode A: `git diff d24fe14e..5fa2493f -- src/ cbindgen.toml generator/ build.rs Cargo.toml Cargo.lock tests/ bindings/python bindings/c` is empty.
+  - **Why.** P13.3's `AdminKeyStrings` guarded only per-key key strings. Every other string the admin client hands the core as a C string (config names and values, log dirs, ACL and quota filter fields, group and transactional ids, SCRAM users, delegation-token principals, …) was cut at its first NUL (`"a\0b"` → `"a"`), and a lone surrogate became U+FFFD. The request then acted on a different target than the one the caller named.
+  - **User-visible changes (pre-publish; Java-faithful unless marked):**
+    - **S1 (G2-1, G3-3, G4-6, G7-1, X12)** — every string the admin client pins goes through `AdminStrings.Validate` in the RPC's precondition block, before anything is rooted, pinned or ref-counted (ffi §B5). A NUL or an unpaired surrogate throws a synchronous `ArgumentException` with one shared message, "An admin request string must not contain a NUL character or an unpaired UTF-16 surrogate…". `ParamName` is the carrying parameter, or `options` for a string inside an `*Options` object. `null` and `""` pass, and each site keeps its own null rule. There are 22 site groups (A1–A22): 70 inventory lines, 64 call sites, including the four `MockAdminClient` seeding methods (D4). This is a recorded .NET-only deviation, because Java length-prefixes every string. `AdminKeyStrings` is renamed `AdminStrings`, and the message says "string" where it said "key" (D2).
+    - **G1-6 / G1-7 (D7)** — `TopicMetadataAndConfig`'s four accessors throw a fresh `KafkaException` carrying the stored error's code, message and retriability, with the stored error as `InnerException`.
+    - **G1-9** — `TopicCollection.TopicIds()` / `TopicNames()` return read-only views that cannot be cast back and mutated. The declared type is unchanged.
+    - **G2-4** — `AlterConfigOp` rejects an undefined `AlterConfigOpType` with `ArgumentOutOfRangeException`. Java's op type is closed, so there is nothing to normalize it to.
+    - **G2-5 (D6)** — `Config` has Java's map semantics: one entry per name (the last wins, at the first one's position), `Get(null)` returns null, `Equals` / `GetHashCode` ignore order, and `ToString` is `Config(entries=[…])`.
+    - **G2-8 (D5)** — `ToString` on `ConfigResource`, `AlterConfigOp`, `ConfigEntry` and `ConfigSynonym` prints Java's constant names (`TOPIC`, `SET`, `STATIC_BROKER_CONFIG`) and `null`.
+    - **Docs only:**
+      - G1-3: `PartitionSizeLimitPerResponse` currently has no effect on any request, because the core sends no DescribeTopicPartitions (G1-2).
+      - G1-8: the synchronous throw for a null topic name is recorded as stricter than Java (D1).
+      - G2-6: `DescribeCluster` has three nullable results, not two.
+      - G1-5: the stale "per-key timing independence is not preserved" paragraph is deleted from **20** result types. The user widened D8 from 13 to 20; the plan header records the supersession.
+  - **Gates, verified by the Manager at each sub-stage and at `5fa2493f`.**
+    - Tests: 2630/2630 on base `d24fe14e`, 2910/2910 after S1, and 2927/2927 at close, on both net10.0 and net8.0 (+297).
+    - 697 P/Invokes throughout. The header SHA-1 stayed `41f48ea8…`. The build has 0 warnings and 0 errors, and `dotnet format --verify-no-changes` is clean.
+    - One net8.0 full-suite run after the fixup had a single failure that was not identified. The next 7 net8.0 runs passed 2927/2927. The fixup is comment-only, so this fits the known net8.0 flakes (P13.3 residuals).
+  - **Critic 87.** One review over `d24fe14e..a176b86f`, as D9 asks. It found one low issue, 87.1: the internal twin of the G1-3 doc still had the stale line cite and "rather than honoured". It was fixed in `5fa2493f` (comment-only), and the re-check was clean. The record is `design/history/M15/P13.4-admin-string-guard-and-lows/COMMENTS.DONE.87.md`.
+  - **Local Docker gate, run on `5fa2493f` (2026-09-30, 18:55 to 19:08 IST).**
+    - The master merge `31078aac` changed the Rust core after P13.3's gate, so P13.3's `.so` was stale and a new linux/amd64 `.so` was built at HEAD. It is provably fresh: it contains strings the merge added (the `client.dns.lookup` parser, #213) that P13.3's `.so` (sha256 `9b35e4bc…`) lacks. All 697 of the binding's entry points resolve in it.
+    - The sync .NET gRPC image was rebuilt from it, and the in-image `.so` has the staged sha256, `4cc23659…`. The Python image was not rebuilt: P13.4 does not touch `bindings/python` and runs no Python arm.
+    - The `__grpc_dotnet` arms of all 13 admin families (79, as `--list` confirms: transactions 11, groups 12, topics 9, elections/reassignments/offsets 8, cluster configs 7, partitions/records 7, ACLs 5, group offsets 5, features 4, log dirs 4, quotas 3, SCRAM 2, delegation tokens 2) plus the one `multilanguage_admin_test` arm: **80 passed; 0 failed**.
+    - Not run: the `_async` arms (the async image was not rebuilt) and the non-admin arms. No scenario sends a NUL or lone-surrogate string; adding one is cross-binding harness work.
+  - **For the user: six result docs make a stale ownership claim.** They say the per-key error is "borrowed from the result root and is never destroyed": `DescribeConfigsResult`, `DescribeLogDirsResult`, `AlterConfigsResult`, `AlterPartitionReassignmentsResult`, `AlterReplicaLogDirsResult` and `DescribeReplicaLogDirsResult`. Under P9's per-key ABI, each key's callback owns its error and frees it. The claim may be partly right for `DescribeLogDirs`, where nested per-log-dir errors inside the value may be borrowed. The Critic confirmed the family is exactly these six. They were not fixed, because they are outside the ruled scope.
+  - **Critic observations, recorded rather than acted on:**
+    - **O5.** The B5-ordering witness (`handle.IsClosed` after `Dispose`) catches a leaked `DangerousAddRef`. It cannot see a leak of only the `GCHandle`. None is reachable today, because every guard sits before both, but plan R2 overstated what the witness covers.
+    - **Rule suggestion S1** (for the persona or the ffi-marshalling preamble; agents don't edit rule files): when a fix corrects a public doc sentence, grep the same cite and phrase across `src/**` internal comments and `tests/**` in the same commit. 87.1 was exactly that miss.
+  - **Supersession notes on older lines:** P13.3's `AdminKeyStrings` residual is now `AdminStrings`. P1's "timing independence is not preserved" deviation below has been superseded since P9 (G1-5).
+  - **Out of scope, carried:**
+    - the Python halves of every finding;
+    - G1-2, a Rust-core dependency;
+    - the NUL gap in the admin, producer and consumer construction config, as one cross-client follow-up (D3);
+    - X10's other members, which throw synchronously for a null where Java fails per key (D1);
+    - the Java-parity `ToString` claims on about 60 other types.
+
+    `grpc-server/TranslateAdmin.cs` casts proto op types unchecked, so an undefined op type now throws there (G2-4). The plan anticipated this, and no harness scenario sends one.
+  - **Residuals:** `AdminStrings` is an internal type with no Java counterpart (DoD §7).
+
 - **Milestone 15 / Phase 13.3 — ".NET Admin: merge PR #201 round 70 and adapt the binding": DONE (2026-09-30). N=86. Mode A; the merge is the only commit with Rust in it.** Branch `prashah_dev_dotnet_binding`, based on `a26f43c6` (the P13.2 close). The commits are not squashed and not pushed:
   - `16d2b4c5` merges PR #201 head `3b27d2c9`.
   - `19e408d0` is the approved plan.
@@ -81,7 +128,7 @@ Newest first.
     - New internal types with no Java counterpart (DoD §7):
       - `ListTransactionsAdminOperation`, which owns both of F5's stages;
       - `AclEnumCodes`;
-      - `AdminKeyStrings`.
+      - `AdminKeyStrings` (renamed `AdminStrings` in M15/P13.4, D2).
     - Flakes the user deferred, not fixed here:
       - the net8.0 `ProducerSubmitHandleRefTests` heap-budget test failed twice at CP0 and once in the fix cycle, and passed on re-run or in isolation;
       - the `DisposeAsync` completion race hit once at CP1 on net8.0, and passed on re-run.
@@ -376,7 +423,7 @@ Newest first.
 
 - **Milestone 15 / Phase 1 — ".NET Admin foundation + the per-key result bridge, proven on `CreateTopics`": DONE (2026-09-08). N=66. Mode A** (Manager-verified: `git diff f24add9e..HEAD -- src/ cbindgen.toml target/include/ generator/` **empty**; generated header byte-identical, SHA-256 `45912ea9…e85105`). 29 files, all under `bindings/dotnet/`. Branch **`prashah_dev_dotnet_admin`** (base `f24add9e`). Landed as five commits (`b35fb304` · `5f898c72` plus three `fixup!`s from three Critic rounds), then **squashed and force-pushed to `6aa5fc4a`** — which is P2a's base; the five pre-squash SHAs are no longer on the branch, so never cite them in a diff range. Plan: `design/history/M15/P1-admin-foundation/PLAN.md`. **Milestone decisions D1–D6, approved 2026-09-08:** D1 the interface is `IAdmin`, not ckd's `IAdminClient`; D2 **one** interface, no `IAsyncAdmin`, because Java's Admin methods do not block; D3 restore Java's `TopicCollection` rather than splitting each RPC into by-name/by-id overloads; D4 `MockAdminClient` lands in P1 alongside the real client; D5 `*Options` as plain C# POCOs, not Java's fluent builders; D6 nine phases. They were ruled in the milestone roadmap, a **deliberately untracked** working document — so it is summarized here and **not cited by path**, and the tracked per-phase record lives under `design/history/M15/`. **First phase of the Admin binding — it lands the shared mechanism that M15/P2…P8 repeat.** Delivered:
   - **The one real design problem, solved: per-key futures across an ABI that has none.** Java's `createTopics` returns immediately with `Map<String, KafkaFuture<T>>`; the C ABI has **no future type at all** (verified — zero `kafka_admin_*Future*` symbols) and instead returns a fully-settled indexed table (`count`/`get_key(i)`/`get_value(i)`/`get_error(i)`/`destroy`), because `src/ffi/admin.rs:809` awaits `KafkaFuture::join_map_results` before enqueuing the completion. The binding **restores** the Java shape: a plain **sync** C# method creates one `TaskCompletionSource<T>` **per key** up front, returns the `*Result` synchronously, and the single aggregate callback walks `0..count-1` completing each TCS from that key's value or that key's error.
-  - **Recorded deviation:** per-key **granularity** is fully preserved (each `Task` carries exactly its own key's outcome); per-key **timing independence** is not — all N `Task`s complete at the same instant, because the ABI resolved them together. Java can complete a fast topic before a slow one. Python has the identical limitation for the identical reason. Documented on `CreateTopicsResult`.
+  - **Recorded deviation:** per-key **granularity** is fully preserved (each `Task` carries exactly its own key's outcome); per-key **timing independence** is not — all N `Task`s complete at the same instant, because the ABI resolved them together. Java can complete a fast topic before a slow one. Python has the identical limitation for the identical reason. Documented on `CreateTopicsResult`. ⚠ **Superseded:** M15/P9's per-key ABI completes each key's `Task` from that key's own callback, so per-key timing independence has been preserved since P9. M15/P13.4 (G1-5) deleted this stale paragraph from `CreateTopicsResult` and 19 other result types.
   - **The two load-bearing memory-safety hazards, both closed with discriminating tests.** (1) **The borrowed/owned `KafkaError` line runs through one C type** — `_get_error(i)` returns `const …KafkaError_t*` (*"do **not** destroy it"*) while the callback's `error` **parameter** is a non-const pointer the callback **owns**; const-ness is the only signal. New `KafkaException.FromBorrowedHandle` shares one reader with `FromHandle` so the two cannot drift — the only difference is the `finally`. (2) **`AdminClient_destroy` has no refcount and no drain** (unlike the consumer ABI, which ref-counts internally) — *"a C lifetime precondition the caller must uphold"* — closed with span-the-op `DangerousAddRef`/`Release` on `SafeAdminHandle`, balanced across all five paths including both inline-callback paths and `AbandonBeforeSubmit`.
   - ⚠ **Both tests are sensitivity-proven, not merely green.** The borrowed-error test goes red by **injection** (destroy it → **test host aborts**); the refcount test is **differential** — no op in flight → `Dispose` releases; op in flight → it does **not**; op completes → it then does. All three cases, each individually sensitive. A single-case assertion cannot tell a working refcount from a permanently-unbalanced one.
   - ⚠ **New environment trap discovered, and it is a false-PASS: an ABORTED `dotnet test` run still exits 0.** A double-free aborts the test host and the exit code stays 0 — the signal is `Test Run Aborted` in the output. Added to the phase docs; **every** future round must read counts and that string, never the exit code.
