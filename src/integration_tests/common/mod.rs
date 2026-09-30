@@ -31,6 +31,8 @@ pub(crate) mod test_certs;
 #[path = "../../../tests/common/test_context.rs"]
 pub(crate) mod test_context;
 
+pub(crate) mod selector_utils;
+
 /// `cluster_pool` reaps the gRPC backend containers pooled on a cluster's
 /// network before evicting it. This binary never starts a backend, so under
 /// `multilanguage-tests` the answer is always "none" — the real
@@ -45,5 +47,5 @@ pub(crate) mod backend_pool {
         false
     }
 
-    pub(crate) fn force_remove_all_containers() {}
+    pub(crate) fn force_stop_all_backends() {}
 }

@@ -26,9 +26,9 @@ AdminClient/MockAdminClient call, returning the result over gRPC. See
 design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
 design/history/Milestone-11/PLAN-multilanguage-admin.md.
 
-The server listens on 0.0.0.0:50051 (the fixed internal port the
-Docker image exposes; the test pool maps it to a random host port via
-testcontainers).
+The server listens on GRPC_HOST:GRPC_PORT (default 127.0.0.1:50051; the
+Docker image sets GRPC_HOST=0.0.0.0 and the test pool maps 50051 to a
+random host port via testcontainers). GRPC_PORT=0 binds an ephemeral port.
 
 Sync grpc.server + thread pool is used because producer.py's underlying
 ctypes library is thread-based — futures are completed by background
@@ -1482,13 +1482,32 @@ class AdminService(apb_grpc.AdminServiceServicer):
         return pb.StatusResponse()
 
 
+def _log_level(rust_log):
+    """Map a RUST_LOG value to a Python logging level name.
+
+    RUST_LOG may hold a Rust-only level (``trace``) or an env_logger filter
+    (``confluent_kafka=debug``) that ``logging`` rejects, so anything that is
+    not a plain Python level name falls back to INFO.
+    """
+    level = rust_log.strip().upper()
+    if level == "TRACE":
+        return "DEBUG"
+    if level in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"):
+        return level
+    return "INFO"
+
+
 def main():
     logging.basicConfig(
-        level=os.environ.get("RUST_LOG", "INFO").upper(),
+        level=_log_level(os.environ.get("RUST_LOG", "")),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
     port = int(os.environ.get("GRPC_PORT", "50051"))
+    # Defaults to 127.0.0.1 because the server is unauthenticated; the Docker
+    # image sets GRPC_HOST=0.0.0.0 so it is reachable from outside the
+    # container. GRPC_PORT=0 binds an ephemeral port.
+    host = os.environ.get("GRPC_HOST", "127.0.0.1")
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
     # One store, shared: a producer takes the group metadata its consumers
     # handed out.
@@ -1496,11 +1515,11 @@ def main():
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
-    server.add_insecure_port(f"0.0.0.0:{port}")
+    bound_port = server.add_insecure_port(f"{host}:{port}")
     server.start()
-    # The Rust BackendPool waits for "listening" on stderr before
-    # connecting — keep this string stable.
-    print(f"listening on 0.0.0.0:{port}", file=sys.stderr, flush=True)
+    # The Rust BackendPool waits for "listening" on stderr and parses the
+    # bound port from the last ':'-separated field — keep this format stable.
+    print(f"listening on {host}:{bound_port}", file=sys.stderr, flush=True)
     server.wait_for_termination()
 
 

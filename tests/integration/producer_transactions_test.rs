@@ -103,9 +103,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 }
 
 /// A transactional producer. `enable.idempotence` is implied by `transactional.id`.
-fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn transactional_producer(ctx: &TestContext, transactional_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("transactional.id".to_string(), transactional_id.to_string()),
         ("client.id".to_string(), format!("txn-producer-{transactional_id}")),
         ("acks".to_string(), "all".to_string()),
@@ -113,6 +113,7 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
         ("linger.ms".to_string(), "0".to_string()),
         ("transaction.timeout.ms".to_string(), "60000".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid transactional producer config"),
         Box::new(ByteArraySerializer::default()),
@@ -137,26 +138,34 @@ fn make_txn_config(bootstrap: &str, transactional_id: &str) -> HashMap<String, S
     ])
 }
 
-/// Pick the bootstrap address the factory's backend can reach: the gRPC backends
-/// run in containers and need the broker's container listener, while native rust
-/// uses the host loopback. Mirrors `producer_test.rs`.
-fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
-    if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers().to_string()
-    } else {
-        ctx.bootstrap_servers().to_string()
-    }
+/// [`make_txn_config`] for the factory's reachable bootstrap
+/// ([`TestContext::protocol_bootstrap_servers_for`]), with the selected
+/// protocol's security keys injected for every backend — the gRPC/container
+/// backends connect over the CONTAINER-family SSL / SASL_SSL listener, and the
+/// keys travel through the gRPC config map to the containerized client.
+fn make_txn_config_for<F: ProducerBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    transactional_id: &str,
+) -> HashMap<String, String> {
+    let mut config = make_txn_config(
+        ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()),
+        transactional_id,
+    );
+    ctx.apply_security(&mut config);
+    config
 }
 
 /// A plain (non-idempotent, non-transactional) producer, for seeding input topics.
-fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn plain_producer(ctx: &TestContext, client_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), client_id.to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid plain producer config"),
         Box::new(ByteArraySerializer::default()),
@@ -166,8 +175,9 @@ fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Ve
 }
 
 /// The config of a consumer for `group_id` at the given isolation level, as a
-/// flat property map: [`assigned_consumer`] parses it natively, and scenario 4
-/// hands it to a [`ConsumerBackendFactory`].
+/// flat property map without the run's security keys: [`assigned_consumer`]
+/// parses it natively, and scenario 4 hands it to a [`ConsumerBackendFactory`].
+/// Callers add the keys with [`TestContext::apply_security`].
 fn consumer_config(bootstrap: &str, group_id: &str, isolation_level: &str) -> HashMap<String, String> {
     HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
@@ -184,8 +194,9 @@ fn consumer_config(bootstrap: &str, group_id: &str, isolation_level: &str) -> Ha
 ///
 /// Callers either `assign` a partition (every verification consumer, so no rebalance
 /// is involved) or `subscribe` — see the module docstring for which and why.
-fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    let props = consumer_config(bootstrap, group_id, isolation_level);
+fn assigned_consumer(ctx: &TestContext, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    let mut props = consumer_config(ctx.protocol_bootstrap_servers(), group_id, isolation_level);
+    ctx.apply_security(&mut props);
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         ConsumerConfig::new(&props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer),
@@ -311,11 +322,10 @@ async fn drain_for(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>, budget: D
 async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
     let mut ctx = TestContext::new(cluster_config()).await;
     let topic = ctx.topic("txn-epoch-bump");
-    let bootstrap = ctx.bootstrap_servers().to_string();
     let txn_id = format!("{topic}-txn-id");
 
     // First incarnation: a complete transaction at the original epoch.
-    let first = transactional_producer(&bootstrap, &txn_id);
+    let first = transactional_producer(&ctx, &txn_id);
     first.init_transactions().await.expect("initTransactions");
     first.begin_transaction().expect("beginTransaction");
     send_all(&first, &topic, 0, &["before-bump-1", "before-bump-2"]).await;
@@ -323,7 +333,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 
     // Second incarnation with the same transactional id: initTransactions bumps
     // the epoch and fences the first.
-    let second = transactional_producer(&bootstrap, &txn_id);
+    let second = transactional_producer(&ctx, &txn_id);
     second.init_transactions().await.expect("initTransactions must bump the epoch");
 
     // The bumped producer produces and commits. Its sequence numbers start again
@@ -369,7 +379,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
     // Exactly the five committed records are readable, in order, with no
     // duplicates — the two from before the bump and the three from after.
     let group = ctx.group_id("txn-epoch-bump-verify");
-    let mut consumer = assigned_consumer(&bootstrap, &group, "read_committed");
+    let mut consumer = assigned_consumer(&ctx, &group, "read_committed");
     let tp = TopicPartition::new(topic.clone(), 0);
     consumer.assign(vec![tp]).await.expect("assign");
     let values = consume_values(&mut consumer, 5, CONSUME_DEADLINE).await;
@@ -419,18 +429,16 @@ async fn transactional_records_are_visible_only_after_commit_inner<F: ProducerBa
     factory: &F,
 ) {
     let topic = ctx.topic("txn-visible-after-commit");
-    let bootstrap = ctx.bootstrap_servers().to_string();
-    let producer_bootstrap = bootstrap_for(factory, ctx);
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // The liveness seed: one non-transactional record, before any transaction opens.
     // A read_committed consumer must always see this one, so its presence in the
     // negative drain below proves the reader actually fetched.
-    let seeder = plain_producer(&bootstrap, "txn-visible-seed");
+    let seeder = plain_producer(ctx, "txn-visible-seed");
     send_all(&seeder, &topic, 0, &["seed"]).await;
 
     let producer = factory
-        .create(make_txn_config(&producer_bootstrap, &format!("{topic}-txn-id")))
+        .create(make_txn_config_for(factory, ctx, &format!("{topic}-txn-id")))
         .await
         .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
@@ -439,7 +447,7 @@ async fn transactional_records_are_visible_only_after_commit_inner<F: ProducerBa
 
     // Before the commit: read_committed sees the seed and nothing else.
     let committed_group = ctx.group_id("txn-visible-committed");
-    let mut committed_reader = assigned_consumer(&bootstrap, &committed_group, "read_committed");
+    let mut committed_reader = assigned_consumer(ctx, &committed_group, "read_committed");
     committed_reader.assign(vec![tp.clone()]).await.expect("assign");
     let before = drain_for(&mut committed_reader, NEGATIVE_POLL_BUDGET).await;
     assert_eq!(
@@ -452,7 +460,7 @@ async fn transactional_records_are_visible_only_after_commit_inner<F: ProducerBa
     // Before the commit: read_uncommitted does see them, so they are genuinely
     // on the broker.
     let uncommitted_group = ctx.group_id("txn-visible-uncommitted");
-    let mut uncommitted_reader = assigned_consumer(&bootstrap, &uncommitted_group, "read_uncommitted");
+    let mut uncommitted_reader = assigned_consumer(ctx, &uncommitted_group, "read_uncommitted");
     uncommitted_reader.assign(vec![tp.clone()]).await.expect("assign");
     let uncommitted = consume_values(&mut uncommitted_reader, 4, CONSUME_DEADLINE).await;
     assert_eq!(
@@ -495,12 +503,10 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
     factory: &F,
 ) {
     let topic = ctx.topic("txn-abort-discards");
-    let bootstrap = ctx.bootstrap_servers().to_string();
-    let producer_bootstrap = bootstrap_for(factory, ctx);
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let producer = factory
-        .create(make_txn_config(&producer_bootstrap, &format!("{topic}-txn-id")))
+        .create(make_txn_config_for(factory, ctx, &format!("{topic}-txn-id")))
         .await
         .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
@@ -516,7 +522,7 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
     producer.commit_transaction().await.expect("commitTransaction");
 
     let group = ctx.group_id("txn-abort-verify");
-    let mut consumer = assigned_consumer(&bootstrap, &group, "read_committed");
+    let mut consumer = assigned_consumer(ctx, &group, "read_committed");
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let values = consume_values(&mut consumer, 2, CONSUME_DEADLINE).await;
@@ -534,7 +540,7 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
     // A read_uncommitted consumer sees all four, which is what proves the aborted
     // records were written and then filtered rather than never sent.
     let all_group = ctx.group_id("txn-abort-verify-all");
-    let mut all_reader = assigned_consumer(&bootstrap, &all_group, "read_uncommitted");
+    let mut all_reader = assigned_consumer(ctx, &all_group, "read_uncommitted");
     all_reader.assign(vec![tp]).await.expect("assign");
     let all = consume_values(&mut all_reader, 4, CONSUME_DEADLINE).await;
     assert_eq!(
@@ -579,12 +585,10 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
 ) {
     let input_topic = ctx.topic("txn-ctp-input");
     let output_topic = ctx.topic("txn-ctp-output");
-    let bootstrap = ctx.bootstrap_servers().to_string();
-    let producer_bootstrap = bootstrap_for(factory, ctx);
     let input_tp = TopicPartition::new(input_topic.clone(), 0);
 
     // Seed the input topic with a plain (non-transactional) producer.
-    let seeder = plain_producer(&bootstrap, "txn-ctp-seed");
+    let seeder = plain_producer(ctx, "txn-ctp-seed");
     send_all(&seeder, &input_topic, 0, &["a", "b", "c"]).await;
 
     // The transform consumer subscribes rather than assigns: it must have real
@@ -592,10 +596,15 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
     // TxnOffsetCommit the producer sends on its behalf. It lives on the
     // producer's backend, so it reaches the broker at the producer's address.
     let input_group = ctx.group_id("txn-ctp-group");
-    let mut input_consumer =
-        ConsumerBackendFactory::create(factory, consumer_config(&producer_bootstrap, &input_group, "read_committed"))
-            .await
-            .expect("create the input consumer");
+    let mut input_config = consumer_config(
+        ctx.protocol_bootstrap_servers_for(ProducerBackendFactory::needs_container_bootstrap(factory)),
+        &input_group,
+        "read_committed",
+    );
+    ctx.apply_security(&mut input_config);
+    let mut input_consumer = ConsumerBackendFactory::create(factory, input_config)
+        .await
+        .expect("create the input consumer");
     input_consumer
         .subscribe_with_topics(vec![input_topic.clone()])
         .await
@@ -614,12 +623,10 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
     // with it. The transactional producer and the input transform-consumer
     // (whose group_metadata() feeds send_offsets_to_transaction) cross the gRPC
     // boundary; every verification consumer stays native.
-    let producer = ProducerBackendFactory::create(
-        factory,
-        make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")),
-    )
-    .await
-    .expect("create transactional producer");
+    let producer =
+        ProducerBackendFactory::create(factory, make_txn_config_for(factory, ctx, &format!("{output_topic}-txn-id")))
+            .await
+            .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     let transformed: Vec<String> = consumed.iter().map(|value| value.to_uppercase()).collect();
@@ -639,7 +646,7 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
 
     // The transformed records are visible to read_committed.
     let output_group = ctx.group_id("txn-ctp-output-verify");
-    let mut output_consumer = assigned_consumer(&bootstrap, &output_group, "read_committed");
+    let mut output_consumer = assigned_consumer(ctx, &output_group, "read_committed");
     output_consumer
         .assign(vec![TopicPartition::new(output_topic.clone(), 0)])
         .await
@@ -655,7 +662,7 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
     // transaction. Read it from a *different* consumer in the same group, so the
     // assertion is against what the coordinator stored rather than against local
     // state.
-    let mut offset_reader = assigned_consumer(&bootstrap, &input_group, "read_committed");
+    let mut offset_reader = assigned_consumer(ctx, &input_group, "read_committed");
     offset_reader.assign(vec![input_tp.clone()]).await.expect("assign");
     let committed = offset_reader
         .committed(std::slice::from_ref(&input_tp))

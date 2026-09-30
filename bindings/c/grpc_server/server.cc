@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -4868,14 +4869,31 @@ class AdminServiceImpl final : public AdminService::Service {
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
-  int port = 50052;
+  // GRPC_PORT=0 binds an ephemeral port; the bound port is reported on the
+  // "listening" line below.
+  long port = 50052;
   if (const char* env = std::getenv("GRPC_PORT")) {
-    port = std::atoi(env);
+    char* end = nullptr;
+    errno = 0;
+    port = std::strtol(env, &end, 10);
+    if (*env == '\0' || *end != '\0' || errno != 0 || port < 0 || port > 65535) {
+      std::cerr << "c server: invalid GRPC_PORT '" << env
+                << "': expected an integer in 0-65535" << std::endl;
+      return 1;
+    }
   }
-  const std::string address = "0.0.0.0:" + std::to_string(port);
+  // Defaults to 127.0.0.1 because the server is unauthenticated. The Docker
+  // image sets GRPC_HOST=0.0.0.0 so it is reachable from outside the container.
+  std::string host = "127.0.0.1";
+  if (const char* env = std::getenv("GRPC_HOST")) {
+    host = env;
+  }
+  const std::string address = host + ":" + std::to_string(port);
 
   grpc::ServerBuilder builder;
-  builder.AddListeningPort(address, grpc::InsecureServerCredentials());
+  int selected_port = 0;
+  builder.AddListeningPort(address, grpc::InsecureServerCredentials(),
+                           &selected_port);
   // Outlives both services, which share it.
   GroupMetadataStore group_metadata;
   ProducerServiceImpl producer_service(&group_metadata);
@@ -4886,14 +4904,17 @@ int main(int /*argc*/, char** /*argv*/) {
   builder.RegisterService(&admin_service);
 
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-  if (!server) {
+  // selected_port stays 0 if the address could not be bound.
+  if (!server || selected_port == 0) {
     std::cerr << "c server: failed to start gRPC server on " << address
               << std::endl;
     return 1;
   }
-  // The Rust BackendPool waits for "listening" on stderr — keep this
-  // string in sync with backend_pool.rs's WaitFor::message_on_stderr.
-  std::cerr << "c server: listening on " << address << std::endl;
+  // The Rust BackendPool waits for "listening" on stderr and parses the bound
+  // port from the last ':'-separated field — keep this format in sync with
+  // backend_pool.rs.
+  std::cerr << "c server: listening on " << host << ":" << selected_port
+            << std::endl;
   server->Wait();
   return 0;
 }

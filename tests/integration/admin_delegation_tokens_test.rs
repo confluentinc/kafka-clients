@@ -22,7 +22,7 @@
 //! addressed here, one by measurement and one by finding the surface that can
 //! reach it.
 //!
-//! # The real broker cannot mint a token, and no fixture changes that
+//! # The test broker cannot mint a token
 //!
 //! `KafkaApis.allowTokenRequests`
 //! (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:2345-2354`) returns
@@ -36,19 +36,28 @@
 //! fixture with `KAFKA_DELEGATION_TOKEN_SECRET_KEY` set and against the default
 //! fixture without it. Both produced byte-identical answers: error code 64 with
 //! Java's message "Delegation Token requests are not allowed on PLAINTEXT/1-way
-//! SSL channels and on delegation token authenticated channels." Configuring the
-//! secret key changes nothing, because the gate is the *client's* security
-//! protocol.
+//! SSL channels and on delegation token authenticated channels." Over PLAINTEXT,
+//! configuring the secret key changes nothing, because the gate is the
+//! *client's* security protocol.
 //!
-//! The blocker is therefore client-side and out of scope here
-//! (`PLAN-multilanguage-admin.md` §0): `AdminClientConfig` recognises no
-//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::new`
-//! (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
-//! `SecurityProtocol::Plaintext`, so the admin client cannot authenticate at all.
-//! The fixture *does* already expose SASL_PLAINTEXT and SASL_SSL listeners with a
-//! `PLAIN` user, so the moment the admin client can speak SASL this becomes
-//! reachable with no fixture work — the gap is recorded in
-//! `design/current/status.md:606-609`.
+//! The admin client authenticates over TLS/SASL: `AdminClientConfig` parses
+//! `security.protocol` / `sasl.*` / `ssl.*`, and `KafkaAdminClient::new` selects
+//! the matching channel builder (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL),
+//! which is what allows the other admin tests in this suite to run over the SSL
+//! and SASL_SSL protocol matrix. A delegation token can only be minted over an
+//! authenticated channel, however, and this scenario asserts the rejection, so
+//! it is pinned to PLAINTEXT (via [`admin_for_plaintext`]) rather than following
+//! `INTEGRATION_TEST_PROTOCOL`. PLAINTEXT and 1-way SSL both trip the broker gate
+//! and return code 64, whereas SASL_SSL passes the gate and returns
+//! `DelegationTokenAuthDisabled`; pinning keeps the code-64 assertion identical
+//! across all three runs.
+//!
+//! Minting a real token therefore needs a SASL_SSL connection to a broker with
+//! `delegation.token.secret.key` set, which the test fixtures do not configure.
+//! The gap is tracked in `design/current/status.md` (Tier 3 Phase 4,
+//! "Integration deferred"). That entry attributes it to missing SASL support in
+//! the admin client, which has since been added; the remaining requirement is
+//! the broker's secret key.
 //!
 //! [`delegation_token_rpcs_are_rejected_on_a_plaintext_connection`] pins that
 //! error path on all four backends. It is not vacuous: it drives the *request*
@@ -82,7 +91,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Error;
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 
-use crate::common::admin_backend::{AdminBackend, admin_for};
+use crate::common::admin_backend::{AdminBackend, admin_for_plaintext};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
@@ -115,15 +124,20 @@ fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common
 /// All four RPCs are refused on a PLAINTEXT connection, with Java's error and
 /// message.
 ///
-/// See the module docs for why this is the reachable state and why no broker
-/// fixture can move it. The value is in driving the four *request* encoders to a
-/// real broker: a mangled principal, lifetime sentinel or HMAC would produce a
+/// See the module docs for why this is the only reachable state over PLAINTEXT,
+/// regardless of broker configuration. The value is in driving the four
+/// *request* encoders to a real broker: a mangled principal, lifetime sentinel or HMAC would produce a
 /// different failure than 64.
 async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
 ) {
-    let admin = admin_for(factory, ctx).await;
+    // Pinned to PLAINTEXT: the broker's `allowTokenRequests` gate returns
+    // DELEGATION_TOKEN_REQUEST_NOT_ALLOWED over PLAINTEXT and 1-way SSL (see
+    // module docs). Over SASL_SSL the gate would pass and the RPC would answer
+    // DelegationTokenAuthDisabled instead, so pinning keeps the code-64
+    // assertion identical in every run.
+    let admin = admin_for_plaintext(factory, ctx).await;
     let backend = factory.name();
 
     // createDelegationToken with a renewer and an explicit owner, so both

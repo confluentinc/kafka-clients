@@ -2005,6 +2005,115 @@ mod tests {
         }
     }
 
+    fn create_ssl_selector(ssl_factory: crate::common::security::ssl::SslFactory) -> Selector {
+        let channel_builder = Box::new(crate::common::network::SslChannelBuilder::new(ssl_factory, None));
+        Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder)
+    }
+
+    /// Verifies that `poll()` drives the non-blocking SSL handshake to
+    /// completion using socket readiness alone, after which the channel is
+    /// ready and reported in `connected()`.
+    #[tokio::test]
+    async fn test_ssl_handshake_completes_through_poll() {
+        let (client_factory, server_config) =
+            crate::common::network::ssl_transport_layer::tests::build_paired_factory_and_server_config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let tls = tokio_rustls::TlsAcceptor::from(server_config).accept(stream).await;
+            // Keep the connection open until the test completes.
+            let _ = done_rx.await;
+            drop(tls);
+        });
+
+        let mut selector = create_ssl_selector(client_factory);
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
+        let mut reported_connected = false;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !selector.is_channel_ready("0") {
+                selector.poll(1000).await.unwrap();
+                reported_connected |= selector.connected().iter().any(|id| id == "0");
+            }
+        })
+        .await
+        .expect("the SSL handshake did not complete through poll() within 10s");
+        assert!(reported_connected, "node 0 should be reported in connected()");
+
+        let _ = done_tx.send(());
+        server.await.unwrap();
+    }
+
+    /// Regression test: `poll()` must not block when an SSL peer accepts the TCP
+    /// connection but never responds to the handshake. The poll must still
+    /// return on its deadline and on `wakeup()`, so that `NetworkClient` can
+    /// enforce the connection setup timeout and the consumer can shut down.
+    /// Previously the handshake awaited the peer inside `poll()`, which caused
+    /// `KafkaConsumer::close()` to hang over SSL.
+    #[tokio::test]
+    async fn test_ssl_poll_does_not_block_on_silent_peer() {
+        use std::time::{Duration, Instant};
+
+        let (client_factory, _server_config) =
+            crate::common::network::ssl_transport_layer::tests::build_paired_factory_and_server_config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            // Accept the connection but never read or write, simulating an
+            // unresponsive peer.
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = done_rx.await;
+            drop(stream);
+        });
+
+        let mut selector = create_ssl_selector(client_factory);
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
+
+        // (a) Each poll returns on its deadline while the handshake is pending.
+        for attempt in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), selector.poll(200))
+                .await
+                .unwrap_or_else(|_| panic!("(a) poll {attempt} blocked on a silent SSL peer"))
+                .unwrap();
+            assert!(
+                !selector.is_channel_ready("0"),
+                "(a) a silent peer cannot complete the handshake"
+            );
+            assert!(
+                !selector.disconnected().contains_key("0"),
+                "(a) a pending handshake is not a disconnect"
+            );
+        }
+
+        // (b) wakeup() promptly interrupts a poll waiting on a long deadline.
+        let notify = selector.wakeup_notify();
+        let waker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            notify.notify_one();
+        });
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), selector.poll(10_000))
+            .await
+            .expect("(b) wakeup() did not return the poll while the SSL handshake was pending")
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "(b) wakeup() should return the poll promptly, not on the deadline"
+        );
+        waker.await.unwrap();
+
+        let _ = done_tx.send(());
+        server.await.unwrap();
+    }
+
     /// Translated from `SelectorTest.testSendWithoutConnecting`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.common.network.SelectorTest#testSendWithoutConnecting")]

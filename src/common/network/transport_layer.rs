@@ -132,6 +132,11 @@ pub trait TransportLayer: Send + Sync {
     /// This is a no-op for the non-secure PLAINTEXT implementation.
     /// For SSL, this would perform the SSL handshake.
     ///
+    /// Implementations must not wait for the peer. As with Java's non-blocking
+    /// `handshake()`, each call makes whatever progress the socket currently
+    /// allows and returns; the selector calls it again on socket readiness
+    /// until `ready()` returns true.
+    ///
     /// # Errors
     ///
     /// Returns an error if the handshake fails.

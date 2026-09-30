@@ -31,6 +31,18 @@ use confluent_kafka::common::TopicCollection;
 
 use super::test_context::TestContext;
 
+/// Awaits `fut`, panicking with `"{what} did not complete within {limit:?}"` if
+/// it has not completed within `limit`.
+///
+/// For bounding steps that could otherwise hang a test indefinitely, such as a
+/// test body or a consumer `close()`.
+pub async fn with_timeout<T>(what: &str, limit: Duration, fut: impl Future<Output = T>) -> T {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(output) => output,
+        Err(_) => panic!("{what} did not complete within {limit:?}"),
+    }
+}
+
 /// Default maximum time to wait for a condition.
 ///
 /// Mirrors `org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS`.
@@ -197,12 +209,12 @@ pub async fn wait_for_all_partitions_metadata_with_context(
     topic: &str,
     expected_num_partitions: usize,
 ) {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+    let mut props = HashMap::from([
         ("client.id".to_string(), "test-utils-metadata-wait".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
+    ctx.configure(&mut props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     let admin: Box<dyn Admin> = AdminClient::create(config).expect("admin client");
     wait_for_all_partitions_metadata(admin.as_ref(), topic, expected_num_partitions).await;

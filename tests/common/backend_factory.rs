@@ -140,9 +140,10 @@ pub trait ProducerBackendFactory {
     fn name(&self) -> &'static str;
 
     /// Whether this backend needs the container-internal bootstrap
-    /// addresses (true for the gRPC backends, since the broker's
-    /// host-loopback addresses aren't reachable from inside their
-    /// containers). Tests pick between
+    /// addresses (true for the gRPC backends in container mode, since the
+    /// broker's host-loopback addresses aren't reachable from inside their
+    /// containers; false in native mode, where the server runs on the host —
+    /// see [`crate::common::backend_pool::BackendMode`]). Tests pick between
     /// [`TestContext::bootstrap_servers`] and
     /// [`TestContext::container_bootstrap_servers`] based on this.
     fn needs_container_bootstrap(&self) -> bool {
@@ -281,8 +282,8 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-            // Caller is responsible for passing a container-reachable
-            // bootstrap — see TestContext::container_bootstrap_servers.
+            // Caller is responsible for passing a backend-reachable
+            // bootstrap — see `needs_container_bootstrap`.
             MultilanguageProducer::new(self.channel.clone(), config, "python").await
         }
 
@@ -298,7 +299,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -321,7 +322,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -341,7 +342,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -379,7 +380,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -402,7 +403,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -422,7 +423,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -458,7 +459,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -479,7 +480,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 
@@ -499,7 +500,7 @@ mod grpc_backends {
         }
 
         fn needs_container_bootstrap(&self) -> bool {
-            true
+            crate::common::backend_pool::uses_containers()
         }
     }
 }

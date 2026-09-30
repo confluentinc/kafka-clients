@@ -104,7 +104,7 @@ enum SslState {
 /// Key differences from Java:
 /// - Uses `rustls::ClientConnection` directly with the buffer-in / buffer-out
 ///   API (`reader()`/`writer()` + `read_tls`/`write_tls`/`process_new_packets`)
-///   so encryption is CPU-only; awaiting TCP is opt-in (handshake only).
+///   so encryption is CPU-only and the handshake never awaits TCP.
 /// - `KafkaChannel`'s selector loop calls `try_write_vectored` for the write
 ///   fast path: encrypt synchronously, push as much ciphertext as the kernel
 ///   accepts, and surface `OP_WRITE` interest via `has_pending_writes()` for
@@ -247,10 +247,18 @@ impl TransportLayer for SslTransportLayer {
 
     /// Performs the TLS handshake, transitioning from `Handshaking` to `Ready`.
     ///
-    /// Drives the rustls state machine manually: while `conn.is_handshaking()`,
-    /// alternate between writing pending TLS records (when `wants_write()`)
-    /// and reading + processing new ciphertext (otherwise). This is called by
-    /// `KafkaChannel::prepare()` after `finish_connect()` returns true.
+    /// Non-blocking, as in Java's `SslTransportLayer.handshake()`. Each call
+    /// flushes pending TLS records (`wants_write()`), reads and processes any
+    /// ciphertext already received, and returns `Ok(())` with the transport
+    /// still `Handshaking` as soon as a TCP write or read would block. The
+    /// selector calls it again when the socket becomes writable (signalled by
+    /// `has_pending_writes()`) or readable. Called by `KafkaChannel::prepare()`
+    /// after `finish_connect()` returns true.
+    ///
+    /// This method must never await the peer. If it did, a peer that accepts
+    /// the TCP connection but does not respond would block the selector task,
+    /// preventing both the `socket.connection.setup.timeout.ms` check in
+    /// `NetworkClient` and selector wakeups from running.
     ///
     /// # Errors
     ///
@@ -272,6 +280,29 @@ impl TransportLayer for SslTransportLayer {
             };
 
             loop {
+                // Push handshake bytes until WouldBlock or no more pending output.
+                while boxed.conn.wants_write() {
+                    let mut adapter = TryWriteAdapter(&boxed.tcp);
+                    match boxed.conn.write_tls(&mut adapter) {
+                        Ok(0) => break,
+                        Ok(_) => {},
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // The socket send buffer is full. Resume once the
+                            // socket is writable; `has_pending_writes()` causes
+                            // the selector to register write interest.
+                            self.state = SslState::Handshaking(boxed);
+                            return Ok(());
+                        },
+                        // Transport-level write failure (connection reset,
+                        // broken pipe, etc.) — this is a network disconnect,
+                        // NOT an authentication failure. Preserve the original
+                        // error kind so the selector / network client treat it
+                        // as a retriable disconnect (Java re-throws the
+                        // original `IOException` at SslTransportLayer.java:324).
+                        Err(e) => return Err(e),
+                    }
+                }
+
                 // Handshake is complete only when both sides finished AND the
                 // local output buffer has been flushed. In TLS 1.3 the client's
                 // own Finished is queued for `write_tls` after `is_handshaking()`
@@ -284,32 +315,7 @@ impl TransportLayer for SslTransportLayer {
                     return Ok(());
                 }
 
-                if boxed.conn.wants_write() {
-                    // Push handshake bytes until WouldBlock or no more pending output.
-                    boxed.tcp.writable().await?;
-                    loop {
-                        if !boxed.conn.wants_write() {
-                            break;
-                        }
-                        let mut adapter = TryWriteAdapter(&boxed.tcp);
-                        match boxed.conn.write_tls(&mut adapter) {
-                            Ok(0) => break,
-                            Ok(_) => continue,
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            // Transport-level write failure (connection reset,
-                            // broken pipe, etc.) — this is a network disconnect,
-                            // NOT an authentication failure. Preserve the original
-                            // error kind so the selector / network client treat it
-                            // as a retriable disconnect (Java re-throws the
-                            // original `IOException` at SslTransportLayer.java:324).
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    continue;
-                }
-
                 // Need to read.
-                boxed.tcp.readable().await?;
                 let mut adapter = TryReadAdapter(&boxed.tcp);
                 match boxed.conn.read_tls(&mut adapter) {
                     Ok(0) => {
@@ -330,8 +336,12 @@ impl TransportLayer for SslTransportLayer {
                         return Ok(());
                     },
                     Ok(_) => {},
-                    // Spurious wake-ups can return WouldBlock — loop and re-await readable.
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    // No handshake data has arrived yet. Return and resume on
+                    // read readiness rather than awaiting the peer here.
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        self.state = SslState::Handshaking(boxed);
+                        return Ok(());
+                    },
                     // Transport-level read failure (connection reset by peer,
                     // unexpected EOF, etc.) — a network disconnect, NOT an
                     // authentication failure. Preserve the original error kind so
@@ -394,10 +404,14 @@ impl TransportLayer for SslTransportLayer {
     }
 
     /// Returns `true` if the TLS layer has pending encrypted data to flush.
+    ///
+    /// Also covers handshake records in the `Handshaking` state, so that the
+    /// selector registers write interest when `handshake()` returned because
+    /// the socket send buffer was full.
     fn has_pending_writes(&self) -> bool {
         match &self.state {
-            SslState::Ready(c) => c.conn.wants_write(),
-            _ => false,
+            SslState::Handshaking(c) | SslState::Ready(c) => c.conn.wants_write(),
+            SslState::Closed => false,
         }
     }
 
@@ -868,7 +882,7 @@ impl io::Read for TryReadAdapter<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::common::config::SslConfigs;
     use crate::common::network::is_authentication_error;
@@ -1014,7 +1028,9 @@ mod tests {
         let transport = SslTransportLayer::new(stream, conn, domain);
         // Before handshake (Handshaking state), has_bytes_buffered() returns false.
         assert!(!transport.has_bytes_buffered());
-        assert!(!transport.has_pending_writes());
+        // rustls queues the ClientHello when the connection is created, so
+        // handshake records are pending before the first `handshake()` call.
+        assert!(transport.has_pending_writes());
     }
 
     #[tokio::test]
@@ -1057,7 +1073,7 @@ mod tests {
 
     /// End-to-end TLS handshake against an in-process rustls server. Verifies
     /// that the manual handshake state machine drives `is_handshaking()` to
-    /// false in one `handshake()` await.
+    /// false when `handshake()` is invoked repeatedly on socket readiness.
     #[tokio::test]
     async fn test_handshake_drives_to_completion() {
         let (factory, server_config) = build_paired_factory_and_server_config();
@@ -1069,7 +1085,7 @@ mod tests {
         // Drive a server-side rustls connection in parallel.
         let server_task = tokio::spawn(async move { drive_server(server_stream, server_config).await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
         assert!(transport.ready(), "transport should be Ready after handshake");
 
         // Cleanly close client; let server task finish.
@@ -1091,7 +1107,7 @@ mod tests {
         let server_task =
             tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
 
         // Wait for the server's encrypted record to arrive on the wire.
         transport.readable().await.unwrap();
@@ -1152,7 +1168,7 @@ mod tests {
         let server_task =
             tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
 
         // `supports_try_read()` must now advertise the sync fast path.
         assert!(transport.supports_try_read());
@@ -1232,7 +1248,7 @@ mod tests {
         let server_task =
             tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
         transport.readable().await.unwrap();
 
         // Drain "hello-tls" (9 bytes) with a 4-byte limit per call: the
@@ -1299,7 +1315,7 @@ mod tests {
         // Server completes the handshake but never reads — let TCP buffer fill.
         let server_task = tokio::spawn(async move { drive_server_then_idle(server_stream, server_config).await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
 
         // Spam writes until rustls retains pending ciphertext (i.e. TCP backpressure hit).
         let payload = vec![0xABu8; MAX_TLS_COALESCE];
@@ -1341,7 +1357,7 @@ mod tests {
 
         let server_task = tokio::spawn(async move { drive_server_drain(server_stream, server_config).await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
 
         let a = b"alpha-payload";
         let b = b"beta-payload";
@@ -1376,7 +1392,7 @@ mod tests {
 
         let server_task = tokio::spawn(async move { drive_server_observe_close(server_stream, server_config).await });
 
-        transport.handshake().await.expect("handshake failed");
+        complete_handshake(&mut transport).await.expect("handshake failed");
         transport.close().await.expect("close failed");
         assert!(!transport.is_open());
 
@@ -1405,8 +1421,7 @@ mod tests {
 
         let server_task = tokio::spawn(async move { drive_server(server_stream, server_config).await });
 
-        let err = transport
-            .handshake()
+        let err = complete_handshake(&mut transport)
             .await
             .expect_err("handshake should fail on untrusted cert");
         assert!(
@@ -1440,7 +1455,9 @@ mod tests {
         // classified as a transport disconnect, not an auth failure.
         drop(server_stream);
 
-        let err = transport.handshake().await.expect_err("handshake should fail on a reset/EOF");
+        let err = complete_handshake(&mut transport)
+            .await
+            .expect_err("handshake should fail on a reset/EOF");
         assert!(
             !is_authentication_error(&err),
             "a transport reset/EOF must NOT be a typed authentication error, got: {err:?}"
@@ -1463,7 +1480,61 @@ mod tests {
         let _ = transport.close().await;
     }
 
+    /// Regression test: `handshake()` must return, rather than wait, when the
+    /// peer accepts the TCP connection but never responds to the ClientHello.
+    /// Each call flushes what it can and returns with the transport still
+    /// handshaking, which lets the selector continue to enforce the connection
+    /// setup timeout and process wakeups, consistent with Java's non-blocking
+    /// `SslTransportLayer.handshake()`. Previously the handshake awaited the
+    /// peer indefinitely, which caused `KafkaConsumer::close()` to hang over SSL.
+    #[tokio::test]
+    async fn test_handshake_returns_when_peer_is_silent() {
+        let factory = create_test_factory();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        for attempt in 0..3 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), transport.handshake())
+                .await
+                .unwrap_or_else(|_| panic!("handshake() call {attempt} awaited a silent peer instead of returning"))
+                .expect("a handshake step with no peer data must not fail");
+            assert!(!transport.ready(), "a silent peer cannot complete the handshake");
+            assert!(transport.is_open(), "the transport must stay open while handshaking");
+            assert!(!transport.has_pending_writes(), "the ClientHello should have been flushed");
+        }
+
+        // Verify the peer received the ClientHello, a TLS handshake record (type 0x16).
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_stream.readable())
+            .await
+            .expect("the ClientHello never reached the peer")
+            .unwrap();
+        let mut first = [0u8; 1];
+        assert_eq!(server_stream.try_read(&mut first).unwrap(), 1);
+        assert_eq!(first[0], 0x16, "expected a TLS handshake record");
+
+        let _ = transport.close().await;
+    }
+
     // ---- Test helpers ---------------------------------------------------------
+
+    /// Drives the non-blocking `handshake()` to completion as the selector does:
+    /// it is invoked again on write readiness while handshake records are
+    /// pending, and on read readiness otherwise.
+    async fn complete_handshake(transport: &mut SslTransportLayer) -> io::Result<()> {
+        loop {
+            transport.handshake().await?;
+            if transport.ready() {
+                return Ok(());
+            }
+            if transport.has_pending_writes() {
+                transport.writable().await?;
+            } else {
+                transport.readable().await?;
+            }
+        }
+    }
 
     /// Self-signed certificate + private key pair for "localhost", generated at
     /// test time via `rcgen`. Returns DER cert bytes and DER PKCS#8 key bytes,
@@ -1481,7 +1552,8 @@ mod tests {
     }
 
     /// Build a paired (client SslFactory, server ServerConfig) sharing one self-signed cert.
-    fn build_paired_factory_and_server_config() -> (SslFactory, Arc<rustls::ServerConfig>) {
+    /// Shared with the selector's SSL tests.
+    pub(crate) fn build_paired_factory_and_server_config() -> (SslFactory, Arc<rustls::ServerConfig>) {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let (cert_der, key_der, cert_pem) = make_self_signed();
