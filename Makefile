@@ -20,8 +20,9 @@ endif
 	test test-rust test-integration test-integration-python test-integration-c test-integration-dotnet \
 	test-integration-python-ssl test-integration-python-sasl-ssl \
 	test-integration-c-ssl test-integration-c-sasl-ssl \
-	build-grpc-native-python build-grpc-native-c \
-	test-integration-python-native test-integration-c-native \
+	test-integration-dotnet-ssl test-integration-dotnet-sasl-ssl \
+	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet \
+	test-integration-python-native test-integration-c-native test-integration-dotnet-native \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
@@ -118,7 +119,8 @@ build-grpc-images-c: build-rust-all-features
 # unlike build-grpc-images-python this does NOT depend on a host-side
 # binding build. Images are platform-agnostic: CI is amd64-native; local
 # Apple-Silicon dev sets DOCKER_DEFAULT_PLATFORM=linux/amd64 in its environment
-# (the arm64 Grpc.Tools protoc segfaults), never a Makefile-baked --platform.
+# (Grpc.Tools' linux_arm64 protoc segfaults in an arm64 Linux container), never a
+# Makefile-baked --platform.
 build-grpc-images-dotnet: build-rust-all-features
 	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
 	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
@@ -319,11 +321,13 @@ test-integration-c:
 # before the recipe, so it would fire the failing image build before the guard
 # could stop it).
 #
-# Unlike python and c there is deliberately NO `-macos` counterpart to fall back
-# to: .NET has no Dockerfile.grpc.macos, because Grpc.Tools ships an arm64 protoc
-# that SIGSEGVs during C# codegen, so the images cannot be built on an arm64
-# host at all. Skipping is the only option here; the container arm runs in CI's
-# amd64 Linux verify-dotnet job (see .semaphore/semaphore.yml).
+# As for python and c, the non-Linux fallback is the native arm,
+# test-integration-dotnet-native below, which the macOS CI verify-dotnet job
+# runs. The container arm runs in CI's amd64 Linux verify-dotnet jobs (see
+# .semaphore/semaphore.yml): the images are built for linux/amd64 because
+# Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen inside an arm64 Linux
+# container. A macOS arm64 host is unaffected by that: Grpc.Tools has no macOS
+# arm64 protoc, and its macosx_x64 one runs under Rosetta 2.
 #
 # THREE TESTS ARE SKIPPED FOR .NET ONLY -- the producer transaction arms.
 # `multilanguage_test!` emits one arm per backend for every test it wraps, so the
@@ -336,14 +340,21 @@ test-integration-c:
 # so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
 # at all yet -- IAsyncProducer's own docs record it as deferred.
 #
-# The skip is scoped to THIS target, which only ever runs __grpc_dotnet*, so no
+# The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the dotnet
+# targets (this one, the -ssl / -sasl-ssl variants that delegate to it, and
+# test-integration-dotnet-native), which only ever run __grpc_dotnet*, so no
 # other backend loses coverage: python / c / rust still run all three.
 #
-# REMOVE THESE THREE LINES when the .NET producer reaches transaction parity with
-# Python (the 10 transaction P/Invokes, the public surface on
+# REMOVE DOTNET_GRPC_SKIPS (the definition below and its uses in this target and
+# in test-integration-dotnet-native) when the .NET producer reaches transaction
+# parity with Python (the 10 transaction P/Invokes, the public surface on
 # IProducer/IAsyncProducer and the four producer types, the three MockProducer
 # transaction controls, and the five RPCs in both producer servicers). Deleting
-# them is the last step of that phase, not a follow-up to it.
+# it is the last step of that phase, not a follow-up to it.
+DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
+	--skip test_aborted_transaction_records_are_discarded \
+	--skip test_consume_transform_produce_with_offsets
+
 test-integration-dotnet:
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
@@ -353,22 +364,19 @@ test-integration-dotnet:
 		printf '  target/release/libconfluent_kafka.so\n'; \
 		printf 'into a Linux container. On this host that artifact is\n'; \
 		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
-		printf '\n'; \
-		printf 'There is no -macos variant for .NET (Grpc.Tools arm64 protoc\n'; \
-		printf 'SIGSEGVs during C# codegen), so this arm runs only in CI'"'"'s\n'; \
-		printf 'amd64 Linux verify-dotnet job. Unit tests still run: make test-dotnet.\n'; \
+		printf 'This container arm runs only in CI'"'"'s amd64 Linux verify-dotnet jobs.\n'; \
+		printf 'Run it natively on this host with: %smake test-integration-dotnet-native\n' \
+			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-dotnet && \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-			--skip test_transactional_records_are_visible_only_after_commit \
-			--skip test_aborted_transaction_records_are_discarded \
-			--skip test_consume_transform_produce_with_offsets; \
+			$(DOTNET_GRPC_SKIPS); \
 	fi
 
 # ── Protocol-scoped container-backed multilanguage arms ──────────────────
 #
-# The gRPC Python/C arms above default to the PLAINTEXT CONTAINER listener.
+# The gRPC Python/C/.NET arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
 # listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
 # of the client SSL/SASL_SSL listeners, advertised on the container hostname
@@ -385,12 +393,17 @@ test-integration-c-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-c
 test-integration-c-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-c
+test-integration-dotnet-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-dotnet
+test-integration-dotnet-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-dotnet
 
 # ── Native (non-container) gRPC multilanguage arms ───────────────────────
 #
-# The same `__grpc_python` / `__grpc_c` arms, but with each gRPC server run as a
-# host process instead of a Docker container (MULTILANG_BACKEND_MODE=native; see
-# tests/common/backend_pool.rs). Only the broker runs in Docker. These targets
+# The same `__grpc_python` / `__grpc_c` / `__grpc_dotnet` arms, but with each
+# gRPC server run as a host process instead of a Docker container
+# (MULTILANG_BACKEND_MODE=native; see tests/common/backend_pool.rs). Only the
+# broker runs in Docker. These targets
 # are used on macOS, where containers run Linux: the container arms can only
 # test the Linux build of the bindings and cannot load the host's Mach-O
 # artifacts. Native mode is also supported on Linux.
@@ -399,6 +412,8 @@ test-integration-c-sasl-ssl:
 # clean:
 #   python/  generated gRPC stubs, put on PYTHONPATH by the harness
 #   c/       the kafka_grpc_server binary
+#   dotnet/  the .NET gRPC server's net10.0 build (Confluent.Kafka.GrpcServer.dll
+#            plus the native library), run with the `dotnet` host
 GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
 GRPC_PROTO_DIR = $(RUST_PROJECT_ROOT)/multilanguage-test-server/proto
 GRPC_PROTOS = $(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
@@ -427,6 +442,13 @@ build-grpc-native-c: build-rust-all-features
 	mkdir -p $(GRPC_NATIVE_DIR)/c
 	cp $(GRPC_NATIVE_DIR)/c-build/kafka_grpc_server $(GRPC_NATIVE_DIR)/c/kafka_grpc_server
 
+# Builds the .NET gRPC server's net10.0 leg against the host's release
+# libconfluent_kafka (bindings/dotnet's grpc-native target). Requires the .NET 10
+# SDK on PATH, which brings the ASP.NET Core 10 runtime the server runs on. On an
+# Apple-Silicon host Grpc.Tools runs its macosx_x64 protoc under Rosetta 2.
+build-grpc-native-dotnet: build-rust-all-features
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-native
+
 test-integration-python-native: build-grpc-native-python
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
@@ -434,6 +456,13 @@ test-integration-python-native: build-grpc-native-python
 test-integration-c-native: build-grpc-native-c
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+
+# Skips the same three transaction tests as test-integration-dotnet
+# (DOTNET_GRPC_SKIPS, see there).
+test-integration-dotnet-native: build-grpc-native-dotnet
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+		$(DOTNET_GRPC_SKIPS)
 
 # ── Performance integration tests ────────────────────────────────────────
 #
@@ -542,9 +571,9 @@ test-dotnet:
 # test-c-macos-docker / test-python-macos-docker, .NET has no OS-specific
 # recipe to swap in -- the delegated bindings/dotnet Makefile step is already
 # platform-agnostic -- so this is a thin alias, kept for naming symmetry with
-# the other macOS-block targets. The gRPC multilanguage arm runs on Linux only
-# (verify-dotnet); this build never touches grpc-server (not in the .sln), so
-# .NET's Linux-only Grpc.Tools/protoc constraint does not apply here.
+# the other macOS-block targets. On macOS the gRPC multilanguage arm runs
+# natively instead (see verify-dotnet-macos-docker); this build never touches
+# grpc-server (not in the .sln).
 test-dotnet-macos-docker: test-dotnet
 
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
@@ -579,10 +608,11 @@ verify-dotnet: test-dotnet
 	$(MAKE) test-integration-dotnet
 	$(MAKE) test-integration-perf-dotnet
 
-# macOS verify-dotnet: unit tests only, no integration/perf (mirrors
-# verify-c-macos-docker / verify-python-macos-docker, which also drop the
-# Linux-only integration stage).
+# macOS verify-dotnet: unit tests, then the gRPC multilanguage arm with the gRPC
+# server as a native host process (see test-integration-dotnet-native), as
+# verify-c-macos-docker / verify-python-macos-docker do. No perf stage.
 verify-dotnet-macos-docker: test-dotnet-macos-docker
+	$(MAKE) test-integration-dotnet-native
 
 # macOS perf p99 budget (ms), used by verify-rust-macos-docker.
 MACOS_P99_LIMIT_MS ?= 150

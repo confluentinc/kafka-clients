@@ -7,13 +7,13 @@ GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:dev
 # target the SOLUTION explicitly — Confluent.Kafka.sln holds only the library
 # (Confluent.Kafka) and its unit tests (Confluent.Kafka.UnitTests). The
 # grpc-server project is deliberately NOT in the solution (it needs protoc and is
-# only ever built inside the gRPC Docker images), so building/formatting/testing
-# the .sln never drags it in.
+# built only by the gRPC Docker images and by `grpc-native` below), so
+# building/formatting/testing the .sln never drags it in.
 DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
 SOLUTION := $(RUST_PROJECT_ROOT)/bindings/dotnet/Confluent.Kafka.sln
 
-.PHONY: grpc-image grpc-image-async build-dotnet test-dotnet test-soak-dotnet
+.PHONY: grpc-image grpc-image-async grpc-native build-dotnet test-dotnet test-soak-dotnet
 
 # Build the .NET gRPC consumer-backend image used by the multilanguage
 # integration test harness. The build context is the repo root so the
@@ -36,6 +36,21 @@ grpc-image-async:
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/dotnet/Dockerfile.grpc.async \
 		$(RUST_PROJECT_ROOT)
+
+# Build the .NET gRPC server for the native (host-process) multilanguage arm
+# (M17/P1): the net10.0 leg of grpc-server into target/grpc-native/dotnet, where
+# tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
+# brings the ASP.NET Core 10 runtime but no ASP.NET Core 8 one; the Docker images
+# publish the net8.0 leg instead. Invoked by the root `build-grpc-native-dotnet`,
+# which builds the Rust release artifacts first.
+#
+# `-c Release` is PINNED rather than $(DOTNET_CONFIG): Confluent.Kafka.csproj's
+# native-copy <Content> item copies target/$(CargoProfileDir)/libconfluent_kafka.*
+# into the output, CargoProfileDir follows the configuration, and only the release
+# native is built by build-rust-all-features. A Debug build would copy a stale or
+# missing debug native instead.
+grpc-native:
+	$(DOTNET) build -c Release -f net10.0 $(RUST_PROJECT_ROOT)/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(RUST_PROJECT_ROOT)/target/grpc-native/dotnet
 
 # Two-stage build (CLAUDE.md §7.1, firm order): the Rust core produces the
 # native cdylib + generated header FIRST, then `dotnet build` compiles the
