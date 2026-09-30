@@ -158,12 +158,6 @@ pub struct ConsumerConfig {
     pub(crate) metrics_num_samples: i32,
     /// `metrics.recording.level`
     pub(crate) metrics_recording_level: String,
-    /// `metric.reporters`
-    pub(crate) metric_reporter_classes: Vec<String>,
-
-    // --- Interceptors ---
-    /// `interceptor.classes`
-    pub(crate) interceptor_classes: Vec<String>,
 
     // --- Share consumer (accepted silently per scope §20) ---
     /// `share.acknowledgement.mode`
@@ -248,9 +242,6 @@ impl Default for ConsumerConfig {
             metrics_sample_window_ms: 30_000,
             metrics_num_samples: 2,
             metrics_recording_level: "INFO".to_string(),
-            metric_reporter_classes: Vec::new(),
-
-            interceptor_classes: Vec::new(),
 
             share_acknowledgement_mode: "implicit".to_string(),
             share_acquire_mode: "batch_optimized".to_string(),
@@ -779,12 +770,9 @@ impl ConsumerConfig {
                     }
                     config.metrics_recording_level = value.clone();
                 },
-                Self::METRIC_REPORTER_CLASSES_CONFIG => {
-                    config.metric_reporter_classes = split_csv(value);
-                },
-                Self::INTERCEPTOR_CLASSES_CONFIG => {
-                    // Accepted silently per scope §20.
-                    config.interceptor_classes = split_csv(value);
+                Self::METRIC_REPORTER_CLASSES_CONFIG | Self::INTERCEPTOR_CLASSES_CONFIG => {
+                    // Accepted silently: both name classes, which this client
+                    // does not load (no reflection).
                 },
                 Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => {
                     // Accepted silently per scope §20.
