@@ -210,6 +210,7 @@ The public-API and deprecation rules are checked against a later release: `@Inte
 `AUDIENCE_REF` and `DEPRECATION_REFS` in `xtask/src/java.rs`; `cargo xtask fetch-java-refs` fetches them.
 
 ## Development Workflow
+The Rust code lives in `rust/`, the bindings in `python/` and `c/`. Run the `cargo` commands below from `rust/`; run `make` targets from the repository root.
 - **Build**: `cargo build`
 - **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
 - **Format**: `cargo xtask format`
@@ -217,8 +218,8 @@ The public-API and deprecation rules are checked against a later release: `@Inte
 - **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
 - **Lint Fix**: `cargo xtask lint-fix` (automatically fix clippy warnings)
 - **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only)
-- **Coverage (unit)**: `cargo xtask coverage` (report at coverage/html/index.html)
-- **Coverage (lcov)**: `cargo xtask coverage-lcov` (writes coverage/lcov.info)
+- **Coverage (unit)**: `cargo xtask coverage` (report at rust/coverage/html/index.html)
+- **Coverage (lcov)**: `cargo xtask coverage-lcov` (writes rust/coverage/lcov.info)
 - **Coverage (all tests)**: `cargo xtask coverage-all` (requires Docker)
 
 ## Definition of Done

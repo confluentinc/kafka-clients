@@ -33,7 +33,7 @@ Update the design documentation in design/current/ of this Rust Kafka client
 so that it describes the CURRENT code.
 
 Read every markdown document in design/current/, then verify their claims
-against the code in src/ and the conventions in CLAUDE.md and .claude/rules/.
+against the code in rust/src/ (and the bindings in python/ and c/) and the conventions in CLAUDE.md and .claude/rules/.
 Correct whatever has drifted: renamed types, moved modules, mechanisms that
 were replaced by another, wrong counts, dead file paths. Cite file:line for
 structural claims so the next reader can re-verify them.
@@ -51,7 +51,7 @@ non-blocking". The phase-by-phase record belongs in design/history/
 Two limits on that rule. First, it targets PROJECT process artifacts, not
 names that exist in the code: the consumer background-task loop really does
 label its steps "Phase 1 ... Phase 2.4 ..." in run_once
-(src/consumer/internals/consumer_network_thread.rs), mirroring Java's
+(rust/src/consumer/internals/consumer_network_thread.rs), mirroring Java's
 ConsumerNetworkThread, and those labels stay -- they point at code the reader
 can go and find. Second, status.md is exempt: tracking what is done is its
 job and it is organised by phase, so leave its structure and its phase and
