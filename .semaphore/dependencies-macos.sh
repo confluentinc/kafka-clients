@@ -47,8 +47,19 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-mod
 source "$HOME/.cargo/env"
 git submodule update --init --depth=1 kafka
 
+# MACOS_INSTALL_GRPC_CPP=true installs the build dependencies of the native C++
+# gRPC server (make build-grpc-native-c): the grpc++ and protobuf headers and
+# libraries, protoc, grpc_cpp_plugin, and pkg-config. Homebrew provides prebuilt
+# bottles for this agent's macOS version, so no source build is required. Only
+# the job that needs these packages sets this variable.
+if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
+  brew install grpc
+  command -v pkg-config >/dev/null || brew install pkgconf
+fi
+
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
-# setup above always runs). Set by blocks whose tests need no container.
+# setup above always runs). Intended for blocks whose tests need no container;
+# no block currently sets it.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else
