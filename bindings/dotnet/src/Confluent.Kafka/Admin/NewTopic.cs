@@ -54,6 +54,16 @@ namespace Confluent.Kafka.Admin;
 /// broker's defaults instead of failing it (ffi §B5). <c>-1</c> is the one negative whose
 /// meaning survives that reading, because it already <em>is</em> "unset".
 /// </para>
+/// <para>
+/// ⚠ <b>Stricter than Java — a <see langword="null"/> name is rejected by every
+/// constructor</b> with <see cref="ArgumentNullException"/>. Java's <c>NewTopic</c> stores
+/// the name without checking (<c>NewTopic.java:57</c>, <c>:72</c>), and
+/// <c>createTopics</c> then fails only that topic's future with
+/// <c>InvalidTopicException</c> (<c>topicNameIsUnrepresentable</c>,
+/// <c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). Whether the binding should
+/// reproduce that per-key failure instead of rejecting up front is open: it is one
+/// instance of the binding-wide up-front-rejection pattern (audit X10).
+/// </para>
 /// </remarks>
 public sealed class NewTopic
 {
@@ -64,7 +74,9 @@ public sealed class NewTopic
     /// <param name="name">The topic name.</param>
     /// <param name="numPartitions">The number of partitions, or <c>-1</c> for the broker default.</param>
     /// <param name="replicationFactor">The replication factor, or <c>-1</c> for the broker default.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="name"/> is null — stricter than Java; see the type remarks.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="numPartitions"/> or <paramref name="replicationFactor"/> is below
     /// <c>-1</c> — see the recorded divergence in the type remarks.
@@ -88,7 +100,9 @@ public sealed class NewTopic
     /// The replication factor, or <see langword="null"/> or <c>-1</c> for the broker
     /// default.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="name"/> is null — stricter than Java; see the type remarks.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="numPartitions"/> or <paramref name="replicationFactor"/> is below
     /// <c>-1</c>. The ABI reads every negative value as "unset", so such a value would be
@@ -133,7 +147,8 @@ public sealed class NewTopic
     /// <param name="replicasAssignments">Partition index → replica broker ids.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="replicasAssignments"/> is null, or a
-    /// map value is null.
+    /// map value is null. A null <paramref name="name"/> is rejected stricter than Java;
+    /// see the type remarks.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">A partition index is negative.</exception>
     public NewTopic(string name, IReadOnlyDictionary<int, IReadOnlyList<int>> replicasAssignments)

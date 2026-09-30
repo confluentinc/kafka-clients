@@ -79,6 +79,17 @@ public abstract class TopicCollection
     /// <param name="topics">The topic names. Copied, so later mutation cannot affect a request.</param>
     /// <returns>The collection.</returns>
     /// <exception cref="System.ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <remarks>
+    /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicNames</c>
+    /// accepts one. ⚠ The RPC it is handed to is <b>stricter than Java</b>:
+    /// <see cref="Admin.IAdmin.DeleteTopics"/> and <see cref="Admin.IAdmin.DescribeTopics"/>
+    /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails
+    /// only that key's future with <c>InvalidTopicException</c>
+    /// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>, used at
+    /// <c>:1924</c> and <c>:2334</c>). Whether the binding should reproduce that per-key
+    /// failure is open: it is one instance of the binding-wide up-front-rejection pattern
+    /// (audit X10).
+    /// </remarks>
     public static TopicNameCollection OfTopicNames(IEnumerable<string> topics) =>
         new TopicNameCollection(topics);
 

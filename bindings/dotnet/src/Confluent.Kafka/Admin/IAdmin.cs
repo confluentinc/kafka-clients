@@ -94,7 +94,11 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// name or a configuration value containing a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks). A null configuration value is <em>not</em>
     /// rejected: it is sent as Java's null (see
-    /// <see cref="NewTopic.Configs"/>).
+    /// <see cref="NewTopic.Configs"/>). A topic with a null <em>name</em> never reaches this
+    /// call: the <see cref="NewTopic"/> constructor rejects one, stricter than Java, whose
+    /// <c>createTopics</c> fails only that topic's future with <c>InvalidTopicException</c>
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). Whether to fail per key
+    /// instead is open (audit X10; see the <see cref="NewTopic"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
@@ -138,7 +142,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
-    /// remarks).
+    /// remarks). The null element is rejected stricter than Java, whose
+    /// <c>deleteTopics</c> fails only that key's future with <c>InvalidTopicException</c>
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1924</c>). Whether to fail per key
+    /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
@@ -172,7 +179,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
-    /// remarks).
+    /// remarks). The null element is rejected stricter than Java, whose
+    /// <c>describeTopics</c> fails only that key's future with <c>InvalidTopicException</c>
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:2334</c>). Whether to fail per key
+    /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is
@@ -283,8 +293,11 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// yields <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// ⚠ <b>Four</b> awaitables — one per cluster attribute — rather than one per key. Two
-    /// of them are genuinely nullable: see <see cref="DescribeClusterResult"/>.
+    /// ⚠ <b>Four</b> awaitables — one per cluster attribute — rather than one per key. Three
+    /// of them are genuinely nullable — <see cref="DescribeClusterResult.Controller"/>,
+    /// <see cref="DescribeClusterResult.ClusterId"/> and
+    /// <see cref="DescribeClusterResult.AuthorizedOperations"/>: see
+    /// <see cref="DescribeClusterResult"/>.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the

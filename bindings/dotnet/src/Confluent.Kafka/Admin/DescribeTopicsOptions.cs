@@ -58,16 +58,24 @@ public sealed class DescribeTopicsOptions
     /// <remarks>
     /// <para>
     /// Java notes the option is effective only for a by-<em>name</em> request, and is
-    /// capped by the broker's <c>max.request.partition.size.limit</c>.
+    /// capped by the broker's <c>max.request.partition.size.limit</c>. Java sends it as the
+    /// DescribeTopicPartitions request's <c>ResponsePartitionLimit</c>
+    /// (<c>KafkaAdminClient.java:2239</c>).
+    /// </para>
+    /// <para>
+    /// ⚠ <b>It currently has no effect on any request.</b> The core does not yet send
+    /// DescribeTopicPartitions — a by-name describe goes through Metadata — so the value is
+    /// carried to the core and then not used. This is a core gap, not a binding choice, and
+    /// the word "currently" is deliberate: this paragraph goes stale when the core starts
+    /// sending the request.
     /// </para>
     /// <para>
     /// Must not be negative — <b>stricter than Java</b>, which accepts any <c>int</c>.
-    /// The ABI maps a negative back to Java's 2000 default
-    /// (<c>src/ffi/admin.rs:3712</c>, a private helper whose doc the generated header does
-    /// not carry), so a negative would be silently reinterpreted rather than honoured.
-    /// That is the same reasoning, and the same
-    /// <see cref="System.ArgumentOutOfRangeException"/>, as
-    /// <see cref="TimeoutMs"/>. Zero is passed through untouched, as Java would.
+    /// The ABI maps a negative back to Java's 2000 default (the private helper
+    /// <c>describe_topics_options</c> in <c>src/ffi/admin.rs</c>, whose doc the generated
+    /// header does not carry), so a negative would be silently reinterpreted. That is the
+    /// same reasoning, and the same <see cref="System.ArgumentOutOfRangeException"/>, as
+    /// <see cref="TimeoutMs"/>.
     /// </para>
     /// </remarks>
     public int PartitionSizeLimitPerResponse { get; set; } = 2000;
