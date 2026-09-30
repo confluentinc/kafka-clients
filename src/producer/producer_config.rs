@@ -456,7 +456,8 @@ impl ProducerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    config.client_id = value.to_string();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_id = value.trim().to_string();
                 },
                 Self::BATCH_SIZE_CONFIG => {
                     config.batch_size = Self::parse_i32(key, value)?;
@@ -1710,6 +1711,18 @@ mod tests {
     fn test_explicit_client_id_is_preserved() {
         let config = ProducerConfig::new(&props_with(&[("client.id", "my-client")])).expect("valid");
         assert_eq!(config.client_id, "my-client");
+    }
+
+    /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
+    /// on the key being present in the originals, not on emptiness
+    /// (`ProducerConfig.java:581-583`), so a blank explicit id stays empty,
+    /// as in Java. The consumer and admin client generate one instead.
+    #[test]
+    fn test_explicit_client_id_is_trimmed() {
+        let config = ProducerConfig::new(&props_with(&[("client.id", " my-client ")])).expect("valid");
+        assert_eq!(config.client_id, "my-client");
+        let config = ProducerConfig::new(&props_with(&[("client.id", " ")])).expect("valid");
+        assert_eq!(config.client_id, "");
     }
 
     /// Without an explicit client.id or transactional.id, the derived form is
