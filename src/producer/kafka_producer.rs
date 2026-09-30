@@ -168,7 +168,7 @@ pub struct KafkaProducer<K, V> {
     /// plumbing (KIP-877) with no Rust counterpart in this milestone, so the
     /// bare [`Partitioner`] trait object is held directly. Nullable in Java
     /// (built-in partitioning when unset) — hence [`Option`]. Resolved from
-    /// `partitioner.class` via
+    /// `partitioner.type` via
     /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)
     /// or set with
     /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner).
@@ -176,7 +176,7 @@ pub struct KafkaProducer<K, V> {
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
     /// Which hash the keyed partition path uses, resolved from
-    /// `partitioner.class` (default [`KeyHasher::Crc32`], librdkafka
+    /// `partitioner.type` (default [`KeyHasher::Crc32`], librdkafka
     /// `consistent_random` parity). Copy-cheap; consulted once per keyed record.
     key_hasher: KeyHasher,
     /// Whether the sender task is still running.
@@ -766,7 +766,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// `key.serializer` is a `Type.CLASS` entry (`ProducerConfig.java:479-482`),
     /// so honouring those constructors means loading and instantiating a class
     /// named by a string at run time. Rust has no reflection, and — unlike
-    /// `partitioner.class`, where the built-in names can be mapped to concrete
+    /// `partitioner.type`, where the built-in names can be mapped to concrete
     /// types by
     /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig) —
     /// a serializer is typed in the producer's own `K` / `V`, so no such mapping
@@ -855,7 +855,7 @@ impl<K, V> KafkaProducer<K, V> {
 
     /// The body of [`new`](Self::new).
     ///
-    /// The partitioner is resolved from `partitioner.class` (a built-in name, or
+    /// The partitioner is resolved from `partitioner.type` (a built-in name, or
     /// the partitioner set with
     /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner))
     /// via `ProducerConfig::resolve_partitioner`. A resolved partitioner is
@@ -978,7 +978,7 @@ impl<K, V> KafkaProducer<K, V> {
         //     `KafkaProducer.java:381-388`: Java reflectively instantiates
         //     `partitioner.class` and calls `partitioner.configure(originals +
         //     {client.id -> clientId})`. Rust has no reflection, so the built-in
-        //     `partitioner.class` names resolve here, and a user-written partitioner
+        //     `partitioner.type` names resolve here, and a user-written partitioner
         //     is the value set with `ProducerConfig::set_partitioner`. It is configured with the user
         //     config map (`originals`) plus the resolved (possibly generated)
         //     `client.id`, so a generated `producer-N` id is visible to `configure`
@@ -3357,19 +3357,19 @@ mod tests {
         assert_eq!(RecordMetadata::UNKNOWN_PARTITION, partition);
     }
 
-    /// Builds a `KafkaProducer` whose `partitioner.class` selects
+    /// Builds a `KafkaProducer` whose `partitioner.type` selects
     /// `Murmur2RandomPartitioner` (the `KeyHasher::Murmur2` hash).
     fn create_murmur2_producer(
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
     ) -> KafkaProducer<String, String> {
         let mut props = HashMap::new();
-        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "Murmur2RandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).expect("murmur2 partitioner config is valid");
         create_producer_with_config(config, metadata, accumulator)
     }
 
-    /// The default (unset `partitioner.class`) keyed partition path uses the
+    /// The default (unset `partitioner.type`) keyed partition path uses the
     /// IEEE CRC-32 (librdkafka `consistent_random`) hash taken UNSIGNED modulo
     /// the partition count — NOT murmur2 / `Utils.toPositive`. This is the
     /// deliberate, user-approved deviation from Java parity.
@@ -3469,7 +3469,7 @@ mod tests {
     #[test]
     fn test_partition_ignore_keys_overrides_murmur2() {
         let mut props = HashMap::new();
-        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "Murmur2RandomPartitioner".to_string());
         props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         let metadata = create_metadata_with_topic(TOPIC, 3);
@@ -3505,7 +3505,7 @@ mod tests {
     //     `InterruptException`. Thread interruption (`Thread.interrupt()` /
     //     `InterruptException`) has no Rust/Tokio analogue — the same gap the producer-
     //     transaction rules record for `TransactionalRequestResult`. `MockPartitioner` is
-    //     incidental here (merely the configured `partitioner.class`), not the subject, so
+    //     incidental here (merely the configured `partitioner.type`), not the subject, so
     //     this belongs to the close/interrupt surface, not Phase 2.
     //   - testMonitorablePlugins exercises the `Plugin` / `Monitorable` metrics SPI, which
     //     the Phase 2 spec places explicitly out of scope. `MonitorablePartitioner` is only
@@ -3518,7 +3518,7 @@ mod tests {
     // pinned explicitly here:
     //
     //   - test_round_robin_partitioner_resolution_and_gating — `new` resolves a
-    //         built-in `partitioner.class` (both spellings) and a resolved partitioner
+    //         built-in `partitioner.type` (both spellings) and a resolved partitioner
     //         disables adaptive partitioning (KafkaProducer.java:428-433).
     //   - test_round_robin_partitioner_used_once_per_record — a stateful partitioner is
     //         consulted EXACTLY once per record on the send path (do_send computes it,
@@ -3527,9 +3527,9 @@ mod tests {
     //         and the serialized bytes are forwarded unchanged.
     //   - test_explicit_partition_bypasses_partitioner — an explicit record partition
     //         short-circuits `compute_partition` before the partitioner is consulted.
-    //   - test_explicit_partitioner_instance_wins_over_partitioner_class — an explicit
-    //         instance overrides a built-in `partitioner.class` (Java's
-    //         `getConfiguredInstance` returns the caller-provided instance).
+    //   - test_set_partitioner_replaces_partitioner_type_property — the partitioner
+    //         set with `ProducerConfig::set_partitioner` replaces a built-in
+    //         `partitioner.type` from the properties.
     // =====================================================================
 
     // --- test-local partitioners (translated from KafkaProducerTest's nested classes) ---
@@ -3669,7 +3669,7 @@ mod tests {
     /// Java resolves the partitioner reflectively through `partitioner.class`, which
     /// invokes the `MockPartitioner` constructor (bumping `INIT_COUNT`) and then
     /// `configure`. `MockPartitioner` is a test-only type with no built-in
-    /// `partitioner.class` name, so here it is supplied as an explicit instance;
+    /// `partitioner.type` name, so here it is supplied as an explicit instance;
     /// constructing it via `MockPartitioner::new()` bumps `INIT_COUNT` exactly as the
     /// Java ctor does. `close()` then bumps `CLOSE_COUNT` (`KafkaProducer.java:1446`).
     ///
@@ -3774,11 +3774,11 @@ mod tests {
         );
     }
 
-    /// A built-in `partitioner.class` (both the simple name and the fully-qualified
+    /// A built-in `partitioner.type` (both the simple name and the fully-qualified
     /// Java class name) is resolved by `new` into a live `partitioner`, and a
     /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
     /// `KafkaProducer.java:428-433`: "no need ... if we use a custom partitioner"). The
-    /// control producer (no `partitioner.class`) keeps `partitioner = None` and adaptive
+    /// control producer (no `partitioner.type`) keeps `partitioner = None` and adaptive
     /// partitioning follows the config default.
     ///
     /// Rust-only behavioral test (Java never inspects these internals); it pins the
@@ -3791,29 +3791,29 @@ mod tests {
             "RoundRobinPartitioner",
             "org.apache.kafka.clients.producer.RoundRobinPartitioner",
         ] {
-            let props = guard_props(&[("partitioner.class", name)]);
+            let props = guard_props(&[("partitioner.type", name)]);
             let config = ProducerConfig::new(&props).expect("valid config");
             let producer =
                 KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
                     .expect("RoundRobinPartitioner resolves");
             assert!(
                 producer.partitioner.is_some(),
-                "partitioner.class={name} must resolve a partitioner"
+                "partitioner.type={name} must resolve a partitioner"
             );
             assert!(
                 !producer.accumulator.enable_adaptive_partitioning_for_test(),
-                "a resolved partitioner must disable adaptive partitioning (partitioner.class={name})"
+                "a resolved partitioner must disable adaptive partitioning (partitioner.type={name})"
             );
         }
 
-        // Control: no partitioner.class -> no partitioner, adaptive follows config.
+        // Control: no partitioner.type -> no partitioner, adaptive follows config.
         let props = guard_props(&[]);
         let config = ProducerConfig::new(&props).expect("valid config");
         let adaptive_default = config.partitioner_adaptive_partitioning_enable;
         let producer =
             KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
                 .expect("default config constructs");
-        assert!(producer.partitioner.is_none(), "no partitioner.class -> no partitioner");
+        assert!(producer.partitioner.is_none(), "no partitioner.type -> no partitioner");
         assert_eq!(
             adaptive_default,
             producer.accumulator.enable_adaptive_partitioning_for_test(),
@@ -3915,16 +3915,16 @@ mod tests {
         );
     }
 
-    /// `ProducerConfig::set_partitioner` replaces a built-in `partitioner.class`
+    /// `ProducerConfig::set_partitioner` replaces a built-in `partitioner.type`
     /// from the properties, as a later value for the same key would in Java.
     /// Verified via `configure`: only `PartitionerForClientId` records the client.id
     /// (`RoundRobinPartitioner`'s `configure` is the default no-op), so a single
     /// recorded id proves the user-written partitioner — not the RoundRobin named in
     /// the properties — was built and configured.
     #[tokio::test]
-    async fn test_set_partitioner_replaces_partitioner_class_property() {
+    async fn test_set_partitioner_replaces_partitioner_type_property() {
         let client_ids = Arc::new(Mutex::new(Vec::new()));
-        let props = guard_props(&[("partitioner.class", "RoundRobinPartitioner")]);
+        let props = guard_props(&[("partitioner.type", "RoundRobinPartitioner")]);
         let config = ProducerConfig::new(&props)
             .expect("valid config")
             .set_partitioner::<String, String>(Box::new(PartitionerForClientId {
@@ -3932,7 +3932,7 @@ mod tests {
             }));
         let producer =
             KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("set_partitioner overrides partitioner.class");
+                .expect("set_partitioner overrides partitioner.type");
 
         let recorded = client_ids.lock().unwrap();
         assert_eq!(1, recorded.len(), "PartitionerForClientId was configured, not RoundRobin");

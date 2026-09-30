@@ -51,7 +51,7 @@ use crate::kafka_trace;
 /// Both hashers must remain selectable — CRC-32 for librdkafka parity (the
 /// default) and murmur2 for exact Java parity — so the choice is modelled as
 /// this `Copy` enum threaded through the (keyed) partition path. It is
-/// selected via the `partitioner.class` producer config (see
+/// selected via the `partitioner.type` producer config (see
 /// [`ProducerConfig::key_hasher`](crate::producer::ProducerConfig)).
 ///
 /// The keyless (sticky, KIP-794) partitioning path is **not** affected by this

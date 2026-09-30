@@ -310,7 +310,7 @@ The app-side path is `do_send` (`kafka_producer.rs:486`) →
 explicit partition wins; otherwise a present, non-ignored key is hashed by the
 configured `KeyHasher` (CRC-32 by default, for co-partitioning parity with
 librdkafka's `consistent_random`; or murmur2 for exact Java parity, selected via
-`partitioner.class`) through `BuiltInPartitioner::partition_for_key`; failing
+`partitioner.type`) through `BuiltInPartitioner::partition_for_key`; failing
 that, `UNKNOWN_PARTITION` defers to the sticky partitioner (see
 `design/current/partitioner.md`). The sender is woken
 only when the append filled a batch or started a new one
