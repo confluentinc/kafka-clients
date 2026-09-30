@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Multi-stage build for the *async* .NET gRPC consumer-backend image used by the
+# multilanguage integration test harness (the dotnet_async backend, M8/P2). It is
+# the async twin of Dockerfile.grpc: identical builder + runtime stages, differing
+# only by ENV CONSUMER_FLAVOR=async (Program.cs then hosts AsyncConsumerServiceImpl,
+# driving the binding's asynchronous AsyncKafkaConsumer<byte[],byte[]>).
+#
+# Kept STANDALONE (its own FROM, NOT `FROM confluent-kafka-rust/dotnet-grpc-server:dev`)
+# so it has no build-ordering dependency on the sync image and can be rebuilt
+# independently — mirroring bindings/python/Dockerfile.grpc.async.
+#
+# Build context MUST be the repo root because we copy from target/,
+# bindings/dotnet/, and multilanguage-test-server/. Use the Makefile target:
+#   make -C bindings/dotnet grpc-image-async
+#
+# Tags the result as confluent-kafka-rust/dotnet-async-grpc-server:dev.
+#
+# The image serves ConsumerService only (consumer-side backend); it drives the
+# binding's asynchronous AsyncKafkaConsumer<byte[],byte[]> over the C ABI. Requires
+# `cargo build --features ffi --release` to have produced the LINUX
+# libconfluent_kafka.so under target/release/ first (build-grpc-images: build).
+
+# ---------------------------------------------------------------------------
+# Stage 1: Restore + publish the grpc-server app against the prebuilt Rust
+# shared lib. Proto codegen (Grpc.Tools) runs here. (Identical to Dockerfile.grpc.)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
+
+WORKDIR /src
+
+# Recreate the repo layout the csprojs expect: the Rust native at
+# target/release/ (Confluent.Kafka.csproj's EnsureNativeLibraryExists probes it
+# 4 dir levels up from src/Confluent.Kafka), the shared build config at the
+# binding root (Directory.Build.props / .editorconfig / the strong-name key), the
+# library the server ProjectReferences, the server itself, and the proto crate
+# (the server's ProtoRoot resolves it 3 dir levels up from grpc-server).
+COPY target/release/libconfluent_kafka.so /src/target/release/libconfluent_kafka.so
+COPY target/include/confluent_kafka.h /src/target/include/confluent_kafka.h
+COPY bindings/dotnet/Directory.Build.props /src/bindings/dotnet/Directory.Build.props
+COPY bindings/dotnet/.editorconfig /src/bindings/dotnet/.editorconfig
+COPY bindings/dotnet/Confluent.Kafka.snk /src/bindings/dotnet/Confluent.Kafka.snk
+COPY bindings/dotnet/src /src/bindings/dotnet/src
+COPY bindings/dotnet/grpc-server /src/bindings/dotnet/grpc-server
+COPY multilanguage-test-server/proto /src/multilanguage-test-server/proto
+
+# Scrub any bin/obj that rode in from a dev-machine build context — a stale
+# cross-OS NuGet assets file would break the Linux restore. CI checkouts are
+# clean, so this is a no-op there.
+RUN find /src/bindings/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+
+# Publish the server (net8.0). Grpc.Tools generates the proto stubs during this
+# build; the ProjectReference builds only the net8.0 leg of Confluent.Kafka.
+RUN dotnet publish /src/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
+        -c Release -o /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal runtime — the ASP.NET Core 8.0 runtime (Grpc.AspNetCore) +
+# the published app + the bundled native lib.
+# ---------------------------------------------------------------------------
+# Base is the Ubuntu 24.04 (Noble) tag, NOT the default Debian 12 (bookworm) one:
+# CI builds libconfluent_kafka.so on the Ubuntu-24.04 host (glibc 2.39), so the
+# runtime image's glibc must be >= that. bookworm (glibc 2.36) can't load the
+# host-built .so ("GLIBC_2.38 not found"); noble (glibc 2.39) matches the host and
+# also loads the locally cross-built (rust:1-bookworm) .so. See M10/P1.
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble AS runtime
+
+WORKDIR /app
+
+# The published output already carries libconfluent_kafka.so (Confluent.Kafka's
+# native-copy Content item flows transitively), but copy it explicitly too so the
+# native is guaranteed beside the app regardless of that item's behavior.
+COPY --from=builder /app /app
+COPY --from=builder /src/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
+
+# Default [DllImport("confluent_kafka")] probing resolves the bare name to
+# libconfluent_kafka.so on the loader path; LD_LIBRARY_PATH=/app guarantees /app
+# wins (mirrors the Python image).
+ENV LD_LIBRARY_PATH=/app
+
+# Pin the consumer flavor for this image (M8/P2) — the ONLY behavioral difference
+# from Dockerfile.grpc. Program.cs's CONSUMER_FLAVOR selector then hosts
+# AsyncConsumerServiceImpl (AsyncKafkaConsumer). Mirrors python_async.
+ENV CONSUMER_FLAVOR=async
+
+EXPOSE 50053
+
+# The Rust BackendPool waits for the substring "listening" on stderr — Program.cs
+# emits it after startup. Keep that line in sync with backend_pool.rs's
+# WaitFor::message_on_stderr setting.
+CMD ["dotnet", "/app/Confluent.Kafka.GrpcServer.dll"]
