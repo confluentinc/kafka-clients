@@ -177,7 +177,7 @@ public sealed class SafeProducerHandleTests
             // while parsing properties, before `KafkaProducer::from_config`'s
             // relabeling try/catch, so it surfaces unwrapped (unlike the
             // "Failed to construct kafka producer" wrapper on later construction
-            // failures — see ProducerConfigMarshalTests).
+            // failures, such as an unparseable bootstrap.servers entry).
             KafkaException? failure = KafkaException.FromHandle(outError);
             Assert.NotNull(failure);
             Assert.Contains("Invalid value not-a-number for configuration batch.size", failure!.Message, StringComparison.Ordinal);

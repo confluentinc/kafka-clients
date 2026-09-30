@@ -43,9 +43,10 @@ public sealed class KafkaExceptionCauseTests
     // removeMembersFromConsumerGroup remove-all wrap built the same way.
     private const int UnknownServerErrorCode = -1;
 
-    // kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT in the header: the core's
-    // Error::local_illegal_argument, which client_utils.rs raises for the bad URL.
-    private const int LocalIllegalArgumentCode = -3;
+    // kafka_common_ErrorCode_CONFIG in the header: the core's Error::Config, which
+    // client_utils.rs raises for the bad URL as Java's parseAndValidateAddresses throws
+    // ConfigException.
+    private const int ConfigErrorCode = -10;
 
     private const string BadBootstrap = "not-a-host-port";
 
@@ -64,7 +65,7 @@ public sealed class KafkaExceptionCauseTests
 
         // Exactly KafkaException — the flat model has no subclass for a cause either.
         KafkaException inner = Assert.IsType<KafkaException>(outer.InnerException);
-        Assert.Equal(LocalIllegalArgumentCode, inner.Code);
+        Assert.Equal(ConfigErrorCode, inner.Code);
         Assert.Equal("Invalid url in bootstrap.servers: " + BadBootstrap, inner.Message);
         Assert.False(inner.IsRetriable);
 

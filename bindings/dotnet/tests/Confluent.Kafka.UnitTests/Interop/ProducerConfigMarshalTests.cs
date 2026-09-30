@@ -34,6 +34,10 @@ public sealed class ProducerConfigMarshalTests
 {
     private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
 
+    // kafka_common_ErrorCode_CONFIG in the header: the core's Error::Config (Java's
+    // ConfigException).
+    private const int ConfigErrorCode = -10;
+
     [Fact]
     public void Create_ValidConfig_Succeeds()
     {
@@ -57,17 +61,21 @@ public sealed class ProducerConfigMarshalTests
     public void Create_MissingBootstrapServers_ThrowsKafkaException()
     {
         // An empty config reaches KafkaProducer_new (proving the new→(no put)→new
-        // marshalling path) but the core requires a resolvable bootstrap.servers, so it
-        // surfaces the operational failure as a flat KafkaException — a second
-        // deterministic broker-free config failure alongside the unparseable-value one.
-        // The core relabels every construction failure as Java's KafkaProducer
-        // constructor does (`catch (Throwable t) { throw new
-        // KafkaException("Failed to construct kafka producer", t); }`), so the
-        // bootstrap.servers detail lives on the wrapped cause, not this top-level
-        // message. The message content is still the behavioral contract (DoD §3).
+        // marshalling path) but bootstrap.servers has no default, so the core surfaces
+        // the failure as a flat KafkaException — a second deterministic broker-free config
+        // failure alongside the unparseable-value one. It is ConfigDef's missing-key
+        // ConfigException, raised while the ProducerConfig is built: Java builds it in the
+        // delegating `this(new ProducerConfig(...), ...)` call, before the constructor's
+        // `catch (Throwable t)` that wraps later failures as "Failed to construct kafka
+        // producer", so it arrives unwrapped. The message content is the behavioral
+        // contract (DoD §3).
         KafkaException failure = Assert.Throws<KafkaException>(
             () => NativeProducer.Create(new Dictionary<string, string>()));
-        Assert.Equal("Failed to construct kafka producer", failure.Message);
+        Assert.Equal(
+            "Missing required configuration \"bootstrap.servers\" which has no default value.",
+            failure.Message);
+        Assert.Equal(ConfigErrorCode, failure.Code);
+        Assert.Null(failure.InnerException);
     }
 
     [Fact]
