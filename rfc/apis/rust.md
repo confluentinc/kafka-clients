@@ -55,11 +55,7 @@ The names in Java have a clear mapping to their equivalents in Rust. The followi
 
 A method that blocks in Java becomes `async` in Rust. A method that must hand work to the client's background task (for example `Consumer::pause`, `assign` or `seek_to_beginning`) is also `async`, even though its Java equivalent does not block. Pure reads of local state (for example `assignment()` or `paused()`) stay synchronous.
 
-A Java callback becomes code run after awaiting the corresponding call. If the original does not block to await the result, use tokio::task::spawn to run it detached.
-
-Where Java uses `thread.join()` or `Future.get()` to block until completion, the Rust translation must actually `.await` the handle.
-
-A callback obligation survives translation: if Java guarantees exactly-once callback invocation at a specific lifecycle point, the Rust code invokes the equivalent at the same point, never deferring or dropping it.
+Where Java uses `thread.join()` or `Future.get()` to block until completion, the Rust application must actually `.await` the handle.
 
 ### Overloaded methods
 
@@ -85,7 +81,7 @@ A Rust setter method uses `set_<field_name>` even when there is no corresponding
 
 Every API which can fail returns `Result<T, Error>`. `Error (common::Error)` is a single flat enum with no Java counterpart: Rust cannot express Java's exception class hierarchy, so one type holds both `KafkaException`'s subclasses and the generic `java.lang / java.util` runtime exceptions that sit beside it. Java's `KafkaException` base class maps to an embedded `KafkaError struct`; every other exception is a variant carrying its own struct.
 
-Rust can propagate the error to the caller automatically, without all the conditions needed in Golang and similarly to Java exception propagation, by appending `?` to the expression returning the error — provided the called function's error type is assignable to the calling function's, which is always the case given we're using the top-level `Error` enum.
+Rust can propagate the error to the caller automatically, without all the conditions needed in Golang and similarly to Java exception propagation, by appending `?` to the expression returning the error — provided the called function's error type is assignable to the calling function's. Almost every API returns the top-level `Error` enum, so this holds. The exception is the `ProducerRecord` constructors, which return `LocalIllegalArgumentError` and must be wrapped explicitly: `ProducerRecord::with_partition_key(..).map_err(Error::LocalIllegalArgument)?`.
 
 #### Inspecting an error
 
@@ -149,7 +145,7 @@ while (true) {
 #### Rust
 
 ```rust
-let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+let mut consumer = KafkaConsumer::new<Vec<u8>, Vec<u8>>(
     config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer),
 )?;
 consumer.subscribe_topics(vec!["foo".into(), "bar".into()]).await?;
@@ -231,7 +227,7 @@ result.values().get("my-topic").get(); // block until created or failed
 
 ```rust
 let result = admin.create_topics(&[
-    NewTopic::new_num_partitions_replication_factor("my-topic", Some(12), Some(3)),
+    NewTopic::with_num_partitions_replication_factor("my-topic", Some(12), Some(3)),
 ]);
 result.all().get().await?; // block until created or failed
 ```
@@ -239,8 +235,8 @@ result.all().get().await?; // block until created or failed
 When you need to override the default options, use create_topics_options instead:
 
 ```rust
-let result = admin.create_topics_options(
-    &[NewTopic::new_num_partitions_replication_factor("my-topic", Some(12), Some(3))],
+let result = admin.create_topics_with_options(
+    &[NewTopic::with_num_partitions_replication_factor("my-topic", Some(12), Some(3))],
     CreateTopicsOptions::new().set_validate_only(true),
 );
 result.all().get().await?; // block until created or failed
@@ -369,7 +365,7 @@ where
     fn paused(&self) -> HashSet<TopicPartition>;
     fn group_metadata(&self) -> ConsumerGroupMetadata;
     fn client_id(&self) -> &str;
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
+    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>; // currently always returns None
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
     // --- Subscription and assignment ---
     async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
@@ -380,12 +376,6 @@ where
     ) -> Result<(), Error>;
     async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
     async fn subscribe_with_pattern_listener(
-        &mut self,
-        pattern: SubscriptionPattern,
-        listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), Error>;
-    async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
-    async fn subscribe_subscription_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
