@@ -102,7 +102,7 @@ fn register_cleanup_hook() {
             // `atexit` runs handlers in reverse registration order and which
             // hook registers first depends on which test ran first — so do not
             // depend on that ordering.
-            force_remove_backend_containers();
+            force_stop_backends();
 
             let pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
             let clusters: Vec<_> = pool.values().filter_map(|entry| entry.cell.get().cloned()).collect();
@@ -183,15 +183,16 @@ fn backends_in_use_on(_network: &str) -> bool {
     false
 }
 
-/// `docker rm -f` every pooled backend container without de-pooling it, so no
-/// `ContainerAsync::drop` runs. Safe from the `atexit` handler.
+/// Stop every pooled backend (`docker rm -f` a container, kill a native
+/// process) without de-pooling it, so no `ContainerAsync::drop` runs. Safe from
+/// the `atexit` handler.
 #[cfg(feature = "multilanguage-tests")]
-fn force_remove_backend_containers() {
-    super::backend_pool::force_remove_all_containers();
+fn force_stop_backends() {
+    super::backend_pool::force_stop_all_backends();
 }
 
 #[cfg(not(feature = "multilanguage-tests"))]
-fn force_remove_backend_containers() {}
+fn force_stop_backends() {}
 
 /// Evicts least-recently-used idle clusters until at most `keep` remain live.
 ///
