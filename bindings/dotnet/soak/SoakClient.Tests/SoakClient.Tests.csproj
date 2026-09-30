@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the soak client's pure logic (M16/P1, PLAN §3) — the parts a
+    two-week run depends on being right and that no broker can verify for us: the
+    payload round-trip (including the total, never-throwing deserializer), the
+    duplicate/gap accounting, the startup configuration validation, the last-value
+    gauge retention, the poll-failure escalation bound, and the exit-code contract
+    shared with run.sh.
+
+    No broker, no Docker, no native call on any logic path. TFMs net8.0;net10.0 —
+    net462 is deliberately absent: the soak exe itself targets net8.0;net10.0 (it is
+    run by `dotnet <dll>` on a Linux box, never on .NET Framework).
+
+    Kept OUT of Confluent.Kafka.sln with the exe (PLAN D11); run by
+    bindings/dotnet/Makefile's `test-soak-dotnet`, by path.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Soak.Tests</RootNamespace>
+    <AssemblyName>SoakClient.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../SoakClient/SoakClient.csproj" />
+  </ItemGroup>
+
+</Project>

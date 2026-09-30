@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Client-AGNOSTIC shared perf harness (M13/P1, PLAN §2/§4). The C# analog of
+    bindings/python/test/performance/performance_common.py: the Metrics harness
+    (1 ms latency histogram, PercentileFromHist, metrics.jsonl schema, CPU/RSS
+    sampler), the message generator, env / SASL config helpers, the CRC-32
+    partitioner, the two measured-loop engines, and the IProducerBackend /
+    IConsumerBackend backend abstraction.
+
+    ⚠ NO client dependency (PLAN §1.1.1 — the same-assembly collision). This
+    library references NEITHER our binding NOR confluent-kafka-dotnet; the client
+    dimension is forced onto the per-client executable boundary (PerfV3 / PerfV2),
+    each of which implements these backend interfaces. Keeping this lib
+    client-free is what lets both exes reuse one engine without colliding on the
+    Confluent.Kafka assembly identity.
+
+    Kept OUT of Confluent.Kafka.sln (PLAN §4, D4) — like grpc-server, the perf
+    suite is isolated from the functional gate so its p99 budgets never fail under
+    the unit suite's contention. Directory.Build.props (at bindings/dotnet/)
+    auto-applies (#nullable enable, dotnet/runtime code style,
+    TreatWarningsAsErrors, strong-name signing).
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Performance</RootNamespace>
+    <AssemblyName>Confluent.Kafka.Performance.Common</AssemblyName>
+    <!-- Test-harness library — never packed, no XML doc file (so no CS1591). -->
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      CA1031: the harness catches System.Exception broadly on purpose in a few
+      spots — a faithful port of performance_common.py / *_performance_test.py's
+      `try/except Exception` that keeps a benchmark run alive across a transient
+      per-record failure (a produce/verify error is logged and counted, never
+      fatal). This is the harness contract, not a defect, so the rule is relaxed
+      for this project only (the grpc-server NoWarn precedent).
+    -->
+    <NoWarn>$(NoWarn);CA1031</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Test-only dependency (perf harness, never shipped — IsPackable=false above).
+      Provides the IEEE CRC-32 (zlib/crc32fast-compatible) hash backing Crc32.cs,
+      the C# analog of bindings/python/test/performance/partitioner.py — see
+      design/current/partitioner.md for why the default key partitioner is
+      CRC-32, not murmur2.
+    -->
+    <PackageReference Include="System.IO.Hashing" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>
