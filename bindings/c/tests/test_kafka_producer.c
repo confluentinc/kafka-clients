@@ -155,6 +155,7 @@ void test_create_null_out_error(void) {
 
 void test_create_invalid_config_value(void) {
     const char *configs[] = {
+        "bootstrap.servers", "localhost:9092",
         "batch.size", "not-a-number",
         NULL
     };
