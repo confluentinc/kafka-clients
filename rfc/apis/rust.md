@@ -163,9 +163,9 @@ loop {
 
 ### Consumer example - with a rebalance listener
 
-Subscribe with a rebalance callback that fires when partitions are assigned or revoked (e.g. to commit offsets before losing a partition), then poll a batch. In Java, this is a `ConsumerRebalanceListener` passed to subscribe; in Rust an `Arc<dyn ConsumerRebalanceListener>` passed to subscribe_topics_listener.
+Subscribe with a rebalance callback that fires when partitions are assigned or revoked (e.g. to commit offsets before losing a partition), then poll a batch. In Java, this is a `ConsumerRebalanceListener` passed to subscribe; in Rust an `Arc<dyn ConsumerRebalanceListener>` passed to `subscribe_with_topics_listener`.
 
-The listener runs on the caller's poll task in every client: Java invokes it inside poll(), and the Rust translation preserves that — the callback executes on the task that calls poll(), never on the background task, so it may call back into the consumer.
+The listener runs on the caller's poll task in every client: Java invokes it inside `poll()`, and the Rust translation preserves that — the callback executes on the task that calls `poll()`, never on the background task. Because `poll` borrows the consumer as `&mut self`, a Rust listener cannot capture the consumer itself as a Java listener does; instead it captures the `ConsumerHandle` returned by `consumer.handle()`, which exposes the operations that are safe to call from inside a callback (`commit_sync`, `seek_*`, `pause`/`resume`, `position`, ...). In the future, the `RebalanceListener` interface from KIP-1306 will resolve this more neatly.
 
 #### Java
 
@@ -477,13 +477,15 @@ where
 The application uses `KafkaConsumer<K, V>`.
 
 ```rust
-impl KafkaConsumer<K, V> {
-    pub fn new(
+impl KafkaConsumer {
+    pub fn new<K, V>(
         config: ConsumerConfig,
         key_deserializer: Box<dyn Deserializer<K>>,
         value_deserializer: Box<dyn Deserializer<V>>,
-    ) -> Result<Self, Error>;
-    pub async fn current_lag_async(&self, topic_partition: &TopicPartition) -> Option<i64>;
+    ) -> Result<Box<dyn Consumer<K, V>>, Error>
+    where
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static;
 }
 ```
 
@@ -535,7 +537,7 @@ impl<K, V> ConsumerRecords<K, V> {
 ```
 
 ## More comprehensive examples
-These are complete, compilable examples which you can also find in github (ADD URLs).
+These are complete, compilable examples which you can also find in the examples directory.
 
 ### Producer example
 
