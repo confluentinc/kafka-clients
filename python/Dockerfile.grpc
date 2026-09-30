@@ -1,0 +1,113 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Multi-stage Docker build for the Python gRPC server image used by the
+# multilanguage integration test harness. See
+# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
+#
+# Build context MUST be the repo root because we copy from rust/target/,
+# rust/multilanguage-test-server/ and python/. The Makefile target sets this for you:
+#   make -C python grpc-image
+#
+# Tags the result as confluent-kafka-rust/python-grpc-server:dev.
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib
+# and generate the gRPC proto stubs.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Recreate the project layout that setup.py expects: setup.py lives at
+# python/ and computes project_root = ../rust/, looking for the
+# Rust header at rust/target/include/confluent_kafka.h and the shared lib
+# under rust/target/release/.
+COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
+COPY rust/target/include/confluent_kafka.h /workspace/rust/target/include/confluent_kafka.h
+COPY python/_confluentkafka.c /workspace/python/_confluentkafka.c
+COPY python/setup.py /workspace/python/setup.py
+COPY python/pyproject.toml /workspace/python/pyproject.toml
+COPY python/producer.py /workspace/python/producer.py
+COPY python/consumer.py /workspace/python/consumer.py
+COPY python/admin.py /workspace/python/admin.py
+
+# Single source of truth for the wire schema: the proto crate.
+COPY rust/multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
+COPY rust/multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
+COPY rust/multilanguage-test-server/proto/admin_service.proto /workspace/proto/admin_service.proto
+
+# Build _confluentkafka.so. setup.py reads CONFLUENT_KAFKA_LIB_DIR for
+# the Rust shared lib location.
+ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/rust/target/release
+RUN cd /workspace/python && \
+    pip install --no-cache-dir setuptools wheel && \
+    python setup.py build_ext --inplace
+
+# Generate proto stubs for both services (consumer imports producer, so
+# both are generated under the same -Iproto path). The gRPC pins are shared
+# with the native build (make build-grpc-native-python).
+COPY python/requirements-grpc.txt python/requirements-grpc-tools.txt /workspace/python/
+RUN pip install --no-cache-dir -r /workspace/python/requirements-grpc-tools.txt && \
+    cd /workspace && \
+    python -m grpc_tools.protoc \
+        -Iproto \
+        --python_out=/workspace/python \
+        --grpc_python_out=/workspace/python \
+        proto/producer_service.proto proto/consumer_service.proto proto/admin_service.proto
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+# protobuf is needed by the generated stubs at runtime; grpcio doesn't
+# pull it in transitively. Both are pinned in requirements-grpc.txt.
+COPY python/requirements-grpc.txt /tmp/requirements-grpc.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-grpc.txt
+
+WORKDIR /app
+
+# Rust shared library next to the Python extension so the runtime
+# loader resolves it via the rpath setup.py embedded.
+COPY --from=builder /workspace/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
+COPY --from=builder /workspace/python/_confluentkafka*.so /app/
+COPY --from=builder /workspace/python/producer.py /app/producer.py
+COPY --from=builder /workspace/python/consumer.py /app/consumer.py
+COPY --from=builder /workspace/python/admin.py /app/admin.py
+COPY --from=builder /workspace/python/producer_service_pb2.py /app/producer_service_pb2.py
+COPY --from=builder /workspace/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
+COPY --from=builder /workspace/python/consumer_service_pb2.py /app/consumer_service_pb2.py
+COPY --from=builder /workspace/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
+COPY --from=builder /workspace/python/admin_service_pb2.py /app/admin_service_pb2.py
+COPY --from=builder /workspace/python/admin_service_pb2_grpc.py /app/admin_service_pb2_grpc.py
+# grpc_server.py imports the shared translation helpers from grpc_translate.py.
+COPY python/grpc_translate.py /app/grpc_translate.py
+# _error_code.py is generated from kafka_common_ErrorCode_t by
+# `python tools/generate_error_code.py`; grpc_translate.py and the servicers
+# import it to stamp real codes on their own synthetic errors.
+COPY python/_error_code.py /app/_error_code.py
+COPY python/grpc_server.py /app/grpc_server.py
+
+# The Python extension was linked with rpath pointing at the original
+# CONFLUENT_KAFKA_LIB_DIR; setting LD_LIBRARY_PATH guarantees /app wins.
+ENV LD_LIBRARY_PATH=/app
+# The server defaults to 127.0.0.1; bind all interfaces so it is reachable
+# through the container's published port.
+ENV GRPC_HOST=0.0.0.0
+
+EXPOSE 50051
+
+# The Rust BackendPool waits for "listening" on stderr — keep grpc_server.py
+# in sync with the BackendPool's WaitFor::message_on_stderr setting.
+CMD ["python", "/app/grpc_server.py"]
