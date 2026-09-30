@@ -33,6 +33,7 @@ use std::sync::OnceLock;
 
 use crate::MetadataResponseData;
 use crate::common::Cluster;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
@@ -126,21 +127,27 @@ impl MetadataResponse {
 
     /// Returns a map of topic IDs to their errors for topics with non-zero error codes.
     ///
-    /// # Panics
+    /// Translated from `MetadataResponse.errorsByTopicId()`.
     ///
-    /// Panics if any topic has a zero UUID (use `errors()` instead).
-    pub fn errors_by_topic_id(&self) -> HashMap<Uuid, Errors> {
+    /// # Errors
+    ///
+    /// Returns a `LocalIllegalStateError` with Java's message, "Use errors() when
+    /// managing topic using topic name", if any topic has the zero topic id; use
+    /// [`errors`](Self::errors) instead. Java throws `IllegalStateException`
+    /// (`MetadataResponse.java:118-120`), and a 4.x broker does send the zero id
+    /// for a topic deleted while a by-id request is being answered, so the
+    /// caller must be able to recover.
+    pub fn errors_by_topic_id(&self) -> Result<HashMap<Uuid, Errors>, Error> {
         let mut errors = HashMap::new();
         for metadata in &self.data.topics {
-            assert!(
-                metadata.topic_id != Uuid::zero(),
-                "Use errors() when managing topic using topic name"
-            );
+            if metadata.topic_id == Uuid::ZERO_UUID {
+                return Err(Error::local_illegal_state("Use errors() when managing topic using topic name"));
+            }
             if metadata.error_code != Errors::None.code() {
                 errors.insert(metadata.topic_id, Errors::for_code(metadata.error_code));
             }
         }
-        errors
+        Ok(errors)
     }
 
     /// Returns error counts aggregating both topic-level and partition-level errors.
@@ -635,5 +642,43 @@ mod tests {
         assert!(cluster.topic_name(&Uuid::zero()).is_none());
         assert!(cluster.topic_name(&zero_uuid).is_none());
         assert_eq!(Some("topic3"), cluster.topic_name(&random_uuid));
+    }
+
+    fn topic_with_id(name: &str, topic_id: Uuid, error: Errors) -> MetadataResponseTopic {
+        let mut topic = MetadataResponseTopic::new();
+        topic.set_name(Some(name.to_string()));
+        topic.set_error_code(error.code());
+        topic.set_topic_id(topic_id);
+        topic
+    }
+
+    /// `errorsByTopicId()` maps each non-`NONE` topic error by id, and throws
+    /// `IllegalStateException("Use errors() when managing topic using topic
+    /// name")` on a zero id (`MetadataResponse.java:115-125`). The Rust
+    /// translation returns that as an `Err` instead of panicking.
+    #[test]
+    fn test_errors_by_topic_id() {
+        let ok_id = Uuid::new(1, 1);
+        let failed_id = Uuid::new(2, 2);
+        let mut data = MetadataResponseData::new();
+        data.set_topics(vec![
+            topic_with_id("ok", ok_id, Errors::None),
+            topic_with_id("failed", failed_id, Errors::TopicAuthorizationFailed),
+        ]);
+        let response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
+        assert_eq!(
+            response.errors_by_topic_id().expect("no zero topic id"),
+            HashMap::from([(failed_id, Errors::TopicAuthorizationFailed)])
+        );
+
+        let mut data = MetadataResponseData::new();
+        data.set_topics(vec![
+            topic_with_id("ok", ok_id, Errors::None),
+            topic_with_id("deleted", Uuid::ZERO_UUID, Errors::UnknownTopicOrPartition),
+        ]);
+        let response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
+        let error = response.errors_by_topic_id().expect_err("a zero topic id is rejected");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Use errors() when managing topic using topic name");
     }
 }

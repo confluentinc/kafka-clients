@@ -598,7 +598,7 @@ def test_describe_cluster():
         # future with an *empty* set, never null.
         described = admin.describe_cluster()
         assert isinstance(described, ClusterDescription)
-        assert described.cluster_id == "4A5xz_QZTB2CtL4wc0X0Jw"
+        assert described.cluster_id == "I4ZmrWqfT2e-upky_4fdPA"
         assert [n.id for n in described.nodes] == [0, 1, 2]
         assert described.nodes[0].host == "localhost"
         assert described.nodes[0].port == 1000

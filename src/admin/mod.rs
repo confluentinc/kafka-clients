@@ -81,7 +81,7 @@ mod log_dir_description;
 mod member_assignment;
 mod member_description;
 mod member_to_remove;
-mod mock_admin_client;
+pub mod mock_admin_client;
 mod new_partition_reassignment;
 mod new_partitions;
 mod new_topic;
@@ -1145,10 +1145,13 @@ mod tests {
 
     use super::*;
     use crate::admin::MockAdminClient;
+    use crate::admin::mock_admin_client;
     use crate::common::{Node, TopicPartition, TopicPartitionInfo};
 
     fn admin() -> MockAdminClient {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = mock_admin_client::Builder::new()
+            .build()
+            .expect("a fresh builder has one broker");
         // The mock seeds brokers as `localhost:1000 + id` (MockAdminClient.java:143).
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(

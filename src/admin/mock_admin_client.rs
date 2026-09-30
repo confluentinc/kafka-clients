@@ -85,13 +85,6 @@ use crate::leave_group_request_data::MemberIdentity;
 
 use std::collections::{BTreeSet, HashSet};
 
-/// Default cluster id used by the mock (matches Java's `DEFAULT_CLUSTER_ID`).
-const DEFAULT_CLUSTER_ID: &str = "4A5xz_QZTB2CtL4wc0X0Jw";
-
-/// The default log directories seeded per broker (mirrors Java's
-/// `MockAdminClient.DEFAULT_LOG_DIRS`).
-const DEFAULT_LOG_DIRS: &[&str] = &["/tmp/kafka-logs"];
-
 /// Internal per-topic metadata held by the mock.
 #[derive(Clone, Debug)]
 struct TopicMetadata {
@@ -131,7 +124,7 @@ struct State {
     // Group configs, keyed by group id.
     group_configs: BTreeMap<String, BTreeMap<String, String>>,
     // Defaults overlaid onto group configs on read (mirrors Java's
-    // `defaultGroupConfigs`; empty for the `create(num_brokers)` builder).
+    // `defaultGroupConfigs`; set by `Builder::set_default_group_configs`).
     default_group_configs: BTreeMap<String, String>,
     // Per-broker list of log directories (index = broker id), mirroring Java's
     // `brokerLogDirs`. Seeded with `DEFAULT_LOG_DIRS` for each broker.
@@ -160,6 +153,10 @@ struct State {
     // Maximum supported feature levels, keyed by feature name (mirrors Java's
     // `maxSupportedFeatureLevels`).
     max_supported_feature_levels: HashMap<String, i16>,
+    // Java's `usingRaftController`. Its only Java reader is `unregisterBroker`,
+    // which this client does not translate yet, so nothing reads it until then.
+    #[allow(dead_code)]
+    using_raft_controller: bool,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -173,49 +170,334 @@ pub struct MockAdminClient {
     state: Mutex<State>,
 }
 
-impl MockAdminClient {
-    /// Creates a mock with `num_brokers` brokers (`localhost:1000+id`),
-    /// controller = broker 0, default partitions 1 and default replication
-    /// factor `min(num_brokers, 3)` — matching Java's `Builder` defaults.
+/// Builds a [`MockAdminClient`].
+///
+/// Translated from Java's nested `MockAdminClient.Builder`
+/// (`MockAdminClient.java:122-221`): the same setters, defaults and failure
+/// points. A fresh builder has one broker, `Node(0, "localhost", 1000)`, with
+/// [`MockAdminClient::DEFAULT_LOG_DIRS`].
+///
+/// Java's builder throws from `java.util` collection methods where it reads an
+/// index out of range. The crate has no `IndexOutOfBoundsException`
+/// counterpart, so those failures are [`Error::LocalIllegalArgument`] (like the
+/// mock's other argument errors), carrying the JDK's message text.
+#[derive(Clone, Debug)]
+pub struct Builder {
+    cluster_id: String,
+    brokers: Vec<Node>,
+    controller: Option<Node>,
+    broker_log_dirs: Vec<Vec<String>>,
+    default_partitions: Option<i16>,
+    using_raft_controller: bool,
+    default_replication_factor: Option<i32>,
+    feature_levels: HashMap<String, i16>,
+    min_supported_feature_levels: HashMap<String, i16>,
+    max_supported_feature_levels: HashMap<String, i16>,
+    default_group_configs: HashMap<String, String>,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Builder {
+    /// Creates a builder with one broker.
+    ///
+    /// Mirrors Java's `public Builder()`, which calls `numBrokers(1)`
+    /// (`MockAdminClient.java:135-137`).
+    pub fn new() -> Self {
+        let mut builder = Self {
+            cluster_id: MockAdminClient::DEFAULT_CLUSTER_ID.to_string(),
+            brokers: Vec::new(),
+            controller: None,
+            broker_log_dirs: Vec::new(),
+            default_partitions: None,
+            using_raft_controller: false,
+            default_replication_factor: None,
+            feature_levels: HashMap::new(),
+            min_supported_feature_levels: HashMap::new(),
+            max_supported_feature_levels: HashMap::new(),
+            default_group_configs: HashMap::new(),
+        };
+        // `numBrokers(1)` on the empty lists takes only the growing branch,
+        // which cannot fail.
+        builder.add_brokers_up_to(1);
+        builder
+    }
+
+    /// Sets the cluster id. Mirrors Java's `clusterId(String)`.
+    pub fn set_cluster_id(mut self, cluster_id: &str) -> Self {
+        self.cluster_id = cluster_id.to_string();
+        self
+    }
+
+    /// Replaces the broker list.
+    ///
+    /// Mirrors Java's `brokers(List<Node>)` (`MockAdminClient.java:144-148`),
+    /// in the same order: first `numBrokers(brokers.size())` resizes the
+    /// current lists, which keeps existing log-dir entries and pads with
+    /// [`MockAdminClient::DEFAULT_LOG_DIRS`], and only then is the broker list
+    /// replaced.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] when `num_brokers` is less than
-    /// one. Java throws instead of producing a broker-less mock: its
-    /// `Builder.build()` reads `brokers.get(0)` for the controller
-    /// (`MockAdminClient.java:210`), which raises `IndexOutOfBoundsException` on
-    /// the empty list `numBrokers(0)` leaves behind, and `numBrokers(-1)` raises
-    /// from `brokers.subList(0, -1)` (`:152`) before `build()` is even reached
-    /// (kafka `a18251bae0`). Reaching either requires an explicit
-    /// `numBrokers(n)` call — Java's `Builder()` constructor defaults to
-    /// `numBrokers(1)` (`:136`) — so this rejects only a request the caller made
-    /// deliberately.
+    /// The errors of [`set_num_brokers`](Self::set_num_brokers). With a
+    /// non-negative count the only reachable one is a log-dir list shorter than
+    /// `brokers` (after [`set_broker_log_dirs`](Self::set_broker_log_dirs)), where
+    /// Java's `brokerLogDirs.subList(0, n)` throws.
+    pub fn set_brokers(self, brokers: Vec<Node>) -> Result<Self, Error> {
+        // `Collection.size()` saturates at `Integer.MAX_VALUE`, so a length that
+        // does not fit an `i32` becomes `i32::MAX`, as Java's `size()` reports it.
+        let count = i32::try_from(brokers.len()).unwrap_or(i32::MAX);
+        let mut builder = self.set_num_brokers(count)?;
+        builder.brokers = brokers;
+        Ok(builder)
+    }
+
+    /// Sets the number of brokers, keeping the first ones.
     ///
-    /// This is a `Result` rather than a `panic!` because the argument is a
-    /// caller-supplied count that the caller can trivially correct, which is
-    /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
-    /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
-    /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
-    /// `kafka_admin_MockAdminClient_new` and abort the process.
-    pub fn create(num_brokers: i32) -> Result<Self, Error> {
-        let brokers: Vec<Node> = (0..num_brokers)
-            .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
-            .collect();
-        // Java's `controller == null ? brokers.get(0) : controller`
-        // (`MockAdminClient.java:210`): the controller is always an element of
-        // `brokers`, never a fabricated node absent from `nodes()`.
-        let controller = match brokers.first() {
-            Some(node) => node.clone(),
-            None => {
-                return Err(Error::local_illegal_argument(format!(
-                    "num_brokers must be at least 1, was {num_brokers}"
-                )));
-            },
+    /// Mirrors Java's `numBrokers(int)` (`MockAdminClient.java:150-161`).
+    /// Shrinking truncates both the broker list and the per-broker log dirs;
+    /// growing appends `Node(id, "localhost", 1000 + id)` and
+    /// [`MockAdminClient::DEFAULT_LOG_DIRS`] for each new id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] where Java's `subList(0, n)`
+    /// (`AbstractList.subListRangeCheck`) throws:
+    ///
+    /// - `num_brokers` is negative: "fromIndex(0) > toIndex(n)" (Java's
+    ///   `IllegalArgumentException`);
+    /// - shrinking below the broker count while the log-dir list is shorter than
+    ///   `num_brokers`: "toIndex = n" (Java's `IndexOutOfBoundsException`).
+    pub fn set_num_brokers(mut self, num_brokers: i32) -> Result<Self, Error> {
+        let current = self.brokers.len() as i64;
+        if current >= i64::from(num_brokers) {
+            let new_len = sub_list_end(num_brokers, self.brokers.len())?;
+            self.brokers.truncate(new_len);
+            let new_len = sub_list_end(num_brokers, self.broker_log_dirs.len())?;
+            self.broker_log_dirs.truncate(new_len);
+        } else {
+            self.add_brokers_up_to(num_brokers);
+        }
+        Ok(self)
+    }
+
+    /// The growing branch of `numBrokers`: adds brokers `brokers.len()` to
+    /// `num_brokers - 1`, each with the default log dirs.
+    fn add_brokers_up_to(&mut self, num_brokers: i32) {
+        let first = self.brokers.len() as i32;
+        for id in first..num_brokers {
+            self.brokers.push(Node::new(id, "localhost".to_string(), 1000 + id));
+            self.broker_log_dirs.push(MockAdminClient::default_log_dirs());
+        }
+    }
+
+    /// Makes the broker at `index` the controller.
+    ///
+    /// Mirrors Java's `controller(int)` (`MockAdminClient.java:163-166`), which
+    /// reads `brokers.get(index)` at this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with the JDK's
+    /// `IndexOutOfBoundsException` text, "Index i out of bounds for length n"
+    /// (`ArrayList.get` → `Objects.checkIndex`), when `index` is not a broker
+    /// index.
+    pub fn set_controller(mut self, index: i32) -> Result<Self, Error> {
+        let node = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.brokers.get(i))
+            .ok_or_else(|| index_out_of_bounds(index, self.brokers.len()))?;
+        self.controller = Some(node.clone());
+        Ok(self)
+    }
+
+    /// Replaces the per-broker log directories. Mirrors Java's
+    /// `brokerLogDirs(List<List<String>>)`; like Java, the length is not
+    /// checked against the broker count.
+    pub fn set_broker_log_dirs(mut self, broker_log_dirs: Vec<Vec<String>>) -> Self {
+        self.broker_log_dirs = broker_log_dirs;
+        self
+    }
+
+    /// Sets the replication factor used when `createTopics` does not give one.
+    ///
+    /// Mirrors Java's `defaultReplicationFactor(int)`. [`build`](Self::build)
+    /// narrows it to 16 bits the way Java's `Integer.shortValue()` does: the
+    /// value wraps, it is not clamped.
+    pub fn set_default_replication_factor(mut self, default_replication_factor: i32) -> Self {
+        self.default_replication_factor = Some(default_replication_factor);
+        self
+    }
+
+    /// Mirrors Java's `usingRaftController(boolean)`.
+    ///
+    /// The value is stored, but it has no effect yet: its only Java reader is
+    /// `MockAdminClient.unregisterBroker`, which this client does not translate
+    /// yet.
+    pub fn set_using_raft_controller(mut self, using_raft_controller: bool) -> Self {
+        self.using_raft_controller = using_raft_controller;
+        self
+    }
+
+    /// Sets the partition count used when `createTopics` does not give one.
+    /// Mirrors Java's `defaultPartitions(short)`.
+    pub fn set_default_partitions(mut self, num_partitions: i16) -> Self {
+        self.default_partitions = Some(num_partitions);
+        self
+    }
+
+    /// Sets the finalized feature levels. Mirrors Java's
+    /// `featureLevels(Map<String, Short>)`.
+    pub fn set_feature_levels(mut self, feature_levels: HashMap<String, i16>) -> Self {
+        self.feature_levels = feature_levels;
+        self
+    }
+
+    /// Sets the minimum supported feature levels. Mirrors Java's
+    /// `minSupportedFeatureLevels(Map<String, Short>)`.
+    pub fn set_min_supported_feature_levels(mut self, min_supported_feature_levels: HashMap<String, i16>) -> Self {
+        self.min_supported_feature_levels = min_supported_feature_levels;
+        self
+    }
+
+    /// Sets the maximum supported feature levels. Mirrors Java's
+    /// `maxSupportedFeatureLevels(Map<String, Short>)`.
+    pub fn set_max_supported_feature_levels(mut self, max_supported_feature_levels: HashMap<String, i16>) -> Self {
+        self.max_supported_feature_levels = max_supported_feature_levels;
+        self
+    }
+
+    /// Sets the defaults overlaid onto every group's configs. Mirrors Java's
+    /// `defaultGroupConfigs(Map<String, String>)`.
+    pub fn set_default_group_configs(mut self, default_group_configs: HashMap<String, String>) -> Self {
+        self.default_group_configs = default_group_configs;
+        self
+    }
+
+    /// Builds the mock.
+    ///
+    /// Mirrors Java's `build()` (`MockAdminClient.java:208-220`). Defaults: the
+    /// controller is the first broker, the default partition count is 1, and the
+    /// default replication factor is `min(brokers.len(), 3)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] where Java throws:
+    ///
+    /// - no controller was set and there are no brokers: "Index 0 out of bounds
+    ///   for length 0", the JDK's text for Java's `brokers.get(0)`;
+    /// - the controller is no longer one of the brokers (for example
+    ///   `set_controller(2)` followed by `set_num_brokers(1)`): "The controller
+    ///   node must be in the list of brokers" (`MockAdminClient.java:280`).
+    pub fn build(self) -> Result<MockAdminClient, Error> {
+        let controller = match self.controller {
+            Some(controller) => controller,
+            None => self.brokers.first().cloned().ok_or_else(|| index_out_of_bounds(0, 0))?,
         };
-        let default_replication_factor = num_brokers.clamp(0, 3) as i16;
+        let default_partitions = self.default_partitions.map_or(1, i32::from);
+        // `defaultReplicationFactor.shortValue()`: a wrapping narrowing.
+        let default_replication_factor = match self.default_replication_factor {
+            Some(factor) => factor as i16,
+            None => self.brokers.len().min(3) as i16,
+        };
+        MockAdminClient::with_state(
+            self.brokers,
+            controller,
+            self.cluster_id,
+            default_partitions,
+            default_replication_factor,
+            self.broker_log_dirs,
+            self.using_raft_controller,
+            self.feature_levels,
+            self.min_supported_feature_levels,
+            self.max_supported_feature_levels,
+            self.default_group_configs,
+        )
+    }
+}
+
+/// The end index of Java's `list.subList(0, to_index)`, or the error the JDK's
+/// `AbstractList.subListRangeCheck(0, toIndex, size)` throws for it.
+///
+/// The JDK checks `toIndex > size` before `fromIndex > toIndex`, so an index
+/// past the end reports "toIndex = n" and a negative one reports
+/// "fromIndex(0) > toIndex(n)".
+fn sub_list_end(to_index: i32, size: usize) -> Result<usize, Error> {
+    if i64::from(to_index) > size as i64 {
+        return Err(Error::local_illegal_argument(format!("toIndex = {to_index}")));
+    }
+    usize::try_from(to_index).map_err(|_| Error::local_illegal_argument(format!("fromIndex(0) > toIndex({to_index})")))
+}
+
+/// The JDK's `IndexOutOfBoundsException` text for `list.get(index)` on a list
+/// of `length` elements (`Objects.checkIndex`).
+fn index_out_of_bounds(index: i32, length: usize) -> Error {
+    Error::local_illegal_argument(format!("Index {index} out of bounds for length {length}"))
+}
+
+impl MockAdminClient {
+    /// The cluster id a [`Builder`] uses unless
+    /// [`set_cluster_id`](Builder::set_cluster_id) overrides it.
+    ///
+    /// Mirrors Java's `MockAdminClient.DEFAULT_CLUSTER_ID`.
+    pub const DEFAULT_CLUSTER_ID: &'static str = "I4ZmrWqfT2e-upky_4fdPA";
+
+    /// The log directories a [`Builder`] gives each broker it adds.
+    ///
+    /// Mirrors Java's `MockAdminClient.DEFAULT_LOG_DIRS`.
+    pub const DEFAULT_LOG_DIRS: &'static [&'static str] = &["/tmp/kafka-logs"];
+
+    /// Creates a [`Builder`] with one broker.
+    ///
+    /// Mirrors Java's `public static Builder create()`
+    /// (`MockAdminClient.java:118-120`), which returns `new Builder()`.
+    pub fn create() -> Builder {
+        Builder::new()
+    }
+
+    /// The log directories of one broker, as owned strings.
+    fn default_log_dirs() -> Vec<String> {
+        Self::DEFAULT_LOG_DIRS.iter().map(|dir| (*dir).to_string()).collect()
+    }
+
+    /// Translated from Java's private constructor
+    /// `MockAdminClient(List<Node>, Node, String, int, int, List<List<String>>,
+    /// boolean, Map, Map, Map, Map)` (`MockAdminClient.java:241-276`), which
+    /// [`Builder::build`] calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// controller node must be in the list of brokers", when `controller` is
+    /// not one of `brokers`. Java throws `IllegalArgumentException` from
+    /// `controller(Node)` (`:279-280`), which the constructor calls.
+    #[allow(clippy::too_many_arguments)]
+    fn with_state(
+        brokers: Vec<Node>,
+        controller: Node,
+        cluster_id: String,
+        default_partitions: i32,
+        default_replication_factor: i16,
+        broker_log_dirs: Vec<Vec<String>>,
+        using_raft_controller: bool,
+        feature_levels: HashMap<String, i16>,
+        min_supported_feature_levels: HashMap<String, i16>,
+        max_supported_feature_levels: HashMap<String, i16>,
+        default_group_configs: HashMap<String, String>,
+    ) -> Result<Self, Error> {
+        if !brokers.contains(&controller) {
+            return Err(Error::local_illegal_argument(
+                "The controller node must be in the list of brokers",
+            ));
+        }
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
-        let broker_configs: Vec<BTreeMap<String, String>> = (0..num_brokers)
+        let broker_configs: Vec<BTreeMap<String, String>> = brokers
+            .iter()
             .map(|_| {
                 let mut config = BTreeMap::new();
                 config.insert("default.replication.factor".to_string(), default_replication_factor.to_string());
@@ -226,29 +508,28 @@ impl MockAdminClient {
             state: Mutex::new(State {
                 brokers,
                 controller,
-                cluster_id: DEFAULT_CLUSTER_ID.to_string(),
+                cluster_id,
                 all_topics: BTreeMap::new(),
                 topic_ids: BTreeMap::new(),
                 topic_names: BTreeMap::new(),
-                default_partitions: 1,
+                default_partitions,
                 default_replication_factor,
                 timeout_next_requests: 0,
                 broker_configs,
                 client_metrics_configs: BTreeMap::new(),
                 group_configs: BTreeMap::new(),
-                default_group_configs: BTreeMap::new(),
-                broker_log_dirs: (0..num_brokers)
-                    .map(|_| DEFAULT_LOG_DIRS.iter().map(|s| (*s).to_string()).collect())
-                    .collect(),
+                default_group_configs: default_group_configs.into_iter().collect(),
+                broker_log_dirs,
                 replica_moves: HashMap::new(),
                 reassignments: HashMap::new(),
                 beginning_offsets: HashMap::new(),
                 end_offsets: HashMap::new(),
                 committed_offsets: HashMap::new(),
                 all_tokens: Vec::new(),
-                feature_levels: HashMap::new(),
-                min_supported_feature_levels: HashMap::new(),
-                max_supported_feature_levels: HashMap::new(),
+                feature_levels,
+                min_supported_feature_levels,
+                max_supported_feature_levels,
+                using_raft_controller,
             }),
         })
     }
@@ -2058,41 +2339,326 @@ mod tests {
     use super::*;
 
     fn admin() -> MockAdminClient {
-        MockAdminClient::create(3).expect("num_brokers is at least 1")
+        Builder::new()
+            .set_num_brokers(3)
+            .and_then(Builder::build)
+            .expect("num_brokers is at least 1")
     }
 
     // --- Builder broker-count validation (MockAdminClient.java:152, :210) ----
 
     /// Java's `Builder.build()` reads `brokers.get(0)` for the controller
-    /// (`MockAdminClient.java:210`), so `numBrokers(0)` throws
-    /// `IndexOutOfBoundsException` rather than yielding a broker-less mock.
+    /// (`MockAdminClient.java:210`), so `numBrokers(0)` fails at `build()` with
+    /// the JDK's `IndexOutOfBoundsException` text instead of yielding a
+    /// broker-less mock.
     #[test]
-    fn create_rejects_zero_brokers_rather_than_fabricating_a_controller() {
-        let err = MockAdminClient::create(0).expect_err("zero brokers must be rejected");
+    fn build_rejects_zero_brokers_rather_than_fabricating_a_controller() {
+        let err = Builder::new()
+            .set_num_brokers(0)
+            .expect("shrinking to zero brokers is accepted")
+            .build()
+            .expect_err("zero brokers must be rejected");
         assert!(
             matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
-        assert_eq!(err.message(), "num_brokers must be at least 1, was 0");
+        assert_eq!(err.message(), "Index 0 out of bounds for length 0");
     }
 
     /// `numBrokers(-1)` throws even earlier in Java, from `brokers.subList(0, -1)`
-    /// (`MockAdminClient.java:152`).
+    /// (`MockAdminClient.java:152`), whose `subListRangeCheck` throws
+    /// `IllegalArgumentException("fromIndex(0) > toIndex(-1)")`.
     #[test]
-    fn create_rejects_a_negative_broker_count() {
-        let err = MockAdminClient::create(-1).expect_err("a negative count must be rejected");
-        assert_eq!(err.message(), "num_brokers must be at least 1, was -1");
+    fn set_num_brokers_rejects_a_negative_broker_count() {
+        let err = Builder::new()
+            .set_num_brokers(-1)
+            .expect_err("a negative count must be rejected");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "fromIndex(0) > toIndex(-1)");
+    }
+
+    // --- Builder (MockAdminClient.java:122-221) --------------------------------
+    //
+    // No clients-module Java test uses the Builder (its users are in
+    // connect/streams/tools), so these pin the Java source directly.
+
+    fn default_dirs() -> Vec<String> {
+        vec!["/tmp/kafka-logs".to_string()]
+    }
+
+    fn dirs(dir: &str) -> Vec<String> {
+        vec![dir.to_string()]
+    }
+
+    /// `new Builder().build()`: one broker `Node(0, "localhost", 1000)` with
+    /// `DEFAULT_LOG_DIRS`, controller = `brokers.get(0)`, `DEFAULT_CLUSTER_ID`,
+    /// 1 default partition, replication factor `min(1, 3)`, no raft controller
+    /// and empty feature and group-config maps.
+    #[test]
+    fn builder_defaults_match_java() {
+        assert_eq!(MockAdminClient::DEFAULT_CLUSTER_ID, "I4ZmrWqfT2e-upky_4fdPA");
+        assert_eq!(MockAdminClient::DEFAULT_LOG_DIRS, &["/tmp/kafka-logs"]);
+
+        let mock = Builder::new().build().expect("a fresh builder has one broker");
+        let state = mock.state.lock().unwrap();
+        let node0 = Node::new(0, "localhost".to_string(), 1000);
+        assert_eq!(state.brokers, vec![node0.clone()]);
+        assert_eq!(state.controller, node0);
+        assert_eq!(state.cluster_id, MockAdminClient::DEFAULT_CLUSTER_ID);
+        assert_eq!(state.default_partitions, 1);
+        assert_eq!(state.default_replication_factor, 1);
+        assert_eq!(state.broker_log_dirs, vec![default_dirs()]);
+        assert!(!state.using_raft_controller);
+        assert!(state.feature_levels.is_empty());
+        assert!(state.min_supported_feature_levels.is_empty());
+        assert!(state.max_supported_feature_levels.is_empty());
+        assert!(state.default_group_configs.is_empty());
+        assert_eq!(
+            state.broker_configs,
+            vec![BTreeMap::from([(
+                "default.replication.factor".to_string(),
+                "1".to_string()
+            )])]
+        );
+    }
+
+    /// `MockAdminClient.create()` is `new Builder()` (`MockAdminClient.java:118-120`),
+    /// so it builds the same defaults as `Builder::new()`.
+    #[test]
+    fn create_returns_a_fresh_builder() {
+        let from_create = MockAdminClient::create().build().expect("a fresh builder has one broker");
+        let from_new = Builder::new().build().expect("a fresh builder has one broker");
+        let created = from_create.state.lock().unwrap();
+        let fresh = from_new.state.lock().unwrap();
+        assert_eq!(created.brokers, fresh.brokers);
+        assert_eq!(created.controller, fresh.controller);
+        assert_eq!(created.cluster_id, fresh.cluster_id);
+        assert_eq!(created.cluster_id, MockAdminClient::DEFAULT_CLUSTER_ID);
+        assert_eq!(created.default_partitions, fresh.default_partitions);
+        assert_eq!(created.default_replication_factor, fresh.default_replication_factor);
+        assert_eq!(created.broker_log_dirs, fresh.broker_log_dirs);
+        assert_eq!(created.broker_configs, fresh.broker_configs);
+        assert_eq!(created.using_raft_controller, fresh.using_raft_controller);
+        assert_eq!(created.default_group_configs, fresh.default_group_configs);
+        assert_eq!(created.feature_levels, fresh.feature_levels);
+        assert_eq!(created.min_supported_feature_levels, fresh.min_supported_feature_levels);
+        assert_eq!(created.max_supported_feature_levels, fresh.max_supported_feature_levels);
+    }
+
+    /// Growing appends `Node(id, "localhost", 1000 + id)` with the default log
+    /// dirs; the default replication factor is `min(brokers.size(), 3)`.
+    #[test]
+    fn set_num_brokers_grows_the_broker_and_log_dir_lists() {
+        let mock = Builder::new()
+            .set_num_brokers(5)
+            .and_then(Builder::build)
+            .expect("five brokers");
+        let state = mock.state.lock().unwrap();
+        let expected: Vec<Node> = (0..5).map(|id| Node::new(id, "localhost".to_string(), 1000 + id)).collect();
+        assert_eq!(state.brokers, expected);
+        assert_eq!(state.broker_log_dirs, vec![default_dirs(); 5]);
+        assert_eq!(state.default_replication_factor, 3, "min(5, 3)");
+        assert_eq!(state.broker_configs.len(), 5);
+    }
+
+    /// Shrinking keeps the first brokers and the first log-dir entries
+    /// (`subList(0, n)`).
+    #[test]
+    fn set_num_brokers_shrinks_both_lists_to_their_prefix() {
+        let mock = Builder::new()
+            .set_num_brokers(3)
+            .expect("three brokers")
+            .set_broker_log_dirs(vec![dirs("a"), dirs("b"), dirs("c")])
+            .set_num_brokers(2)
+            .and_then(Builder::build)
+            .expect("two brokers");
+        let state = mock.state.lock().unwrap();
+        assert_eq!(
+            state.brokers,
+            vec![
+                Node::new(0, "localhost".to_string(), 1000),
+                Node::new(1, "localhost".to_string(), 1001)
+            ]
+        );
+        assert_eq!(state.broker_log_dirs, vec![dirs("a"), dirs("b")]);
+        assert_eq!(state.default_replication_factor, 2);
+    }
+
+    /// `brokerLogDirs.subList(0, n)` throws `IndexOutOfBoundsException("toIndex
+    /// = n")` when the log-dir list is shorter than the new count, which can
+    /// happen after `brokerLogDirs(..)` installed a shorter list.
+    #[test]
+    fn shrinking_past_a_short_log_dir_list_fails_like_sub_list() {
+        let short = || {
+            Builder::new()
+                .set_num_brokers(3)
+                .expect("three brokers")
+                .set_broker_log_dirs(vec![dirs("a")])
+        };
+        let err = short().set_num_brokers(2).expect_err("the log-dir list is too short");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "toIndex = 2");
+
+        // `brokers(list)` resizes through `numBrokers(list.size())` first.
+        let two = vec![Node::new(7, "h".to_string(), 7), Node::new(8, "h".to_string(), 8)];
+        let err = short().set_brokers(two).expect_err("the log-dir list is too short");
+        assert_eq!(err.message(), "toIndex = 2");
+    }
+
+    /// A negative count reaches `subList(0, n)` with `n < 0`, and
+    /// `subListRangeCheck` throws `IllegalArgumentException("fromIndex(0) >
+    /// toIndex(n)")`, also from an already-empty builder.
+    #[test]
+    fn a_negative_broker_count_fails_like_sub_list_even_when_empty() {
+        let err = Builder::new()
+            .set_num_brokers(0)
+            .and_then(|builder| builder.set_num_brokers(-3))
+            .expect_err("a negative count must be rejected");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "fromIndex(0) > toIndex(-3)");
+    }
+
+    /// `brokers(list)` runs `numBrokers(list.size())` on the current lists
+    /// before replacing the broker list, so existing log-dir entries are kept
+    /// and the rest padded with `DEFAULT_LOG_DIRS`.
+    #[test]
+    fn set_brokers_resizes_the_log_dirs_before_replacing_the_brokers() {
+        let nodes = vec![
+            Node::new(5, "h5".to_string(), 5),
+            Node::new(6, "h6".to_string(), 6),
+            Node::new(7, "h7".to_string(), 7),
+        ];
+        let mock = Builder::new()
+            .set_broker_log_dirs(vec![dirs("custom")])
+            .set_brokers(nodes.clone())
+            .and_then(Builder::build)
+            .expect("three explicit brokers");
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.brokers, nodes, "the given list replaces the generated brokers");
+        assert_eq!(
+            state.broker_log_dirs,
+            vec![dirs("custom"), default_dirs(), default_dirs()],
+            "the existing entry is kept and the new ones padded"
+        );
+        assert_eq!(state.controller, nodes[0], "brokers.get(0) of the new list");
+
+        // Shrinking through `brokers(list)` keeps the log-dir prefix.
+        let mock = Builder::new()
+            .set_num_brokers(3)
+            .expect("three brokers")
+            .set_broker_log_dirs(vec![dirs("a"), dirs("b"), dirs("c")])
+            .set_brokers(vec![Node::new(9, "h9".to_string(), 9)])
+            .and_then(Builder::build)
+            .expect("one explicit broker");
+        assert_eq!(mock.state.lock().unwrap().broker_log_dirs, vec![dirs("a")]);
+    }
+
+    /// `controller(index)` reads `brokers.get(index)` at the call; the JDK's
+    /// `ArrayList.get` throws `IndexOutOfBoundsException("Index i out of bounds
+    /// for length n")` for an index outside the list.
+    #[test]
+    fn set_controller_picks_the_broker_at_index_or_fails_at_the_call() {
+        let three = || Builder::new().set_num_brokers(3).expect("three brokers");
+        let mock = three().set_controller(1).and_then(Builder::build).expect("broker 1 exists");
+        assert_eq!(
+            mock.state.lock().unwrap().controller,
+            Node::new(1, "localhost".to_string(), 1001)
+        );
+
+        let err = three().set_controller(3).expect_err("index 3 is past the end");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "Index 3 out of bounds for length 3");
+        let err = three().set_controller(-1).expect_err("a negative index");
+        assert_eq!(err.message(), "Index -1 out of bounds for length 3");
+    }
+
+    /// `build()` passes the chosen controller to the constructor, whose
+    /// `controller(Node)` throws `IllegalArgumentException("The controller node
+    /// must be in the list of brokers")` when a later resize or replacement
+    /// dropped it (`MockAdminClient.java:278-281`).
+    #[test]
+    fn build_rejects_a_controller_no_longer_in_the_broker_list() {
+        let err = Builder::new()
+            .set_num_brokers(3)
+            .and_then(|builder| builder.set_controller(2))
+            .and_then(|builder| builder.set_num_brokers(1))
+            .and_then(Builder::build)
+            .expect_err("broker 2 was removed");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+
+        let err = Builder::new()
+            .set_controller(0)
+            .and_then(|builder| builder.set_brokers(vec![Node::new(9, "h9".to_string(), 9)]))
+            .and_then(Builder::build)
+            .expect_err("the original broker 0 was replaced");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+    }
+
+    /// Each value-only setter reaches the built mock.
+    #[test]
+    fn builder_setters_reach_the_built_mock() {
+        let features = HashMap::from([("f".to_string(), 3i16)]);
+        let min = HashMap::from([("f".to_string(), 1i16)]);
+        let max = HashMap::from([("f".to_string(), 5i16)]);
+        let group_defaults = HashMap::from([("group.session.timeout.ms".to_string(), "45000".to_string())]);
+        let mock = Builder::new()
+            .set_cluster_id("my-cluster")
+            .set_default_partitions(7)
+            .set_default_replication_factor(2)
+            .set_using_raft_controller(true)
+            .set_feature_levels(features.clone())
+            .set_min_supported_feature_levels(min.clone())
+            .set_max_supported_feature_levels(max.clone())
+            .set_default_group_configs(group_defaults.clone())
+            .build()
+            .expect("one broker");
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.cluster_id, "my-cluster");
+        assert_eq!(state.default_partitions, 7);
+        assert_eq!(state.default_replication_factor, 2);
+        assert!(state.using_raft_controller);
+        assert_eq!(state.feature_levels, features);
+        assert_eq!(state.min_supported_feature_levels, min);
+        assert_eq!(state.max_supported_feature_levels, max);
+        assert_eq!(
+            state.default_group_configs,
+            group_defaults.into_iter().collect::<BTreeMap<_, _>>()
+        );
+        assert_eq!(state.broker_configs[0]["default.replication.factor"], "2");
+    }
+
+    /// `build()` narrows the replication factor with `Integer.shortValue()`,
+    /// which wraps rather than clamps.
+    #[test]
+    fn build_narrows_the_default_replication_factor_like_short_value() {
+        for (factor, narrowed) in [(65_537, 1i16), (32_768, -32_768), (-1, -1), (70_000, 4_464)] {
+            let mock = Builder::new()
+                .set_default_replication_factor(factor)
+                .build()
+                .expect("one broker");
+            let state = mock.state.lock().unwrap();
+            assert_eq!(state.default_replication_factor, narrowed, "shortValue() of {factor}");
+            assert_eq!(
+                state.broker_configs[0]["default.replication.factor"],
+                narrowed.to_string(),
+                "String.valueOf of the narrowed value for {factor}"
+            );
+        }
     }
 
     /// The controller Java picks is `brokers.get(0)` — an element of the broker
     /// list, hence always present in `describeCluster().nodes()`. This pins that
     /// invariant for every valid count; the count at which the fabricated
     /// `Node::new(0, "localhost", 1000)` fallback broke it is now unreachable, and
-    /// is covered by `create_rejects_zero_brokers_rather_than_fabricating_a_controller`.
+    /// is covered by `build_rejects_zero_brokers_rather_than_fabricating_a_controller`.
     #[tokio::test]
     async fn controller_is_always_one_of_the_seeded_nodes() {
         for num_brokers in 1..=3 {
-            let mock = MockAdminClient::create(num_brokers).expect("num_brokers is at least 1");
+            let mock = Builder::new()
+                .set_num_brokers(num_brokers)
+                .and_then(Builder::build)
+                .expect("num_brokers is at least 1");
             let described = mock.describe_cluster_with_options(DescribeClusterOptions::new());
             let nodes = described.nodes().get().await.expect("nodes");
             let controller = described.controller().get().await.expect("controller").expect("a controller");
@@ -2109,7 +2675,7 @@ mod tests {
     /// the range [1, 5] (mirrors the shape used by Java's `MockAdminClient`
     /// feature tests).
     fn admin_with_features() -> MockAdminClient {
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let mock = Builder::new().build().expect("a fresh builder has one broker");
         mock.set_feature_levels(
             HashMap::from([("feature".to_string(), 3i16)]),
             HashMap::from([("feature".to_string(), 1i16)]),
@@ -2313,7 +2879,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_replication_factor_too_large_fails() {
-        let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        let client = Builder::new().build().expect("a fresh builder has one broker");
         let result = client.create_topics_with_options(
             &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(5))],
             CreateTopicsOptions::new(),
@@ -2412,7 +2978,7 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         let controller = result.controller().get().await.unwrap();
         assert_eq!(controller.unwrap().id(), 0);
-        assert_eq!(result.cluster_id().get().await.unwrap(), DEFAULT_CLUSTER_ID);
+        assert_eq!(result.cluster_id().get().await.unwrap(), MockAdminClient::DEFAULT_CLUSTER_ID);
         assert!(result.authorized_operations().get().await.unwrap().unwrap().is_empty());
     }
 
@@ -3071,7 +3637,7 @@ mod tests {
         TopicPartitionInfo::with_elr_last_known_elr(partition, leader, replicas, isr, Vec::new(), Vec::new())
     }
 
-    /// The nodes `MockAdminClient::create` seeds, so a test can name a broker
+    /// The nodes a [`Builder`] seeds, so a test can name a broker
     /// the mock actually has (`Node::new(id, "localhost", 1000 + id)`).
     fn seeded_broker(id: i32) -> Node {
         Node::new(id, "localhost".to_string(), 1000 + id)

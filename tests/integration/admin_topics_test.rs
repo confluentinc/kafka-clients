@@ -117,6 +117,60 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
     ctx.cleanup().await;
 }
 
+/// `describeTopics` by name goes through KIP-966 `DescribeTopicPartitions`, as
+/// in Java 4.3.1: the broker always reports the eligible-leader-replica lists
+/// (`KRaftMetadataCache.java:221-222`), so on a healthy topic they are empty
+/// lists, not "unavailable" — the Metadata API, which this client used by name
+/// before, carries no ELR and left them `None`. With
+/// `partition_size_limit_per_response` below the partition count the broker
+/// answers in pages, and the client must follow `NextCursor` to see them all.
+async fn describe_topics_by_name_reports_elr_and_pages<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let topic = ctx.topic("admin_describe_pages");
+    create_topic(&admin, &topic, 5, 1).await;
+    wait_for_all_partitions_metadata(&admin, &topic, 5).await;
+
+    for limit in [None, Some(2), Some(1)] {
+        let options = match limit {
+            Some(limit) => DescribeTopicsOptions::new().set_partition_size_limit_per_response(limit),
+            None => DescribeTopicsOptions::new(),
+        };
+        let described = admin
+            .describe_topics_with_topics(std::slice::from_ref(&topic), options)
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend (limit {limit:?}): describe topics: {e}"));
+        let desc = described[&topic]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{backend} backend (limit {limit:?}): describe topics should succeed: {e}"));
+        let partitions: Vec<i32> = desc.partitions().iter().map(|p| p.partition()).collect();
+        assert_eq!(
+            partitions,
+            vec![0, 1, 2, 3, 4],
+            "{backend} backend (limit {limit:?}): every page must be followed, in order"
+        );
+        for partition in desc.partitions() {
+            assert_eq!(
+                partition.elr(),
+                Some(&[][..]),
+                "{backend} backend (limit {limit:?}): partition {} ELR",
+                partition.partition()
+            );
+            assert_eq!(
+                partition.last_known_elr(),
+                Some(&[][..]),
+                "{backend} backend (limit {limit:?}): partition {} last-known ELR",
+                partition.partition()
+            );
+            assert!(partition.leader().is_some(), "{backend} backend (limit {limit:?}): leader");
+        }
+    }
+
+    delete_and_close(&admin, &[topic]).await;
+    ctx.cleanup().await;
+}
+
 async fn describe_nonexistent_topic_is_unknown<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -600,6 +654,10 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
 }
 
 multilanguage_admin_test!(test_create_then_list_and_describe_topics, create_then_list_and_describe_topics);
+multilanguage_admin_test!(
+    test_describe_topics_by_name_reports_elr_and_pages,
+    describe_topics_by_name_reports_elr_and_pages
+);
 multilanguage_admin_test!(
     test_describe_nonexistent_topic_is_unknown,
     describe_nonexistent_topic_is_unknown

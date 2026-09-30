@@ -32,7 +32,13 @@ pub struct DescribeConfigsResult {
 
 impl DescribeConfigsResult {
     /// Creates a new result from the per-resource futures.
-    pub(crate) fn new(futures: HashMap<ConfigResource, KafkaFuture<Config>>) -> Self {
+    ///
+    /// Java declares this constructor `protected`
+    /// (`DescribeConfigsResult.java:35`). Rust has no `protected`: Java code outside the
+    /// package reaches it by constructing an anonymous subclass, for example in
+    /// a hand-written `Admin` fake, so `pub` is what gives user code the same
+    /// ability here.
+    pub fn new(futures: HashMap<ConfigResource, KafkaFuture<Config>>) -> Self {
         Self { futures }
     }
 
