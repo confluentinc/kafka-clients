@@ -1737,7 +1737,7 @@ where
     /// (`AsyncKafkaConsumer.java:390-508`). See [`Self::new`] for the
     /// `catch (Throwable t)` wrap applied to every error it returns.
     fn new_inner(
-        config: ConsumerConfig,
+        mut config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
     ) -> Result<Self, Error> {
@@ -1764,6 +1764,21 @@ where
         use crate::consumer::internals::TopicMetadataRequestManager;
 
         log::debug!("Initializing the Kafka consumer");
+
+        // A config built with `ConsumerConfig::default()` and the fluent
+        // setters never went through `ConsumerConfig::new`, so it may still
+        // carry an empty `client.id`. Java's config is immutable and always
+        // finalised by `postProcessParsedConfig`; construction is the Rust
+        // equivalent point, so apply the same `maybeOverrideClientId` rule.
+        config.maybe_override_client_id()?;
+
+        // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
+        // (`AsyncKafkaConsumer.java:470-473`) validates a set
+        // `group.instance.id` (`GroupRebalanceConfig.java:68-72`) regardless of
+        // `client.id`; `ConsumerConfig` only does so when it derives the id.
+        if let Some(group_instance_id) = config.group_instance_id() {
+            crate::common::requests::JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
+        }
 
         // Java line 390 — `clientId = config.getString(CLIENT_ID_CONFIG)`.
         let client_id: Arc<str> = Arc::from(config.client_id());
@@ -6686,6 +6701,88 @@ mod tests {
         assert!(
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
+        );
+    }
+
+    /// A config built with `ConsumerConfig::default()` and the setters skips
+    /// `ConsumerConfig::new`, so the constructor derives the `client.id` with
+    /// the same `maybeOverrideClientId` rule instead of sending an empty id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_built_config_gets_generated_client_id() {
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // A refused localhost port, so the ctor does not block on network IO.
+        let config = ConsumerConfig::default()
+            .set_bootstrap_servers(vec!["127.0.0.1:1".to_string()])
+            .set_group_id("g");
+        assert_eq!(config.client_id(), "", "precondition: the setter path leaves client.id unset");
+
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        let client_id = consumer.client_id().to_string();
+        let n = client_id
+            .strip_prefix("consumer-g-")
+            .unwrap_or_else(|| panic!("unexpected generated id {client_id:?}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
+
+        consumer.close().await.expect("close should succeed");
+    }
+
+    /// Java validates `group.instance.id` again in the constructor
+    /// (`GroupRebalanceConfig.java:68-72`), independently of `client.id`, so an
+    /// id that `ConsumerConfig` accepted (explicit `client.id`) still fails
+    /// construction with the constructor wrap and `JoinGroupRequest`'s message
+    /// as the cause.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_group_instance_id_fails_construction_with_explicit_client_id() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("client.id".to_string(), "my-consumer".to_string()),
+            ("group.id".to_string(), "test-group".to_string()),
+            ("group.instance.id".to_string(), "bad/id".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an invalid group.instance.id must fail construction");
+
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let source = std::error::Error::source(&err).expect("the validation failure must be the cause");
+        let Some(Error::InvalidConfiguration(cause)) = err.kafka_error().and_then(|e| e.source()) else {
+            panic!("cause must be InvalidConfiguration, got: {source:?}");
+        };
+        assert_eq!(
+            "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
+             alphanumerics, '.', '_' and '-'",
+            cause.message()
         );
     }
 

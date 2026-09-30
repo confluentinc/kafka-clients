@@ -18,7 +18,12 @@
 //! members required by the admin client (`removeMembersFromConsumerGroup`) are
 //! translated here: the classic-protocol `JoinGroupRequest` itself is out of
 //! scope (see `.claude/rules/consumer-threading.md` §20). This file carries the
-//! `UNKNOWN_MEMBER_ID` sentinel and the shared reason-truncation utility.
+//! `UNKNOWN_MEMBER_ID` sentinel, the shared reason-truncation utility and the
+//! `group.instance.id` validator used by `ConsumerConfig`.
+
+use crate::common::Error;
+use crate::common::errors::InvalidConfigurationError;
+use crate::common::internals::Topic;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.requests.JoinGroupRequest`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -49,11 +54,47 @@ impl JoinGroupRequest {
             reason.to_string()
         }
     }
+
+    /// Validates a `group.instance.id` with the topic-name rules.
+    ///
+    /// Corresponds to `JoinGroupRequest.validateGroupInstanceId`, which calls
+    /// `Topic.validate(id, "Group instance id", ...)` and throws
+    /// `InvalidConfigurationException` with the message
+    /// `"Group instance id is invalid: <reason>"`. Here the `Topic.validate`
+    /// callback form collapses into returning the error directly.
+    pub fn validate_group_instance_id(id: &str) -> Result<(), Error> {
+        match Topic::detect_invalid_topic(id) {
+            Some(reason_invalid) => Err(Error::InvalidConfiguration(InvalidConfigurationError::new(format!(
+                "Group instance id is invalid: {reason_invalid}"
+            )))),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A well-formed instance id passes validation.
+    #[test]
+    fn valid_group_instance_id_accepted() {
+        JoinGroupRequest::validate_group_instance_id("instance-1.A_b").unwrap();
+    }
+
+    /// An id violating the topic-name rules is an `InvalidConfigurationError`
+    /// carrying Java's message.
+    #[test]
+    fn invalid_group_instance_id_rejected_with_java_message() {
+        let err = JoinGroupRequest::validate_group_instance_id("bad/id").unwrap_err();
+        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("Group instance id is invalid:"),
+            "unexpected message: {err}"
+        );
+        let err = JoinGroupRequest::validate_group_instance_id("").unwrap_err();
+        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
+    }
 
     /// A short reason is returned unchanged.
     #[test]
