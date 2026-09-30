@@ -172,7 +172,7 @@ pub struct KafkaProducer<K, V> {
     /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)
     /// or set with
     /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner).
-    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
     /// Which hash the keyed partition path uses, resolved from
@@ -264,7 +264,7 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// Java's `partitioner`. Stored as-is and **not** configured, mirroring
     /// `KafkaProducer.java:502`, which wraps a pre-built `Partitioner` without
     /// calling `configure`.
-    pub partitioner: Option<Arc<dyn Partitioner<K, V>>>,
+    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
 }
 
 /// Fluent builder for [`KafkaProducerOptions`].
@@ -287,7 +287,7 @@ pub(crate) struct KafkaProducerOptionsBuilder<'a, K, V> {
     time: Option<Arc<dyn Time>>,
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     pending_requests: Option<Arc<Mutex<PendingRequests>>>,
-    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
 }
 
 impl<K, V> Default for KafkaProducerOptionsBuilder<'_, K, V> {
@@ -381,7 +381,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
         self
     }
     /// Sets [`KafkaProducerOptions::partitioner`]; defaults to `None`.
-    pub(crate) fn set_partitioner(mut self, partitioner: Option<Arc<dyn Partitioner<K, V>>>) -> Self {
+    pub(crate) fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
@@ -488,7 +488,7 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     /// `None` for the built-in default partitioner. Callers that resolve a
     /// partitioner also gate adaptive partitioning on its absence before
     /// building the `accumulator` they pass in (see `KafkaProducer::new`).
-    pub partitioner: Option<Arc<dyn Partitioner<K, V>>>,
+    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
 }
 
 /// Fluent builder for [`KafkaProducerClientOptions`].
@@ -509,7 +509,7 @@ pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     sender_metrics_registry: Option<SenderMetricsRegistry>,
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     pending_requests: Option<Arc<Mutex<PendingRequests>>>,
-    partitioner: Option<Arc<dyn Partitioner<K, V>>>,
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
 }
 
 impl<K, V, C> Default for KafkaProducerClientOptionsBuilder<'_, K, V, C> {
@@ -603,7 +603,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
         self
     }
     /// Sets [`KafkaProducerClientOptions::partitioner`]; defaults to `None`.
-    pub(crate) fn set_partitioner(mut self, partitioner: Option<Arc<dyn Partitioner<K, V>>>) -> Self {
+    pub(crate) fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
@@ -864,7 +864,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// absence. Errors escape raw from here; `new` relabels them
     /// (`KafkaProducer.java:461-466`).
     fn new_inner(
-        config: ProducerConfig,
+        mut config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     ) -> Result<Self, Error>
@@ -993,8 +993,8 @@ impl<K, V> KafkaProducer<K, V> {
         //     runs *before* this point, so no reachable fallible step follows the
         //     partitioner's construction; the normal `close()` path is therefore the
         //     only one, and no close-on-error path is needed.
-        let partitioner = config.resolve_partitioner::<K, V>()?;
-        if let Some(partitioner) = &partitioner {
+        let mut partitioner = config.resolve_partitioner::<K, V>()?;
+        if let Some(partitioner) = partitioner.as_mut() {
             let mut configs = config.originals.clone();
             configs.insert(ProducerConfig::CLIENT_ID_CONFIG.to_string(), config.client_id.clone());
             partitioner.configure(&configs);
@@ -3564,7 +3564,7 @@ mod tests {
     }
 
     impl<K, V> Partitioner<K, V> for PartitionerForClientId {
-        fn configure(&self, configs: &HashMap<String, String>) {
+        fn configure(&mut self, configs: &HashMap<String, String>) {
             if let Some(id) = configs.get(ProducerConfig::CLIENT_ID_CONFIG) {
                 self.client_ids.lock().unwrap().push(id.clone());
             }
@@ -3658,7 +3658,7 @@ mod tests {
                 .set_wakeup(wakeup)
                 .set_time(default_time())
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
-                .set_partitioner(Some(Arc::from(partitioner)))
+                .set_partitioner(Some(partitioner))
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
@@ -3757,7 +3757,7 @@ mod tests {
         let props = guard_props(&[]); // bootstrap only; NO client.id
         let config = ProducerConfig::new(&props)
             .expect("valid config")
-            .set_partitioner::<String, String>(Arc::new(PartitionerForClientId {
+            .set_partitioner::<String, String>(Box::new(PartitionerForClientId {
                 client_ids: Arc::clone(&client_ids),
             }));
         let producer =
@@ -3927,7 +3927,7 @@ mod tests {
         let props = guard_props(&[("partitioner.class", "RoundRobinPartitioner")]);
         let config = ProducerConfig::new(&props)
             .expect("valid config")
-            .set_partitioner::<String, String>(Arc::new(PartitionerForClientId {
+            .set_partitioner::<String, String>(Box::new(PartitionerForClientId {
                 client_ids: Arc::clone(&client_ids),
             }));
         let producer =
@@ -3953,7 +3953,7 @@ mod tests {
         let props = guard_props(&[]);
         let config = ProducerConfig::new(&props)
             .expect("valid config")
-            .set_partitioner::<Vec<u8>, Vec<u8>>(Arc::new(RoundRobinPartitioner::new()));
+            .set_partitioner::<Vec<u8>, Vec<u8>>(Box::new(RoundRobinPartitioner::new()));
         let err = match KafkaProducer::<String, String>::new(
             config,
             Box::new(StringSerializer),
@@ -4824,8 +4824,8 @@ mod tests {
     #[tokio::test]
     async fn test_send_allocations_do_not_grow_with_a_custom_partitioner() {
         async fn steady_state_send_allocations(with_partitioner: bool) -> usize {
-            let partitioner: Option<Arc<dyn Partitioner<String, String>>> = if with_partitioner {
-                Some(Arc::new(RoundRobinPartitioner::new()))
+            let partitioner: Option<Box<dyn Partitioner<String, String>>> = if with_partitioner {
+                Some(Box::new(RoundRobinPartitioner::new()))
             } else {
                 None
             };

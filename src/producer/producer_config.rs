@@ -22,7 +22,6 @@
 
 use std::any::{Any, type_name};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
@@ -52,7 +51,7 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#producerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig")]
 pub struct ProducerConfig {
     // --- Connection ---
@@ -280,10 +279,10 @@ pub struct ProducerConfig {
 /// No Java counterpart: Java holds the `partitioner.class` value in the config
 /// map as an `Object`. It is needed because [`ProducerConfig`] is not generic
 /// over the record types the partitioner is written for.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ConfiguredPartitioner {
-    /// An `Arc<dyn Partitioner<K, V>>`.
-    partitioner: Arc<dyn Any + Send + Sync>,
+    /// A `Box<dyn Partitioner<K, V>>`.
+    partitioner: Box<dyn Any + Send + Sync>,
     /// `dyn Partitioner<K, V>`, named in the type mismatch error.
     type_name: &'static str,
 }
@@ -698,7 +697,7 @@ impl ProducerConfig {
     /// - the two [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner)
     ///   spellings ([`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) and
     ///   [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN)) →
-    ///   `Some(Arc::new(RoundRobinPartitioner::new()))`;
+    ///   `Some(Box::new(RoundRobinPartitioner::new()))`;
     /// - every other accepted value (unset, `ConsistentRandomPartitioner`,
     ///   `Murmur2RandomPartitioner`) → `None`, meaning the built-in default
     ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
@@ -717,21 +716,25 @@ impl ProducerConfig {
     /// `K` / `V`: Java's `getConfiguredInstance` throws
     /// `KafkaException(c.getName() + " is not an instance of " + t.getName())`
     /// when the configured value does not implement the requested type.
+    ///
+    /// Takes `&mut self` because the partitioner set with `set_partitioner` is
+    /// moved out: the producer being built owns it, as a Java producer owns
+    /// the instance it creates from `partitioner.class`.
     pub(crate) fn resolve_partitioner<K: 'static, V: 'static>(
-        &self,
-    ) -> Result<Option<Arc<dyn Partitioner<K, V>>>, Error> {
-        if let Some(configured) = &self.partitioner {
-            let Some(partitioner) = configured.partitioner.downcast_ref::<Arc<dyn Partitioner<K, V>>>() else {
+        &mut self,
+    ) -> Result<Option<Box<dyn Partitioner<K, V>>>, Error> {
+        if let Some(configured) = self.partitioner.take() {
+            let Ok(partitioner) = configured.partitioner.downcast::<Box<dyn Partitioner<K, V>>>() else {
                 return Err(Error::kafka_message(format!(
                     "{} is not an instance of {}",
                     configured.type_name,
                     type_name::<dyn Partitioner<K, V>>()
                 )));
             };
-            return Ok(Some(Arc::clone(partitioner)));
+            return Ok(Some(*partitioner));
         }
         Ok(match self.partitioner_class.as_deref() {
-            Some(value) if Self::is_round_robin_partitioner(value) => Some(Arc::new(RoundRobinPartitioner::new())),
+            Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
             _ => None,
         })
     }
@@ -744,8 +747,7 @@ impl ProducerConfig {
     /// `configure`s it with the user configs plus the resolved `client.id`, as
     /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
-    /// Every producer built from this config, or from a clone of it, shares
-    /// the same instance.
+    /// The producer built from this config takes ownership of the partitioner.
     ///
     /// This replaces a `partitioner.class` given in the properties passed to
     /// [`new`](Self::new), as a later value for the same key would.
@@ -753,10 +755,10 @@ impl ProducerConfig {
     /// The partitioner's `K` / `V` must be the record types of the producer built
     /// from this config; otherwise `KafkaProducer::new` fails with
     /// "`<partitioner>` is not an instance of `<expected>`".
-    pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Arc<dyn Partitioner<K, V>>) -> Self {
+    pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Box<dyn Partitioner<K, V>>) -> Self {
         self.partitioner_class = None;
         self.partitioner = Some(ConfiguredPartitioner {
-            partitioner: Arc::new(partitioner),
+            partitioner: Box::new(partitioner),
             type_name: type_name::<dyn Partitioner<K, V>>(),
         });
         self
@@ -1181,7 +1183,7 @@ mod tests {
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = HashMap::new();
         props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
-        let config = ProducerConfig::new(&props).unwrap();
+        let mut config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
 
@@ -1194,7 +1196,7 @@ mod tests {
             "partitioner.class".to_string(),
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
         );
-        let config = ProducerConfig::new(&props).unwrap();
+        let mut config = ProducerConfig::new(&props).unwrap();
         assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
 
@@ -1203,7 +1205,7 @@ mod tests {
     /// instance.
     #[test]
     fn test_resolve_partitioner_default_none() {
-        let config = ProducerConfig::new(&HashMap::new()).unwrap();
+        let mut config = ProducerConfig::new(&HashMap::new()).unwrap();
         assert!(config.partitioner_class.is_none());
         assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_none());
     }
@@ -1218,7 +1220,7 @@ mod tests {
         for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
             let mut props = HashMap::new();
             props.insert("partitioner.class".to_string(), name.to_string());
-            let config = ProducerConfig::new(&props).unwrap();
+            let mut config = ProducerConfig::new(&props).unwrap();
             assert!(
                 config.resolve_partitioner::<String, String>().expect("resolves").is_none(),
                 "{name} must not resolve to a Partitioner instance"

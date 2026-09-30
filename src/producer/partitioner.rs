@@ -38,8 +38,8 @@ use crate::common::Cluster;
 ///   generic Rust producer the key and value have concrete types, so the
 ///   partitioner receives typed borrows instead of `Object` — no downcasts.
 /// - **`Send + Sync` supertraits**: the producer is shared across tasks, so the
-///   partitioner it holds must be shareable. Because these are supertrait
-///   bounds, `Arc<dyn Partitioner<K, V>>` is itself `Send + Sync`.
+///   boxed partitioner it owns must be shareable. Because these are supertrait
+///   bounds, `Box<dyn Partitioner<K, V>>` is itself `Send + Sync`.
 /// - **`partition(&self)`**, not `&mut self`: Java's `KafkaProducer` is
 ///   thread-safe and calls the *one* shared partitioner instance concurrently,
 ///   so Java implementations must already be internally synchronized
@@ -51,11 +51,10 @@ use crate::common::Cluster;
 ///   takes `&self`, so the partitioner must be closable through a shared
 ///   reference. Wrapping it in a `Mutex` to obtain `&mut` would add a lock to
 ///   every send for no behavioral gain.
-/// - **`configure(&self)`**, not `&mut self`: the partitioner is the value of
-///   `partitioner.class`, set on the `Clone` [`ProducerConfig`](crate::producer::ProducerConfig)
-///   with [`set_partitioner`](crate::producer::ProducerConfig::set_partitioner),
-///   so it is already shared when the producer configures it. State set by
-///   `configure` needs interior mutability, as for `partition`.
+/// - **`configure(&mut self)`** with a default no-op mirrors the consumer
+///   interceptor precedent (`ConsumerInterceptor::configure`) and is called
+///   exactly once, before the instance is boxed and shared with the producer,
+///   so `&mut self` is available then.
 /// - Java's `Plugin<Partitioner>` / `Monitorable` metrics wrapper (the javadoc's
 ///   "implement `Monitorable` to register metrics") has **no Rust counterpart**
 ///   and is not translated.
@@ -64,10 +63,10 @@ pub trait Partitioner<K, V>: Send + Sync {
     /// Configure this partitioner.
     ///
     /// Corresponds to Java's `Configurable.configure(Map<String, ?> configs)`.
-    /// Called by each producer built with this partitioner, before its first
-    /// send, with the producer's original configuration plus the (possibly
-    /// generated) `client.id`. The default implementation is a no-op.
-    fn configure(&self, _configs: &HashMap<String, String>) {}
+    /// Called once, before the instance is shared with the producer, with the
+    /// producer's original configuration plus the (possibly generated)
+    /// `client.id`. The default implementation is a no-op.
+    fn configure(&mut self, _configs: &HashMap<String, String>) {}
 
     /// Compute the partition for the given record.
     ///
