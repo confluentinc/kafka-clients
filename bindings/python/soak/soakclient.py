@@ -100,6 +100,7 @@ PRODUCER_CONFIG_KEYS = frozenset([
     "batch.size",
     "bootstrap.servers",
     "buffer.memory",
+    "client.dns.lookup",
     "client.id",
     "compression.type",
     "connections.max.idle.ms",

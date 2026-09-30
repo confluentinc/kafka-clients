@@ -17,6 +17,7 @@
 
 pub mod admin;
 pub mod api_versions;
+mod client_dns_lookup;
 mod client_request;
 mod client_response;
 mod client_utils;
@@ -58,6 +59,7 @@ pub mod ffi;
 pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
 pub use api_versions::ApiVersions;
+pub use client_dns_lookup::ClientDnsLookup;
 pub use client_request::ClientRequest;
 pub use client_response::ClientResponse;
 pub(crate) use client_utils::ClientUtils;
