@@ -1744,7 +1744,7 @@ mod tests {
         assert!(Errors::UnknownTopicOrPartition.error().is_some_and(|x| x.is_retriable_error()));
     }
 
-    /// Each hierarchy predicate (CLAUDE.md §10.4) must be `true` for **exactly** the
+    /// Each hierarchy predicate (CLAUDE.md §12.4) must be `true` for **exactly** the
     /// error codes whose Java exception class extends the corresponding class.
     ///
     /// Sets derived from the Apache Kafka 4.2 source in `kafka/` by taking the
@@ -1958,7 +1958,7 @@ mod tests {
     /// The four intermediate classes added alongside the `ErrorHierarchy`
     /// refactor must cover **exactly** the codes whose Java class transitively
     /// extends them — checked in both directions over every code, per
-    /// CLAUDE.md §10.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
+    /// CLAUDE.md §12.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
     #[test]
     fn test_new_intermediate_predicates_match_java_hierarchy() {
         let invalid_configuration: HashSet<Errors> = [
@@ -2042,7 +2042,7 @@ mod tests {
     /// recording fatal errors that Java records, or starts recording ones it
     /// does not.
     ///
-    /// Fatality is deliberately NOT exported to C (CLAUDE.md §10.4, and the note
+    /// Fatality is deliberately NOT exported to C (CLAUDE.md §12.4, and the note
     /// at `ffi/common.rs:161`): a C caller composes the classification from the
     /// exported predicates, so this table is also what keeps that composition
     /// answering what Java answers.

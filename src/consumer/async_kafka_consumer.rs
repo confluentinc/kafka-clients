@@ -181,7 +181,7 @@ enum BgJoin {
 ///
 /// `ConsumerHandle` is a concrete struct, so its async methods are
 /// concrete `async fn` returning an anonymous future (no
-/// `Pin<Box<dyn Future>>`), per CLAUDE.md §11. None of its methods are on
+/// `Pin<Box<dyn Future>>`), per CLAUDE.md §13. None of its methods are on
 /// a per-record hot path.
 #[derive(Clone)]
 pub struct ConsumerHandle {
@@ -1229,7 +1229,7 @@ where
     background_event_queue_size: Arc<AtomicI64>,
 
     // ── App-side only ─────────────────────────────────────────────────
-    /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
+    /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §13.
     client_id: Arc<str>,
     /// `group.id`, if any.
     group_id: Option<String>,
@@ -2724,7 +2724,7 @@ where
     }
 
     /// Java: `String clientId()`. Returned as a borrowed `&str` per
-    /// CLAUDE.md §12 (most general borrowed form for getters).
+    /// CLAUDE.md §14 (most general borrowed form for getters).
     ///
     /// **Returns the configured value silently when the consumer is
     /// closed** (Java throws `IllegalStateException`). The `client_id`
@@ -4201,7 +4201,7 @@ where
             // `hasAllFetchPositions`). Java's copy is a cheap TLAB nursery
             // allocation the GC absorbs; in Rust it was a malloc + 24 Arc
             // clones + SipHash inserts per poll (~1.3% of app-thread CPU on
-            // the cloud profile). CLAUDE.md §11: keep it off the heap
+            // the cloud profile). CLAUDE.md §13: keep it off the heap
             // (Phase 27 Fix #3).
             let needs_backoff = {
                 let subs = self.subscriptions.lock().unwrap();

@@ -75,13 +75,13 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
       is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
-      (§10.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
+      (§12.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
       struct, which never crosses the boundary on its own.
     - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
     - Classes that aren't public in Rust crate MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
       `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every
-      hierarchy predicate from §10.4, e.g. `is_kafka_error` ->
+      hierarchy predicate from §12.4, e.g. `is_kafka_error` ->
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
       only way a C caller can classify an error beyond its numeric code.
@@ -193,7 +193,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
     Return a borrowed reference in case the data is still owned by the original struct (getter for example).
     When ownership is transferred to the caller prefer returning the struct (making use of RVO) over Box or Rc or Arc.
     Don't copy byte arrays holding the key, value or headers passed to ProduceRecord or received in ConsumeRecord. This zero-copy requirement extends through the entire write path: serialized bytes must be written directly into the batch buffer (no intermediate buffer), batch finalization must not copy already-serialized bytes, and wire sends must use vectored I/O (`IoSlice` / `write_vectored`) so the framing header and payload are sent without assembling a single contiguous buffer. On the receive path, the symmetric rule applies: fetched bytes are owned by one buffer in `CompletedFetch`, every downstream type borrows slices from it, and the `Deserializer<T>` trait takes `&[u8]` (sync, no `#[async_trait]`) — see `consumer-threading.md` §27.
-15. **Consumer-specific rules**: see [consumer-threading.md](.claude/rules/consumer-threading.md) for `AsyncKafkaConsumer` API shape, background-task design, `wakeup()` cancellation, `SubscriptionState` ownership, group-protocol scope, receive-path zero-copy, and `ConsumerRebalanceListener` invocation thread. These rules supplement #8/#9/#11/#12 inside the consumer module.
+15. **Consumer-specific rules**: see [consumer-threading.md](.claude/rules/consumer-threading.md) for `AsyncKafkaConsumer` API shape, background-task design, `wakeup()` cancellation, `SubscriptionState` ownership, group-protocol scope, receive-path zero-copy, and `ConsumerRebalanceListener` invocation thread. These rules supplement #10/#11/#13/#14 inside the consumer module.
 
 ## Agent Role
 

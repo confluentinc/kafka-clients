@@ -704,7 +704,7 @@ impl ProducerBatch {
     /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
     ///
     /// The returned [`MemoryRecords`] wraps a refcounted [`bytes::Bytes`], so this
-    /// clones a handle, not the record bytes (CLAUDE.md §12).
+    /// clones a handle, not the record bytes (CLAUDE.md §14).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#records")]
     pub fn records(&mut self) -> MemoryRecords {
         self.records_builder.build()
@@ -1432,7 +1432,7 @@ mod tests {
         assert_eq!(split_record_count, appended, "no record may be lost by the split");
     }
 
-    /// `definition-of-done.md` §10 / CLAUDE.md §11-12 for
+    /// `definition-of-done.md` §10 / CLAUDE.md §13-12 for
     /// [`ProducerBatch::records`], which `Sender::send_producer_data` calls once per
     /// drained batch.
     ///
@@ -1446,7 +1446,7 @@ mod tests {
     ///   2. **Re-reading is free and copies nothing.** Every call after the first
     ///      allocates zero and hands back the *same* bytes, at the same address. That
     ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
-    ///      (CLAUDE.md §12) now that it re-reads the batch instead of panicking.
+    ///      (CLAUDE.md §14) now that it re-reads the batch instead of panicking.
     ///
     /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
     /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a

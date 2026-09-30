@@ -172,7 +172,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 /// error with `instanceof`, and a Rust caller discriminates it by matching the
 /// [`Error`] variant. C can do neither — it cannot see enum variants — so its
 /// whole budget for classifying an error is the numeric code, a free-text
-/// message, and the hierarchy predicates. This is the same reason CLAUDE.md §3
+/// message, and the hierarchy predicates. This is the same reason CLAUDE.md §4
 /// gives for exporting the predicates at all, applied to the other half of the
 /// problem: the predicates place an error in a *family*, and this enum names
 /// the *class*.
@@ -715,7 +715,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kaf
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
 // here. `org.apache.kafka.common.requests` carries the package disclaimer "This
 // package is not a supported Kafka API; the implementation may change without
-// warning between minor or patch releases", and CLAUDE.md §3 forbids C bindings
+// warning between minor or patch releases", and CLAUDE.md §4 forbids C bindings
 // for such packages. A C caller that needs the classification composes it from
 // the exported predicates (`kafka_common_Error_is_authentication_error`,
 // `kafka_common_Error_is_authorization_error`) and the error code.
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_c
 
 /// Returns whether the error's Java exception extends `ApiException` — an error the broker can report over the protocol, as opposed to a client-side programming or serialization failure.
 ///
-/// Mirrors `Error::is_api_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_api_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -780,7 +780,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_com
 
 /// Returns whether the error is retriable AND a metadata/coordinator refresh is what clears it (Java `RefreshRetriableException`).
 ///
-/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -805,7 +805,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *c
 
 /// Returns whether the error means the client's cached metadata may be stale (Java `InvalidMetadataException`).
 ///
-/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -830,7 +830,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *co
 
 /// Returns whether the error is an authentication failure reported by the broker (Java `AuthenticationException`).
 ///
-/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -855,7 +855,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *cons
 
 /// Returns whether the error is an authorization failure — a missing ACL (Java `AuthorizationException`).
 ///
-/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -882,7 +882,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const
 /// authorization families, so a broad classification a C caller cannot make from
 /// the numeric code alone.
 ///
-/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -908,7 +908,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error
 /// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
 /// producer or rejoining the group.
 ///
-/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -935,7 +935,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
 
 /// Returns whether the error's Java class extends `InvalidOffsetException` (common.errors).
 ///
-/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -960,7 +960,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *cons
 
 /// Returns whether the error's Java class extends `OutOfOrderSequenceException`.
 ///
-/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -985,7 +985,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error
 
 /// Returns whether the error's Java class extends `SerializationException`.
 ///
-/// Mirrors `Error::is_serialization_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_serialization_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const
 
 /// Returns whether the error's Java class extends `TimeoutException` (also covers `BufferExhaustedException`).
 ///
-/// Mirrors `Error::is_timeout_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_timeout_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka
 
 /// Returns whether the error's Java class extends the consumer package's `InvalidOffsetException`.
 ///
-/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1063,7 +1063,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
 /// Returns whether the error's Java class extends the consumer package's `OffsetOutOfRangeException` (also covers
 /// `LogTruncationException`).
 ///
-/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_erro
 
 /// Returns whether the error's Java class extends `TransactionAbortableException` — the transaction may be aborted and retried.
 ///
-/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1131,7 +1131,7 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
 }
 
 // ---------------------------------------------------------------------------
-// Per-variant payload accessors (CLAUDE.md §3: "Exceptions having additional
+// Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
 //
 // Of the ~156 `Error` variants, the 13 below carry state beyond

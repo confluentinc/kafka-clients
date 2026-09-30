@@ -196,7 +196,7 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 //     test targets do not enable.
 //
 // `check-generated` re-runs the generation and fails on any difference, so a
-// stale copy breaks the build rather than a test (CLAUDE.md #6: xtask programs
+// stale copy breaks the build rather than a test (CLAUDE.md #8: xtask programs
 // rather than shell scripts).
 
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
@@ -744,7 +744,7 @@ fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
 ///
 /// Shape 1's check was shipped for Phase 8 as an ad-hoc script and could not see
 /// shape 2 — an attribute-free stack. Both live here now, and in `lint`, because
-/// CLAUDE.md §6 puts repeatable checks in xtask rather than in shell scripts, and
+/// CLAUDE.md §8 puts repeatable checks in xtask rather than in shell scripts, and
 /// because a check nobody is obliged to run is a check that finds the next instance
 /// one review round late.
 ///

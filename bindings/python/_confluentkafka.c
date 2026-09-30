@@ -1427,7 +1427,7 @@ static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
 // error code, which is what the FFI's own note on
 // kafka_common_Error_is_retriable_error prescribes: fatality lives in
 // `org.apache.kafka.common.requests`, a package Kafka disclaims as unsupported,
-// so CLAUDE.md §3 forbids giving it a C binding of its own.
+// so CLAUDE.md §4 forbids giving it a C binding of its own.
 //
 // The composition mirrors `request_utils::is_fatal_error` term for term — the
 // two authorization/authentication predicates, plus the five coded classes it

@@ -49,7 +49,7 @@
 //! - **Must NOT** be called from a thread that is already inside a tokio
 //!   runtime (a worker thread, or any code reached from `block_on`):
 //!   `Handle::block_on` panics there. Rather than let a panic cross the FFI
-//!   boundary (CLAUDE.md §10.1), every entry point detects that situation and
+//!   boundary (CLAUDE.md §12.1), every entry point detects that situation and
 //!   fails with an `IllegalStateError` instead. The only way an embedder can
 //!   hit this is by calling a handle op from a callback that ran *inline on a
 //!   runtime worker* — which happens only in the documented teardown fallback
@@ -165,7 +165,7 @@ where
 /// Boxed future type used by [`block_on_void`], so one helper can serve every
 /// void-returning core-handle method (each returns a distinct anonymous
 /// future). One `Box` per FFI call is amortized over a whole consumer
-/// operation — not a hot path (CLAUDE.md §11).
+/// operation — not a hot path (CLAUDE.md §13).
 type BoxFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 
 /// Drives a value-returning core-handle future to completion on the calling

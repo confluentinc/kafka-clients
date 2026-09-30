@@ -186,7 +186,7 @@ impl MockAdminClient {
     ///
     /// This is a `Result` rather than a `panic!` because the argument is a
     /// caller-supplied count that the caller can trivially correct, which is
-    /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
+    /// CLAUDE.md §12.2 ("return a `Result` when Java code throws … even if
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
     /// keeps `crate::ffi::admin` free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
@@ -269,7 +269,7 @@ impl MockAdminClient {
     // Convention for this group: a seeding helper whose Java counterpart is a
     // `void` method that *throws* returns `Result<(), Error>` and reuses
     // Java's message verbatim, rather than panicking. Java's throws here are all
-    // catchable `IllegalArgumentException`s, and CLAUDE.md §10.2 asks for a
+    // catchable `IllegalArgumentException`s, and CLAUDE.md §12.2 asks for a
     // `Result` for a recoverable Java throw even when it is unchecked. A helper
     // whose Java counterpart cannot fail (`updateBeginningOffsets`,
     // `updateEndOffsets`, `updateConsumerGroupOffsets`, `timeoutNextRequest`)
@@ -369,7 +369,7 @@ impl MockAdminClient {
         // established by anything — Java's `brokerLogDirs.get(id).get(0)`
         // (MockAdminClient.java:312-314) throws `IndexOutOfBoundsException` for a
         // broker configured with no log directory — so it is surfaced as an error
-        // rather than panicked on (CLAUDE.md §10.2).
+        // rather than panicked on (CLAUDE.md §12.2).
         let mut partition_log_dirs: Vec<String> = Vec::with_capacity(partitions.len());
         for leader in partitions.iter().filter_map(TopicPartitionInfo::leader) {
             let dirs = &state.broker_log_dirs[leader.id() as usize];
@@ -446,7 +446,7 @@ fn current_time_millis() -> i64 {
 /// Returns an error when a stored reassignment references a partition with no
 /// metadata. Java throws a bare `RuntimeException` from both of these branches;
 /// since `list_partition_reassignments` cannot throw, the caller fails the
-/// result's future instead (CLAUDE.md §10.1 — a panic here would unwind into C
+/// result's future instead (CLAUDE.md §12.1 — a panic here would unwind into C
 /// through the FFI). This is *not* only reachable through internal corruption:
 /// `delete_topics` removes the topic from `all_topics` without pruning
 /// `reassignments`, exactly as Java's does, so any legal
@@ -708,7 +708,7 @@ impl Admin for MockAdminClient {
             // throws an unchecked `IndexOutOfBoundsException` for a broker with
             // no log directories; `add_topic` already translates the identical
             // situation as a per-topic error instead of a panic (CLAUDE.md
-            // §10.2), so `create_topics` gets the same treatment here.
+            // §12.2), so `create_topics` gets the same treatment here.
             if state.broker_log_dirs[leader.id() as usize].is_empty() {
                 handle.complete_with_error(Error::local_illegal_argument(format!(
                     "Broker {} has no log directories.",
@@ -1217,7 +1217,7 @@ impl Admin for MockAdminClient {
         // `IndexOutOfBoundsException` and a replica on a broker the caller did
         // not ask about raises an NPE. Both are latent defects in a test helper
         // rather than a contract, and reproducing them would mean panicking in a
-        // public API (CLAUDE.md §10.1), so each case is skipped instead.
+        // public API (CLAUDE.md §12.1), so each case is skipped instead.
         for (topic_name, meta) in &state.all_topics {
             // For tests, we assume there will always be only 1 log-dir entry.
             let Some(log_dir) = meta.partition_log_dirs.first() else {
@@ -1368,7 +1368,7 @@ impl Admin for MockAdminClient {
     /// Mirrors `MockAdminClient.electLeaders`, which throws
     /// `UnsupportedOperationException("Not implemented yet")`
     /// (`MockAdminClient.java:797`). Translated to a future failed with an
-    /// "unsupported" `Error` (CLAUDE.md §10.1: no panic in public API).
+    /// "unsupported" `Error` (CLAUDE.md §12.1: no panic in public API).
     fn elect_leaders_with_options(
         &self,
         _election_type: ElectionType,
@@ -1414,7 +1414,7 @@ impl Admin for MockAdminClient {
     /// (`MockAdminClient.java:1186-1192`). A synchronous throw is not
     /// representable in this signature, so the result's single future is failed
     /// instead — the same accommodation `list_offsets` makes for a
-    /// `TimestampSpec` (CLAUDE.md §10.1).
+    /// `TimestampSpec` (CLAUDE.md §12.1).
     fn list_partition_reassignments_with_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -1448,7 +1448,7 @@ impl Admin for MockAdminClient {
     /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
     /// (`MockAdminClient.java:1230`); since a synchronous throw is not
     /// representable in this signature, the affected partition's future is
-    /// failed with an "unsupported" `Error` (CLAUDE.md §10.1).
+    /// failed with an "unsupported" `Error` (CLAUDE.md §12.1).
     fn list_offsets_with_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
@@ -1570,7 +1570,7 @@ impl Admin for MockAdminClient {
         // wrapper — `admin_sync_future_op` runs the submit closure inline on the
         // calling thread — and abort the process. So the error is surfaced on the
         // group's future, which the trait signature can carry
-        // (CLAUDE.md §10.1/§10.2, admin-client.md §9).
+        // (CLAUDE.md §12.1/§12.2, admin-client.md §9).
         let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
@@ -1781,7 +1781,7 @@ impl Admin for MockAdminClient {
         // when no renewer was supplied. That is a catchable `RuntimeException`
         // in Java, but an index panic in Rust — and every FFI path runs this
         // inline on the calling thread, so it would unwind across an
-        // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
+        // `extern "C"` boundary and abort the process. Per CLAUDE.md §12.1 the
         // future is completed exceptionally instead.
         let Some(owner) = options.renewers().first().cloned() else {
             handle.complete_with_error(Error::local_illegal_argument(

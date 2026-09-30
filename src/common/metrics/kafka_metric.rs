@@ -86,7 +86,7 @@ impl KafkaMetric {
     /// Returns [`Error::LocalIllegalState`] when the provider is a
     /// [`MetricValueProvider::Gauge`] instead — Java's `measurable()` throws
     /// `IllegalStateException("Not a measurable: " + class)` in that case
-    /// (`KafkaMetric.java`). Per CLAUDE.md §10.2 an unchecked-but-recoverable
+    /// (`KafkaMetric.java`). Per CLAUDE.md §12.2 an unchecked-but-recoverable
     /// Java exception becomes a `Result` rather than a panic.
     ///
     /// Java returns the provider so callers can compare it by identity (see
@@ -216,7 +216,7 @@ mod tests {
     // Java: `assertFalse(metric.isMeasurable())` +
     // `assertThrows(IllegalStateException.class, metric::measurable)`. The Rust
     // `measurable()` returns `Err(IllegalState)` instead of throwing
-    // (CLAUDE.md §10.2). The message is asserted because error text is part of
+    // (CLAUDE.md §12.2). The message is asserted because error text is part of
     // the behavioral contract (definition-of-done.md #3).
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testIsMeasurableWithGaugeProvider")]

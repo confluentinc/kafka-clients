@@ -42,7 +42,7 @@ use crate::common::serialization::Deserializer;
 /// consumer; sharing happens at the outer `Arc`. One concept instead of
 /// two.
 ///
-/// # Allocation cost (CLAUDE.md §11 / DoD §10)
+/// # Allocation cost (CLAUDE.md §13 / DoD §10)
 ///
 /// The receive path calls `Deserializer::deserialize` once per key and
 /// once per value per record. With `Box<dyn Deserializer<T>>` inside

@@ -56,7 +56,7 @@ impl ConfigType {
     /// and `.type()`. Unlike Java's `forId`, which throws
     /// `IllegalArgumentException` for a negative id, this returns
     /// [`ConfigType::Unknown`] for any unrecognized id so response parsing never
-    /// panics on a recoverable path (CLAUDE.md §10).
+    /// panics on a recoverable path (CLAUDE.md §12).
     pub(crate) fn for_id(id: i8) -> ConfigType {
         match id {
             1 => ConfigType::Boolean,
@@ -112,7 +112,7 @@ impl ConfigSource {
     /// and `KafkaAdminClient.configSource`. Unlike Java's `configSource`, which
     /// throws `IllegalArgumentException` for the `UNKNOWN` / client-metrics /
     /// group ids, this returns [`ConfigSource::Unknown`] for unrecognized ids so
-    /// response parsing never panics on a recoverable path (CLAUDE.md §10).
+    /// response parsing never panics on a recoverable path (CLAUDE.md §12).
     pub(crate) fn for_id(id: i8) -> ConfigSource {
         match id {
             1 => ConfigSource::DynamicTopicConfig,

@@ -366,7 +366,7 @@ impl FetchRequestManager {
         // call's `drain_pending_completions` then dispatches into
         // `AbstractFetch::handle_fetch_*` on `&mut self`, mirroring
         // Java's `whenComplete((response, exception) -> { ... })`
-        // lambda on `AbstractFetch.createFetchRequest`. CLAUDE.md §11
+        // lambda on `AbstractFetch.createFetchRequest`. CLAUDE.md §13
         // hot-path note: one spawn per FetchRequest (per-broker batch),
         // NOT per-record — the forwarder lives outside any per-record
         // loop, and the response body bytes (a `Bytes` buffer inside

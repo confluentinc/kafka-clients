@@ -500,7 +500,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// controller and `createTopics` does likewise for each partition leader
 /// (`MockAdminClient.java:210` / `:412` at kafka `a18251bae0b8`). Returning null
 /// here is that throw expressed in the FFI's idiom — a Rust panic must not
-/// unwind across the C boundary (CLAUDE.md §10.1).
+/// unwind across the C boundary (CLAUDE.md §12.1).
 ///
 /// The rejection itself lives in [`MockAdminClient::create`], which returns
 /// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
@@ -528,7 +528,7 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 ///
 /// Safe to call with a null pointer (no-op). Destroying concurrently with an
 /// in-flight `_async` operation is a C lifetime precondition the caller must
-/// uphold (CLAUDE.md FFI §3).
+/// uphold (CLAUDE.md FFI §4).
 ///
 /// # Safety
 ///
@@ -691,7 +691,7 @@ unsafe fn admin_async_void_op<F, Fut>(
 }
 
 /// A raw `user_data` pointer wrapped so it can cross into the spawned task and
-/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §3).
+/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §4).
 struct SendUserData(*mut c_void);
 // SAFETY: the C user is responsible for the thread-safety of `user_data`.
 unsafe impl Send for SendUserData {}
@@ -9153,7 +9153,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 ///
 /// There is no `kafka_admin_OffsetAndMetadata_t`: `OffsetAndMetadata` is
 /// `org.apache.kafka.clients.consumer.OffsetAndMetadata`, so an
-/// `kafka_admin_`-prefixed handle would be mis-namespaced (CLAUDE.md §3), and
+/// `kafka_admin_`-prefixed handle would be mis-namespaced (CLAUDE.md §4), and
 /// the crate's existing `kafka_consumer_OffsetAndMetadata_t` is private to the
 /// consumer FFI module. Its three fields are therefore flattened into indexed
 /// accessors on this map handle, exactly as B2 flattened
@@ -11813,7 +11813,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // B5a — ACL and client-quota value types
 //
 // Every Java class bound here lives in `org.apache.kafka.common` (`.acl`,
-// `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §3 the C
+// `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §4 the C
 // spelling is `kafka_common_*`. `kafka_common_Node_t` and
 // `kafka_common_Error_t` are the existing precedent. Naming these
 // `kafka_admin_*` would repeat the `kafka_common_TopicPartition_t` mistake
@@ -12314,7 +12314,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
 // Request-side ACL bindings, filters and quota entities cross as parallel
 // arrays, following `alterPartitionReassignments` /
 // `alterConsumerGroupOffsets` (flat) and `listConsumerGroupOffsets` (ragged
-// two-level). Per CLAUDE.md §3 a NULL *required array* is a caller
+// two-level). Per CLAUDE.md §4 a NULL *required array* is a caller
 // programming error and is not diagnosed; it is read as "no entries", exactly
 // as `read_alter_group_offsets` already does. A NULL *element* of a
 // non-nullable string array is diagnosed, because it is indistinguishable from
@@ -14270,7 +14270,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
 // `mark_topic_for_deletion` additionally need `TopicPartitionInfo` input
 // marshaling and a non-panicking Rust surface (both currently `panic!` on
 // duplicate/missing topics, mirroring Java's `IllegalArgumentException`, which
-// must not cross the FFI boundary — CLAUDE.md §10.1), so they arrive with the
+// must not cross the FFI boundary — CLAUDE.md §12.1), so they arrive with the
 // slice whose tests need them.
 // ---------------------------------------------------------------------------
 
@@ -14560,7 +14560,7 @@ unsafe fn read_partition_offsets(
 // `KafkaPrincipal` is `org.apache.kafka.common.security.auth`, and
 // `DelegationToken` / `TokenInformation` are
 // `org.apache.kafka.common.security.token.delegation`; none is under
-// `clients.admin`, so per CLAUDE.md §3 all three are `kafka_common_*`, as
+// `clients.admin`, so per CLAUDE.md §4 all three are `kafka_common_*`, as
 // `kafka_common_Node_t`, `kafka_common_Error_t` and B5a's three ACL /
 // quota types already are. The SCRAM and feature types *are*
 // `org.apache.kafka.clients.admin`, so anything minted for them would be
@@ -14937,7 +14937,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 // B5b — SCRAM, delegation-token and feature input marshaling and submission
 //
 // Requests cross as parallel arrays, as everywhere else in this module. Per
-// CLAUDE.md §3 a NULL *required array* is a caller programming error and is
+// CLAUDE.md §4 a NULL *required array* is a caller programming error and is
 // read as "no entries" rather than diagnosed; a NULL *element* of a
 // non-nullable array is diagnosed, because it is otherwise indistinguishable
 // from a legitimate absent value.
@@ -17512,7 +17512,7 @@ fn submit_fence_producers(
                 // the two errors are the same one; report whichever is present.
                 (Some(Err(e)), _) | (_, Some(Err(e))) => Err(e),
                 // Unreachable: both joins are built from the same key list. It is
-                // an explicit error rather than a silent drop (CLAUDE.md §5).
+                // an explicit error rather than a silent drop (CLAUDE.md §7).
                 _ => Err(Error::local_illegal_state(format!(
                     "fenceProducers produced no outcome for transactional id `{id}`"
                 ))),
@@ -22038,7 +22038,7 @@ mod tests {
             .expect_err("a null principal name is rejected");
         assert_eq!(error.message(), "owner principal name at index 0 must not be null");
 
-        // A NULL array is read as "no entries", per CLAUDE.md §3.
+        // A NULL array is read as "no entries", per CLAUDE.md §4.
         assert!(
             unsafe { read_kafka_principals(std::ptr::null(), names.as_ptr(), 2, "renewer") }
                 .expect("null array")

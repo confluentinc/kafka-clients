@@ -1669,7 +1669,7 @@ impl ConsumerMembershipManager {
         if !aborted {
             // The transition result is captured and handled AFTER the guard is
             // dropped: `fail_reconciliation` locks the same `inner` mutex, and
-            // `std::sync::Mutex` is not reentrant (CLAUDE.md §9.6), so calling
+            // `std::sync::Mutex` is not reentrant (CLAUDE.md §11.6), so calling
             // it while holding the guard would self-deadlock on the error path
             // — a path no test would notice until it hung in production.
             let transition = {

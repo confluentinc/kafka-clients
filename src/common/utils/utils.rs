@@ -40,7 +40,7 @@ impl Utils {
     /// # Panics
     ///
     /// Panics if any bit index is out of the `0..=31` range, matching Java's
-    /// `IllegalArgumentException` (a programming error, per CLAUDE.md §10.1).
+    /// `IllegalArgumentException` (a programming error, per CLAUDE.md §12.1).
     pub fn to_32_bit_field(bytes: &std::collections::HashSet<i8>) -> i32 {
         let mut value: i32 = 0;
         for &b in bytes {

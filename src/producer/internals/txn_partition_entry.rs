@@ -58,7 +58,7 @@ pub(crate) type InFlightBatchKey = (i64, i16, i32);
 ///
 /// See `.claude/rules/producer-transactions.md` §7 for the full rationale,
 /// including why `Arc<Mutex<ProducerBatch>>` was rejected (it would put a
-/// per-batch lock on the drain path, a hot path per CLAUDE.md §11).
+/// per-batch lock on the drain path, a hot path per CLAUDE.md §13).
 ///
 /// No interior `Mutex`: Java relies on the caller holding the
 /// `TransactionManager` monitor, and Phase 3 wraps the whole manager. A lock
@@ -268,7 +268,7 @@ impl TxnPartitionEntry {
 
             let new_sequence = batch.base_sequence() - record_count;
             if new_sequence < 0 {
-                // Java throws IllegalStateException; per CLAUDE.md §10.2 this
+                // Java throws IllegalStateException; per CLAUDE.md §12.2 this
                 // is a Result, not a panic. Message text preserved.
                 return Err(Error::local_illegal_state(format!(
                     "Sequence number for batch with sequence {} for partition {} is going to become negative: {}",

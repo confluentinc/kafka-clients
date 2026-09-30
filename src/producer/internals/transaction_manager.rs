@@ -1892,7 +1892,7 @@ impl TransactionManager {
     /// until some node reports a features epoch — and `ApiVersions.update` writes
     /// the map and the epoch together (`ApiVersions.java:47-50`). This crate models
     /// the field as an `Option`, and treats `None` as an empty map: the same answer
-    /// (`transaction.version` absent ⇒ V2 off) without a panic (CLAUDE.md §10.1).
+    /// (`transaction.version` absent ⇒ V2 off) without a panic (CLAUDE.md §12.1).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeUpdateTransactionV2Enabled")]
     pub(crate) fn maybe_update_transaction_v2_enabled(&mut self, on_initialization: bool) {
         if self.latest_finalized_features_epoch >= self.api_versions.max_finalized_features_epoch() {
@@ -3285,7 +3285,7 @@ impl TransactionManager {
     /// producer's `UnknownProducerId` matches the first branch and requests an
     /// epoch bump; only a transactional producer reaches the second branch. The
     /// relation is recovered by [`Error::is_out_of_order_sequence_error`], the
-    /// single predicate encoding that `extends` edge (CLAUDE.md §10.4) — see
+    /// single predicate encoding that `extends` edge (CLAUDE.md §12.4) — see
     /// `.claude/rules/producer-transactions.md` §9.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#handleFailedBatch")]
     pub(crate) fn handle_failed_batch(
@@ -3938,7 +3938,7 @@ impl TransactionManager {
     /// fatal error *and* then goes on to install one of them and call
     /// `result.done()`. That is preserved. For an **empty** list Java would raise
     /// `IndexOutOfBoundsException`; Rust cannot index and must not panic
-    /// (CLAUDE.md §10.1), so the fatal error is returned instead — an error either
+    /// (CLAUDE.md §12.1), so the fatal error is returned instead — an error either
     /// way, with the same state left behind.
     fn handle_find_coordinator_response(
         &mut self,
@@ -3954,7 +3954,7 @@ impl TransactionManager {
         };
         let ConcreteResponse::FindCoordinator(find_coordinator_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected a FindCoordinator response for a FindCoordinator request, got {response}"
             )));
@@ -4059,7 +4059,7 @@ impl TransactionManager {
         };
         let ConcreteResponse::InitProducerId(init_producer_id_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected an InitProducerId response for an InitProducerId request, got {response}"
             )));
@@ -4165,7 +4165,7 @@ impl TransactionManager {
     /// it unchecked. `errors()` omits that key entirely when the response carries no
     /// v3-and-below topic results, so a malformed or v4+-shaped response makes Java
     /// raise a `NullPointerException` inside `NetworkClient.poll`. Rust must not
-    /// panic (CLAUDE.md §10.1), so the absent key becomes an error — the same
+    /// panic (CLAUDE.md §12.1), so the absent key becomes an error — the same
     /// treatment `handle_find_coordinator_response` gives Java's
     /// `IndexOutOfBoundsException` (PLAN §10.7 deviation 7). Unreachable in
     /// practice: the request is only built from a non-empty pending set.
@@ -4178,7 +4178,7 @@ impl TransactionManager {
     ) -> Result<(), Error> {
         let ConcreteResponse::AddPartitionsToTxn(add_partitions_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected an AddPartitionsToTxn response for an AddPartitionsToTxn request, got {response}"
             )));
@@ -4318,7 +4318,7 @@ impl TransactionManager {
         };
         let ConcreteResponse::EndTxn(end_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected an EndTxn response for an EndTxn request, got {response}"
             )));
@@ -4417,7 +4417,7 @@ impl TransactionManager {
         };
         let ConcreteResponse::AddOffsetsToTxn(add_offsets_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected an AddOffsetsToTxn response for an AddOffsetsToTxn request, got {response}"
             )));
@@ -4531,7 +4531,7 @@ impl TransactionManager {
         };
         let ConcreteResponse::TxnOffsetCommit(txn_offset_commit_response) = response else {
             // Java casts unconditionally; a mismatch would be a
-            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            // ClassCastException. Surfaced as an error per CLAUDE.md §12.2.
             return Err(Error::local_illegal_state(format!(
                 "Expected a TxnOffsetCommit response for a TxnOffsetCommit request, got {response}"
             )));
@@ -4685,7 +4685,7 @@ impl TransactionManager {
     ///   - **V2** — the arm runs every time, as Java's does: `get_or_create` and the
     ///     `partitions_in_transaction` insert each hash once and each clone the
     ///     `TopicPartition`. That clone is an `Arc<str>` refcount bump plus an `i32`,
-    ///     which is the representation CLAUDE.md §11 prescribes precisely so it is
+    ///     which is the representation CLAUDE.md §13 prescribes precisely so it is
     ///     not a heap allocation — the set already holds the key, so no bucket is
     ///     allocated and both clones are dropped again. Java pays the two lookups too
     ///     (`computeIfAbsent` + `HashSet.add`) and, having references, no refcount
@@ -6726,7 +6726,7 @@ mod tests {
                 "Cannot execute transactional method because we are in an error state"
             );
             // librdkafka keeps fatal and requires-abort disjoint (CLAUDE.md
-            // §10.3): a fatal-state error must NOT tell the app to abort.
+            // §12.3): a fatal-state error must NOT tell the app to abort.
             assert!(!manager.has_abortable_error());
         }
     }

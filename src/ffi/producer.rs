@@ -460,7 +460,7 @@ fn box_metadata(metadata: RecordMetadata) -> *mut kafka_producer_RecordMetadata_
 // that drains a completion queue, so user callbacks run on one predictable
 // thread and never on a tokio worker (a slow callback cannot stall producer
 // I/O). The non-blocking send path funnels through one shared **submission
-// task** (not a per-message `tokio::spawn`, per CLAUDE.md §11).
+// task** (not a per-message `tokio::spawn`, per CLAUDE.md §13).
 
 // Internal canonical callback signatures (not exported). There are only three
 // distinct shapes; the public per-method typedefs below alias these. The
@@ -478,7 +478,7 @@ type BatchCallbackFn = unsafe extern "C" fn(
     *mut std::ffi::c_void,
 );
 
-// Public per-method callback typedefs. Per CLAUDE.md §3, an async callback type
+// Public per-method callback typedefs. Per CLAUDE.md §4, an async callback type
 // is named after its C method plus a `_callback` suffix, so each async function
 // has its own typedef even when the underlying signature is shared. In every
 // case the caller owns any non-null handle delivered to the callback and frees
@@ -531,7 +531,7 @@ pub type kafka_producer_Producer_close_callback_t =
 /// async counterpart of [`kafka_producer_Producer_init_transactions`]. A null
 /// `error` means success; a non-null [`kafka_common_Error_t`] is owned by the
 /// callee, which frees it with [`kafka_common_Error_destroy`]. Named after the
-/// Java `initTransactions` method per CLAUDE.md §3; all five transaction-control
+/// Java `initTransactions` method per CLAUDE.md §4; all five transaction-control
 /// completion typedefs alias the same [`OperationCallbackFn`] shape that
 /// flush/close use.
 pub type kafka_producer_Producer_init_transactions_callback_t =
@@ -558,7 +558,7 @@ pub type kafka_producer_Producer_abort_transaction_callback_t =
 /// [`kafka_common_PartitionInfoList_destroy`]) and `error` is null; on failure
 /// `list` is null and `error` is non-null. The caller owns whichever is non-null.
 /// (Named after the consumer sibling `..._partitions_for_callback_t` rather than
-/// the `..._partitions_for_async_callback_t` that CLAUDE.md §3 would suggest, for
+/// the `..._partitions_for_async_callback_t` that CLAUDE.md §4 would suggest, for
 /// consistency with `kafka_consumer_Consumer_partitions_for_callback_t`.)
 pub type kafka_producer_Producer_partitions_for_callback_t =
     unsafe extern "C" fn(*mut kafka_common_PartitionInfoList_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -691,7 +691,7 @@ fn make_record_callback(
 /// its early-error paths (`ensure_not_closed`, `throw_if_in_prepared_state`, a
 /// non-`ApiException` metadata error) return `Err` without invoking it. Keeping
 /// the target lets the task fire once from a fresh callback on that `Err`
-/// (CLAUDE.md §9.5), while the delivery path owns the single fire on success.
+/// (CLAUDE.md §11.5), while the delivery path owns the single fire on success.
 struct SendRequest {
     record: ProducerRecord<&'static [u8], &'static [u8]>,
     target: RecordCallbackTarget,
@@ -802,7 +802,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         // most one of the two delivers.
         let callback = make_record_callback(target, handle.completion_tx.clone(), std::sync::Arc::clone(&fired));
         // Brief lock to extend a reference to the inner producer; guard dropped
-        // before the `.await` below (CLAUDE.md §9.6).
+        // before the `.await` below (CLAUDE.md §11.6).
         match unsafe { producer_static_ref(ptr) } {
             ProducerStaticRef::Kafka(kp) => {
                 // Hot path: the borrowed record is sent directly — no copy, no
@@ -2836,7 +2836,7 @@ fn flush_or_close_async(
         let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
             Err(e) => Err(e),
             // Brief lock to extend a reference to the inner producer; the guard is
-            // dropped before the `.await` (CLAUDE.md §9.6).
+            // dropped before the `.await` (CLAUDE.md §11.6).
             Ok(()) => match unsafe { producer_static_ref(ptr) } {
                 ProducerStaticRef::Kafka(k) => {
                     if is_close {
@@ -2968,7 +2968,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
-        // dropped before the `.await` (CLAUDE.md §9.6).
+        // dropped before the `.await` (CLAUDE.md §11.6).
         let result = match unsafe { producer_static_ref(ptr) } {
             ProducerStaticRef::Kafka(k) => k.partitions_for(&topic_str).await,
             ProducerStaticRef::Mock(m) => m.partitions_for(&topic_str).await,
@@ -3137,7 +3137,7 @@ async fn drain_submitted_sends_await(
 ///
 /// The `kind` mutex is taken only briefly — to extend a reference to the inner
 /// producer and clone the runtime handle — and dropped before `op` runs, so no
-/// lock is held across the transaction RPC (CLAUDE.md §9.6) and a `send` between
+/// lock is held across the transaction RPC (CLAUDE.md §11.6) and a `send` between
 /// `begin` and `commit` is never blocked by a control call for longer than that
 /// brief lock.
 ///
@@ -3359,7 +3359,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 /// - `producer` must be a valid handle, or null.
 /// - When `count > 0`, `topics`, `partitions` and `offsets` must each point to
 ///   `count` valid entries and are **not** null-checked — passing null is a
-///   violated precondition, not a reported error (CLAUDE.md FFI §3), exactly as
+///   violated precondition, not a reported error (CLAUDE.md FFI §4), exactly as
 ///   for `kafka_consumer_Consumer_commit_sync_offsets`. `leader_epochs` and
 ///   `metadata` are the only two that may be null, and then `count` entries are
 ///   still required of whichever is non-null. `count == 0` reads none of them, so
@@ -3667,7 +3667,7 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
             Err(e) => Err(e),
             // `producer_static_ref` takes the `kind` lock only to extend the
             // reference and drops it before returning, so no lock is held across the
-            // op's `.await` (CLAUDE.md §9.6).
+            // op's `.await` (CLAUDE.md §11.6).
             Ok(()) => run(unsafe { producer_static_ref(ptr) }).await,
         };
         // Release the flag before delivering completion, so a caller that reacts to
@@ -3809,7 +3809,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
 /// - `producer` must be a valid handle, or null.
 /// - When `count > 0`, `topics`, `partitions` and `offsets` must each point to
 ///   `count` valid entries and are **not** null-checked (a violated precondition,
-///   per CLAUDE.md FFI §3), exactly as for the synchronous function. `leader_epochs`
+///   per CLAUDE.md FFI §4), exactly as for the synchronous function. `leader_epochs`
 ///   and `metadata` may be null; `count == 0` reads none of the arrays.
 /// - `group_metadata` must be a valid group-metadata handle, or null (null is
 ///   reported through `callback`).

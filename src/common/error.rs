@@ -17,7 +17,7 @@
 //! [`Error`] is the single type every fallible API returns. It has no Java
 //! counterpart: Rust cannot express Java's exception hierarchy, so one enum
 //! holds both `KafkaException`'s subclasses and the generic `java.lang` /
-//! `java.util` runtime exceptions that sit beside it (CLAUDE.md §10.3).
+//! `java.util` runtime exceptions that sit beside it (CLAUDE.md §12.3).
 //!
 //! Flattening the hierarchy destroys the `extends` chain, so the traits and
 //! macros that reconstruct it live here too, next to the enum they serve:
@@ -132,7 +132,7 @@ trait Display {
 /// carry the public documentation for each predicate.
 ///
 /// It has no Java counterpart — it is the Rust encoding of the `extends` chain
-/// that [`Error`] flattens away (CLAUDE.md §10.3/§10.4). One method per
+/// that [`Error`] flattens away (CLAUDE.md §12.3/§12.4). One method per
 /// **intermediate** class in Java's tree; leaf classes need no predicate,
 /// because they are a single [`Error`] variant or a single error code.
 ///
@@ -848,7 +848,7 @@ impl ErrorHierarchy for LocalTimeoutError {}
 /// `is_transaction_abortable_error()`
 /// live only here: `KafkaError` mirrors Java's `KafkaException`, which has
 /// neither — they are librdkafka-style predicates required by CLAUDE.md
-/// §10.3, so they belong on this enum rather than on the Java-shaped base.
+/// §12.3, so they belong on this enum rather than on the Java-shaped base.
 ///
 /// This type is used in `Result` return types and `Option` storage where
 /// any kind of Kafka error may occur.
@@ -1637,7 +1637,7 @@ impl Error {
 
     /// Whether the transaction must be aborted because of this error.
     ///
-    /// Named for the Java class it tests, per CLAUDE.md §10.4's uniform
+    /// Named for the Java class it tests, per CLAUDE.md §12.4's uniform
     /// `is_` + class + `_error` shape, even though `TransactionAbortableException`
     /// is a **leaf**: it has no subclasses, so §10.4 puts no predicate on
     /// `ErrorHierarchy` for it and this stays an inherent test on the variant.
@@ -1654,7 +1654,7 @@ impl Error {
     // -- Hierarchy predicates ----------------------------------------------
     //
     // Java's exception hierarchy is flattened into this enum, so each
-    // intermediate class becomes a predicate (CLAUDE.md §10.4). The answers
+    // intermediate class becomes a predicate (CLAUDE.md §12.4). The answers
     // come from the variant's payload via `ErrorHierarchy`, which is crate
     // -internal; these forwarders are the public surface.
     //
@@ -1766,7 +1766,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `RefreshRetriableException`
-    /// (CLAUDE.md §10.4) — retriable, and a metadata / coordinator refresh is
+    /// (CLAUDE.md §12.4) — retriable, and a metadata / coordinator refresh is
     /// what clears it.
     ///
     /// Fifteen payloads name it in their `extends:` list: the thirteen that also
@@ -1784,7 +1784,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `TimeoutException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than the [`Timeout`](Self::Timeout) variant:
     /// `BufferExhaustedException extends TimeoutException`, so
@@ -1799,7 +1799,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `InvalidMetadataException`
-    /// (CLAUDE.md §10.4) — the client's cached metadata may be stale.
+    /// (CLAUDE.md §12.4) — the client's cached metadata may be stale.
     ///
     /// Nested inside [`is_refresh_retriable_error`](Self::is_refresh_retriable_error),
     /// which is nested inside [`is_retriable_error`](Self::is_retriable_error).
@@ -1811,7 +1811,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `InvalidConfigurationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than its name suggests: in Kafka 4.2 **both**
     /// `AuthenticationException` and `AuthorizationException` extend
@@ -1829,7 +1829,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `ApplicationRecoverableException`
-    /// (CLAUDE.md §10.4) — the application can recover, but only by
+    /// (CLAUDE.md §12.4) — the application can recover, but only by
     /// re-initialising its producer or rejoining its group; the current epoch or
     /// session is gone.
     ///
@@ -1842,7 +1842,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `InvalidOffsetException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// `Errors::OffsetOutOfRange` is the only member carrying a protocol code;
     /// the sibling `NoOffsetForPartitionException` is raised client-side.
@@ -1851,7 +1851,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `OutOfOrderSequenceException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Two codes: `Errors::OutOfOrderSequenceNumber` itself and
     /// `Errors::UnknownProducerId`, its only subclass.
@@ -1861,7 +1861,7 @@ impl Error {
 
     /// Whether this error's Java class extends
     /// `org.apache.kafka.clients.consumer.InvalidOffsetException`
-    /// (CLAUDE.md §10.4) — no offset is usable for the partition.
+    /// (CLAUDE.md §12.4) — no offset is usable for the partition.
     ///
     /// Covers
     /// [`ConsumerNoOffsetForPartition`](Self::ConsumerNoOffsetForPartition),
@@ -1881,7 +1881,7 @@ impl Error {
 
     /// Whether this error's Java class extends
     /// `org.apache.kafka.clients.consumer.OffsetOutOfRangeException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Wider than the [`ConsumerOffsetOutOfRange`](Self::ConsumerOffsetOutOfRange)
     /// variant: `LogTruncationException` extends that class, so
@@ -1898,7 +1898,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `SerializationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// No protocol code maps here — `SerializationException` and its subclass
     /// `RecordDeserializationException` are raised client-side — so only
@@ -1910,7 +1910,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `AuthenticationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Five payloads name it in their `extends:` list:
     /// [`Authentication`](Self::Authentication) — the concrete base class, which
@@ -1940,7 +1940,7 @@ impl Error {
     }
 
     /// Whether this error's Java class extends `AuthorizationException`
-    /// (CLAUDE.md §10.4).
+    /// (CLAUDE.md §12.4).
     ///
     /// Six payloads name it in their `extends:` list:
     /// [`Authorization`](Self::Authorization) — the concrete base class, which

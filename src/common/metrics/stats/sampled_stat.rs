@@ -62,7 +62,7 @@ pub trait SampledStatKind: Send + Sync {
 ///
 /// The mutable sample ring + cursor are guarded by a single [`Mutex`] mirroring
 /// Java's sensor `synchronized`. This lock is taken per-fetch / per-partition,
-/// never per-record on the hot path (CLAUDE.md §11/§27).
+/// never per-record on the hot path (CLAUDE.md §13/§27).
 #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat")]
 pub struct SampledStat {
     initial_value: f64,

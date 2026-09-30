@@ -125,7 +125,7 @@ impl ConsumerRebalanceListenerInvoker {
     /// Java: `Exception invokePartitionsAssigned(SortedSet<TopicPartition>)`.
     ///
     /// `assigned_partitions` is taken as `&[TopicPartition]` per CLAUDE.md
-    /// §12 (most general borrowed form); the listener's
+    /// §14 (most general borrowed form); the listener's
     /// `on_partitions_assigned` takes the same.
     ///
     /// # Lock discipline (§16)

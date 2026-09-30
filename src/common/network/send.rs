@@ -30,7 +30,7 @@ use std::pin::Pin;
 /// This trait represents a send operation that may require multiple calls to
 /// [`write_to`](Send::write_to) before all data is fully written.
 ///
-/// All I/O is async per CLAUDE.md rule 8.
+/// All I/O is async per CLAUDE.md rule 10.
 #[doc(alias = "org.apache.kafka.common.network.Send")]
 pub trait Send: std::marker::Send + Sync {
     /// Returns `true` if this send is complete.

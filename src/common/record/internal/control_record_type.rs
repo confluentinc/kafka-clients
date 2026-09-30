@@ -122,7 +122,7 @@ impl ControlRecordType {
         // Java builds this in the enum constructor, where a serialization failure
         // is an `ExceptionInInitializerError` (fatal). Writing a single `int16`
         // field into a correctly pre-sized buffer cannot fail, so an error here is
-        // unrecoverable (CLAUDE.md §10.1).
+        // unrecoverable (CLAUDE.md §12.1).
         MessageUtil::to_version_prefixed_byte_buffer(
             ControlRecordTypeSchemaData::HIGHEST_SUPPORTED_VERSION,
             &mut schema,
@@ -141,7 +141,7 @@ impl ControlRecordType {
     ///
     /// Returns a [`Error`] for [`Self::Unknown`] — Java throws
     /// `IllegalArgumentException("Cannot serialize UNKNOWN control record type")`
-    /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §10.2).
+    /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §12.2).
     #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#recordKey")]
     pub fn record_key(self) -> Result<Vec<u8>, Error> {
@@ -178,7 +178,7 @@ impl ControlRecordType {
     ///
     /// Returns [`InvalidRecordError`] — Java's `InvalidRecordException` — when the
     /// key is too short or carries a version below the lowest supported one. Java
-    /// throws in both cases; CLAUDE.md §10.2 makes that a `Result` here.
+    /// throws in both cases; CLAUDE.md §12.2 makes that a `Result` here.
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#parseTypeId")]
     pub fn parse_type_id(key: &[u8]) -> Result<i16, InvalidRecordError> {
         // We should duplicate the original buffer since it will be read again in

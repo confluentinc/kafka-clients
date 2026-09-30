@@ -53,7 +53,7 @@ use crate::common::{Error, TopicPartition};
 ///
 /// `#[async_trait]` is correct here — listener invocation is per-rebalance,
 /// not per-record; the cost of one `Box<Future>` per callback is irrelevant.
-/// Per CLAUDE.md §11, `#[async_trait]` is only forbidden on per-record hot
+/// Per CLAUDE.md §13, `#[async_trait]` is only forbidden on per-record hot
 /// paths.
 #[async_trait]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener")]
@@ -69,11 +69,11 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     /// `void onPartitionsRevoked(Collection<TopicPartition> partitions)`.
     ///
     /// The Java method is `void` but can throw checked / unchecked
-    /// exceptions; per CLAUDE.md §10 we convert this to
+    /// exceptions; per CLAUDE.md §12 we convert this to
     /// `Result<(), Error>`.
     ///
     /// `partitions` is `&[TopicPartition]` rather than
-    /// `Vec<TopicPartition>` per CLAUDE.md §12 — accept the most general
+    /// `Vec<TopicPartition>` per CLAUDE.md §14 — accept the most general
     /// borrowed form. Implementors who need ownership can `to_vec()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsRevoked")]
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error>;

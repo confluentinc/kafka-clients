@@ -35,7 +35,7 @@
 //! Misuse returns `Err` where Java throws: `IllegalStateException` becomes
 //! [`Error::local_illegal_state`] and `ProducerFencedException` becomes a
 //! [`Error`] carrying [`Errors::ProducerFenced`], with Java's message text
-//! preserved verbatim (CLAUDE.md §10.2).
+//! preserved verbatim (CLAUDE.md §12.2).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};

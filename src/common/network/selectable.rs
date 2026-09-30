@@ -50,7 +50,7 @@ pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
 ///
 /// Translated from the Java `Selectable` interface.
 ///
-/// All I/O methods are `async` per CLAUDE.md rule 8.
+/// All I/O methods are `async` per CLAUDE.md rule 10.
 #[doc(alias = "org.apache.kafka.common.network.Selectable")]
 pub trait Selectable: Send {
     /// Begin establishing a socket connection to the given address identified by

@@ -287,14 +287,14 @@ impl Sensor {
         // [`check_quotas`](Self::check_quotas) / [`check_quotas_time_ms`] — but it
         // cannot be called from here yet, and the blocker is the signature, not
         // the stats: `record` / `record_value` / `record_value_time_ms` return `()`,
-        // so there is nowhere to put the `Result` that CLAUDE.md §9.1/§10.2
+        // so there is nowhere to put the `Result` that CLAUDE.md §11.1/§12.2
         // requires, and Java's `record(value, timeMs, checkQuotas)` overload —
         // the boolean that selects enforcement — has no Rust counterpart for the
         // same reason. Adding the `Result` reaches 45 call sites across
         // `src/consumer/`, so it is its own piece of work; swallowing the
         // violation into a log here instead would both diverge from Java (which
         // stops the caller) and put a per-metric scan on the per-record path
-        // (CLAUDE.md §11 / DoD #10).
+        // (CLAUDE.md §13 / DoD #10).
         //
         // Until then a caller that configures a `Quota` enforces it by calling
         // `check_quotas()` itself, which is what Java's broker-side

@@ -34,7 +34,7 @@
 //! All mutable state lives on `OffsetsRequestManager` itself, which the
 //! consumer's bg task owns exclusively (consumer-threading.md §10). The
 //! `Arc<Mutex<SubscriptionState>>` is borrowed for the brief critical
-//! sections; no lock is held across an `.await` (CLAUDE.md §9.6).
+//! sections; no lock is held across an `.await` (CLAUDE.md §11.6).
 //!
 //! ## Pending-completion handling
 //!
@@ -631,7 +631,7 @@ struct PendingFetchCommittedRequest {
 ///
 /// Rust's `oneshot` is single-consumer, so the waiter list lives *inside* the
 /// replaceable slot and its senders are dropped on replacement. We must still
-/// complete the caller (CLAUDE.md §5 — a silently hung future is worse than an
+/// complete the caller (CLAUDE.md §7 — a silently hung future is worse than an
 /// explicit error), so we complete it with the outcome Java produces for an
 /// abandoned fetch: a timeout. That matters beyond cosmetics —
 /// `is_ignorable_async_poll_error` swallows only `Error::Timeout`, exactly
@@ -1181,7 +1181,7 @@ impl OffsetsRequestManager {
         // which is CONDITIONAL: an error already in the `KafkaException`
         // hierarchy passes through, anything else is wrapped so the caller
         // always observes a `KafkaException`. That is not a no-op here — per
-        // CLAUDE.md §10.3 the flat `Error` enum also holds Java's `java.lang`
+        // CLAUDE.md §12.3 the flat `Error` enum also holds Java's `java.lang`
         // runtime exceptions, and `SubscriptionState`'s "No current assignment
         // for partition ..." reaches this catch as `Error::LocalIllegalState`, for
         // which `is_kafka_error()` is false.
@@ -2402,7 +2402,7 @@ mod tests {
             "a differing initializing set must issue a new OffsetFetch, superseding the first"
         );
 
-        // The orphaned caller must still be completed (CLAUDE.md §5 — never
+        // The orphaned caller must still be completed (CLAUDE.md §7 — never
         // leave the future hanging) and with an ignorable timeout.
         let err = rx1
             .await

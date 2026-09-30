@@ -63,7 +63,7 @@
 //!    `future.whenComplete(complete(event.future()))`).
 //!
 //! Spawning is per-event (not per-record); the hot-path rule from
-//! CLAUDE.md §11 still applies inside `Fetcher` / `FetchCollector`.
+//! CLAUDE.md §13 still applies inside `Fetcher` / `FetchCollector`.
 
 #![cfg_attr(not(test), expect(dead_code))]
 

@@ -329,7 +329,7 @@ impl BufferPool {
         /// Java's exits are "got the memory" (where it zeroes `accumulated` first, at
         /// `:183`, so the credit is a no-op) and "threw". Rust adds a third: the
         /// future being dropped at the wait below, which has no Java analogue because
-        /// threads cannot be cancelled (CLAUDE.md §9.6). Without this the waiter's
+        /// threads cannot be cancelled (CLAUDE.md §11.6). Without this the waiter's
         /// `Arc<Notify>` stayed in `inner.waiters` forever, and since
         /// `deallocate_with_size` and `maybe_signal_next_waiter` only ever signal
         /// `waiters.front()`, a leaked entry that reached the head **swallowed every

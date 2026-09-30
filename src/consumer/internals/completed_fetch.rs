@@ -592,7 +592,7 @@ impl CompletedFetch {
         let initial_capacity = (max_records as usize).min(512);
         out.reserve(initial_capacity);
 
-        // §27 / CLAUDE.md §11 metrics-cost invariant (Milestone-9 Phase M8):
+        // §27 / CLAUDE.md §13 metrics-cost invariant (Milestone-9 Phase M8):
         // this per-record loop performs NO `Sensor.record(...)`. The only
         // metric work per record is the pure `records_read += 1; bytes_read
         // += size;` i32 accumulation below. The windowed `Sensor` recording
@@ -1577,7 +1577,7 @@ mod tests {
     }
 
     /// Milestone-9 Phase M8 — explicit guard that the metrics wiring added
-    /// ZERO per-record cost on the receive hot path (CLAUDE.md §11 / §27).
+    /// ZERO per-record cost on the receive hot path (CLAUDE.md §13 / §27).
     ///
     /// The per-record loop in `fetch_records` performs only the pure i32
     /// accumulation `records_read += 1; bytes_read += size;` — there is NO
@@ -1652,7 +1652,7 @@ mod tests {
             "Metrics regression on the per-record path: {alloc_count} allocs for {RECORD_COUNT} \
              records (budget {max_allowed}). The per-record loop must stay pure i32 counter \
              accumulation — an *allocating* metric operation (e.g. `aggregator.record(...)` or a \
-             windowed-stat sample rotation) entered the loop (CLAUDE.md §11 / §27)."
+             windowed-stat sample rotation) entered the loop (CLAUDE.md §13 / §27)."
         );
 
         // The per-partition sensor recording happens HERE — once — not in the

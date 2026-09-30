@@ -33,7 +33,7 @@
 //! the pool state in [`Mutex`] so peers on the fetch path (the bg task adding
 //! `CompletedFetch`es and the app task draining them) can both share an
 //! `Arc<BufferSupplier>` without contention concerns. Critical sections never
-//! await (CLAUDE.md §9), so `std::sync::Mutex` is the right choice.
+//! await (CLAUDE.md §11), so `std::sync::Mutex` is the right choice.
 //!
 //! The struct is referenced by `CompletedFetch` and `AbstractFetch` later in
 //! Phase 7a; the `#[expect(dead_code)]` keeps the lib's `#![deny(warnings)]`

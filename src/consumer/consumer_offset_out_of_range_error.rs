@@ -89,7 +89,7 @@ impl ConsumerOffsetOutOfRangeError {
     ///
     /// Returns an iterator rather than a `HashSet`: Java's `keySet()` is a
     /// *view* over the map, so materialising a set here would allocate where
-    /// Java does not (CLAUDE.md §11/§12).
+    /// Java does not (CLAUDE.md §13/§14).
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.offset_out_of_range_partitions.keys()

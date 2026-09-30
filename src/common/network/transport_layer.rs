@@ -94,7 +94,7 @@ impl ops::BitAnd for InterestOps {
 /// In Rust, the async I/O capabilities and the Kafka-specific methods are combined
 /// into this single trait. I/O methods return boxed futures for object safety (`dyn TransportLayer`).
 ///
-/// Per CLAUDE.md rule 8, all I/O is async using Tokio.
+/// Per CLAUDE.md rule 10, all I/O is async using Tokio.
 #[doc(alias = "org.apache.kafka.common.network.TransportLayer")]
 pub trait TransportLayer: Send + Sync {
     /// Returns the remote address of the connected peer, if available.

@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_is_copy() {
-        // Guards CLAUDE.md §11: the type must stay stack-allocated and cheap to
+        // Guards CLAUDE.md §13: the type must stay stack-allocated and cheap to
         // pass by value. If `Copy` is ever dropped this stops compiling.
         let a = ProducerIdAndEpoch::new(1, 2);
         let b = a;

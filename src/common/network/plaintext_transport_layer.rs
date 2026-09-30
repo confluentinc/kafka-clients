@@ -18,7 +18,7 @@
 //!
 //! In Java, this wraps a `SocketChannel` obtained from a `SelectionKey`.
 //! In Rust, this wraps a `tokio::net::TcpStream` for async non-blocking I/O,
-//! per CLAUDE.md rule 8.
+//! per CLAUDE.md rule 10.
 
 use super::{InterestOps, TransportLayer};
 

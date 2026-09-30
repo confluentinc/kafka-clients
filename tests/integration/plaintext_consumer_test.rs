@@ -780,7 +780,7 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
     let records = consume_records(consumer.as_mut(), num_records).await;
     let now = current_time_ms();
 
-    // Translation deviation (CLAUDE.md #4 / DoD #7): Java bounds the
+    // Translation deviation (CLAUDE.md #6 / DoD #7): Java bounds the
     // broker-stamped timestamp by `[startingTimestamp, now]` with ZERO
     // tolerance (`ClientsTestUtils.consumeAndVerifyRecordsWithTimeTypeLogAppend`).
     // That holds in Java only because `ClusterInstance` runs the KRaft brokers

@@ -54,7 +54,7 @@ impl Builder {
     /// Set the compression level.
     ///
     /// Java throws `IllegalArgumentException` for an out-of-range level; per
-    /// CLAUDE.md §10.2 that becomes an `Err` here, carrying Java's message.
+    /// CLAUDE.md §12.2 that becomes an `Err` here, carrying Java's message.
     #[doc(alias = "org.apache.kafka.common.compress.GzipCompression$Builder#level")]
     pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Gzip.min_level().unwrap();

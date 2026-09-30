@@ -46,7 +46,7 @@
 //! 5. **Refresh `maximumTimeToWait`** — fold each manager's
 //!    `maximum_time_to_wait(now)` into a min; store into the cached
 //!    `AtomicI64` so the app side can read it without locking the
-//!    manager set (CLAUDE.md §11: single numeric across tasks ⇒ atomic).
+//!    manager set (CLAUDE.md §13: single numeric across tasks ⇒ atomic).
 //! 6. **Reap expired application events** — `CompletableEventReaper::reap`.
 //!
 //! `cleanup()` is the symmetric path: `pollOnClose` from each manager,
@@ -569,7 +569,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // races it against the wakeup signals would drop the poll future at an
         // `.await` — e.g. right after `connection_states.connecting()` marked a
         // node `Connecting` but before the socket is created — permanently
-        // stranding that node (CLAUDE.md §9.6.1; full analysis in
+        // stranding that node (CLAUDE.md §11.6.1; full analysis in
         // `design/current/consumer-join-stall-rootcause.md`).
         //
         // Instead we run the poll to completion and deliver wakeups the way

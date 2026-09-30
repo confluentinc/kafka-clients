@@ -84,7 +84,7 @@ impl<K, V> Partitioner<K, V> for RoundRobinPartitioner {
     /// `ArithmeticException` there. This is unreachable from
     /// [`KafkaProducer`](crate::producer::KafkaProducer): `wait_on_metadata`
     /// guarantees the topic has partitions before `partition` is called. Per
-    /// CLAUDE.md §10.1 this class of panic (division by zero) is acceptable, so
+    /// CLAUDE.md §12.1 this class of panic (division by zero) is acceptable, so
     /// the `i32` return type is preserved rather than made fallible.
     fn partition(
         &self,

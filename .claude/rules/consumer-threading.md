@@ -156,9 +156,9 @@ Implementations in Milestone 8:
 A `ClassicKafkaConsumer<K, V>` impl may be added later without breaking
 changes; `new_consumer` just gains a new arm.
 
-**Why `#[async_trait]` despite CLAUDE.md §11:**
+**Why `#[async_trait]` despite CLAUDE.md §13:**
 
-CLAUDE.md §11 cautions against `Pin<Box<dyn Future>>` per call on **hot
+CLAUDE.md §13 cautions against `Pin<Box<dyn Future>>` per call on **hot
 paths**. The `Consumer` dispatch surface is *not* a hot path:
 
   - `poll()` is called at batch granularity (≤ ~100/sec realistically); the
@@ -244,7 +244,7 @@ I/O-bound on the same `NetworkClient`).
     because the Rust `Selector::connect` awaits the TCP handshake instead of
     being non-blocking like Java NIO. A `select!` that drops the poll at that
     `await` strands the node in `Connecting` with no socket; it only recovers
-    after the ~10 s connection-setup-timeout (CLAUDE.md §9.6.1). This produced a
+    after the ~10 s connection-setup-timeout (CLAUDE.md §11.6.1). This produced a
     severe intermittent join stall — full analysis in
     `design/current/consumer-join-stall-rootcause.md`.
 
@@ -266,7 +266,7 @@ I/O-bound on the same `NetworkClient`).
     non-blocking like Java NIO, so the poll has no side-effect-before-`await`;
     that is not currently done.)
   - Do NOT `tokio::spawn` inside the bg task for per-request or per-event
-    work (CLAUDE.md §11).
+    work (CLAUDE.md §13).
 
 ## 11. `wakeup()` semantics: rotating `CancellationToken`
 
@@ -319,7 +319,7 @@ Java's `SubscriptionState` 1:1 — the Java source is the contract.
 
 **Why std `Mutex` and not `tokio::Mutex`:**
 
-Critical sections are short, CPU-bound, never awaiting (per CLAUDE.md §9.6).
+Critical sections are short, CPU-bound, never awaiting (per CLAUDE.md §11.6).
 `std::sync::Mutex` is faster (no async overhead) and `poisoned()` surfaces
 panics, which is correct here. Do NOT use `parking_lot::Mutex` —
 non-poisoning semantics silently leaves state inconsistent after a panic.
@@ -335,7 +335,7 @@ Java's `synchronized` blocks, simplifying behavior-parity review.
   - One `Arc<Mutex<SubscriptionState>>` per consumer instance, cloned into
     the bg task at spawn time.
   - Lock acquire → mutate / read → drop guard. NEVER hold the guard across
-    an `.await` (CLAUDE.md §9.6).
+    an `.await` (CLAUDE.md §11.6).
   - In particular: drop the guard before invoking a
     `ConsumerRebalanceListener` callback, before sending on any mpsc
     channel that could block, and before any `network_client` call.
@@ -455,7 +455,7 @@ files become a new module/phase. The current public API does not change;
 
 ## 27. Receive-path zero-copy contract
 
-CLAUDE.md §12 forbids copying key/value/header bytes through the producer
+CLAUDE.md §14 forbids copying key/value/header bytes through the producer
 send path. The symmetric rule on the receive path:
 
   - `FetchResponse` bytes arriving from the network are owned by exactly
@@ -519,7 +519,7 @@ in a batch) only if profiling shows header allocation is hot.
     buffer + a parsing cursor instead, decode lazily.
   - `String::from_utf8(topic_bytes.clone())` per record — clone the
     `Arc<str>` from `SubscriptionState` instead.
-  - Per-record `tokio::spawn` on the fetch path (CLAUDE.md §11).
+  - Per-record `tokio::spawn` on the fetch path (CLAUDE.md §13).
 
 **Tests required:**
 

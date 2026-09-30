@@ -124,7 +124,7 @@ pub trait KafkaClient {
     /// [`Error`] cannot name that intermediate class in a type, so the guarantee
     /// is instead that whatever is returned answers `true` to
     /// [`is_authentication_error`](Error::is_authentication_error) (CLAUDE.md
-    /// §10.4). The value originates in
+    /// §12.4). The value originates in
     /// [`ChannelState::error`](crate::common::network::ChannelState::error), which
     /// only carries one in the `AuthenticationFailed` state.
     #[doc(alias = "org.apache.kafka.clients.KafkaClient#authenticationException")]

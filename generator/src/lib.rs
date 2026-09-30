@@ -1035,7 +1035,7 @@ fn is_copy_field(field: &FieldSpec) -> bool {
 /// Java emits — so these accessors are the only read path for other crates.
 ///
 /// Copy scalars are returned by value; everything else is borrowed, because the
-/// data stays owned by the message (CLAUDE.md §12).
+/// data stays owned by the message (CLAUDE.md §14).
 fn generate_field_accessors(file: &mut fs::File, struct_spec: &StructSpec) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(file)?;
     for field in struct_spec.fields() {
@@ -4215,7 +4215,7 @@ fn generate_field_write(
             } else {
                 // Non-nullable: clone the owned handle rather than `std::mem::take`.
                 // A `bytes::Bytes` clone is a reference-count bump that copies no
-                // payload (still zero-copy per CLAUDE.md §12), and — unlike
+                // payload (still zero-copy per CLAUDE.md §14), and — unlike
                 // `std::mem::take` — it does NOT mutate the message as a side effect
                 // of serialising, mirroring the nullable path above. `std::mem::take`
                 // left the field empty after a `write`, so a second `write` emitted an

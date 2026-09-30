@@ -27,7 +27,7 @@
 //! `&mut self` accordingly. Java's `IllegalStateException` /
 //! `IllegalArgumentException` paths translate to
 //! `Err(Error::local_illegal_state(...))` / `Err(Error::local_illegal_argument(...))`
-//! per CLAUDE.md §10.
+//! per CLAUDE.md §12.
 
 #![expect(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
 
@@ -317,7 +317,7 @@ impl TopicPartitionState {
     /// parameter on `transitionState`). The closure runs only when the
     /// transition is valid.
     ///
-    /// Per CLAUDE.md §10.1, Java's
+    /// Per CLAUDE.md §12.1, Java's
     /// `IllegalStateException("...but position is null")` is translated to
     /// a `panic!` — this is a programmer-error path that cannot be reached
     /// on the happy path (the closure must leave `self.position` consistent
@@ -1034,7 +1034,7 @@ impl SubscriptionState {
 
     /// Java's private `assignedState(tp)` — `&TopicPartitionState` or an
     /// `IllegalStateException` when the partition isn't assigned. Per
-    /// CLAUDE.md §10 we return `Err` instead of panicking.
+    /// CLAUDE.md §12 we return `Err` instead of panicking.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#assignedState")]
     fn assigned_state(&self, tp: &TopicPartition) -> Result<&TopicPartitionState, Error> {
         self.assignment

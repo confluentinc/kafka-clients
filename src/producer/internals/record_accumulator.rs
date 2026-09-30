@@ -79,7 +79,7 @@ pub struct PartitionerConfig {
 /// [`Callback`] is a `Box<dyn FnOnce>` — deliberately non-`Clone`, which is what
 /// makes "exactly once" a type-level guarantee — so it is *moved* into `append`
 /// and the only way the caller can still honour the callback obligation
-/// (CLAUDE.md §9.5) is for `append` to give it back. That is the same
+/// (CLAUDE.md §11.5) is for `append` to give it back. That is the same
 /// `returned_callback` mechanism [`RecordAccumulator::try_append`] already uses
 /// for the batch-is-full path; this type extends it to the error paths.
 ///
@@ -152,7 +152,7 @@ pub struct RecordAppendResult {
     /// (`get_or_create_topic_info`), so building it here costs a single refcount
     /// increment, whereas `KafkaProducer::do_send_bytes` rebuilding it from the
     /// `&str` would allocate a `String` *and* an `Arc<str>` and copy the topic name
-    /// twice — per record, on the default path, which CLAUDE.md §11 names as an
+    /// twice — per record, on the default path, which CLAUDE.md §13 names as an
     /// anti-pattern ("identifiers cloned on every message ... prefer `Arc<str>`")
     /// and `definition-of-done.md` §10 asks the send-path audit to catch. Carrying
     /// the index alone was exactly that regression; see Critic 44 issue 1.
@@ -237,7 +237,7 @@ impl TopicInfo {
 /// Java's `finally` returns the not-yet-consumed buffer to the pool and
 /// decrements `appendsInProgress`, whatever exit `append` takes. A Rust `async fn`
 /// has one exit Java does not — the future being dropped mid-`await`
-/// (CLAUDE.md §9.6) — so straight-line code after the `await` cannot stand in for
+/// (CLAUDE.md §11.6) — so straight-line code after the `await` cannot stand in for
 /// it. This is not a new abstraction over Java: it is the only way to express
 /// `finally` across a cancellable await.
 ///
@@ -590,7 +590,7 @@ impl RecordAccumulator {
         //     `tokio::time::timeout` / `select!`, and it blocks up to
         //     `max.block.ms` inside `free.allocate`. Java has no analogue — threads
         //     have no cancellation — so this exit exists only in Rust
-        //     (CLAUDE.md §9.6). A lost `appends_in_progress` decrement makes
+        //     (CLAUDE.md §11.6). A lost `appends_in_progress` decrement makes
         //     `abort_incomplete_batches` never leave its (non-yielding) loop.
         let mut guard = AppendGuard::new(&self.free, &self.appends_in_progress);
 
@@ -1424,7 +1424,7 @@ impl RecordAccumulator {
     /// Runs once per **batch** on the drain path, never per record. It allocates
     /// nothing: `set_producer_state` writes four scalars, and the two
     /// `TopicPartition` clones inside the manager happen only where Java also
-    /// inserts into a map (CLAUDE.md §11, DoD §10).
+    /// inserts into a map (CLAUDE.md §13, DoD §10).
     fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), Error> {
         let Some(transaction_manager) = &self.transaction_manager else {
             return Ok(());
@@ -1927,7 +1927,7 @@ impl RecordAccumulator {
         // `InterruptedException` the method declares. In Rust the uncovered exit is
         // the future being dropped at one of the `await`s below — `flush()` is
         // `async` public API, so a caller may wrap it in `tokio::time::timeout` or
-        // `select!` (CLAUDE.md §9.6). A lost decrement makes `flush_in_progress()`
+        // `select!` (CLAUDE.md §11.6). A lost decrement makes `flush_in_progress()`
         // answer `true` forever, and it feeds the sendable predicate in `ready()`:
         // every partition would then look immediately ready for the producer's whole
         // lifetime, silently disabling `linger.ms` batching.
@@ -4518,7 +4518,7 @@ mod tests {
         assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1()));
     }
 
-    /// `definition-of-done.md` §10 / CLAUDE.md §11: the producer-state assignment the
+    /// `definition-of-done.md` §10 / CLAUDE.md §13: the producer-state assignment the
     /// drain performs is **per batch**, never per record, so enabling idempotence must
     /// not add a single allocation that scales with the record count.
     ///
@@ -4652,7 +4652,7 @@ mod tests {
     /// The same `finally`, on the exit Java does not have: the `append` future being
     /// dropped mid-`await`. `append` is `async` public API a caller may wrap in
     /// `tokio::time::timeout`, and it blocks up to `max.block.ms` inside
-    /// `free.allocate` — so this is reachable (CLAUDE.md §9.6).
+    /// `free.allocate` — so this is reachable (CLAUDE.md §11.6).
     ///
     /// A lost `appends_in_progress` decrement makes `abort_incomplete_batches` never
     /// leave its loop, and that loop is sync and never yields, so on a
@@ -4733,7 +4733,7 @@ mod tests {
 
     /// `append` must hand the user callback back on every failure path so the
     /// caller can honour the exactly-once callback obligation
-    /// (CLAUDE.md §5, §9.5) — see [`AppendFailure`]. Java does not need this
+    /// (CLAUDE.md §7, §11.5) — see [`AppendFailure`]. Java does not need this
     /// because `KafkaProducer.doSend` keeps its own `callback` reference alive
     /// across the `append` call.
     #[tokio::test]

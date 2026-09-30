@@ -517,7 +517,7 @@ method-for-method: a method Java's mock implements against its in-memory maps
 is implemented here too, and only the ones Java leaves as
 `UnsupportedOperationException("Not implemented yet")` fail — as
 `unsupported_version("Not implemented yet")` on the returned future rather than
-a panic, since a public API must not panic (CLAUDE.md §10.1).
+a panic, since a public API must not panic (CLAUDE.md §12.1).
 
 Two limits are visible right in the constructor: `AdminClientConfig` carries no
 security configuration, so `kafka_admin_client.rs:279` builds a `PLAINTEXT`

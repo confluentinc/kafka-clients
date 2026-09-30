@@ -539,7 +539,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
 
-    /* Every hierarchy predicate (CLAUDE.md §10.4) on a real handle, asserted
+    /* Every hierarchy predicate (CLAUDE.md §12.4) on a real handle, asserted
      * rather than merely called, so a predicate wired to the wrong Rust method
      * fails here.
      *
@@ -552,7 +552,7 @@ void test_error_inspection(void) {
      * predicates are complementary, not redundant: the code names the class,
      * while the false predicates tell a C caller "you misused the client"
      * rather than "the broker reported an error". (Fatality is not exported:
-     * `common.requests` is not a supported Kafka API — CLAUDE.md §3.) */
+     * `common.requests` is not a supported Kafka API — CLAUDE.md §4.) */
     TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(err));
@@ -599,7 +599,7 @@ void test_error_null_safety(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-variant payload accessors (CLAUDE.md §3: "Exceptions having additional
+// Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
 //
 // Of the 12 `Error` variants with extra fields exposed to C, only the 7 below have a Java
@@ -1363,7 +1363,7 @@ void test_transaction_commit_error_requires_abort(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(120, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_transaction_abortable_error(err));
-    /* Fatality is deliberately not exported (CLAUDE.md §3: `common.requests` is
+    /* Fatality is deliberately not exported (CLAUDE.md §4: `common.requests` is
      * not a supported Kafka API). `request_utils::is_fatal_error` is
      * authentication || authorization || one of five standalone classes, and
      * TRANSACTION_ABORTABLE is none of them — so assert the exported halves. */

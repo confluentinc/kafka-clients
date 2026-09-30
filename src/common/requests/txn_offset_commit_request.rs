@@ -602,7 +602,7 @@ impl RequestBuilder for Builder {
     /// clamp cannot mask an unsupported-version error.
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < 3 && self.group_metadata_set() {
-            // Java throws UnsupportedVersionException; per CLAUDE.md §10.2 this
+            // Java throws UnsupportedVersionException; per CLAUDE.md §12.2 this
             // is a Result. Message text preserved.
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

@@ -781,7 +781,7 @@ other Tier 3 phases.
   `Result<UpdateFeaturesResult, KafkaError>` — the one admin RPC with this shape,
   because Java `updateFeatures` throws `IllegalArgumentException` SYNCHRONOUSLY
   (pre-enqueue) for empty/blank inputs, and `FeatureUpdate::new` throws for the
-  deletion-without-downgrade-flag case (CLAUDE.md §10.2). Critic-confirmed faithful.
+  deletion-without-downgrade-flag case (CLAUDE.md §12.2). Critic-confirmed faithful.
 - **New types**: `admin::{FeatureMetadata, FeatureUpdate (+ UpgradeType:
   UPGRADE/SAFE_DOWNGRADE/UNSAFE_DOWNGRADE/UNKNOWN), FinalizedVersionRange,
   SupportedVersionRange, Describe/UpdateFeatures{Options,Result}}`.

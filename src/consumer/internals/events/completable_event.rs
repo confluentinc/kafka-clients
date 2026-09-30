@@ -83,7 +83,7 @@ pub(crate) struct CompletableEventHandle<T: Send + 'static> {
 
 /// Shared completion slot. The [`Mutex`] is **synchronous** because the
 /// critical section is sub-microsecond (one `Option::take`); per CLAUDE.md
-/// §9 the guard MUST NOT be held across an `.await`.
+/// §11 the guard MUST NOT be held across an `.await`.
 struct HandleInner<T> {
     sender: Mutex<Option<oneshot::Sender<Result<T, Error>>>>,
 }

@@ -1822,7 +1822,7 @@ impl AdminBackend for RustNativeAdmin {
 /// `default.api.timeout.ms=30000`, so a broker-side stall still fails on its
 /// own; what an unbounded `get()` loses is the bound on a **client-side future
 /// that is never completed at all** — no API timeout fires for it, so the test
-/// binary hangs and takes every other entry down with it, which CLAUDE.md §5
+/// binary hangs and takes every other entry down with it, which CLAUDE.md §7
 /// singles out as worse than an explicit error. The gRPC backends already have a
 /// channel deadline, so this restores the same guarantee on the native arm.
 const NATIVE_FUTURE_TIMEOUT: Duration = Duration::from_secs(30);

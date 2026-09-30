@@ -1009,7 +1009,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // to service — it just polls until the rebalance completes and the
     // in-callback commit has landed.
     //
-    // `tokio::select!` is still avoided here (CLAUDE.md §9.6): it cancels the
+    // `tokio::select!` is still avoided here (CLAUDE.md §11.6): it cancels the
     // losing branch mid-execution, and the consumer's poll has side effects on
     // internal state that are not cancellation-safe.
     let deadline = Instant::now() + Duration::from_secs(90);

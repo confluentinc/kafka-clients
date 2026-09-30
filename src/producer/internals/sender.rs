@@ -122,7 +122,7 @@ enum BatchAction {
 /// topic-partition set and topic names here and process responses after
 /// `client.poll()` returns. The actual batches remain in `in_flight_batches`.
 ///
-/// This follows CLAUDE.md rule 9: translate callbacks to code executed after
+/// This follows CLAUDE.md rule 11: translate callbacks to code executed after
 /// awaiting the corresponding call.
 struct PendingProduceRequest {
     /// The topic-partitions whose batches were sent in this request, each paired with
@@ -150,7 +150,7 @@ struct PendingProduceRequest {
 ///
 /// Translated from Java's `Sender.SenderMetrics` inner class. All recording is
 /// per-drained-batch / per-response (amortized over many records) — not on the
-/// per-record hot path (CLAUDE.md §11).
+/// per-record hot path (CLAUDE.md §13).
 #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics")]
 struct SenderMetrics {
     retry_sensor: Arc<Sensor>,
@@ -547,7 +547,7 @@ pub struct Sender<C: KafkaClient> {
     /// `RequestCompletionHandler` cannot capture `&mut self`, so the handler is
     /// parked here and matched against the response's correlation id after
     /// `poll()` returns — the same shape [`PendingProduceRequest`] already uses for
-    /// produce responses (CLAUDE.md §9.2).
+    /// produce responses (CLAUDE.md §11.2).
     ///
     /// An [`Option`] rather than a map because Java allows at most one in-flight
     /// transactional request: `maybeSendAndPollTransactionalRequest` returns early
@@ -624,7 +624,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Suspends the Sender task for `duration_ms`, translating Java's
     /// `time.sleep(retryBackoffMs)` (`Sender.java:501`, `:525`).
     ///
-    /// Java blocks the Sender thread; CLAUDE.md §9.1 makes that an `.await` here. Both
+    /// Java blocks the Sender thread; CLAUDE.md §11.1 makes that an `.await` here. Both
     /// call sites exist to prevent a tight retry loop and neither holds a
     /// `TransactionManager` guard (rules §4).
     ///
@@ -659,7 +659,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Java rethrows the exception object with its message untouched.
     ///
     /// `Error::Authentication` is the class `run_once`'s `is_authentication_error()`
-    /// arm tests for (CLAUDE.md §10.4) — a codeless `UnknownServerError` would answer
+    /// arm tests for (CLAUDE.md §12.4) — a codeless `UnknownServerError` would answer
     /// `false` to it and therefore to `request_utils::RequestUtils::is_fatal_error` too.
     fn authentication_error_from_io(error: &std::io::Error) -> Error {
         let message = network::authentication_error_message(error)
@@ -968,7 +968,7 @@ impl<C: KafkaClient> Sender<C> {
                 // it: `close()` only ever targets `FATAL_ERROR`, which is always a
                 // valid transition, and always supplies an error. Logged rather than
                 // unwrapped so an unreachable failure cannot panic the task
-                // (CLAUDE.md §10.1).
+                // (CLAUDE.md §12.1).
                 // `pending_requests` before the manager, per its field docs.
                 let mut pending_requests = self.pending_requests.lock().unwrap();
                 if let Err(error) = transaction_manager.lock().unwrap().close(&mut pending_requests, Caller::Sender) {
@@ -1127,7 +1127,7 @@ impl<C: KafkaClient> Sender<C> {
                 // `sendProducerData` at `:343`, which this `match` arm preserves by
                 // falling through.
                 //
-                // The test is `is_authentication_error()` — CLAUDE.md §10.4's
+                // The test is `is_authentication_error()` — CLAUDE.md §12.4's
                 // translation of `instanceof AuthenticationException`. Java's `catch`
                 // covers the *whole* `try` block (`:308-335`), so it fires for an
                 // authentication failure raised by ANY statement in it, not just by
@@ -1677,7 +1677,7 @@ impl<C: KafkaClient> Sender<C> {
             // Java attaches `nextRequestHandler` itself as the completion handler; a
             // Rust callback cannot capture `&mut self`, so the handler is parked in
             // `pending_transactional_response` and matched by correlation id in
-            // `handle_client_responses` (CLAUDE.md §9.2).
+            // `handle_client_responses` (CLAUDE.md §11.2).
             None,
         );
         let correlation_id = client_request.correlation_id();
@@ -1807,7 +1807,7 @@ impl<C: KafkaClient> Sender<C> {
     /// [`ProduceRequestResult`]s rather than batches — a `ProducerBatch` has exactly
     /// one owner (rules §7) — so the accumulator can only reach what is still in its
     /// deques. Without this, the record futures of drained batches are never
-    /// completed, which CLAUDE.md §5 forbids.
+    /// completed, which CLAUDE.md §7 forbids.
     ///
     /// Applies Java's in-flight fork (`:1160-1167`): a batch still marked in flight
     /// keeps its pooled buffer until its response arrives (KAFKA-19012), so it moves
@@ -6983,7 +6983,7 @@ mod tests {
     /// Critic 44 note 2: `abort_incomplete_batches` walks the deques only, because
     /// Rust's `IncompleteBatches` tracks `ProduceRequestResult`s rather than batches,
     /// so a drained batch's records were never completed on a force close — a
-    /// CLAUDE.md §5 hanging future.
+    /// CLAUDE.md §7 hanging future.
     #[tokio::test]
     async fn test_force_close_aborts_the_senders_in_flight_batches() {
         let mut ctx = SenderTestContext::idempotent();
@@ -8773,7 +8773,7 @@ mod tests {
     /// --test-threads=8` failed 8 runs out of 8.
     ///
     /// A `tokio::sync::Mutex` rather than a `std` one because the guard is necessarily
-    /// held across the driver's `.await` points (CLAUDE.md §9.6.2 / clippy's
+    /// held across the driver's `.await` points (CLAUDE.md §11.6.2 / clippy's
     /// `await_holding_lock`).
     static SPLIT_BATCH_AND_SEND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

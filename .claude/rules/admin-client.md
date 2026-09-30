@@ -17,14 +17,14 @@ Every Java `Admin` RPC method (`createTopics`, `deleteTopics`,
 `*Result` object wrapping one `KafkaFuture<T>` per key (e.g. one per topic
 for `createTopics`). The network I/O happens later on the background task;
 the *caller* decides whether/when to block, by awaiting the returned
-`KafkaFuture`(s). Per CLAUDE.md §9.1 ("if a method is blocking in Java it
+`KafkaFuture`(s). Per CLAUDE.md §11.1 ("if a method is blocking in Java it
 should be async in Rust"), these methods are **not** blocking in Java, so
 they must **not** become `async fn` in Rust — they stay plain sync `fn`
 that enqueue a `Call` (or driver invocation) onto the background task and
 return a result struct holding one `KafkaFuture<T>` handle per key.
 
 The one exception is `close()`: Java's `close(Duration timeout)` blocks
-joining the background thread (CLAUDE.md §9.4: `thread.join()` → must
+joining the background thread (CLAUDE.md §11.4: `thread.join()` → must
 actually `.await` in Rust), so `close()` / `close_with_timeout()` are the only
 `async fn`s on the `Admin` trait.
 
@@ -290,7 +290,7 @@ does for that same method** — not by which tier/phase the method belongs to:
     `throw new UnsupportedOperationException("Not implemented yet")` (e.g.
     `createPartitions`, and the non-empty `deleteRecords` path) may the Rust
     mock return an `Error::unsupported_version("Not implemented yet")`
-    (NOT a `panic!` — CLAUDE.md §10.1). This is a faithful translation of the
+    (NOT a `panic!` — CLAUDE.md §12.1). This is a faithful translation of the
     Java behavior, not a scope deferral, and every such site MUST cite the
     exact Java line that throws so the claim is verifiable. Do NOT attach a
     "Java throws unsupported" justification to a method Java actually

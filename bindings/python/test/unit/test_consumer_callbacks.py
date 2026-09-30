@@ -787,7 +787,7 @@ async def test_async_coroutine_listener_can_use_handle():
 async def test_async_coroutine_commit_callback():
     """A coroutine commit callback is scheduled onto the consumer's loop and
     awaited there, exactly like a coroutine rebalance listener — the completion
-    must not be silently dropped (CLAUDE.md §9.5).
+    must not be silently dropped (CLAUDE.md §11.5).
 
     ``commit_async`` is driven from an executor for the same reason
     ``_rebalance_off_loop`` exists: the mock delivers the completion inline inside

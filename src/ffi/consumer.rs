@@ -513,7 +513,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 ///
 /// Safe to call with a null pointer (no-op). Does NOT acquire the guard
 /// (mirrors Java); destroying concurrently with an in-flight op is a C
-/// lifetime precondition the caller must uphold (CLAUDE.md FFI §3).
+/// lifetime precondition the caller must uphold (CLAUDE.md FFI §4).
 ///
 /// # Safety
 ///
@@ -2858,7 +2858,7 @@ unsafe fn async_void_op<F, Fut>(
 }
 
 /// A raw `user_data` pointer wrapped so it can cross into the spawned task and
-/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §3).
+/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §4).
 struct SendUserData(*mut c_void);
 // SAFETY: the C user is responsible for the thread-safety of `user_data`.
 unsafe impl Send for SendUserData {}
@@ -3846,7 +3846,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
 /// (`commitAsync(OffsetCommitCallback)`) rather than after either C entry point,
 /// since one typedef serves both (C has no overloading, so the Java overloads
 /// become `..._commit_async_with_callback` and
-/// `..._commit_async_offsets_with_callback`); the CLAUDE.md §3 spelling would be
+/// `..._commit_async_offsets_with_callback`); the CLAUDE.md §4 spelling would be
 /// the doubly-suffixed `..._commit_async_with_callback_callback_t`. It also
 /// deliberately does not reuse the identically-shaped
 /// [`kafka_consumer_Consumer_committed_callback_t`], whose map is a *query

@@ -937,7 +937,7 @@ impl<K, V> KafkaProducer<K, V> {
         // `init_transactions` / `begin_transaction` / `send_offsets_to_transaction` /
         // `commit_transaction` / `abort_transaction` are implemented. PLAN §7.1 named
         // this removal as an explicit Phase-6 deliverable, so nothing is left behind
-        // (CLAUDE.md §5).
+        // (CLAUDE.md §7).
 
         // 3. Derive compression from config
         //    Translated from KafkaProducer.configureCompression().
@@ -1389,7 +1389,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///    transactional messages issued by the producer.
     ///
     /// Java blocks on `result.await(maxBlockTimeMs, ..)`, so this is `async`
-    /// (CLAUDE.md §9.1) and returns [`Error::Timeout`] when the transactional
+    /// (CLAUDE.md §11.1) and returns [`Error::Timeout`] when the transactional
     /// state cannot be initialized before `max.block.ms` expires. It is safe to
     /// retry in that case, but once the transactional state has been successfully
     /// initialized this method should no longer be used.
@@ -1443,7 +1443,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Translated from `KafkaProducer.beginTransaction()`
     /// (`KafkaProducer.java:674-681`). Stays synchronous: Java's body is a pure
-    /// state transition with no wait, so CLAUDE.md §9.1 does not apply.
+    /// state transition with no wait, so CLAUDE.md §11.1 does not apply.
     ///
     /// # Errors
     ///
@@ -1821,7 +1821,7 @@ impl<K, V> KafkaProducer<K, V> {
         } else {
             // No custom partitioner: keep the zero-copy owned path.
             // `serialize_owned_headers` moves the key/value so a `Vec<u8>` payload
-            // is written into the batch without a copy (CLAUDE.md §12); `do_send_bytes`
+            // is written into the batch without a copy (CLAUDE.md §14); `do_send_bytes`
             // then runs the built-in key-hash partitioning via `compute_partition`.
             let serialized_key = match self.key_serializer.serialize_owned_headers(&record_topic, &record_headers, key)
             {
@@ -1930,7 +1930,7 @@ impl<K, V> KafkaProducer<K, V> {
                 // `appendCallbacks.topicPartition()`. It is borrowed, not rebuilt:
                 // constructing it here from `topic: &str` would allocate a `String` and
                 // an `Arc<str>` and copy the topic name twice on **every** record, which
-                // CLAUDE.md §11 forbids on the send path. The accumulator interns one
+                // CLAUDE.md §13 forbids on the send path. The accumulator interns one
                 // `Arc<str>` per topic and hands the `TopicPartition` back, so this costs
                 // nothing. (Critic 44 issue 1.)
                 if let Some(transaction_manager) = &self.transaction_manager {
@@ -1983,7 +1983,7 @@ impl<K, V> KafkaProducer<K, V> {
                             // available at this point — and (b) already carried by that
                             // future, which fires it exactly once when the batch is later
                             // completed/aborted. Firing it here too would double-invoke it,
-                            // breaking the exactly-once-per-record contract (CLAUDE.md §9.5).
+                            // breaking the exactly-once-per-record contract (CLAUDE.md §11.5).
                             // (Java's `doSend` catch fires the raw `callback` at
                             // `KafkaProducer.java:1061`, but keeps it as a reference separate
                             // from the `appendCallbacks` it registered, so Java can fire it
@@ -2008,7 +2008,7 @@ impl<K, V> KafkaProducer<K, V> {
             // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
             // NO_TIMESTAMP, -1, -1)` *and* returns a failed future. `append` gives the
             // callback back (`AppendFailure::callback`) precisely so this arm can honour
-            // that obligation exactly once (CLAUDE.md §9.5) — the four sibling arms
+            // that obligation exactly once (CLAUDE.md §11.5) — the four sibling arms
             // covering the same Java block all route through `handle_api_error` too.
             Err(failure) if failure.error.is_api_error() => {
                 self.handle_api_error(failure.error, topic, partition, failure.callback)
@@ -2411,7 +2411,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// then joins unconditionally (`KafkaProducer.java:1414-1418`) — dropping it here
     /// would leave [`Self::await_sender_handle_indefinitely`] with nothing to join and
     /// `close` would return while the Sender task was still running, which CLAUDE.md
-    /// §9.4 forbids. `JoinHandle` is `Unpin`, so `&mut` is enough to await it without
+    /// §11.4 forbids. `JoinHandle` is `Unpin`, so `&mut` is enough to await it without
     /// giving it away.
     async fn await_sender_handle(&self, timeout: Duration) -> bool {
         let handle = self.sender_handle.lock().unwrap().take();
@@ -3286,7 +3286,7 @@ mod tests {
 
         // The callback fired exactly once. `Callback` is a `Box<dyn FnOnce>`, so
         // "at most once" is a type-level guarantee; this pins "at least once".
-        // The guard is cloned out and dropped before the `await` below (CLAUDE.md §9.6).
+        // The guard is cloned out and dropped before the `await` below (CLAUDE.md §11.6).
         let invocations = invocations.lock().unwrap().clone();
         assert_eq!(invocations.len(), 1, "the callback must fire exactly once, got {invocations:?}");
         let (offset, partition, message) = &invocations[0];
@@ -4324,7 +4324,7 @@ mod tests {
     /// `catch (ApiException e)` arm still fires the user callback with the
     /// placeholder metadata because it holds its own `callback` reference
     /// (`KafkaProducer.java:1056-1068`). Rust *moves* the callback into
-    /// `append`, so the callback obligation (CLAUDE.md §5, §9.5) is only met
+    /// `append`, so the callback obligation (CLAUDE.md §7, §11.5) is only met
     /// because `AppendFailure` hands it back — this test is the regression guard
     /// for that hand-back.
     #[tokio::test]
@@ -4733,7 +4733,7 @@ mod tests {
         );
     }
 
-    /// `definition-of-done.md` §10 / CLAUDE.md §11: enabling idempotence must not add
+    /// `definition-of-done.md` §10 / CLAUDE.md §13: enabling idempotence must not add
     /// a single per-record heap allocation to the send path.
     ///
     /// This is the audit clause aimed at the public `send` entry point.
@@ -4822,7 +4822,7 @@ mod tests {
         );
     }
 
-    /// `definition-of-done.md` §10 / CLAUDE.md §11: dispatching through a custom
+    /// `definition-of-done.md` §10 / CLAUDE.md §13: dispatching through a custom
     /// `Partitioner<K, V>` must not add a single per-record heap allocation to the
     /// send path, matching the idempotence audit above
     /// (`test_send_allocations_do_not_grow_when_idempotence_is_enabled`).
@@ -4835,7 +4835,7 @@ mod tests {
     ///
     /// `RoundRobinPartitioner` is the concrete partitioner under measurement: its
     /// steady-state path is a `DashMap::get` on an already-present topic entry plus an
-    /// `AtomicI32` increment (CLAUDE.md §11), so the delta versus no partitioner
+    /// `AtomicI32` increment (CLAUDE.md §13), so the delta versus no partitioner
     /// (built-in key-hash partitioning) must be zero.
     #[tokio::test]
     async fn test_send_allocations_do_not_grow_with_a_custom_partitioner() {
@@ -5157,7 +5157,7 @@ mod tests {
     /// Java's spawned I/O thread would.
     ///
     /// `tokio::join!` rather than `tokio::select!`: `select!` drops the losing future
-    /// and its side effects (CLAUDE.md §9.6.1), which here would abandon a half-sent
+    /// and its side effects (CLAUDE.md §11.6.1), which here would abandon a half-sent
     /// transactional request. `join!` polls both to completion and never drops either.
     ///
     /// The loop stops as soon as `op` resolves. It `yield_now()`s rather than sleeps:
@@ -5913,7 +5913,7 @@ mod tests {
     ///
     /// The callback was moved into `accumulator.append(..)` and registered with the
     /// record's future, which fires it exactly once when the batch is later
-    /// completed/aborted. Passing it here too would double-fire (CLAUDE.md §9.5).
+    /// completed/aborted. Passing it here too would double-fire (CLAUDE.md §11.5).
     /// (Java's `doSend` catch additionally fires the raw `callback` at
     /// `KafkaProducer.java:1061`, but keeps `callback` as a reference separate from
     /// the `appendCallbacks` it registered, so Java can invoke it twice on this path;
@@ -6809,7 +6809,7 @@ mod tests {
     /// handle in place for [`KafkaProducer::await_sender_handle_indefinitely`] to join.
     ///
     /// Java's `close` force-closes and *then* joins unconditionally
-    /// (`KafkaProducer.java:1414-1418`), and CLAUDE.md §9.4 requires the Rust
+    /// (`KafkaProducer.java:1414-1418`), and CLAUDE.md §11.4 requires the Rust
     /// translation to await the handle rather than merely signal it. Passing the handle
     /// by value into `tokio::time::timeout` breaks that silently: `timeout` takes
     /// ownership and drops it on `Elapsed`.
@@ -6879,7 +6879,7 @@ mod tests {
             exited.load(Ordering::SeqCst),
             "close returned before the Sender task finished: the graceful wait expired, \
              so close force-closed and must then have joined the handle \
-             (KafkaProducer.java:1414-1418, CLAUDE.md §9.4)"
+             (KafkaProducer.java:1414-1418, CLAUDE.md §11.4)"
         );
 
         init.abort();

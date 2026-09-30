@@ -195,7 +195,7 @@ impl ConsumerUtils {
     /// wrapped so that `is_kafka_error()` answers `true`, carrying the original
     /// as its [`Error::source`].
     ///
-    /// This is NOT a no-op. Per CLAUDE.md §10.3 the Rust `Error` enum is flat and
+    /// This is NOT a no-op. Per CLAUDE.md §12.3 the Rust `Error` enum is flat and
     /// holds both `KafkaException`'s subclasses AND the generic runtime
     /// exceptions beside it; `is_kafka_error()` is the only thing that recovers
     /// the distinction, and several call sites branch on it. Returning the input

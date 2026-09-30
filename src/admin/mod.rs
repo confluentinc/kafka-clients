@@ -1138,7 +1138,7 @@ pub trait Admin: Send + Sync {
     /// `Admin.updateFeatures(Map<String, FeatureUpdate>, UpdateFeaturesOptions)`.
     ///
     /// Java throws `IllegalArgumentException` synchronously when the update map
-    /// is empty or contains a blank feature name; per CLAUDE.md §10.2, that
+    /// is empty or contains a blank feature name; per CLAUDE.md §12.2, that
     /// unchecked-but-recoverable throw becomes an `Err` here (the only admin
     /// RPC whose client-side validation can fail before the `Call` is
     /// enqueued).
@@ -1174,7 +1174,7 @@ pub trait Admin: Send + Sync {
     /// finished by then is left running.
     ///
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
-    /// Rust (CLAUDE.md §9.4).
+    /// Rust (CLAUDE.md §11.4).
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#close")]
     async fn close_with_timeout(&self, timeout: Duration);
 }

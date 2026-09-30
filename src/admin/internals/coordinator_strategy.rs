@@ -246,7 +246,7 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
 
     fn build_request(&self, keys: &HashSet<CoordinatorKey>) -> Box<dyn RequestBuilder> {
         // The precondition violations (`IllegalArgumentException` in Java) are
-        // programming errors — CLAUDE.md §10.1 permits panic for unrecoverable
+        // programming errors — CLAUDE.md §12.1 permits panic for unrecoverable
         // programming errors. In the normal admin group-describe flow all keys
         // are representable group keys of the strategy's type, so this never
         // fails; the fallible variant `build_lookup_request` is exercised by
@@ -322,7 +322,7 @@ mod tests {
     /// than one RPC and (ii) **poisoned the driver mutex**, making every later
     /// `lock().unwrap()` panic too. Java's `catch (Throwable t)` at
     /// `KafkaAdminClient.java:1387-1391` is positive proof the Java client treats
-    /// this as recoverable, and CLAUDE.md §10.1 forbids the panic outright.
+    /// this as recoverable, and CLAUDE.md §12.1 forbids the panic outright.
     #[test]
     fn an_unexpected_response_type_fails_every_lookup_key() {
         let s = strategy(CoordinatorType::Group);

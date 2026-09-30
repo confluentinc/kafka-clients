@@ -26,7 +26,7 @@
 //!
 //! The file keeps its `kafka_error` name because it translates
 //! `KafkaException.java`, as does the C FFI type `kafka_common_Error_t`
-//! (CLAUDE.md §3).
+//! (CLAUDE.md §4).
 
 use std::fmt;
 
@@ -97,7 +97,7 @@ impl KafkaError {
     // `(String message, Throwable cause)` (`:26`) — with a leading `error: Errors`
     // that has no Java counterpart: it carries what Java's subclass identity
     // carried, since this struct stands in for the whole base class (CLAUDE.md
-    // §10.3). `error` is therefore in every signature, so the parameter-name
+    // §12.3). `error` is therefore in every signature, so the parameter-name
     // intersection is `{error}` and `new(error)` — Java's no-arg form — keeps the
     // plain name under CLAUDE.md §2; the rest are suffixed with the Rust
     // parameters beyond it, in declaration order.

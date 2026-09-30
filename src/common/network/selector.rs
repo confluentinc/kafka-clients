@@ -22,7 +22,7 @@
 //!
 //! # NIO to Tokio mapping
 //!
-//! Per CLAUDE.md rule 8: single Selector for multiple TCP connections.
+//! Per CLAUDE.md rule 10: single Selector for multiple TCP connections.
 //! The `poll()` method:
 //! 1. Iterates all channels, attempts non-blocking I/O (connect/read/write)
 //! 2. If no progress and timeout > 0, waits for I/O readiness on any channel
@@ -194,7 +194,7 @@ impl CloseMode {
 pub struct Selector {
     /// Active channels indexed by connection ID.
     ///
-    /// The connection ID is stored as `Arc<str>` (CLAUDE.md §11: identifiers
+    /// The connection ID is stored as `Arc<str>` (CLAUDE.md §13: identifiers
     /// cloned on every poll iteration) so that the per-poll
     /// `channels.keys().cloned()` (and the equivalent clones into the tracking
     /// sets below) are refcount bumps rather than heap allocations. Lookups by
@@ -1198,7 +1198,7 @@ impl Selectable for Selector {
 
         // The connection completed immediately (Tokio connect is async but resolves when done)
         // Intern the connection id once as a single `Arc<str>` shared between the
-        // channels map and the tracking sets (CLAUDE.md §11).
+        // channels map and the tracking sets (CLAUDE.md §13).
         let key: Arc<str> = Arc::from(id);
         self.immediately_connected_keys.insert(Arc::clone(&key));
         // Phase 30 (dirty site #4): register per-channel wakers/arming so the

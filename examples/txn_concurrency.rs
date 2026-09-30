@@ -24,7 +24,7 @@
 //! 2. **Fencing while sends are in flight** — a successor `init_transactions`
 //!    lands while 300 unawaited sends race the sender. Every future must
 //!    resolve (acked or fenced) — none may hang — and the zombie's commit
-//!    must fail (KIP-890; CLAUDE.md §9.5 callback obligation).
+//!    must fail (KIP-890; CLAUDE.md §11.5 callback obligation).
 //! 3. **Transaction-per-message churn** — 90 back-to-back transactions,
 //!    every third aborted. Under `transaction.version=2` each EndTxn bumps
 //!    the producer epoch, so this exercises epoch tracking 90 times

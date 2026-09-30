@@ -287,5 +287,5 @@ pub use write_txn_markers_response::WriteTxnMarkersResponse;
 /// `common::requests` is a *directory* module, which keeps its own namespace, and
 /// `RecordBatch` lives under `common::record::internal` and so is only
 /// `pub(crate)`. Folding would therefore drop a public constant from the API
-/// (CLAUDE.md §4).
+/// (CLAUDE.md §6).
 pub const RECORD_BATCH_NO_PARTITION_LEADER_EPOCH: i32 = -1;

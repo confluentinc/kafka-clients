@@ -57,7 +57,7 @@
 //! requires, so this module can still become private without touching them.
 //!
 //! Note [`is_authentication_error`] here takes `&io::Error` and is **not** the
-//! CLAUDE.md §10.4 hierarchy predicate `Error::is_authentication_error()`; the
+//! CLAUDE.md §12.4 hierarchy predicate `Error::is_authentication_error()`; the
 //! two share a name and nothing else.
 
 use std::io;

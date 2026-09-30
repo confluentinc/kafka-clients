@@ -56,7 +56,7 @@ use super::{FetchPosition, SubscriptionState};
 /// - `AtomicReference<RuntimeException>` becomes `Mutex<Option<Error>>`:
 ///   `Error` is not a pointer-sized value, so there is no atomic swap to
 ///   mirror. The critical sections are a single `take()` / `is_none()`
-///   test and never `.await` (CLAUDE.md §9.6).
+///   test and never `.await` (CLAUDE.md §11.6).
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator")]
 pub(crate) struct PositionsValidator {
     metadata: Arc<ConsumerMetadata>,

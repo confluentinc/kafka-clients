@@ -83,7 +83,7 @@ impl FetchMetricsManager {
     ///
     /// These builders run on the per-fetch record path, so a `.expect()` here turned
     /// a recoverable registration error into a panic that killed the consumer task
-    /// (CLAUDE.md §10.1 — do not panic where recovery is possible).
+    /// (CLAUDE.md §12.1 — do not panic where recovery is possible).
     ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
     /// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
@@ -389,7 +389,7 @@ impl FetchMetricsManager {
         // `assignedPartitions()` set ONLY when the id has changed. A
         // steady-state poll with an unchanged assignment therefore does ZERO
         // `TopicPartition` clones — restoring the pre-M3 behavior on the
-        // bg-task per-poll path (CLAUDE.md §11).
+        // bg-task per-poll path (CLAUDE.md §13).
         let new_assignment_id = subscription.lock().expect("SubscriptionState mutex poisoned").assignment_id();
 
         // Hold the assignment-tracking guard for the whole update. This is

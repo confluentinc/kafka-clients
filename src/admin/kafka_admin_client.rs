@@ -2085,7 +2085,7 @@ fn node_for(resource: &ConfigResource) -> Option<i32> {
     {
         // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
         // would throw. Here a parse failure degrades to "any broker" rather
-        // than panicking on a recoverable path (CLAUDE.md §10).
+        // than panicking on a recoverable path (CLAUDE.md §12).
         resource.name().parse::<i32>().ok()
     } else {
         None

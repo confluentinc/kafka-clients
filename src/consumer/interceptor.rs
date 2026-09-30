@@ -32,7 +32,7 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// # Sync, not async
 ///
 /// Java's `onConsume` and `onCommit` are synchronous; this trait mirrors
-/// that exactly. Per CLAUDE.md §11, the interceptor chain runs per-batch
+/// that exactly. Per CLAUDE.md §13, the interceptor chain runs per-batch
 /// inside `poll()` — not on a hot per-record path — so per-call boxed-dyn
 /// dispatch is acceptable, but `#[async_trait]` is forbidden because
 /// Java's API does not allow asynchrony here and adding it would change

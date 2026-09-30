@@ -185,7 +185,7 @@ impl RequestBuilder for Builder {
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `InitProducerIdRequest.Builder.build(short version)`. Java
-        // throws IllegalArgumentException for both checks; per CLAUDE.md §10.2
+        // throws IllegalArgumentException for both checks; per CLAUDE.md §12.2
         // these become errors rather than panics.
         if self.data.transaction_timeout_ms <= 0 {
             return Err(io::Error::new(

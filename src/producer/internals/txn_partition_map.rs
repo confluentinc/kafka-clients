@@ -48,7 +48,7 @@ impl TxnPartitionMap {
 
     /// The entry for `topic_partition`, which must already exist.
     ///
-    /// Java throws `IllegalStateException` when absent; per CLAUDE.md §10.2 that
+    /// Java throws `IllegalStateException` when absent; per CLAUDE.md §12.2 that
     /// becomes an `Err`. Note the deliberate asymmetry with
     /// [`Self::get_or_create`] and the tolerant accessors below — see the
     /// comment on [`Self::last_acked_offset`].

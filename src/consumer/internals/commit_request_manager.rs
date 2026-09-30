@@ -30,7 +30,7 @@
 //! lives behind a `Mutex` so the two sides can interact without
 //! `Arc<Mutex<&mut Self>>`-style ownership pretzels. The mutex is acquired
 //! only for short critical sections and **never held across an `.await`**
-//! per CLAUDE.md §9.6.
+//! per CLAUDE.md §11.6.
 //!
 //! # Deferred wiring
 //!

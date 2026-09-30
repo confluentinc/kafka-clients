@@ -107,7 +107,7 @@ use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 /// # Async surface
 ///
 /// Per `consumer-threading.md` §1: methods that block in Java become
-/// `async fn`; non-blocking accessors stay `fn`. Per CLAUDE.md §11, the
+/// `async fn`; non-blocking accessors stay `fn`. Per CLAUDE.md §13, the
 /// per-call `Box<Future>` cost of `#[async_trait]` is amortized over many
 /// records (typical `poll()` granularity is ≤ ~100 calls/sec) and is
 /// acceptable on this top-level dispatch trait.
@@ -157,7 +157,7 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
-    /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §12.
+    /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
     fn client_id(&self) -> &str;
 
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.

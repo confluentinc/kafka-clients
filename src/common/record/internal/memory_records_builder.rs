@@ -311,7 +311,7 @@ impl MemoryRecordsBuilder {
     ///
     /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
     /// [`bytes::Bytes`], so this is an O(1) refcount bump and copies no record bytes
-    /// (CLAUDE.md §12). The single finalisation copy lives in
+    /// (CLAUDE.md §14). The single finalisation copy lives in
     /// [`take_batch_data`](Self::take_batch_data) and runs once, inside `close()`.
     ///
     /// Panics if the builder has been aborted.
