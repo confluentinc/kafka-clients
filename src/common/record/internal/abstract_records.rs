@@ -15,7 +15,7 @@
 #![expect(dead_code)]
 //! Utility functions for record batch operations.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.AbstractRecords`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.AbstractRecords`.
 
 use crate::common::header::RecordHeader;
 use crate::common::record::internal::CompressionType;

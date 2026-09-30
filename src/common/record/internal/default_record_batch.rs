@@ -35,7 +35,7 @@
 //!   Records => [Record]
 //! ```
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.DefaultRecordBatch`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.DefaultRecordBatch`.
 
 use std::io;
 
@@ -54,7 +54,7 @@ use crate::common::record::internal::SimpleRecord;
 /// Wraps a byte buffer containing a complete record batch. The batch header is
 /// 61 bytes long, followed by the (possibly compressed) record data.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.DefaultRecordBatch`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.DefaultRecordBatch`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch")]
 pub struct DefaultRecordBatch {

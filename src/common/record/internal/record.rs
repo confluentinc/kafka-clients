@@ -17,7 +17,7 @@
 //! A log record is a tuple consisting of a unique offset in the log, a sequence
 //! number assigned by the producer, a timestamp, a key, and a value.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.Record` interface.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.Record` interface.
 
 use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
@@ -25,7 +25,7 @@ use crate::common::record::TimestampType;
 /// A log record is a tuple consisting of a unique offset in the log, a sequence
 /// number assigned by the producer, a timestamp, a key, and a value.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.Record` interface.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.Record` interface.
 #[doc(alias = "org.apache.kafka.common.record.internal.Record")]
 pub trait Record {
     /// The offset of this record in the log.

@@ -170,7 +170,7 @@ impl FetchRequest {
 
     /// Sentinel value indicating that the partition leader epoch is unknown.
     ///
-    /// Mirrors `org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH`.
+    /// Mirrors `org.apache.kafka.common.record.internal.RecordBatch.NO_PARTITION_LEADER_EPOCH`.
     pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
 
     /// Helper used by `build_version` to bucket a list of `TopicIdPartition`s

@@ -17,7 +17,7 @@
 //! This class helps estimate the compression ratio for each topic and
 //! compression type combination.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionRatioEstimator`.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -39,7 +39,7 @@ static INSTANCE: LazyLock<CompressionRatioEstimator> = LazyLock::new(Compression
 /// [`estimation`](Self::estimation), etc.) which operate on the process-wide
 /// global instance, matching Java's static `CompressionRatioEstimator` methods.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionRatioEstimator`.
 #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator")]
 pub struct CompressionRatioEstimator {
     compression_ratio: Mutex<HashMap<String, [f32; CompressionType::COUNT]>>,

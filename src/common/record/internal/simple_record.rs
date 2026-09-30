@@ -17,7 +17,7 @@
 //! This is useful when building record sets to avoid depending on a specific
 //! magic version.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.SimpleRecord`.
 
 use crate::common::Error;
 use crate::common::header::RecordHeader;
@@ -28,7 +28,7 @@ use crate::common::record::internal::RecordBatch;
 /// This is useful when building record sets to avoid depending on a specific
 /// magic version. It owns its key, value, and headers data.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.SimpleRecord`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord")]
 pub struct SimpleRecord {

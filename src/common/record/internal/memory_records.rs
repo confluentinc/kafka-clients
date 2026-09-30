@@ -18,7 +18,7 @@
 //! record batches. To create a new buffer see [`MemoryRecordsBuilder`],
 //! or one of the [`builder_with_initial_capacity()`](MemoryRecords::builder_with_initial_capacity) variants.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.MemoryRecords`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,7 +37,7 @@ use crate::common::record::internal::SimpleRecord;
 ///
 /// Contains one or more complete record batches in serialized form.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.MemoryRecords`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords")]
 pub struct MemoryRecords {

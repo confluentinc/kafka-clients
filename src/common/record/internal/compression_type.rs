@@ -14,7 +14,7 @@
 
 //! The compression type to use for record batches.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionType`.
 
 use crate::common::Error;
 
@@ -23,7 +23,7 @@ use crate::common::Error;
 /// Compression type is represented by two bits in the attributes field of the
 /// record batch header, so a byte is large enough.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType")]
 pub enum CompressionType {

@@ -38,7 +38,7 @@
 //! The offset and timestamp deltas compute the difference relative to the base
 //! offset and base timestamp of the batch that this record is contained in.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.DefaultRecord`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.DefaultRecord`.
 
 use std::io::{self, Read, Write};
 
@@ -52,7 +52,7 @@ use crate::common::utils::ByteUtils;
 
 /// The default (v2) record format for Kafka.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.DefaultRecord`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.DefaultRecord`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord")]
 pub struct DefaultRecord {

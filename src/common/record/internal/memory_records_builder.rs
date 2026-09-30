@@ -17,7 +17,7 @@
 //! This is the write path for [`MemoryRecords`]. It transparently handles
 //! compression and exposes methods for appending new records.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.MemoryRecordsBuilder`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.MemoryRecordsBuilder`.
 
 use std::io::{self, Write};
 
@@ -53,7 +53,7 @@ enum AppendState<W: Write> {
 /// On [`close()`](Self::close) or [`build()`](Self::build), flushes compression
 /// and writes the batch header (attributes, timestamps, CRC).
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecordsBuilder`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.MemoryRecordsBuilder`.
 #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder")]
 pub struct MemoryRecordsBuilder {
     timestamp_type: TimestampType,

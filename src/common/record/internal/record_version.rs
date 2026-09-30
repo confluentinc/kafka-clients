@@ -18,11 +18,11 @@
 //! and `message format version`. Note that the version actually applies to the
 //! record batch (instead of the individual record).
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.RecordVersion`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.RecordVersion`.
 
 /// Record format versions supported by Kafka.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.RecordVersion`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.RecordVersion`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion")]
 pub enum RecordVersion {
