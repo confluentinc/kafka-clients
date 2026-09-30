@@ -25,20 +25,19 @@ name: build-test-release
 #
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
-#   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
-#   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
+#   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
+#   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
 #      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
-#   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
+#   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
+#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
 #      verify-python (pytest test/unit), followed by the gRPC multilanguage arm
 #      with the gRPC servers running as native host processes
 #      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
 #      binding. The broker runs in Docker via Colima.
-#   6. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
+#   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
 #      crate with warnings denied.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
@@ -52,7 +51,7 @@ name: build-test-release
 #
 # Split per language so a failure is attributable to one job, and so the gRPC
 # arm of the multilanguage suite runs in the job for the binding it exercises
-# (see the `__grpc_` naming convention in tests/common/multilanguage_test_macro.rs).
+# (see the `__grpc_` naming convention in rust/tests/common/multilanguage_test_macro.rs).
 #
 # The translation agent is a separate manual promotion (start-translation-plan.yml).
 # It runs in a detached git worktree and pushes new commits when promotions
@@ -84,24 +83,6 @@ global_job_config:
       - sem-version python 3.10
 
 blocks:
-  - name: "R2 Code Review"
-    # The translation agent (start-translation-plan.yml) is a separate
-    # promotion pipeline, so there is no sequencing concern here.
-    dependencies: []
-    run:
-      # run on all pull requests except changes in `/.deployed-versions/`
-      when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
-    task:
-      prologue:
-        commands:
-          - ./.semaphore/dependencies.sh || true
-          - make || true
-      jobs:
-        - name: "R2 Code Review"
-          commands:
-            # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
-            - r2 code-review --verbose --timeout=15m || true
-
   - name: "Verify Rust (Linux amd64)"
     # Runs on every new commit, whether created manually or by the translation
     # agent.
@@ -120,7 +101,7 @@ blocks:
     #     so running them once in the PLAINTEXT job is enough.
     #
     # Each job provisions its own broker, so the jobs do not contend for
-    # Docker resources. See tests/common/test_context.rs
+    # Docker resources. See rust/tests/common/test_context.rs
     # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
     # listeners are selected per run.
     dependencies: []
@@ -135,7 +116,7 @@ blocks:
           commands:
             # The submodule is a shallow clone; `lint-custom` reads the
             # Kafka tags pinned in xtask and fails without them.
-            - cargo xtask fetch-java-refs
+            - (cd rust && cargo xtask fetch-java-refs)
             - make verify-rust
         - name: "Verify Rust (Linux amd64) — ssl"
           commands:
@@ -219,7 +200,7 @@ blocks:
           commands:
             # The submodule is a shallow clone; `lint-custom` reads the
             # Kafka tags pinned in xtask and fails without them.
-            - cargo xtask fetch-java-refs
+            - (cd rust && cargo xtask fetch-java-refs)
             - make verify-rust-macos-docker
 
   - name: "Verify language bindings (macOS arm64)"
@@ -231,8 +212,8 @@ blocks:
     #
     # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
     # run on Linux. The TLS and SASL code paths are in the Rust client and are
-    # covered on macOS by src/integration_tests/ssl_sasl_test.rs and
-    # tests/integration/sasl_ssl_consumer_test.rs in "Verify Rust (macOS arm64)".
+    # covered on macOS by rust/src/integration_tests/ssl_sasl_test.rs and
+    # rust/tests/integration/sasl_ssl_consumer_test.rs in "Verify Rust (macOS arm64)".
     dependencies: []
     execution_time_limit:
       minutes: 30
@@ -276,6 +257,20 @@ blocks:
         - name: "doc-check (Linux amd64)"
           commands:
             - make doc-check
+
+  - name: "Check crate package (Linux amd64)"
+    # Packages `confluent-kafka` as it would be published, fails if the
+    # compressed `.crate` is above 3 MiB, and builds a fresh project that
+    # depends on it (`cargo xtask package-check`).
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "package-check (Linux amd64)"
+          commands:
+            - make package-check
 
 promotions:
   - name: Start translation plan

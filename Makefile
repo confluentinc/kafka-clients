@@ -1,15 +1,16 @@
-RUST_PROJECT_ROOT = $(CURDIR)
-ARCH := $(shell uname -m)
-
-ifeq ($(ARCH),x86_64)
-  # x86-64-v3 (Haswell+, ~2013): faster than baseline, portable across v3 hosts.
-  RUSTFLAGS_NATIVE = -C target-cpu=x86-64-v3
-  CFLAGS_NATIVE = -march=x86-64-v3 -mtune=generic
-else
-  # Other arches (e.g. aarch64): default target-cpu is already the portable baseline.
-  RUSTFLAGS_NATIVE =
-  CFLAGS_NATIVE = -mtune=generic
-endif
+# Cross-language Makefile. Each language owns its recipes in its own Makefile
+# -- rust/Makefile, python/Makefile, c/Makefile -- and this one only
+# orchestrates them: it orders the builds across languages (the bindings link
+# the Rust library, so it is built first) and owns what belongs to the whole
+# repository (git submodules and hooks, the shared Python venv).
+REPO_ROOT = $(CURDIR)
+RUST_PROJECT_ROOT = $(REPO_ROOT)/rust
+ROOTS = REPO_ROOT=$(REPO_ROOT) RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT)
+# `$(MAKE)` is spelled out in every delegating recipe line rather than hidden
+# in a variable: GNU make only treats a line as a recursive make -- passing
+# down the -j jobserver, -n, -k -- when `$(MAKE)` appears in it literally.
+# Python targets run inside the shared venv.
+VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
 	build-rust build-rust-integration-tests build-rust-all-features \
@@ -31,273 +32,113 @@ endif
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint doc-check install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check package-check install-rust-analyzer clean
 
 build: init-hooks build-all
 
 build-all: build-rust-all-features build-c build-python
 
 build-rust:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
+	$(MAKE) -C rust build
 build-rust-integration-tests:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests --release
+	$(MAKE) -C rust build-integration-tests
 build-rust-all-features:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
+	$(MAKE) -C rust build-all-features
 
 submodules:
 	git submodule update --init --recursive
 
 build-c: submodules build-rust-all-features
-	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
-	cmake --build bindings/c/build
+	$(MAKE) -C c $(ROOTS) build
 
 init-venv:
 	[ -d venv ] || python3 -m venv venv
 
 build-python: init-venv build-rust-all-features
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
 devel-build: devel-build-rust devel-build-c devel-build-python
 
 devel-build-rust:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
+	$(MAKE) -C rust devel-build
 devel-build-rust-integration-tests:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests
+	$(MAKE) -C rust devel-build-integration-tests
 devel-build-rust-all-features:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
+	$(MAKE) -C rust devel-build-all-features
 
 devel-build-c: submodules devel-build-rust
-	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
-	cmake --build bindings/c/build
+	$(MAKE) -C c $(ROOTS) devel-build
 
 devel-build-python: init-venv devel-build-rust
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug build)
 
 # Build the per-language gRPC server Docker images used by the
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
-# Depends on the existing `build` target so libconfluent_kafka.{a,so}
-# and confluent_kafka.h are present under target/release/.
+# Depends on `build` so libconfluent_kafka.{a,so} and confluent_kafka.h are
+# present under rust/target/release/.
 build-grpc-images: build
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
+	$(MAKE) -C c $(ROOTS) grpc-image
 
-# Just the two Python gRPC images (sync + asyncio), for the Python-only
-# multilanguage run below. Skips the C image, which that run never starts.
+# Just the two Python gRPC images (sync + asyncio). The Python image installs
+# the built binding, hence `build-python`.
 build-grpc-images-python: build-rust-all-features build-python
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
+	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 
-# Just the C gRPC image, for the C-only multilanguage run below. Skips the two
-# Python images, which that run never starts.
-#
-# Needs only the Rust release artifacts: Dockerfile.grpc copies
-# target/release/libconfluent_kafka.a and target/include/confluent_kafka.h, then
-# runs cmake on bindings/c/grpc_server inside the container.
-#
-# Hence the deliberate asymmetry with `build-grpc-images-python`, which also
-# needs `build-python`: the Python image installs the built wheel, whereas the
-# host-side `build-c` (cmake for the C unit tests) contributes nothing the C
-# image consumes.
+# Just the C gRPC image. Needs only the Rust release artifacts (see
+# c/Makefile's `grpc-image`), not the host-side `build-c`.
 build-grpc-images-c: build-rust-all-features
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C c $(ROOTS) grpc-image
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
-# submodules (kafka source reference + Unity for the C unit tests).
-# Run this before `make build` on a new checkout.
-init:
-	@git submodule update --init --recursive
-	@[ -d venv ] || python3 -m venv venv
-	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
+# submodules (kafka source reference + Unity for the C unit tests) and the
+# Python development dependencies. Run this before `make build` on a new
+# checkout.
+init: submodules init-venv
+	@($(VENV) && $(MAKE) -C python $(ROOTS) init)
 
 test: test-rust-all-features test-c test-python
 
-test-rust: build-rust
-	# --workspace, not the root package alone: `cargo test` from the root only
-	# builds and tests `confluent-kafka-rust`, so `generator` (the wire-protocol
-	# code generator, 57 tests), `xtask`, `consumer-perf` and
-	# `multilanguage-test-server` were never exercised by any gate. Feature
-	# unification is not a hazard here: only `consumer-perf` depends on the root
-	# package and it takes default features, so neither `integration-tests` nor
-	# `ffi` is activated by the extra members.
-	cargo test --workspace
-	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
-	# so the C FFI modules' own unit tests (~500 across producer, consumer and
-	# admin) are invisible to the run above. Not `--workspace --features ffi`:
-	# `ffi` is a root-package feature the other members do not declare, so a
-	# second root-only invocation is both simpler and sufficient.
-	cargo test --features ffi
+test-rust:
+	$(MAKE) -C rust test
 
-# The whole Rust test suite, compiled with every feature but running only the
-# native-Rust tests: unit tests, the functional integration suite, and the
-# `__rust` arm of the multilanguage suite. Every container-backed arm carries the
-# `__grpc_` infix, so one `--skip __grpc` excludes all of them at once -- and any
-# gRPC backend added later is excluded automatically rather than silently
-# joining a job that has no image for it.
-#
-# The feature stays ON rather than being dropped, because it is the *compile*
-# that matters: with `multilanguage-tests` off, the whole gRPC harness
-# (`backend_pool`, `backend_factory`, `multilanguage_consumer`, the two test
-# macros) is not built at all, and silently rots whenever the client API
-# changes. Compiling it here catches that immediately, for the cost of one
-# compile and no test runtime.
-#
-# Only the non-Rust backends are filtered, and only at runtime: they are the
-# ones needing prebuilt gRPC images and a container per test. Each binding's
-# own verify job owns its arm: `test-integration-python` (invoked from
-# bindings/python's `test`) and `test-integration-c` (from bindings/c's
-# `test`). Dropping `build-grpc-images` from this target is what makes that
-# split real: this job no longer builds three Docker images it never starts.
-#
-# `__rust` is kept deliberately and costs nothing extra: its macro arm uses
-# `RustNativeFactory` directly -- no container, no gRPC hop -- so it needs no
-# image. It is also the control case for the other arms: a `__grpc_python` failure
-# where `__rust` passes points at the binding or the bridge, not at the client
-# or the harness.
-#
+# Every feature compiled, only the native-Rust tests run (see rust/Makefile).
 # Part of `verify` (through `test`) and of the CI `verify-rust` job.
-test-rust-all-features: build-rust-all-features
-	cargo test --all-features -- --skip __grpc
+test-rust-all-features:
+	$(MAKE) -C rust test-all-features
 
-# Functional integration tests only. The performance tests live in their own
-# `performance` cargo test target (tests/performance/main.rs), so `--test
-# integration` cannot schedule them alongside the functional suite.
-test-integration: build-rust-integration-tests
-	cargo test --features integration-tests --test integration
-	# The integration tests that drive crate internals live in the lib test
-	# binary (src/integration_tests), since those types are not public API.
-	cargo test --features integration-tests --lib -- integration_tests::
+# Functional integration tests (Docker required).
+test-integration:
+	$(MAKE) -C rust test-integration
 
-# ── Protocol-parameterized functional integration runs ───────────────────
-#
-# Every broker the harness starts exposes PLAINTEXT / SSL / SASL_PLAINTEXT /
-# SASL_SSL listeners simultaneously, so INTEGRATION_TEST_PROTOCOL selects which
-# listener the whole suite's native clients connect over — the port and the
-# matching security keys are filled in centrally by TestContext::configure /
-# apply_security (tests/common/test_context.rs). This is the librdkafka-style
-# "run the whole suite once per protocol" model, adapted to our one-cluster,
-# all-listeners harness.
-#
-# `test-integration` above (no env var) is equivalent to the plaintext run.
-# These run the `integration` test binary and the in-crate integration tests
-# (src/integration_tests) and are intended for local use.
-# CI runs the full suite through test-rust-all-features-{ssl,sasl-ssl} below.
-test-integration-plaintext: build-rust-integration-tests
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --lib -- integration_tests::
-test-integration-ssl: build-rust-integration-tests
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --lib -- integration_tests::
-test-integration-sasl-ssl: build-rust-integration-tests
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --lib -- integration_tests::
+# The functional integration tests over one listener of the broker, selected
+# by INTEGRATION_TEST_PROTOCOL (see rust/Makefile). For local use.
+test-integration-plaintext:
+	$(MAKE) -C rust test-integration-plaintext
+test-integration-ssl:
+	$(MAKE) -C rust test-integration-ssl
+test-integration-sasl-ssl:
+	$(MAKE) -C rust test-integration-sasl-ssl
 
-# ── Whole native-Rust test suite, per protocol (no format/lint/perf) ──────
-#
-# The same test selection as `test-rust-all-features` (unit tests + the
-# functional integration suite + the `__rust` multilanguage arms; perf is
-# `test = false` so it is never scheduled), but with the client connections
-# driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
-#
-# These are what the SSL / SASL_SSL CI jobs run, so those jobs exercise the
-# entire suite over their listener rather than only the `integration` binary.
-# They deliberately OMIT format-check, clippy and the performance tail that
-# `verify-rust` wraps around `test-rust-all-features`: those checks are
-# protocol-independent, so running them once in the PLAINTEXT job is enough.
-# (The unit tests are protocol-independent too and so overlap the PLAINTEXT
-# run; they are kept here so a job failure points at one whole suite, not a
-# subset.)
+# `test-rust-all-features` over the SSL / SASL_SSL listener, without the
+# format/lint/perf checks of `verify-rust` (see rust/Makefile). Run by the
+# SSL / SASL_SSL CI jobs.
 test-rust-all-features-ssl:
-	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-rust-all-features
+	$(MAKE) -C rust test-all-features-ssl
 test-rust-all-features-sasl-ssl:
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-rust-all-features
+	$(MAKE) -C rust test-all-features-sasl-ssl
 
-# ── Per-backend multilanguage integration tests ──────────────────────────
-#
-# The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
-# case into one test per backend, named `<case>__rust`, `<case>__grpc_python`,
-# `<case>__grpc_python_async` and `<case>__grpc_c`. So a backend is selectable
-# with a plain libtest name filter -- no cargo feature or env var needed.
-#
-# The shared `__grpc_` infix is what lets `test-rust-all-features` exclude every
-# container-backed arm with a single `--skip __grpc`; `__rust` deliberately
-# lacks it.
-#
-# `__grpc_python` also matches `__grpc_python_async` (the latter contains it),
-# which is intended: both exercise the Python binding, one through the sync API
-# and one through the asyncio one. To run only the sync binding, add
-# `--skip __grpc_python_async`.
-#
-# The `__rust` arm is not a target here: it needs no gRPC image and already runs
-# as part of `test-rust-all-features` / `verify-rust`.
+# The container-backed arms of the multilanguage suite, one per binding. Each
+# binding's `test-integration` builds its gRPC image(s) and runs the matching
+# `__grpc_*` tests of the Rust harness; the prerequisites here build the
+# artifacts those images copy.
+test-integration-python: build-rust-all-features build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) test-integration)
 
-# ── Cross-arch guard for the container-backed arms ───────────────────────
-#
-# Dockerfile.grpc (both bindings) COPY the *host-built* release artifacts
-# straight into a Linux container and link them with the container's GNU ld:
-# the Python images copy `target/release/libconfluent_kafka.so`, the C image
-# copies `target/release/libconfluent_kafka.a` (+ `target/include/confluent_kafka.h`).
-# On a non-Linux host those artifacts are the wrong object format — Mach-O on
-# macOS, and no ELF `.so` is produced at all — so the image build/link fails,
-# and even if it linked the binary could not run. Cross-compiling host->Linux
-# is out of scope for a dev-box `make verify`.
-#
-# So off Linux these two arms SELF-SKIP with a loud notice and exit 0. They are
-# NOT skipped in CI: CI runs `make verify` on Linux, where `uname -s` == Linux,
-# the artifacts are native ELF, and the images build and run unchanged. The
-# skip is honest — it never claims the container arms passed, only that this
-# host cannot build the Linux images.
-#
-# To run the same gRPC arm on a non-Linux host, use
-# test-integration-{python,c}-native below. It runs each gRPC server as a
-# native host process and is what the macOS CI verify-c / verify-python jobs
-# run.
-#
-# The `build-grpc-images-*` image build is invoked *inside* the recipe (rather
-# than as a prerequisite) precisely so the skip also short-circuits the Docker
-# build: a prerequisite would run before the recipe and fire the failing image
-# build before the guard could stop it.
-test-integration-python:
-	@if [ "$$(uname -s)" != "Linux" ]; then \
-		printf '\n========================================================================\n'; \
-		printf 'SKIP test-integration-python: host is %s, not Linux.\n' "$$(uname -s)"; \
-		printf '\n'; \
-		printf 'The Python gRPC-server images COPY the host-built\n'; \
-		printf '  target/release/libconfluent_kafka.so\n'; \
-		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
-		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
-		printf 'Run it natively on this host with: %smake test-integration-python-native\n' \
-			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
-		printf '========================================================================\n\n'; \
-	else \
-		$(MAKE) build-grpc-images-python && \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python; \
-	fi
+test-integration-c: build-rust-all-features
+	$(MAKE) -C c $(ROOTS) test-integration
 
-test-integration-c:
-	@if [ "$$(uname -s)" != "Linux" ]; then \
-		printf '\n========================================================================\n'; \
-		printf 'SKIP test-integration-c: host is %s, not Linux.\n' "$$(uname -s)"; \
-		printf '\n'; \
-		printf 'The C gRPC-server image COPYs the host-built\n'; \
-		printf '  target/release/libconfluent_kafka.a\n'; \
-		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
-		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
-		printf 'Run it natively on this host with: %smake test-integration-c-native\n' \
-			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
-		printf '========================================================================\n\n'; \
-	else \
-		$(MAKE) build-grpc-images-c && \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
-	fi
-
-# ── Protocol-scoped container-backed multilanguage arms ──────────────────
-#
 # The gRPC Python/C arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
 # listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
@@ -320,64 +161,37 @@ test-integration-c-sasl-ssl:
 #
 # The same `__grpc_python` / `__grpc_c` arms, but with each gRPC server run as a
 # host process instead of a Docker container (MULTILANG_BACKEND_MODE=native; see
-# tests/common/backend_pool.rs). Only the broker runs in Docker. These targets
-# are used on macOS, where containers run Linux: the container arms can only
-# test the Linux build of the bindings and cannot load the host's Mach-O
+# rust/tests/common/backend_pool.rs). Only the broker runs in Docker. These
+# targets are used on macOS, where containers run Linux: the container arms can
+# only test the Linux build of the bindings and cannot load the host's Mach-O
 # artifacts. Native mode is also supported on Linux.
 #
-# Build outputs are written under target/grpc-native/ to keep the source tree
-# clean:
+# Build outputs are written under rust/target/grpc-native/ to keep the source
+# tree clean:
 #   python/  generated gRPC stubs, put on PYTHONPATH by the harness
 #   c/       the kafka_grpc_server binary
-GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
-GRPC_PROTO_DIR = $(RUST_PROJECT_ROOT)/multilanguage-test-server/proto
-GRPC_PROTOS = $(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
-	$(GRPC_PROTO_DIR)/admin_service.proto
-
-# Builds the Python extension (build-python), installs the gRPC packages into the
-# venv, and generates the gRPC stubs. The versions are pinned in
-# bindings/python/requirements-grpc{,-tools}.txt, shared with the Docker images.
 build-grpc-native-python: build-python
-	@(. venv/bin/activate && \
-	pip install -r $(RUST_PROJECT_ROOT)/bindings/python/requirements-grpc-tools.txt && \
-	mkdir -p $(GRPC_NATIVE_DIR)/python && \
-	python -m grpc_tools.protoc -I$(GRPC_PROTO_DIR) \
-		--python_out=$(GRPC_NATIVE_DIR)/python --grpc_python_out=$(GRPC_NATIVE_DIR)/python \
-		$(GRPC_PROTOS))
+	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
-# Builds the C++ gRPC server, linked against the host's libconfluent_kafka.a.
-# Requires the gRPC C++ and protobuf development packages (headers, protoc,
-# grpc_cpp_plugin, pkg-config) on the host.
 build-grpc-native-c: build-rust-all-features
-	cmake -S bindings/c/grpc_server -B $(GRPC_NATIVE_DIR)/c-build -DCMAKE_BUILD_TYPE=Release \
-		-DRUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/release \
-		-DRUST_INCLUDE_DIR=$(RUST_PROJECT_ROOT)/target/include \
-		-DPROTO_DIR=$(GRPC_PROTO_DIR)
-	cmake --build $(GRPC_NATIVE_DIR)/c-build --parallel
-	mkdir -p $(GRPC_NATIVE_DIR)/c
-	cp $(GRPC_NATIVE_DIR)/c-build/kafka_grpc_server $(GRPC_NATIVE_DIR)/c/kafka_grpc_server
+	$(MAKE) -C c $(ROOTS) grpc-native
 
 test-integration-python-native: build-grpc-native-python
-	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+	$(MAKE) -C rust test-integration-grpc-python-native
 
 test-integration-c-native: build-grpc-native-c
-	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+	$(MAKE) -C rust test-integration-grpc-c-native
 
 # ── Performance integration tests ────────────────────────────────────────
 #
 # Separated from the functional suites because they assert latency and
-# throughput budgets: run concurrently with ~138 functional tests they contend
-# for CPU, memory and Docker, and their p99 budgets fail for reasons unrelated
-# to the code under test. Both targets expect an otherwise-idle machine.
+# throughput budgets; both targets expect an otherwise-idle machine.
 
-test-integration-perf-rust: build-rust-integration-tests
-	cargo test --features integration-tests --test performance -- --nocapture
+test-integration-perf-rust:
+	$(MAKE) -C rust test-integration-perf
 
 test-integration-perf-python: build-python
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-performance)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-performance)
 
 # Rust and Python performance suites, one after the other. Recipe lines rather
 # than prerequisites so the order holds under `make -j`, and so the two
@@ -386,62 +200,37 @@ test-integration-perf:
 	$(MAKE) test-integration-perf-rust
 	$(MAKE) test-integration-perf-python
 
-# Env-driven producer performance benchmark. Configure via environment
-# variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
-# COMPRESSION_TYPE, P99_LIMIT_MS, ...); writes metrics.jsonl for plot_metrics.py.
-# Keep in sync with the other producer performance tests in the project.
-producer-perf-test: build-rust
-	cargo xtask producer-perf-test
+# Env-driven producer and consumer benchmarks, one per language, sharing one
+# env-var contract (see each language's Makefile). Keep them in sync.
+producer-perf-test:
+	$(MAKE) -C rust producer-perf-test
 
-# C producer performance benchmark (opt-in; needs a reachable broker). Same
-# env-var contract as `producer-perf-test`; select the backend with
-# CLIENT_VERSION (3 = Rust client C bindings, default; 2 = librdkafka baseline).
-# Built by `build-c` but intentionally not run under `make test-c`.
 producer-perf-test-c: build-c
-	./bindings/c/build/producer_perf_test
+	$(MAKE) -C c $(ROOTS) producer-perf-test
 
-# Env-driven Python consumer end-to-end latency benchmark (standalone). Mirrors
-# consumer-perf/compare/benchmark_e2e_latency.c. Needs a reachable broker via
-# BOOTSTRAP_SERVERS; set KAFKA_BIN to a Kafka bin dir to self-spawn load
-# (kafka-producer-perf-test.sh), otherwise runs consume-only. Select the backend
-# with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka baseline). Set
-# ASYNC=True to drive the asyncio-native consumer of the selected backend
-# (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer) instead of the sync one.
 consumer-perf-test-python: build-python
-	@(. venv/bin/activate && \
-	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/consumer_performance_test.py)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) consumer-perf-test)
 
-# Env-driven Python producer performance benchmark (standalone). Same env-var
-# contract as `producer-perf-test`.
 producer-perf-test-python: build-python
-	@(. venv/bin/activate && \
-	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) producer-perf-test)
 
-# Delegates to bindings/c's own `test` (ctest + the C-backend multilanguage arm)
-# instead of reimplementing the ctest invocation here, mirroring how
-# `test-python` delegates to bindings/python. Passes the same
-# RUST_PROJECT_ROOT / CFLAGS_EXTRA as `build-c` so the delegated cmake configure
-# matches and does not reconfigure the build dir with different flags.
+# c/'s `test` runs ctest and then the C-backend multilanguage arm.
 test-c: build-c
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
+	$(MAKE) -C c $(ROOTS) test
 
 # macOS variant of test-c: C unit tests (ctest) only. On macOS the gRPC
 # multilanguage arm runs natively instead (see verify-c-macos-docker).
 test-c-macos-docker: build-c
-	cd bindings/c/build && ctest --output-on-failure
+	$(MAKE) -C c $(ROOTS) test-unit
 
 test-python: build-python
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test)
 
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
 test-python-macos-docker: build-python
-	@(. venv/bin/activate && \
-	cd $(RUST_PROJECT_ROOT)/bindings/python && \
-	(pip install .[dev] || pip install --no-dependencies .[dev]) && \
-	python -m pytest test/unit -v)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
 
 verify: build format-check check-generated lint test check-bindings
 
@@ -456,9 +245,6 @@ verify-c-macos-docker: test-c-macos-docker
 verify-python: test-python check-bindings
 	$(MAKE) test-integration-perf-python
 
-# macOS perf p99 budget (ms), used by verify-rust-macos-docker.
-MACOS_P99_LIMIT_MS ?= 150
-
 # macOS verify-python: Python unit tests, then the gRPC multilanguage arm with
 # the gRPC server as a native host process, as verify-c-macos-docker does.
 verify-python-macos-docker: test-python-macos-docker
@@ -467,9 +253,9 @@ verify-python-macos-docker: test-python-macos-docker
 verify-rust: build-rust-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
-# macOS verify-rust; perf tail uses MACOS_P99_LIMIT_MS.
+# macOS verify-rust; the perf tail uses rust/Makefile's MACOS_P99_LIMIT_MS.
 verify-rust-macos-docker: build-rust-all-features format-check check-generated lint test-rust-all-features
-	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-rust
+	$(MAKE) -C rust test-integration-perf-macos
 
 verify-sandbox: build-rust build-c format-check check-generated lint test-integration test-c
 
@@ -477,56 +263,34 @@ init-hooks:
 	@git config core.hooksPath .githooks
 	@chmod +x .githooks/pre-commit
 
-# Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
-# component for the toolchain pinned in rust-toolchain.toml, and, if the
-# `claude` CLI is on PATH, the matching Claude Code LSP plugin. Not a
-# prerequisite of `init`/`build`/`verify` -- not every contributor's editor or
-# workflow needs rust-analyzer, so this is run by hand.
+# Opt-in editor/AI-assistant tooling (see rust/Makefile); run by hand.
 install-rust-analyzer:
-	rustup component add rust-analyzer
-	@if command -v claude >/dev/null 2>&1; then \
-		claude plugin install rust-analyzer-lsp@claude-plugins-official; \
-	else \
-		echo "claude CLI not found on PATH, skipping Claude Code rust-analyzer-lsp plugin install"; \
-	fi
+	$(MAKE) -C rust install-rust-analyzer
 
 format-check:
-	cargo xtask format-check
+	$(MAKE) -C rust format-check
 
 # Checks the generated protocol code's formatting and that the checked-in
 # error-code tables are current; it reads the build's output, so it follows
 # a build in every verify target.
 check-generated:
-	cargo xtask check-generated
+	$(MAKE) -C rust check-generated
 
 lint:
-	cargo xtask lint
+	$(MAKE) -C rust lint
 
-# Build the rustdoc of every workspace crate with warnings denied, so a broken
-# or private intra-doc link fails CI instead of surfacing only when someone
-# runs `cargo doc`. The doctests themselves run as part of `cargo test`.
 doc-check:
-	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+	$(MAKE) -C rust doc-check
 
-# Static arity check of the hand-written CPython extension's variadic calls.
-# A Py_BuildValue / PyArg_Parse* format one unit short of its argument list
-# compiles silently and reads a garbage pointer at run time; for every admin
-# RPC that Java's MockAdminClient leaves unsupported, the affected drain's
-# success path is unreachable from the test suite, so this defect class must
-# be caught statically. Needs no build artifacts, so it is cheap to run.
-#
-# The scanner's own unit tests run first: `cargo test` at the workspace root
-# only tests the root package, so nothing else exercises them, and a gate is
-# only worth as much as the parser behind it.
+package-check:
+	$(MAKE) -C rust package-check
+
+# Static checks of the Python binding (see python/Makefile's `check-static`).
+# Needs no build artifacts, so it is cheap to run.
 check-bindings:
-	# Kept even though `test-rust` is now `--workspace`, so that
-	# `make check-bindings` on its own still exercises the scanner's own tests
-	# before trusting its verdict.
-	cargo test -p xtask
-	cargo xtask check-bindings
+	@($(VENV) && $(MAKE) -C python $(ROOTS) check-static)
 
 clean:
-	cargo clean
-	rm -rf bindings/c/build
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python clean)
+	$(MAKE) -C rust clean
+	$(MAKE) -C c $(ROOTS) clean
+	@($(VENV) && $(MAKE) -C python $(ROOTS) clean)
