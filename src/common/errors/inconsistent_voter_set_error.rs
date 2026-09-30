@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentVoterSetException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Indicates that the either the sender or recipient of a voter-only request
     /// is not one of the expected voters.
     ///

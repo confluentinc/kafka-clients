@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.OffsetNotAvailableException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The leader high watermark has not caught up from a recent leader election
     /// so the offsets cannot be guaranteed to be monotonically increasing.
     ///

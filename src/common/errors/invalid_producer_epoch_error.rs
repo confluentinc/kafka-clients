@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidProducerEpochException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Producer attempted to produce with an old epoch.
     ///
     /// Corresponds to Java's `InvalidProducerEpochException`, error code `Errors::InvalidProducerEpoch`.

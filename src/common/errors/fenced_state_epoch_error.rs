@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedStateEpochException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The share coordinator rejected the request because the share-group state
     /// epoch did not match.
     ///

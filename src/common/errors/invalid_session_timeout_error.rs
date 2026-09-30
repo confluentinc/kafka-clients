@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidSessionTimeoutException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The session timeout is not within the range allowed by the broker (as
     /// configured by group.min.session.timeout.ms and
     /// group.max.session.timeout.ms).

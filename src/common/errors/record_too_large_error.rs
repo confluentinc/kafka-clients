@@ -30,7 +30,7 @@ use crate::common::{Error, TopicPartition};
 /// Java `extends` chain:
 ///    `RecordTooLargeException` -> `ApiException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it
+/// Hand-written rather than declared with `kafka_error_type!` because it
 /// carries Java's `recordTooLargePartitions` field and accessor.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException")]

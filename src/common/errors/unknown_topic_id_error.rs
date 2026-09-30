@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownTopicIdException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// This server does not host this topic ID.
     ///
     /// Corresponds to Java's `UnknownTopicIdException`, error code `Errors::UnknownTopicId`.

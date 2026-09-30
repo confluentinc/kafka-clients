@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.PositionOutOfRangeException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Requested position is not greater than or equal to zero, and less than the
     /// size of the snapshot.
     ///

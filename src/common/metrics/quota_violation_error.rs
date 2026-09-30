@@ -26,7 +26,7 @@ use crate::common::{Error, MetricName};
 /// Java `extends` chain:
 ///    `QuotaViolationException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it adds
+/// Hand-written rather than declared with `kafka_error_type!` because it adds
 /// subclass state (the metric, the recorded value and the bound) and overrides
 /// `toString()` instead of taking the generated
 /// `"<TypeName>: <message>"` form.

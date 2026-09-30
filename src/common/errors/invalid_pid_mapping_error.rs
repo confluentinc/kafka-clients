@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidPidMappingException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The producer attempted to use a producer id which is not currently
     /// assigned to its transactional id.
     ///

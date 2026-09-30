@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidCommitOffsetSizeException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The committing offset data size is not valid.
     ///
     /// Corresponds to Java's `InvalidCommitOffsetSizeException`, error code `Errors::InvalidCommitOffsetSize`.

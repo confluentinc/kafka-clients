@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidConfigurationException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Configuration is invalid.
     ///
     /// Corresponds to Java's `InvalidConfigurationException`, error code `Errors::InvalidConfig`.

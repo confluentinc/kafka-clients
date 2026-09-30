@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionAbortedException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The transaction was aborted, so the record was not written.
     ///
     /// Corresponds to Java's `TransactionAbortedException`. It has no entry in `Errors`, so it

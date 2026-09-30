@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidGroupIdException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The group id is invalid.
     ///
     /// Corresponds to Java's `InvalidGroupIdException`, error code `Errors::InvalidGroupId`.

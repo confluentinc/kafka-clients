@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.CorruptRecordException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// This message has failed its CRC checksum, exceeds the valid size, has a
     /// null key for a compacted topic, or is otherwise corrupt.
     ///

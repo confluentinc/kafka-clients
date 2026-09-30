@@ -22,7 +22,7 @@ mod cluster_resource_listener;
 pub(crate) mod compress;
 pub mod config;
 mod election_type;
-// `pub(crate)` rather than private: `kafka_error_class!` and
+// `pub(crate)` rather than private: `kafka_error_type!` and
 // `message_only_error!` expand `$crate::common::error::ErrorSource` and eight
 // similar absolute paths at every one of their ~150 call sites, so the module
 // has to be nameable crate-wide. The types it holds are still reached through

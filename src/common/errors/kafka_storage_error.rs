@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.KafkaStorageException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Disk error when trying to access log file on the disk.
     ///
     /// Corresponds to Java's `KafkaStorageException`, error code `Errors::KafkaStorageError`.

@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.StaleBrokerEpochException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Broker epoch has changed.
     ///
     /// Corresponds to Java's `StaleBrokerEpochException`, error code `Errors::StaleBrokerEpoch`.

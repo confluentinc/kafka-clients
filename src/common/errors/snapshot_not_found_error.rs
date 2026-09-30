@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.SnapshotNotFoundException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Requested snapshot was not found.
     ///
     /// Corresponds to Java's `SnapshotNotFoundException`, error code `Errors::SnapshotNotFound`.

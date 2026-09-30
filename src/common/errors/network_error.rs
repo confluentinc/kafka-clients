@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.NetworkException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The server disconnected before a response was received.
     ///
     /// Corresponds to Java's `NetworkException`, error code `Errors::NetworkError`.

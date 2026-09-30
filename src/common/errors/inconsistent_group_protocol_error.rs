@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentGroupProtocolException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The group member's supported protocols are incompatible with those of
     /// existing members or first group member tried to join with empty protocol
     /// type or empty protocol list.

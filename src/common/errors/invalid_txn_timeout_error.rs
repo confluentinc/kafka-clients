@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidTxnTimeoutException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The transaction timeout is larger than the maximum value allowed by the
     /// broker (as configured by transaction.max.timeout.ms).
     ///

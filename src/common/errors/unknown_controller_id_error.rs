@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownControllerIdException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// This controller ID is not known.
     ///
     /// Corresponds to Java's `UnknownControllerIdException`, error code `Errors::UnknownControllerId`.

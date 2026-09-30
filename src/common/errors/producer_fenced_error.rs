@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.ProducerFencedException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// There is a newer producer with the same transactionalId which fences the
     /// current one.
     ///

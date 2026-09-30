@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotLeaderOrFollowerException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// For requests intended only for the leader, this error indicates that the
     /// broker is not the current leader. For requests intended for any replica,
     /// this error indicates that the broker is not a replica of the topic

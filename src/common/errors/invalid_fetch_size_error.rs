@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidFetchSizeException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The requested fetch size is invalid.
     ///
     /// Corresponds to Java's `InvalidFetchSizeException`, error code `Errors::InvalidFetchSize`.

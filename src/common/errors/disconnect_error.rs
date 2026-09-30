@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.DisconnectException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The connection to the broker was lost before a response arrived.
     ///
     /// Raised client-side, so it carries no protocol code.

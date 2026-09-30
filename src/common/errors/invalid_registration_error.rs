@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidRegistrationException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The controller has considered the broker registration to be invalid.
     ///
     /// Corresponds to Java's `InvalidRegistrationException`, error code `Errors::InvalidRegistration`.

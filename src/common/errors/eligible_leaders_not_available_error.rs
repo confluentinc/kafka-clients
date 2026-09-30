@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.EligibleLeadersNotAvailableException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Eligible topic partition leaders are not available.
     ///
     /// Corresponds to Java's `EligibleLeadersNotAvailableException`, error code `Errors::EligibleLeadersNotAvailable`.

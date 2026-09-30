@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.TopicExistsException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Topic with this name already exists.
     ///
     /// Corresponds to Java's `TopicExistsException`, error code `Errors::TopicAlreadyExists`.

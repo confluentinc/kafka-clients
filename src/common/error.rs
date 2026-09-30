@@ -25,7 +25,7 @@
 //!  - [`ErrorHierarchy`] recovers each intermediate Java class as a predicate;
 //!    [`ErrorCode`], [`ErrorName`], [`ErrorMessage`] and [`ErrorSource`] are the
 //!    per-payload answers [`Error`] delegates to.
-//!  - [`kafka_error_class`] and [`message_only_error`] declare the two shapes of
+//!  - [`kafka_error_type`] and [`message_only_error`] declare the two shapes of
 //!    error class that carry nothing beyond a message, one per Java class.
 //!
 //! Java's `KafkaException` base class is a *different* type: the `KafkaError`
@@ -363,7 +363,7 @@ pub(crate) trait ErrorName {
 /// => extends: [is_kafka_error, is_api_error, is_retriable_error,
 ///              is_refresh_retriable_error, is_invalid_metadata_error]
 /// ```
-macro_rules! kafka_error_class {
+macro_rules! kafka_error_type {
     // No `code:` — the class has no entry in `Errors.java`, and walking its
     // superclasses (Java's `Errors.forException`) finds none either, so
     // `ErrorCode` takes its default of `Errors::UnknownServerError`.
@@ -372,7 +372,7 @@ macro_rules! kafka_error_class {
         $name:ident,
         extends: [$($predicate:ident),* $(,)?] $(,)?
     ) => {
-        kafka_error_class! {
+        kafka_error_type! {
             $(#[$meta])*
             $name,
             code: $crate::common::protocol::Errors::UnknownServerError,
@@ -487,7 +487,7 @@ macro_rules! kafka_error_class {
     };
 }
 
-pub(crate) use kafka_error_class;
+pub(crate) use kafka_error_type;
 
 /// The message an error carries, translating Java's `Throwable.getMessage()`.
 ///
@@ -642,7 +642,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 /// preserving the strings the previous hand-written `Display` produced.
 ///
 /// Every path in the expansion is `$crate`-qualified, as in
-/// [`kafka_error_class`], so an invoking file needs nothing in scope but the
+/// [`kafka_error_type`], so an invoking file needs nothing in scope but the
 /// macro itself. The four `Local*` classes each live in their own file per
 /// CLAUDE.md §2 and invoke this from there.
 ///
@@ -662,7 +662,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 ///     outside the repository (CLAUDE.md §1) — hence the macro's name. A
 ///     null-message constructor and a cause-only constructor would be public API
 ///     with no caller and no Kafka contract behind them (DoD #7).
-///   - [`kafka_error_class`] cannot follow suit: it declares 141 classes from one
+///   - [`kafka_error_type`] cannot follow suit: it declares 141 classes from one
 ///     body, and only ~19 of their Java counterparts have a no-arg constructor.
 ///     Were `new` to mean the no-arg form here and the message form there,
 ///     `SomeError::new("msg")` would compile or not depending on which macro
@@ -682,7 +682,7 @@ macro_rules! message_only_error {
             /// mirroring the `(String message)` constructor.
             ///
             /// Keeps the plain name under CLAUDE.md §2, for consistency with
-            /// `kafka_error_class!` — see the note on this macro about the
+            /// `kafka_error_type!` — see the note on this macro about the
             /// constructors these classes deliberately do not model.
             /// (Deliberately not an intra-doc link: this doc comment expands
             /// into each declaring module, where that macro is not in scope.)
@@ -768,7 +768,7 @@ pub(crate) use message_only_error;
 // `extends` chain
 // ---------------------------------------------------------------------------
 
-// The fifteen payloads that are neither `kafka_error_class!` nor
+// The fifteen payloads that are neither `kafka_error_type!` nor
 // `message_only_error!` declarations: each adds subclass state, so it is
 // hand-written in its own file. `ErrorName` is a crate-local trait, so the impls
 // live here rather than in fifteen files — keeping the one place a reader can
@@ -1579,11 +1579,11 @@ impl Error {
             Self::KafkaError(e) => Some(e),
             // The only other payloads that embed one: Java gives these three
             // subclass state on top of the base, so they compose rather than
-            // being declared by `kafka_error_class!`.
+            // being declared by `kafka_error_type!`.
             Self::TopicAuthorization(e) => Some(e.kafka_error()),
             Self::InvalidTopic(e) => Some(e.kafka_error()),
             Self::GroupAuthorization(e) => Some(e.kafka_error()),
-            // Every other variant is a `kafka_error_class!` declaration holding
+            // Every other variant is a `kafka_error_type!` declaration holding
             // only its message; it answers its code through [`ErrorCode`] and
             // its ancestry through [`ErrorHierarchy`], with no base to expose.
             // A catch-all is safe here precisely because there is nothing

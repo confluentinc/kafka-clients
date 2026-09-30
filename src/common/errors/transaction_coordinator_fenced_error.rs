@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Indicates that the transaction coordinator sending a WriteTxnMarker is no
     /// longer the current coordinator for a given producer.
     ///

@@ -29,7 +29,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// Java `extends` chain:
 ///    `InvalidReceiveException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because the
+/// Hand-written rather than declared with `kafka_error_type!` because the
 /// network layer surfaces it across an [`io::Error`] boundary, so it needs the
 /// `From<_> for io::Error` conversion the macro does not provide. It still implements
 /// [`ErrorHierarchy`] / [`ErrorMessage`] / [`ErrorCode`] and has an

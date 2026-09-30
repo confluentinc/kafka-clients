@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.protocol.types.SchemaException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Raised if the protocol schema validation fails while parsing a request or
     /// response.
     ///

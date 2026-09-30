@@ -38,7 +38,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// [`SchemaError`](crate::common::protocol::types::SchemaError) it converts
 /// *some* of its occurrences into.
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it
+/// Hand-written rather than declared with `kafka_error_type!` because it
 /// carries Java's two `int` fields and their accessors — `responseCorrelationId()`
 /// is read by `NetworkClient.parseResponse` to decide whether the response is
 /// unrelated to a SASL request.

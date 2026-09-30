@@ -17,10 +17,10 @@
 //! Note the package: this class sits in `org.apache.kafka.common`, beside
 //! `KafkaException`, not in `common.errors` with the rest of the family.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// This record has failed the validation on broker and hence will be
     /// rejected.
     ///

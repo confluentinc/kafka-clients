@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentTopicIdException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The log's topic ID did not match the topic ID in the request.
     ///
     /// Corresponds to Java's `InconsistentTopicIdException`, error code `Errors::InconsistentTopicId`.

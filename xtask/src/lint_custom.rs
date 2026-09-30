@@ -704,7 +704,7 @@ struct TypeDef {
     attrs: Vec<syn::Attribute>,
 }
 
-/// The type a `kafka_error_class!` / `message_only_error!` invocation defines:
+/// The type a `kafka_error_type!` / `message_only_error!` invocation defines:
 /// the leading `#[..]* Name` of its body.
 fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
     let is_error_macro = m
@@ -712,7 +712,7 @@ fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
         .path
         .segments
         .last()
-        .is_some_and(|s| s.ident == "kafka_error_class" || s.ident == "message_only_error");
+        .is_some_and(|s| s.ident == "kafka_error_type" || s.ident == "message_only_error");
     if !is_error_macro {
         return None;
     }

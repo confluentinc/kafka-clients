@@ -44,7 +44,7 @@ pub enum DeserializationErrorOrigin {
 ///    `RecordDeserializationException` -> `SerializationException` ->
 ///   `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it
+/// Hand-written rather than declared with `kafka_error_type!` because it
 /// carries the eight fields Java exposes — they identify *which* record failed,
 /// and consumer error handlers read them.
 #[derive(Clone, Debug)]

@@ -29,7 +29,7 @@ use crate::common::protocol::Errors;
 ///    `ThrottlingQuotaExceededException` -> `RetriableException` ->
 ///   `ApiException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it adds
+/// Hand-written rather than declared with `kafka_error_type!` because it adds
 /// a field: Java's constructor is
 /// `ThrottlingQuotaExceededException(int throttleTimeMs, String message)`.
 #[derive(Clone, Debug)]

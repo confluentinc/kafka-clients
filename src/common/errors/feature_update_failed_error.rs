@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.FeatureUpdateFailedException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Unable to update finalized features due to an unexpected server error.
     ///
     /// Corresponds to Java's `FeatureUpdateFailedException`, error code `Errors::FeatureUpdateFailed`.

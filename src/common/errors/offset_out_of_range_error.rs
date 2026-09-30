@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.OffsetOutOfRangeException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The requested offset is not within the range of offsets maintained by
     /// the server.
     ///

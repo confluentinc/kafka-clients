@@ -27,7 +27,7 @@ use crate::common::protocol::Errors;
 /// Java `extends` chain:
 ///    `ResourceNotFoundException` -> `ApiException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it
+/// Hand-written rather than declared with `kafka_error_type!` because it
 /// carries Java's `resource` field and `resource()` accessor.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException")]

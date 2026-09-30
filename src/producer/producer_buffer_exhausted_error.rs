@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.clients.producer.BufferExhaustedException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The producer cannot allocate memory for a record because the buffer pool
     /// is full and the max blocking time has elapsed.
     ///

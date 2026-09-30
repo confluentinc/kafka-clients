@@ -16,9 +16,9 @@
 
 use std::fmt::Display;
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// A configuration value is invalid — wrong type, out of range, or otherwise
     /// unacceptable.
     ///
@@ -50,7 +50,7 @@ impl ConfigError {
     // full parameter lists as the suffix.
     //
     // The `(String message)` form is the exception, and deliberately so: it is
-    // generated as `new` by `kafka_error_class!` above, whose single body
+    // generated as `new` by `kafka_error_type!` above, whose single body
     // declares 141 classes. Renaming it here would mean threading a per-class
     // constructor name through the macro so that exactly one of the 141 spells
     // it `with_message` — leaving `SomeError::new("msg")` valid or not depending

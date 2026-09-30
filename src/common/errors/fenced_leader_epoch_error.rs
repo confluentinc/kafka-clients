@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedLeaderEpochException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The leader epoch in the request is older than the epoch on the broker.
     ///
     /// Corresponds to Java's `FencedLeaderEpochException`, error code `Errors::FencedLeaderEpoch`.

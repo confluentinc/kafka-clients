@@ -14,10 +14,10 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentClusterIdException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The clusterId in the request does not match that found on the server.
     ///
     /// Corresponds to Java's `InconsistentClusterIdException`, error code `Errors::InconsistentClusterId`.
