@@ -30,15 +30,25 @@
 //! constructs its config.
 
 use std::collections::HashMap;
+use std::sync::atomic::{self, AtomicI32};
 
 use log::warn;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::requests::JoinGroupRequest;
 use crate::common::security::SecurityProtocol;
 use crate::consumer::AutoOffsetResetStrategy;
 use crate::{ClientDnsLookup, CommonClientConfigs};
+
+/// Process-wide counter for deriving a default `client.id`.
+///
+/// Corresponds to Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`
+/// (`ConsumerConfig.java:393`), which starts at 1. Crate-level (not per-config)
+/// to match Java's static scope, so successive consumers in one process get
+/// distinct ids.
+static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -846,10 +856,43 @@ impl ConsumerConfig {
             }
         }
 
+        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:717`),
+        // i.e. after every key has been parsed.
+        config.maybe_override_client_id()?;
+
         config
             .client_dns_lookup
             .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
+    }
+
+    /// Derives `client.id` when the user did not set one.
+    ///
+    /// Translated from `ConsumerConfig.maybeOverrideClientId`
+    /// (`ConsumerConfig.java:723-735`). The derived form is
+    /// `consumer-<group.id>-<group.instance.id>` for a static member, otherwise
+    /// `consumer-<group.id>-<n>` from a process-wide counter starting at 1 —
+    /// matching Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`. When a
+    /// `group.instance.id` is present it is validated first with
+    /// `JoinGroupRequest.validateGroupInstanceId`, exactly where Java does it.
+    ///
+    /// Java formats a missing `group.id` with `String.format("%s", null)`, which
+    /// yields the literal `null`; that is preserved here (`consumer-null-1`) so
+    /// the wire `client_id` matches a Java consumer with the same configuration.
+    fn maybe_override_client_id(&mut self) -> Result<(), Error> {
+        if !self.client_id.is_empty() {
+            return Ok(());
+        }
+        if let Some(group_instance_id) = &self.group_instance_id {
+            JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
+        }
+        let group_id = self.group_id.as_deref().unwrap_or("null");
+        let group_instance_id_part = match &self.group_instance_id {
+            Some(group_instance_id) => group_instance_id.clone(),
+            None => CONSUMER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed).to_string(),
+        };
+        self.client_id = format!("consumer-{group_id}-{group_instance_id_part}");
+        Ok(())
     }
 }
 
@@ -1305,5 +1348,96 @@ mod tests {
             // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
             assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
         }
+    }
+
+    /// Props with `bootstrap.servers` plus the given extra keys.
+    fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut props = base_props();
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        props
+    }
+
+    /// Parses the `<n>` suffix of a generated `consumer-<group>-<n>` id.
+    fn sequence_suffix<'a>(client_id: &'a str, prefix: &str) -> &'a str {
+        client_id
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("{client_id:?} does not start with {prefix:?}"))
+    }
+
+    /// Without `client.id`, the id is `consumer-<group.id>-<n>` and every
+    /// config draws a fresh `<n>` from the process-wide sequence.
+    #[test]
+    fn test_generated_client_id_uses_group_id_and_sequence() {
+        let props = props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")]);
+        let first = ConsumerConfig::new(&props).unwrap();
+        let second = ConsumerConfig::new(&props).unwrap();
+        let n1: i32 = sequence_suffix(first.client_id(), "consumer-test-group-").parse().unwrap();
+        let n2: i32 = sequence_suffix(second.client_id(), "consumer-test-group-").parse().unwrap();
+        assert!(n1 >= 1, "{}", first.client_id());
+        assert_ne!(first.client_id(), second.client_id());
+        // Other tests may draw from the shared sequence concurrently, so only
+        // the direction is fixed, not the gap.
+        assert!(n2 > n1, "{} then {}", first.client_id(), second.client_id());
+    }
+
+    /// A static member uses its `group.instance.id` instead of the sequence.
+    #[test]
+    fn test_generated_client_id_uses_group_instance_id() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "inst"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "consumer-test-group-inst");
+    }
+
+    /// An explicit `client.id` is never overridden.
+    #[test]
+    fn test_explicit_client_id_preserved() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::CLIENT_ID_CONFIG, "my-consumer"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "my-consumer");
+    }
+
+    /// Java formats a missing `group.id` with `String.format("%s", null)`,
+    /// yielding the literal `null`.
+    #[test]
+    fn test_generated_client_id_without_group_id() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        let n: i32 = sequence_suffix(config.client_id(), "consumer-null-").parse().unwrap();
+        assert!(n >= 1, "{}", config.client_id());
+    }
+
+    /// A `group.instance.id` that breaks the topic-name rules is rejected
+    /// while deriving the client id, with `JoinGroupRequest`'s message.
+    #[test]
+    fn test_generated_client_id_rejects_invalid_group_instance_id() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "bad/id"),
+        ]);
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
+        assert!(err.is_kafka_error(), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
+             alphanumerics, '.', '_' and '-'"
+        );
+    }
+
+    /// With an explicit `client.id`, `ConsumerConfig` does not validate
+    /// `group.instance.id` here; the consumer constructor does (Java
+    /// `GroupRebalanceConfig`, see `AsyncKafkaConsumer::new`).
+    #[test]
+    fn test_explicit_client_id_skips_group_instance_id_validation() {
+        let props = props_with(&[
+            (ConsumerConfig::CLIENT_ID_CONFIG, "my-consumer"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "bad/id"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "my-consumer");
     }
 }
