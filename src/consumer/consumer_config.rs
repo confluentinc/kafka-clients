@@ -622,7 +622,8 @@ impl ConsumerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    config.client_id = value.clone();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
                     config.client_rack = value.clone();
@@ -643,14 +644,17 @@ impl ConsumerConfig {
                     config.group_id = Some(value.clone());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
+                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:729-731`)
+                    // before `NonEmptyString.ensureValid` runs on it (`:1226-1231`).
+                    let value = value.trim();
                     if value.is_empty() {
                         return Err(Error::config_name_value_message(
                             Self::GROUP_INSTANCE_ID_CONFIG,
                             value,
-                            "must be non-empty",
+                            "String must be non-empty",
                         ));
                     }
-                    config.group_instance_id = Some(value.clone());
+                    config.group_instance_id = Some(value.to_string());
                 },
                 Self::GROUP_PROTOCOL_CONFIG => {
                     // Case-insensitive validation against the enum's lower-case names.
@@ -1444,5 +1448,41 @@ mod tests {
             (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "bad/id"),
         ]);
         assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `ConfigDef.parseType` trims `client.id`, so a blank one generates an id
+    /// and a padded one is kept without its padding.
+    #[test]
+    fn test_client_id_is_trimmed() {
+        let blank = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::CLIENT_ID_CONFIG, " "),
+        ]);
+        let config = ConsumerConfig::new(&blank).unwrap();
+        sequence_suffix(config.client_id(), "consumer-test-group-");
+        let padded = props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, " my-consumer ")]);
+        assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `group.instance.id` is trimmed before Java's `NonEmptyString` check, so
+    /// a blank one is a config error for that key, not the instance-id
+    /// validator's `InvalidConfiguration`.
+    #[test]
+    fn test_blank_group_instance_id_is_config_error() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, " "),
+        ]);
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert!(
+            err.message().contains(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("String must be non-empty"), "{}", err.message());
+
+        let padded = props_with(&[(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, " inst ")]);
+        assert_eq!(ConsumerConfig::new(&padded).unwrap().group_instance_id(), Some("inst"));
     }
 }

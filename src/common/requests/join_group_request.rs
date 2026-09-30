@@ -76,24 +76,55 @@ impl JoinGroupRequest {
 mod tests {
     use super::*;
 
-    /// A well-formed instance id passes validation.
+    /// Translated from `JoinGroupRequestTest.shouldAcceptValidGroupInstanceIds`.
+    ///
+    /// Java builds the max-length id with `TestUtils.randomString(249)`, i.e.
+    /// 249 characters drawn from `LETTERS_AND_DIGITS`; cycling through that
+    /// same alphabet gives a deterministic string of the same shape.
     #[test]
-    fn valid_group_instance_id_accepted() {
-        JoinGroupRequest::validate_group_instance_id("instance-1.A_b").unwrap();
+    fn should_accept_valid_group_instance_ids() {
+        const LETTERS_AND_DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let max_length_string: String = (0..249)
+            .map(|i| LETTERS_AND_DIGITS[i % LETTERS_AND_DIGITS.len()] as char)
+            .collect();
+        let valid_group_instance_ids = [
+            "valid",
+            "INSTANCE",
+            "gRoUp",
+            "ar6",
+            "VaL1d",
+            "_0-9_.",
+            "...",
+            max_length_string.as_str(),
+        ];
+
+        for instance_id in valid_group_instance_ids {
+            JoinGroupRequest::validate_group_instance_id(instance_id)
+                .unwrap_or_else(|e| panic!("{instance_id:?} should be valid, got {e:?}"));
+        }
     }
 
-    /// An id violating the topic-name rules is an `InvalidConfigurationError`
-    /// carrying Java's message.
+    /// Translated from `JoinGroupRequestTest.shouldThrowOnInvalidGroupInstanceIds`.
     #[test]
-    fn invalid_group_instance_id_rejected_with_java_message() {
-        let err = JoinGroupRequest::validate_group_instance_id("bad/id").unwrap_err();
-        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
-        assert!(
-            err.to_string().contains("Group instance id is invalid:"),
-            "unexpected message: {err}"
-        );
-        let err = JoinGroupRequest::validate_group_instance_id("").unwrap_err();
-        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
+    fn should_throw_on_invalid_group_instance_ids() {
+        let long_string = "a".repeat(250);
+        let invalid_group_instance_ids = ["", "foo bar", "..", "foo:bar", "foo=bar", ".", long_string.as_str()];
+
+        for instance_id in invalid_group_instance_ids {
+            let err = JoinGroupRequest::validate_group_instance_id(instance_id).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidConfiguration(_)),
+                "InvalidConfigurationError expected as instance id {instance_id:?} is invalid, got {err:?}"
+            );
+        }
+    }
+
+    /// Beyond Java's tests: the message is `Topic.validate`'s
+    /// `"<thing> is invalid: <reason>"` form.
+    #[test]
+    fn invalid_group_instance_id_carries_java_message() {
+        let err = JoinGroupRequest::validate_group_instance_id("..").unwrap_err();
+        assert_eq!(err.message(), "Group instance id is invalid: '..' is not allowed");
     }
 
     /// A short reason is returned unchanged.
