@@ -982,7 +982,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// The ACL bindings to create. Duplicates collapse, because Java keys its result on a
     /// map. Every binding is already valid by construction —
     /// <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY and
-    /// MATCH values the broker would refuse.
+    /// MATCH values the broker would refuse. Those constructors also store an enum value that
+    /// is not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two
+    /// bindings that differ only in such values are duplicates (M15/P13.3 F8).
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1008,7 +1010,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <param name="filters">
     /// The filters to apply. Duplicates collapse, because Java keys its result on a map. A
     /// <see langword="null"/> name, principal or host matches <em>any</em> value, and is
-    /// distinct from <c>""</c>, which filters on the literal empty string.
+    /// distinct from <c>""</c>, which filters on the literal empty string. The filter
+    /// constructors store an enum value that is not a defined member as <c>Unknown</c>, as
+    /// Java's <c>fromCode</c> does, so two filters that differ only in such values are
+    /// duplicates (M15/P13.3 F8).
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1091,12 +1096,11 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <param name="entries">
     /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
     /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
-    /// <c>0.0</c> sets it to zero. ⚠ Unlike the two ACL RPCs above, a <b>repeated entity is
-    /// rejected</b> rather than collapsed, because the ABI refuses it and collapsing would
-    /// drop an alteration the caller wrote — a recorded divergence: Java accepts it
-    /// (<c>KafkaAdminClient.java:4314-4318</c>), so code ported from Java may need to
-    /// de-duplicate at the call site. An alteration whose entity has <b>no</b> entity types
-    /// is sent as given, as Java does, and is answered for that entity alone.
+    /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it
+    /// (<c>KafkaAdminClient.java:4314-4318</c>): every alteration is sent, in order, and the
+    /// entity has one awaitable in the result, as Java's per-entity future map collapses it.
+    /// An alteration whose entity has <b>no</b> entity types is sent as given, as Java does,
+    /// and is answered for that entity alone.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1107,7 +1111,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="entries"/> contains a null element, or the same entity more than once.
+    /// <paramref name="entries"/> contains a null element.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.

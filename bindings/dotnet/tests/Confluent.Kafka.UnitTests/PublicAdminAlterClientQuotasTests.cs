@@ -88,28 +88,56 @@ public sealed class PublicAdminAlterClientQuotasTests
     }
 
     /// <summary>
-    /// Two empty entities are one entity altered twice, so the repeated-entity rejection —
-    /// unchanged by G4-4 — still refuses them before the native call, with the empty entity's
-    /// own <see cref="ClientQuotaEntity.ToString"/> in the message.
+    /// ⚠ <b>M15/P13.3 F7.</b> Two empty entities are one entity altered twice, and a repeated
+    /// entity is <b>sent</b>, not rejected — Java sends every alteration and its per-entity
+    /// future map collapses the repeat (<c>KafkaAdminClient.java:4314-4318</c>), which the
+    /// core has done since PR #201 round 70. So the request reaches the mock, and the one
+    /// entity has one awaitable carrying the mock's own answer. That the rows were sent and the
+    /// client released is <c>AdminAlterClientQuotasRepeatedEntityTests</c>' job.
     /// </summary>
     [Fact]
-    public void TwoEmptyEntities_AreARepeatedEntity()
+    public async Task TwoEmptyEntities_AreOneEntity_SentAndAnsweredOnce()
     {
         using MockAdminClient admin = new MockAdminClient(1);
 
-        ArgumentException duplicate = Assert.Throws<ArgumentException>(
-            () => admin.AlterClientQuotas(
-                new[]
-                {
-                    new ClientQuotaAlteration(EmptyEntity(), s_noOps),
-                    new ClientQuotaAlteration(EmptyEntity(), s_noOps),
-                }));
-        Assert.Equal("entries", duplicate.ParamName);
-        Assert.StartsWith(
-            "The client quota alterations must not alter the entity ClientQuotaEntity(entries={}) "
-            + "more than once.",
-            duplicate.Message,
-            StringComparison.Ordinal);
+        AlterClientQuotasResult result = admin.AlterClientQuotas(
+            new[]
+            {
+                new ClientQuotaAlteration(EmptyEntity(), s_noOps),
+                new ClientQuotaAlteration(EmptyEntity(), s_noOps),
+            });
+
+        Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values[EmptyEntity()], s_deadline));
+        Assert.Equal(NotImplemented, failure.Message);
+        Assert.Equal(35, failure.Code);
+    }
+
+    /// <summary>
+    /// ⚠ <b>M15/P13.3 F7.</b> The same entity altered twice is accepted, as Java accepts it:
+    /// one awaitable for the entity, carrying the mock's own answer — not the
+    /// <see cref="ArgumentException"/> the binding used to throw before the native call.
+    /// </summary>
+    [Fact]
+    public async Task ARepeatedEntity_IsAccepted_AndHasOneAwaitable()
+    {
+        using MockAdminClient admin = new MockAdminClient(1);
+
+        AlterClientQuotasResult result = admin.AlterClientQuotas(
+            new[] { Alteration("dup", 1d), Alteration("dup", 2d) });
+
+        Assert.Equal(Entity("dup"), Assert.Single(result.Values).Key);
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values[Entity("dup")], s_deadline));
+        Assert.Equal(NotImplemented, failure.Message);
+        Assert.Equal(35, failure.Code);
+
+        // All() is Java's allOf over the one per-entity future.
+        KafkaException all = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        Assert.Equal(NotImplemented, all.Message);
     }
 
     /// <summary>
@@ -280,10 +308,10 @@ public sealed class PublicAdminAlterClientQuotasTests
     }
 
     /// <summary>
-    /// Preconditions are rejected before any native call (ffi §B5) — including the one ABI
-    /// rejection C# surfaces itself (PLAN D38): the same entity altered twice. An empty
-    /// entity is no longer among them (M15/P13.2 G4-4) — see
-    /// <see cref="AnEmptyEntity_IsSent_AndAnsweredForItselfAlone"/>.
+    /// Preconditions are rejected before any native call (ffi §B5). Neither an empty entity
+    /// (M15/P13.2 G4-4 — see <see cref="AnEmptyEntity_IsSent_AndAnsweredForItselfAlone"/>) nor
+    /// the same entity altered twice (M15/P13.3 F7 — see
+    /// <see cref="ARepeatedEntity_IsAccepted_AndHasOneAwaitable"/>) is among them any more.
     /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
@@ -301,17 +329,6 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.StartsWith(
             "The client quota alterations must not contain a null element.",
             nullElement.Message,
-            StringComparison.Ordinal);
-
-        // ⚠ Rejected, NOT collapsed: the ABI refuses a repeated entity (h:8300-8302), so
-        // silently dropping one would lose an alteration the caller wrote.
-        ArgumentException duplicate = Assert.Throws<ArgumentException>(
-            () => admin.AlterClientQuotas(new[] { Alteration("dup", 1d), Alteration("dup", 2d) }));
-        Assert.Equal("entries", duplicate.ParamName);
-        Assert.StartsWith(
-            "The client quota alterations must not alter the entity ClientQuotaEntity(entries={user=dup}) "
-            + "more than once.",
-            duplicate.Message,
             StringComparison.Ordinal);
 
         ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(

@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka;
 
 /// <summary>
@@ -32,6 +34,11 @@ namespace Confluent.Kafka;
 /// is deliberately <b>not</b> ported: ACL matching semantics are Kafka behavior and live once,
 /// in the Rust core (<c>bindings/CLAUDE.md §2.6</c>). Recorded deviation,
 /// <c>definition-of-done.md</c> §7.
+/// </para>
+/// <para>
+/// An enum value that is not a defined member is stored as its enum's <c>Unknown</c>, so
+/// <see cref="Operation"/> and <see cref="PermissionType"/> only ever hold a defined member —
+/// as a Java filter does.
 /// </para>
 /// </remarks>
 public sealed class AccessControlEntryFilter
@@ -53,10 +60,28 @@ public sealed class AccessControlEntryFilter
     /// <param name="host">
     /// The host, or <c>null</c> to match any. <c>""</c> filters on the empty host.
     /// </param>
-    /// <param name="operation">The operation, or <see cref="AclOperation.Any"/>.</param>
-    /// <param name="permissionType">
-    /// The permission type, or <see cref="AclPermissionType.Any"/>.
+    /// <param name="operation">
+    /// The operation, or <see cref="AclOperation.Any"/>. ⚠ A value that is not a defined
+    /// <see cref="AclOperation"/> member — reachable only through an unchecked <c>int</c> cast
+    /// — is stored as <see cref="AclOperation.Unknown"/>, exactly as Java's
+    /// <c>AclOperation.fromCode</c> maps a code it has no member for
+    /// (<c>AclOperation.java:151</c>).
     /// </param>
+    /// <param name="permissionType">
+    /// The permission type, or <see cref="AclPermissionType.Any"/>. ⚠ A value that is not a
+    /// defined <see cref="AclPermissionType"/> member is stored as
+    /// <see cref="AclPermissionType.Unknown"/>, as Java's <c>AclPermissionType.fromCode</c>
+    /// maps it (<c>AclPermissionType.java:74</c>).
+    /// </param>
+    /// <remarks>
+    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
+    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
+    /// <c>deleteAcls</c> answer for the <see cref="AclBindingFilter"/> this belongs to by the
+    /// <c>Unknown</c> it became. Storing the raw value would key that filter's awaitable on a
+    /// value the answer never names, and two filters differing only in undefined codes would be
+    /// two keys where the core answers one. Normalizing here serves the request key and the key
+    /// read back alike, because both are built by this constructor.
+    /// </remarks>
     public AccessControlEntryFilter(
         string? principal,
         string? host,
@@ -65,8 +90,10 @@ public sealed class AccessControlEntryFilter
     {
         Principal = principal;
         Host = host;
-        Operation = operation;
-        PermissionType = permissionType;
+
+        // Java's fromCode fallback (F8); Any is a defined member and is kept.
+        Operation = AclEnumCodes.DefinedOrUnknown(operation);
+        PermissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
     }
 
     /// <summary>

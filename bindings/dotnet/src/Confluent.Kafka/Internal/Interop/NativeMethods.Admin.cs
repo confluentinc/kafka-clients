@@ -3592,13 +3592,14 @@ internal static partial class NativeMethods
     /// </para>
     /// <para>
     /// Ordinary bad input reaches the <b>inline</b> callback path here — a NULL entity type
-    /// or op key, an alteration with no entity types, or a repeated entity
-    /// (<c>confluent_kafka.h:9438-9441</c>). The managed side keeps it exceptional rather
-    /// than removing the obligation: it rejects a repeated entity before any pin (PLAN D38),
-    /// the value types cannot carry a NULL entity type or op key, and "no entity types" —
-    /// a <b>NULL</b> <c>entity_types[i]</c>, not a zero count — is never sent, because an
-    /// empty entity crosses as a non-null placeholder row with a count of 0 (M15/P13.2
-    /// G4-4).
+    /// or op key, an alteration with no entity types, or a repeated entity type within one
+    /// entity (the header's own list on this symbol). The managed side keeps it exceptional
+    /// rather than removing the obligation: the value types cannot carry a NULL entity type,
+    /// a NULL op key or a repeated entity type, and "no entity types" — a <b>NULL</b>
+    /// <c>entity_types[i]</c>, not a zero count — is never sent, because an empty entity
+    /// crosses as a non-null placeholder row with a count of 0 (M15/P13.2 G4-4). A repeated
+    /// entity <em>across</em> alterations is not on that list since PR #201 round 70: it is
+    /// sent, as Java sends it, and answered by one callback (M15/P13.3 F7).
     /// The <c>_async</c> form is driven rather than the sync twin, which blocks until every
     /// per-entity future has resolved.
     /// </para>

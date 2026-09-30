@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka;
 
 /// <summary>
@@ -33,6 +35,11 @@ namespace Confluent.Kafka;
 /// live once, in the Rust core (<c>bindings/CLAUDE.md §2.6</c>). Recorded deviation,
 /// <c>definition-of-done.md</c> §7.
 /// </para>
+/// <para>
+/// An enum value that is not a defined member is stored as its enum's <c>Unknown</c>, so
+/// <see cref="ResourceType"/> and <see cref="PatternType"/> only ever hold a defined member —
+/// as a Java filter does.
+/// </para>
 /// </remarks>
 public sealed class ResourcePatternFilter
 {
@@ -49,6 +56,10 @@ public sealed class ResourcePatternFilter
     /// </summary>
     /// <param name="resourceType">
     /// The resource type, or <see cref="ResourceType.Any"/> to ignore the pattern's type.
+    /// ⚠ A value that is not a defined <see cref="Confluent.Kafka.ResourceType"/> member —
+    /// reachable only through an unchecked <c>int</c> cast — is stored as
+    /// <see cref="ResourceType.Unknown"/>, exactly as Java's <c>ResourceType.fromCode</c> maps
+    /// a code it has no member for (<c>ResourceType.java:94</c>).
     /// </param>
     /// <param name="name">
     /// The resource name, or <c>null</c> to match any name. <c>""</c> is a filter on the
@@ -56,12 +67,25 @@ public sealed class ResourcePatternFilter
     /// </param>
     /// <param name="patternType">
     /// The pattern type, or <see cref="PatternType.Any"/> / <see cref="PatternType.Match"/>.
+    /// ⚠ A value that is not a defined <see cref="Confluent.Kafka.PatternType"/> member is
+    /// stored as <see cref="PatternType.Unknown"/>, as Java's <c>PatternType.fromCode</c> maps
+    /// it (<c>PatternType.java:111</c>).
     /// </param>
+    /// <remarks>
+    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
+    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
+    /// <c>deleteAcls</c> answer for the <see cref="AclBindingFilter"/> this belongs to by the
+    /// <c>Unknown</c> it became. Storing the raw value would key that filter's awaitable on a
+    /// value the answer never names, and two filters differing only in undefined codes would be
+    /// two keys where the core answers one. Normalizing here serves the request key and the key
+    /// read back alike, because both are built by this constructor.
+    /// </remarks>
     public ResourcePatternFilter(ResourceType resourceType, string? name, PatternType patternType)
     {
-        ResourceType = resourceType;
+        // Java's fromCode fallback (F8); Any and Match are defined members and are kept.
+        ResourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
         Name = name;
-        PatternType = patternType;
+        PatternType = AclEnumCodes.DefinedOrUnknown(patternType);
     }
 
     /// <summary>The resource type this filter matches — Java's <c>resourceType()</c> (<c>:68</c>).</summary>

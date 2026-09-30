@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka;
 
 /// <summary>
@@ -25,7 +27,9 @@ namespace Confluent.Kafka;
 /// A <b>concrete</b> pattern: <see cref="Name"/> is never null, and the filter-only enum
 /// values (<see cref="ResourceType.Any"/>, <see cref="PatternType.Any"/>,
 /// <see cref="PatternType.Match"/>) are rejected by the constructor, as in Java. Use
-/// <see cref="ResourcePatternFilter"/> where those are wanted.
+/// <see cref="ResourcePatternFilter"/> where those are wanted. An enum value that is not a
+/// defined member is stored as its enum's <c>Unknown</c>, so <see cref="ResourceType"/> and
+/// <see cref="PatternType"/> only ever hold a defined member — as a Java pattern does.
 /// </remarks>
 public sealed class ResourcePattern
 {
@@ -39,11 +43,29 @@ public sealed class ResourcePattern
     /// Creates a resource pattern — Java's
     /// <c>ResourcePattern(ResourceType, String, PatternType)</c> (<c>:43</c>).
     /// </summary>
-    /// <param name="resourceType">The specific resource type; <see cref="ResourceType.Any"/> is rejected.</param>
+    /// <param name="resourceType">
+    /// The specific resource type; <see cref="ResourceType.Any"/> is rejected. ⚠ A value that
+    /// is not a defined <see cref="Confluent.Kafka.ResourceType"/> member — reachable only
+    /// through an unchecked <c>int</c> cast — is stored as <see cref="ResourceType.Unknown"/>,
+    /// exactly as Java's <c>ResourceType.fromCode</c> maps a code it has no member for
+    /// (<c>ResourceType.java:94</c>).
+    /// </param>
     /// <param name="name">The resource name, which may be <see cref="WildcardResource"/>.</param>
     /// <param name="patternType">
     /// The specific pattern type; <see cref="PatternType.Any"/> and <see cref="PatternType.Match"/> are rejected.
+    /// ⚠ A value that is not a defined <see cref="Confluent.Kafka.PatternType"/> member is stored as
+    /// <see cref="PatternType.Unknown"/>, as Java's <c>PatternType.fromCode</c> maps it
+    /// (<c>PatternType.java:111</c>).
     /// </param>
+    /// <remarks>
+    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
+    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
+    /// <c>createAcls</c> answer for this pattern's binding by the <c>Unknown</c> it became.
+    /// Storing the raw value would key the binding's awaitable on a value the answer never
+    /// names, and two bindings differing only in undefined codes would be two keys where the
+    /// core answers one. Normalizing here serves the request key and the key read back alike,
+    /// because both are built by this constructor.
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null (Java's <c>:45</c>).</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="resourceType"/> is <see cref="ResourceType.Any"/> (Java's <c>:48-50</c>), or
@@ -54,6 +76,11 @@ public sealed class ResourcePattern
     {
         // Java also requireNonNull's the two enums; a C# enum has no null to reject.
         Name = name ?? throw new ArgumentNullException(nameof(name));
+
+        // Java's fromCode fallback (F8). Any and Match are defined members, so folding an
+        // undefined value first cannot change which of the checks below fires.
+        resourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
+        patternType = AclEnumCodes.DefinedOrUnknown(patternType);
 
         if (resourceType == ResourceType.Any)
         {

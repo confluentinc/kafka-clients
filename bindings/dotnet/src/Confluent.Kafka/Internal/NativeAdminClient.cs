@@ -3514,6 +3514,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// binding's do too, so an <see cref="AclBinding"/> that exists is already valid
     /// (PLAN D38). A second check would only shadow the one that runs.
     /// </para>
+    /// <para>
+    /// ⚠ <b>No code normalization happens here either</b> (M15/P13.3 F8). The ABI keys each
+    /// callback by the binding as Java's <c>fromCode</c> reads it, so an undefined enum code
+    /// comes back as <c>Unknown</c>; the same two constructors already fold such a code to
+    /// <c>Unknown</c>, so the keys below compare as the core's do.
+    /// </para>
     /// </remarks>
     internal CreateAclsResult CreateAcls(
         IEnumerable<AclBinding> acls, CreateAclsOptions? options, NativeCreateAclsSubmit submit)
@@ -3552,9 +3558,9 @@ internal sealed class NativeAdminClient : IDisposable
             rows = AclRowMarshal.Pin(keys);
 
             // Shape 4b, owned key: "once per distinct binding", and `keys` is already
-            // DistinctBindings (value equality), so the row count is the number. A binding
-            // the core rejects locally still arrives as its own callback carrying an
-            // INVALID_REQUEST error.
+            // DistinctBindings (value equality over codes the constructors normalized, as the
+            // core does — F8), so the row count is the number. A binding the core rejects
+            // locally still arrives as its own callback carrying an INVALID_REQUEST error.
             operation.SetPendingCallbacks(rows.Count);
 
             submit(
@@ -3606,6 +3612,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// the ABI rejects no enum combination and reads a NULL name as "match any"
     /// (<c>confluent_kafka.h:8121-8125</c>), exactly as Java's filter constructors do.
     /// </para>
+    /// <para>
+    /// ⚠ The ABI keys each callback by the filter as Java's <c>fromCode</c> reads it, so an
+    /// undefined enum code comes back as <c>Unknown</c>; the filter constructors already fold
+    /// such a code to <c>Unknown</c>, so the keys below compare as the core's do
+    /// (M15/P13.3 F8).
+    /// </para>
     /// </remarks>
     internal DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters,
@@ -3647,8 +3659,9 @@ internal sealed class NativeAdminClient : IDisposable
             rows = AclRowMarshal.Pin(keys);
 
             // Shape 4a: one callback per DISTINCT filter — delete_acls_async's own doc says so
-            // since PR #201 round 70 — and `keys` is already DistinctFilters (value equality),
-            // so the row count is the number. Armed before the
+            // since PR #201 round 70 — and `keys` is already DistinctFilters (value equality
+            // over codes the constructors normalized, as the core does — F8), so the row
+            // count is the number. Armed before the
             // submit (every key can fire inline on this thread); the submit's own token is
             // released after, which is what makes an EMPTY filter list release rather than
             // leak.
@@ -3868,19 +3881,25 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>Values[entity]</c> lookup a caller makes are keyed by it (PLAN D39).
     /// </para>
     /// <para>
-    /// ⚠ One ABI rejection is surfaced here, before any pin (PLAN D38), because the ABI
-    /// reports it by firing the callback synchronously on this thread for every key
-    /// (<c>confluent_kafka.h:9438-9441</c>): a <b>repeated entity</b> across alterations —
-    /// which is rejected rather than collapsed, since the ABI refuses it and silently
-    /// dropping one would lose an alteration the caller wrote (<c>h:9395-9397</c>).
-    /// ⚠ <b>Java accepts a repeated entity</b> (<c>KafkaAdminClient.java:4314-4318</c> puts
-    /// the futures unconditionally, collapsing the map, and still sends every alteration),
-    /// so this is a recorded divergence (<c>definition-of-done.md</c> §7), not parity — the
-    /// one P6 RPC whose Java-faithful <c>Collection</c> shape is not accepted verbatim. Two
-    /// empty entities are a repeated entity, so they are rejected by the same check. The
-    /// rest are unreachable: a repeated entity type <em>within</em> one alteration and a
-    /// null entity type cannot survive <see cref="ClientQuotaEntity"/>'s dictionary, and a
-    /// null op key cannot survive <see cref="ClientQuotaAlteration.Op"/>'s constructor.
+    /// ⚠ <b>A repeated entity is sent, not rejected</b> (M15/P13.3 F7, D8). Java sends every
+    /// alteration and puts one future per entity unconditionally, so its map collapses a
+    /// repeated one (<c>KafkaAdminClient.java:4314-4318</c>); since PR #201 round 70 the ABI
+    /// does the same — both alterations reach the broker, in order, and the entity is one key
+    /// answered by one callback (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>
+    /// and <c>_async</c>). So <b>every</b> alteration is marshalled while the bridge's key set
+    /// is de-duplicated by <see cref="ClientQuotaEntity"/>'s value equality — the
+    /// <see cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions?)"/>
+    /// shape. That equality is the core's: the entity's dictionary is an ordinal copy, as the
+    /// core's map of strings is. Two empty entities are one entity altered twice, so they
+    /// take the same path. (Until round 70 .NET rejected a repeat with an
+    /// <see cref="ArgumentException"/>, because the ABI then refused one; that divergence
+    /// from Java is gone.)
+    /// </para>
+    /// <para>
+    /// The remaining ABI rejections are unreachable from here: a repeated entity type
+    /// <em>within</em> one alteration and a null entity type cannot survive
+    /// <see cref="ClientQuotaEntity"/>'s dictionary, and a null op key cannot survive
+    /// <see cref="ClientQuotaAlteration.Op"/>'s constructor.
     /// </para>
     /// <para>
     /// ⚠ <b>An empty entity is sent, not rejected</b> (M15/P13.2 G4-4). Java has no client
@@ -3926,18 +3945,13 @@ internal sealed class NativeAdminClient : IDisposable
                     "The client quota alterations must not contain a null element.", nameof(entries));
             }
 
-            if (!seen.Add(alteration.Entity))
-            {
-                throw new ArgumentException(
-                    string.Format(
-                        CultureInfo.InvariantCulture,
-                        "The client quota alterations must not alter the entity {0} more than once.",
-                        alteration.Entity),
-                    nameof(entries));
-            }
-
+            // Every alteration is sent, a repeated entity's included (F7); only the key set
+            // is distinct, first occurrence first, as the core keys its callbacks.
             alterations.Add(alteration);
-            keys.Add(alteration.Entity);
+            if (seen.Add(alteration.Entity))
+            {
+                keys.Add(alteration.Entity);
+            }
         }
 
         VoidKeyedAdminOperation<ClientQuotaEntity> operation =
@@ -3959,9 +3973,10 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = ClientQuotaMarshal.PinAlterations(alterations);
 
-            // Shape 4b, owned key: one callback per distinct entity, and a repeated entity
-            // is rejected above, so the row count is the number.
-            operation.SetPendingCallbacks(rows.Count);
+            // ⚠ Shape 4b, owned key: the ABI fires once per DISTINCT ENTITY, not once per
+            // row — a repeated entity is sent twice and answered once — which is why `keys` is
+            // the distinct-entity list while `rows` may be longer (F7).
+            operation.SetPendingCallbacks(keys.Count);
 
             submit(
                 _handle.DangerousGetHandle(),
@@ -4108,9 +4123,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// (a <c>SCRAM_SHA_256</c> deletion plus a <c>SCRAM_SHA_512</c> upsertion, say) both reach
     /// the broker, and Java keys one future per user so they collapse to one outcome row
     /// (<c>confluent_kafka.h:8875-8886</c>). Hence <b>every</b> alteration is marshalled while
-    /// the bridge's key set is de-duplicated. This is the deliberate inverse of
-    /// <see cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions?)"/>,
-    /// whose compound key a caller could not re-derive.
+    /// the bridge's key set is de-duplicated.
+    /// <see cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions?)"/>
+    /// has had the same shape since PR #201 round 70 (M15/P13.3 F7); it used to reject a
+    /// repeated entity instead.
     /// </remarks>
     internal AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
@@ -6717,11 +6733,18 @@ internal sealed class NativeAdminClient : IDisposable
     /// and rejects a null element before it can reach the ABI.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The de-duplication is by value because Java's result is a
     /// <c>Map&lt;AclBinding, …&gt;</c>, so two equal bindings are one entry — which is also
     /// what stops the per-key bridge seeing a duplicate key. Takes an
     /// <see cref="IEnumerable{T}"/> rather than a collection because Java's signature is
     /// <c>Collection&lt;AclBinding&gt;</c> and the public overload mirrors it.
+    /// </para>
+    /// <para>
+    /// ⚠ Value equality here is the core's own only because the ACL constructors store an
+    /// undefined enum code as <c>Unknown</c>, as the ABI reads it (M15/P13.3 F8). Two bindings
+    /// differing only in undefined codes are therefore one entry here, and one callback there.
+    /// </para>
     /// </remarks>
     /// <param name="acls">The requested bindings, in request order.</param>
     /// <param name="parameterName">The caller's parameter to blame.</param>
@@ -6749,6 +6772,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <summary>
     /// The filter twin of <see cref="DistinctBindings"/>, for the same reason: Java's result
     /// is a <c>Map&lt;AclBindingFilter, …&gt;</c>, so two value-equal filters are one entry.
+    /// The filter constructors normalize an undefined enum code the same way (M15/P13.3 F8).
     /// </summary>
     /// <param name="filters">The requested filters, in request order.</param>
     /// <param name="parameterName">The caller's parameter to blame.</param>

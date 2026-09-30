@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka;
 
 /// <summary>
@@ -25,6 +27,9 @@ namespace Confluent.Kafka;
 /// A <b>concrete</b> entry: <see cref="Principal"/> and <see cref="Host"/> are never null, and
 /// <see cref="AclOperation.Any"/> / <see cref="AclPermissionType.Any"/> are rejected by the
 /// constructor, as in Java. Use <see cref="AccessControlEntryFilter"/> where those are wanted.
+/// An enum value that is not a defined member is stored as its enum's <c>Unknown</c>, so
+/// <see cref="Operation"/> and <see cref="PermissionType"/> only ever hold a defined member —
+/// as a Java entry does.
 /// </remarks>
 public sealed class AccessControlEntry
 {
@@ -34,10 +39,28 @@ public sealed class AccessControlEntry
     /// </summary>
     /// <param name="principal">The principal, e.g. <c>User:alice</c>.</param>
     /// <param name="host">The host, or <c>*</c> for all hosts.</param>
-    /// <param name="operation">The operation; <see cref="AclOperation.Any"/> is rejected.</param>
-    /// <param name="permissionType">
-    /// The permission type; <see cref="AclPermissionType.Any"/> is rejected.
+    /// <param name="operation">
+    /// The operation; <see cref="AclOperation.Any"/> is rejected. ⚠ A value that is not a
+    /// defined <see cref="AclOperation"/> member — reachable only through an unchecked
+    /// <c>int</c> cast — is stored as <see cref="AclOperation.Unknown"/>, exactly as Java's
+    /// <c>AclOperation.fromCode</c> maps a code it has no member for
+    /// (<c>AclOperation.java:151</c>).
     /// </param>
+    /// <param name="permissionType">
+    /// The permission type; <see cref="AclPermissionType.Any"/> is rejected. ⚠ A value that is
+    /// not a defined <see cref="AclPermissionType"/> member is stored as
+    /// <see cref="AclPermissionType.Unknown"/>, as Java's <c>AclPermissionType.fromCode</c>
+    /// maps it (<c>AclPermissionType.java:74</c>).
+    /// </param>
+    /// <remarks>
+    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
+    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
+    /// <c>createAcls</c> answer for this entry's binding by the <c>Unknown</c> it became.
+    /// Storing the raw value would key the binding's awaitable on a value the answer never
+    /// names, and two bindings differing only in undefined codes would be two keys where the
+    /// core answers one. Normalizing here serves the request key and the key read back alike,
+    /// because both are built by this constructor.
+    /// </remarks>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="principal"/> or <paramref name="host"/> is null (Java's <c>:37-38</c>).
     /// </exception>
@@ -50,6 +73,11 @@ public sealed class AccessControlEntry
         // Java's null checks come first, then the two ANY rejections, in this order.
         Principal = principal ?? throw new ArgumentNullException(nameof(principal));
         Host = host ?? throw new ArgumentNullException(nameof(host));
+
+        // Java's fromCode fallback (F8). Any is a defined member, so folding an undefined value
+        // first cannot change which of the two checks below fires.
+        operation = AclEnumCodes.DefinedOrUnknown(operation);
+        permissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
 
         if (operation == AclOperation.Any)
         {
