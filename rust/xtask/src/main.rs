@@ -660,9 +660,10 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --security-protocol P  broker listener the producer/consumer workloads
 ///                          connect through: plaintext (default) | ssl |
 ///                          sasl_plaintext | sasl_ssl. SSL trusts the cluster CA;
-///                          SASL is PLAIN as admin/admin-secret. Rust workloads
-///                          only (the gRPC bridge reaches PLAINTEXT only); the
-///                          harness's own admin stays on PLAINTEXT
+///                          SASL is PLAIN as admin/admin-secret. Applies to
+///                          every backend (sasl_plaintext is unavailable to a
+///                          containerised gRPC server); the harness's own admin
+///                          stays on PLAINTEXT
 ///   --rps N                producer target records/sec, 0 = max (1000)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)

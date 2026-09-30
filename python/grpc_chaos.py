@@ -1,0 +1,722 @@
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""ChaosWorkloadService for the Python gRPC servers.
+
+Runs a chaos-harness workload (tests/chaos/) inside this process, against the
+Python binding, and streams its events back to the harness -- see
+multilanguage-test-server/proto/chaos_service.proto for the contract.
+
+The loops here are the Python counterparts of the Rust harness's in-process
+``ProducerWorkload`` / ``ConsumerWorkload`` / ``ChaosRebalanceListener``
+(tests/chaos/workload.rs) and follow them step for step, so a run with a Python
+workload exercises the same client behaviour as a run with a Rust one:
+
+* the producer sends on an absolute schedule without awaiting each record, so
+  the binding batches and pipelines as an application's would, and reports each
+  record's outcome from its delivery callback;
+* the consumer subscribes with a rebalance listener that reports every callback
+  and, in ``on_partitions_revoked``, commits through a ``ConsumerHandle`` and
+  reads the commit back, as a real application flushing offsets does;
+* the drain is the same: the producer closes (every record settles first), the
+  consumer commits, reads back, reports it is closing, closes.
+
+``ChaosWorkloadService`` serves the synchronous server (grpc_server.py): each
+workload runs on its own thread with the synchronous client.
+``AsyncChaosWorkloadService`` serves the asyncio server (grpc_server_async.py):
+each workload is a task on the server's event loop using the asyncio client, so
+the async flavour of the binding is what gets exercised.
+"""
+
+import asyncio
+import logging
+import queue
+import threading
+import time
+
+import chaos_service_pb2 as chpb
+import chaos_service_pb2_grpc as chpb_grpc
+import producer_service_pb2 as pb
+import producer as kp
+import consumer as kc
+import _error_code as ec
+
+from grpc_translate import _kafka_error_to_proto
+
+LOG = logging.getLogger("grpc_chaos")
+
+# Upper bound on events per stream message. A server flushes whatever it has
+# queued each time it writes; this only caps one message's size when the harness
+# falls behind a very fast workload.
+_MAX_BATCH = 4096
+
+# Pause after a failed poll before polling again, so a persistent error does not
+# spin at full CPU (tests/chaos/workload.rs POLL_ERROR_BACKOFF).
+_POLL_ERROR_BACKOFF_S = 0.1
+
+# A schedule more than this far behind (a long `send` block while the client
+# waits out a fault) resumes from now rather than replaying the backlog.
+_MAX_SCHEDULE_LAG_S = 1.0
+
+# An asyncio producer that is behind schedule (or unlimited) yields to the event
+# loop once per this many records. The loop also runs the completion drain and
+# the gRPC stream, so it must get turns, but a yield per record is a full loop
+# iteration per record and capped the producer at ~33k records/s; every 10th
+# record measured ~113k (the sync server's rate) with no loss of promptness.
+_ASYNC_YIELD_EVERY = 10
+
+_REBALANCE_KIND = {
+    "assigned": chpb.REBALANCE_KIND_ASSIGNED,
+    "revoked": chpb.REBALANCE_KIND_REVOKED,
+    "lost": chpb.REBALANCE_KIND_LOST,
+}
+
+
+# ---------------------------------------------------------------------------
+# Record encoding and event construction (shared by both flavours)
+# ---------------------------------------------------------------------------
+
+
+def _key(index):
+    """The record key: its 8-byte big-endian logical index."""
+    return index.to_bytes(8, "big")
+
+
+def _value(index, msg_size):
+    """The record value: the index's 8 bytes zero-padded to ``msg_size``, or
+    the first ``msg_size`` of those bytes when smaller
+    (tests/chaos/workload.rs ``build_value``)."""
+    idx = _key(index)
+    if msg_size <= len(idx):
+        return idx[:msg_size]
+    return idx + bytes(msg_size - len(idx))
+
+
+def _error(exc):
+    return _kafka_error_to_proto(exc)
+
+
+def _sent(index):
+    return chpb.WorkloadEvent(sent=chpb.Sent(index=index))
+
+
+def _outcome(index, metadata, exception):
+    """The event settling record ``index`` from its delivery callback."""
+    if exception is not None:
+        return chpb.WorkloadEvent(send_failed=chpb.SendFailed(index=index, error=_error(exception)))
+    if metadata is None:
+        return chpb.WorkloadEvent(send_failed=chpb.SendFailed(index=index, error=pb.KafkaError(
+            code=ec.LOCAL_ILLEGAL_STATE,
+            message="python server: delivery callback fired with neither metadata nor error")))
+    return chpb.WorkloadEvent(delivered=chpb.Delivered(
+        index=index, partition=metadata.partition(), offset=metadata.offset()))
+
+
+def _send_failed(index, exc):
+    return chpb.WorkloadEvent(send_failed=chpb.SendFailed(index=index, error=_error(exc)))
+
+
+def _stats(sent, elapsed):
+    return chpb.WorkloadEvent(producer_stats=chpb.ProducerStats(sent=sent, elapsed_seconds=elapsed))
+
+
+def _consumed_events(records):
+    """One ``Consumed`` per harness record (8-byte key) in a poll's batch."""
+    events = []
+    for r in records:
+        key = r.key
+        if key is None or len(key) != 8:
+            continue
+        events.append(chpb.WorkloadEvent(consumed=chpb.Consumed(
+            index=int.from_bytes(bytes(key), "big"),
+            topic=r.topic, partition=r.partition, offset=r.offset)))
+    return events
+
+
+def _rebalance(kind, partitions):
+    refs = sorted((tp.topic, tp.partition) for tp in partitions)
+    return chpb.WorkloadEvent(rebalance=chpb.Rebalance(
+        kind=_REBALANCE_KIND[kind],
+        partitions=[chpb.TopicPartitionRef(topic=t, partition=p) for t, p in refs]))
+
+
+def _committed_events(offsets):
+    return [chpb.WorkloadEvent(committed=chpb.Committed(
+        topic=tp.topic, partition=tp.partition, offset=oam.offset))
+        for tp, oam in offsets.items()]
+
+
+def _consumer_error(op, exc):
+    return chpb.WorkloadEvent(consumer_error=chpb.ConsumerError(op=op, error=_error(exc)))
+
+
+def _closing():
+    return chpb.WorkloadEvent(consumer_closing=chpb.ConsumerClosing())
+
+
+def _closed():
+    return chpb.WorkloadEvent(consumer_closed=chpb.ConsumerClosed())
+
+
+def _finished():
+    return chpb.WorkloadEvent(finished=chpb.Finished())
+
+
+def _failed(exc):
+    return chpb.WorkloadEvent(failed=chpb.Failed(error=_error(exc)))
+
+
+def _is_terminal(event):
+    return event.WhichOneof("event") in ("finished", "failed")
+
+
+def _check_commits(request):
+    """Whether to read committed offsets back after the revoke-time and final
+    commits (both synchronous, so in either commit mode). The periodic
+    poll-loop read-back additionally needs COMMIT_MODE_SYNC: an async commit
+    may not have reached the broker yet."""
+    return request.commit_check_interval_ms > 0
+
+
+class _ChaosRebalanceListener:
+    """The rebalance listener every chaos consumer registers
+    (tests/chaos/workload.rs ``ChaosRebalanceListener``).
+
+    It reports each callback, and in ``on_partitions_revoked`` commits through
+    the consumer's ``ConsumerHandle`` -- the reentrant path a listener has back
+    into its consumer -- then reads the commit back, unless the consumer is
+    closing: once closing, the client only drains commits, so an offset fetch
+    queued from this callback would wait out the API timeout, and the
+    workload's own read-back after its final commit already covers that state.
+
+    ``on_partitions_lost`` is implemented rather than left to the binding's
+    Java-faithful default (delegate to revoked), so a fenced member's callback
+    is reported as lost.
+
+    The methods are plain functions in both flavours: they run on the binding's
+    dispatcher thread, and the handle's methods are blocking calls meant for
+    exactly that thread (consumer.py ``ConsumerHandle``).
+    """
+
+    def __init__(self, emit, handle, check_commits):
+        self._emit = emit
+        self._handle = handle
+        self._check_commits = check_commits
+        self.closing = False
+
+    def on_partitions_assigned(self, partitions):
+        self._emit(_rebalance("assigned", partitions))
+
+    def on_partitions_revoked(self, partitions):
+        self._emit(_rebalance("revoked", partitions))
+        try:
+            self._handle.commit_sync()
+        except Exception as e:  # noqa: BLE001
+            self._emit(_consumer_error(chpb.CONSUMER_OP_REVOKE_COMMIT, e))
+            return
+        if self._check_commits and not self.closing:
+            try:
+                self._emit_many(_committed_events(self._handle.committed(partitions)))
+            except Exception as e:  # noqa: BLE001
+                self._emit(_consumer_error(chpb.CONSUMER_OP_READ_COMMITTED, e))
+
+    def on_partitions_lost(self, partitions):
+        self._emit(_rebalance("lost", partitions))
+
+    def _emit_many(self, events):
+        for event in events:
+            self._emit(event)
+
+
+# ---------------------------------------------------------------------------
+# Synchronous flavour (grpc_server.py): one thread per workload.
+# ---------------------------------------------------------------------------
+
+
+def _run_producer_sync(request, emit, stop):
+    try:
+        producer = kp.KafkaProducer(dict(request.config))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos producer %s: construction failed", request.workload_id)
+        emit(_failed(e))
+        return
+
+    topic = request.topic
+    msg_size = request.msg_size
+    interval = 1.0 / request.target_rps if request.target_rps else 0.0
+    started = time.monotonic()
+    next_due = started
+    index = 0
+    try:
+        while not stop.is_set():
+            record = kp.ProducerRecord(topic, _value(index, msg_size), _key(index), -1, -1)
+            # Open the record's in-flight window before handing it over; the
+            # delivery callback's event closes it.
+            emit(_sent(index))
+
+            def on_delivery(metadata, exception, index=index):
+                emit(_outcome(index, metadata, exception))
+
+            try:
+                # Not awaited: the binding reports the outcome through
+                # on_delivery, which lets it batch and pipeline. send() itself
+                # blocks while buffer.memory is exhausted, as it would for any
+                # application.
+                producer.send(record, on_delivery=on_delivery)
+            except Exception as e:  # noqa: BLE001
+                emit(_send_failed(index, e))
+            index += 1
+            if interval:
+                next_due += interval
+                now = time.monotonic()
+                if next_due > now:
+                    stop.wait(next_due - now)
+                elif now - next_due > _MAX_SCHEDULE_LAG_S:
+                    next_due = now
+        emit(_stats(index, max(time.monotonic() - started, 1e-9)))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos producer %s: send loop died", request.workload_id)
+        _close_quietly(producer.close)
+        emit(_failed(e))
+        return
+
+    try:
+        # Close waits for every buffered record's outcome, so every delivery
+        # callback has fired when it returns.
+        producer.close()
+    except Exception as e:  # noqa: BLE001
+        emit(_failed(e))
+        return
+    emit(_finished())
+
+
+def _run_consumer_sync(request, emit, stop):
+    try:
+        consumer = kc.KafkaConsumer(dict(request.config))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos consumer %s: construction failed", request.workload_id)
+        emit(_failed(e))
+        return
+
+    check_commits = _check_commits(request)
+    handle = consumer.handle()
+    listener = _ChaosRebalanceListener(emit, handle, check_commits)
+    try:
+        consumer.subscribe(list(request.topics), listener=listener)
+    except Exception as e:  # noqa: BLE001
+        _close_consumer_sync(consumer, handle)
+        emit(_failed(e))
+        return
+
+    poll_timeout = request.poll_timeout_ms / 1000.0
+    check_interval = request.commit_check_interval_ms / 1000.0
+    sync_commit = request.commit_mode == chpb.COMMIT_MODE_SYNC
+    last_check = time.monotonic()
+
+    def read_back():
+        try:
+            for event in _committed_events(consumer.committed(list(consumer.assignment()))):
+                emit(event)
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_READ_COMMITTED, e))
+
+    while not stop.is_set():
+        try:
+            records = consumer.poll(poll_timeout)
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_POLL, e))
+            stop.wait(_POLL_ERROR_BACKOFF_S)
+            continue
+        if records.is_empty():
+            continue
+        for event in _consumed_events(records):
+            emit(event)
+        try:
+            if sync_commit:
+                consumer.commit()
+            else:
+                consumer.commit_async()
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
+            continue
+        # Read back only after a sync commit: an async one may not have reached
+        # the broker yet.
+        if sync_commit and check_commits and time.monotonic() - last_check >= check_interval:
+            last_check = time.monotonic()
+            read_back()
+
+    try:
+        consumer.commit()
+    except Exception as e:  # noqa: BLE001
+        emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
+    else:
+        if check_commits:
+            read_back()
+    listener.closing = True
+    emit(_closing())
+    try:
+        _close_consumer_sync(consumer, handle)
+    except Exception as e:  # noqa: BLE001
+        emit(_failed(e))
+        return
+    emit(_closed())
+    emit(_finished())
+
+
+def _close_consumer_sync(consumer, handle):
+    """``Consumer.close()`` with the listener's handle released in between.
+
+    The close-time ``on_partitions_revoked`` still commits through the handle,
+    so it must outlive the Rust-side close; and the FFI requires every handle to
+    be destroyed before the consumer itself is (src/ffi/consumer_handle.rs).
+    ``Consumer.close()`` does both steps in one call, so this is that method's
+    body with ``handle.destroy()`` placed between them.
+    """
+    if consumer.closed:
+        handle.destroy()
+        return
+    consumer.closed = True
+    try:
+        consumer._run_sync(*consumer._close_spec())
+    finally:
+        handle.destroy()
+        consumer._destroy()
+
+
+def _close_quietly(close):
+    try:
+        close()
+    except Exception:  # noqa: BLE001
+        LOG.exception("chaos: close after a failed loop raised")
+
+
+class _Registry:
+    """workload_id -> stop signal, shared by the Run* and StopWorkload RPCs."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stops = {}
+
+    def add(self, workload_id, stop):
+        with self._lock:
+            if workload_id in self._stops:
+                return False
+            self._stops[workload_id] = stop
+            return True
+
+    def remove(self, workload_id):
+        with self._lock:
+            self._stops.pop(workload_id, None)
+
+    def get(self, workload_id):
+        with self._lock:
+            return self._stops.get(workload_id)
+
+
+def _duplicate_id(workload_id):
+    return chpb.WorkloadEventBatch(events=[chpb.WorkloadEvent(failed=chpb.Failed(error=pb.KafkaError(
+        code=ec.LOCAL_ILLEGAL_ARGUMENT,
+        message=f"python server: workload_id {workload_id!r} is already running")))])
+
+
+class ChaosWorkloadService(chpb_grpc.ChaosWorkloadServiceServicer):
+    """ChaosWorkloadService over the synchronous binding. Each workload runs on
+    its own thread; the RPC's worker thread streams its events."""
+
+    def __init__(self):
+        self._registry = _Registry()
+
+    def RunProducer(self, request, context):
+        return self._run(request, context, _run_producer_sync)
+
+    def RunConsumer(self, request, context):
+        return self._run(request, context, _run_consumer_sync)
+
+    def StopWorkload(self, request, context):
+        stop = self._registry.get(request.workload_id)
+        if stop is not None:
+            stop.set()
+        return pb.StatusResponse()
+
+    def _run(self, request, context, loop):
+        stop = threading.Event()
+        if not self._registry.add(request.workload_id, stop):
+            yield _duplicate_id(request.workload_id)
+            return
+        # The harness going away (cancelled RPC) stops the workload, which then
+        # drains and closes its client on its own thread.
+        context.add_callback(stop.set)
+        events = queue.SimpleQueue()
+        worker = threading.Thread(
+            target=self._guarded, args=(loop, request, events.put, stop),
+            name=f"chaos-{request.workload_id}", daemon=True)
+        worker.start()
+        try:
+            while True:
+                batch = [events.get()]
+                while len(batch) < _MAX_BATCH:
+                    try:
+                        batch.append(events.get_nowait())
+                    except queue.Empty:
+                        break
+                yield chpb.WorkloadEventBatch(events=batch)
+                if any(_is_terminal(e) for e in batch):
+                    return
+        finally:
+            stop.set()
+            self._registry.remove(request.workload_id)
+
+    @staticmethod
+    def _guarded(loop, request, emit, stop):
+        try:
+            loop(request, emit, stop)
+        except Exception as e:  # noqa: BLE001  -- never leave the stream open
+            LOG.exception("chaos workload %s died", request.workload_id)
+            emit(_failed(e))
+
+
+# ---------------------------------------------------------------------------
+# asyncio flavour (grpc_server_async.py): one task per workload on the loop.
+# ---------------------------------------------------------------------------
+
+
+def _loop_emitter(loop, events):
+    """An ``emit`` usable from the event loop and from the binding's threads.
+
+    Delivery callbacks run on the loop; rebalance callbacks run on the
+    binding's dispatcher thread, so those hop onto the loop with
+    ``call_soon_threadsafe``. Both paths keep FIFO order, and a poll's
+    completion reaches the loop the same way after its callbacks returned, so
+    listener events are queued before that poll's records.
+    """
+    loop_thread = threading.get_ident()
+
+    def emit(event):
+        if threading.get_ident() == loop_thread:
+            events.put_nowait(event)
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(events.put_nowait, event)
+
+    return emit
+
+
+async def _wait(stop, timeout):
+    """Sleep up to ``timeout`` seconds, returning early when ``stop`` is set."""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def _run_producer_async(request, emit, stop):
+    try:
+        producer = kp.AsyncKafkaProducer(dict(request.config))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos producer %s: construction failed", request.workload_id)
+        emit(_failed(e))
+        return
+
+    topic = request.topic
+    msg_size = request.msg_size
+    interval = 1.0 / request.target_rps if request.target_rps else 0.0
+    started = time.monotonic()
+    next_due = started
+    index = 0
+    try:
+        while not stop.is_set():
+            record = kp.ProducerRecord(topic, _value(index, msg_size), _key(index), -1, -1)
+            emit(_sent(index))
+
+            def on_delivery(metadata, exception, index=index):
+                emit(_outcome(index, metadata, exception))
+
+            try:
+                # Awaits only buffer capacity; the returned future is not
+                # awaited, the outcome arrives through on_delivery.
+                await producer.send(record, on_delivery=on_delivery)
+            except Exception as e:  # noqa: BLE001
+                emit(_send_failed(index, e))
+            index += 1
+            if interval:
+                next_due += interval
+                now = time.monotonic()
+                if next_due > now:
+                    # At most one interval: the stop check next iteration is
+                    # soon enough, and a plain sleep is cheaper per record than
+                    # waiting on the stop event.
+                    await asyncio.sleep(next_due - now)
+                    continue
+                if now - next_due > _MAX_SCHEDULE_LAG_S:
+                    next_due = now
+            # Behind schedule or unlimited: still yield regularly, so
+            # completions, StopWorkload and the other workloads on this loop
+            # get a turn (see _ASYNC_YIELD_EVERY).
+            if index % _ASYNC_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+        emit(_stats(index, max(time.monotonic() - started, 1e-9)))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos producer %s: send loop died", request.workload_id)
+        try:
+            await producer.close()
+        except Exception:  # noqa: BLE001
+            LOG.exception("chaos: close after a failed loop raised")
+        emit(_failed(e))
+        return
+
+    try:
+        await producer.close()
+    except Exception as e:  # noqa: BLE001
+        emit(_failed(e))
+        return
+    emit(_finished())
+
+
+async def _run_consumer_async(request, emit, stop):
+    try:
+        consumer = kc.AsyncKafkaConsumer(dict(request.config))
+    except Exception as e:  # noqa: BLE001
+        LOG.exception("chaos consumer %s: construction failed", request.workload_id)
+        emit(_failed(e))
+        return
+
+    check_commits = _check_commits(request)
+    handle = consumer.handle()
+    listener = _ChaosRebalanceListener(emit, handle, check_commits)
+    try:
+        await consumer.subscribe(list(request.topics), listener=listener)
+    except Exception as e:  # noqa: BLE001
+        await _close_consumer_async(consumer, handle)
+        emit(_failed(e))
+        return
+
+    poll_timeout = request.poll_timeout_ms / 1000.0
+    check_interval = request.commit_check_interval_ms / 1000.0
+    sync_commit = request.commit_mode == chpb.COMMIT_MODE_SYNC
+    last_check = time.monotonic()
+
+    async def read_back():
+        try:
+            for event in _committed_events(await consumer.committed(list(consumer.assignment()))):
+                emit(event)
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_READ_COMMITTED, e))
+
+    while not stop.is_set():
+        try:
+            records = await consumer.poll(poll_timeout)
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_POLL, e))
+            await _wait(stop, _POLL_ERROR_BACKOFF_S)
+            continue
+        if records.is_empty():
+            continue
+        for event in _consumed_events(records):
+            emit(event)
+        try:
+            if sync_commit:
+                await consumer.commit()
+            else:
+                consumer.commit_async()
+        except Exception as e:  # noqa: BLE001
+            emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
+            continue
+        if sync_commit and check_commits and time.monotonic() - last_check >= check_interval:
+            last_check = time.monotonic()
+            await read_back()
+
+    try:
+        await consumer.commit()
+    except Exception as e:  # noqa: BLE001
+        emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
+    else:
+        if check_commits:
+            await read_back()
+    listener.closing = True
+    emit(_closing())
+    try:
+        await _close_consumer_async(consumer, handle)
+    except Exception as e:  # noqa: BLE001
+        emit(_failed(e))
+        return
+    emit(_closed())
+    emit(_finished())
+
+
+async def _close_consumer_async(consumer, handle):
+    """``AsyncConsumer.close()`` with the listener's handle released in
+    between; see ``_close_consumer_sync``."""
+    if consumer.closed:
+        handle.destroy()
+        return
+    consumer.closed = True
+    try:
+        await consumer._run_async(*consumer._close_spec())
+    finally:
+        handle.destroy()
+        consumer._destroy()
+
+
+class AsyncChaosWorkloadService(chpb_grpc.ChaosWorkloadServiceServicer):
+    """ChaosWorkloadService over the asyncio binding. Each workload is a task on
+    the server's event loop; the RPC streams its events."""
+
+    def __init__(self):
+        self._registry = _Registry()
+
+    async def RunProducer(self, request, context):
+        async for batch in self._run(request, _run_producer_async):
+            yield batch
+
+    async def RunConsumer(self, request, context):
+        async for batch in self._run(request, _run_consumer_async):
+            yield batch
+
+    async def StopWorkload(self, request, context):
+        stop = self._registry.get(request.workload_id)
+        if stop is not None:
+            stop.set()
+        return pb.StatusResponse()
+
+    async def _run(self, request, loop_fn):
+        stop = asyncio.Event()
+        if not self._registry.add(request.workload_id, stop):
+            yield _duplicate_id(request.workload_id)
+            return
+        events = asyncio.Queue()
+        emit = _loop_emitter(asyncio.get_running_loop(), events)
+        task = asyncio.create_task(self._guarded(loop_fn, request, emit, stop))
+        try:
+            while True:
+                batch = [await events.get()]
+                while len(batch) < _MAX_BATCH and not events.empty():
+                    batch.append(events.get_nowait())
+                yield chpb.WorkloadEventBatch(events=batch)
+                if any(_is_terminal(e) for e in batch):
+                    return
+        finally:
+            # Normal end, or the harness went away (the generator is closed or
+            # cancelled): either way the workload stops, and it still drains and
+            # closes its client, so wait for it without letting a cancellation
+            # of this RPC cut that short.
+            stop.set()
+            self._registry.remove(request.workload_id)
+            await asyncio.shield(task)
+
+    @staticmethod
+    async def _guarded(loop_fn, request, emit, stop):
+        try:
+            await loop_fn(request, emit, stop)
+        except Exception as e:  # noqa: BLE001  -- never leave the stream open
+            LOG.exception("chaos workload %s died", request.workload_id)
+            emit(_failed(e))

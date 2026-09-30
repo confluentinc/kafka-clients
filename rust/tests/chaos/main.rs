@@ -42,6 +42,8 @@ mod actions;
 mod config;
 mod harness;
 mod isolation;
+#[cfg(feature = "multilanguage-tests")]
+mod remote_workload;
 mod reports;
 mod verifier;
 mod workload;
