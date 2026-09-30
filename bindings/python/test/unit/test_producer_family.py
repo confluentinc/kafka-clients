@@ -31,9 +31,12 @@ import asyncio
 import inspect
 import itertools
 import logging
+import os
+import signal
 import threading
 import time
 import warnings
+from types import FrameType
 from typing import Any
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
@@ -554,6 +557,136 @@ def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the
     assert type(error) is KafkaTimeoutError
     assert str(error) == "Topic topic not present in metadata after 300 ms."
     assert seen == [error]
+
+
+_NOT_IN_A_TRANSACTION = "Cannot add partition topic-0 to transaction while in state  READY"
+
+
+def _fake_full_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fakes the native calls of a send whose buffer is full and whose record is
+    not handed over yet; the completion callback send() passed is kept."""
+    captured: dict[str, Any] = {}
+
+    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
+        captured["cb"] = cb
+        return True  # the buffer is full
+
+    def producer_drain(c_producer: int, ready: Any) -> bool:
+        return False  # not handed over yet
+
+    def on_space_available(c_producer: int, ready: Any) -> bool:
+        captured["waiting_for_space"] = True
+        return False  # no space yet
+
+    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    monkeypatch.setattr(_lib, "Producer_drain", producer_drain)
+    monkeypatch.setattr(_lib, "Producer_on_space_available", on_space_available)
+    return captured
+
+
+def _immediate_error(cb: Any) -> None:
+    """The core reports the error its send() returned for the record."""
+    cb(0, _lib.KafkaError_new(IllegalStateError._ffi_id, _NOT_IN_A_TRANSACTION), True)
+
+
+@pytest.mark.parametrize("error_before_interrupt", [False, True])
+def test_ctrl_c_while_a_transactional_send_waits_for_space_leaves_nothing_to_flush(
+        monkeypatch: pytest.MonkeyPatch, error_before_interrupt: bool) -> None:
+    # With no transaction started, send() waits for buffer space, then for the
+    # handover, to raise what Java's doSend rethrows. After a Ctrl+C in the
+    # first wait, the immediate error reaches the callback and the future when
+    # it arrives later, and drops the future when it came first (Java gives a
+    # rethrown error to neither); either way flush() has nothing left to wait
+    # for (Copilot review, PR #187).
+    p = KafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_full_send(monkeypatch)
+    seen: list[Exception | None] = []
+    called = threading.Event()
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append(e)
+        called.set()
+
+    armed = True
+
+    def on_sigint(signum: int, frame: FrameType | None) -> None:
+        if armed:
+            raise KeyboardInterrupt
+
+    def interrupt() -> None:
+        if error_before_interrupt:
+            _immediate_error(captured["cb"])
+        os.kill(os.getpid(), signal.SIGINT)
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    timer = threading.Timer(0.2, interrupt)
+    try:
+        timer.start()
+        with pytest.raises(KeyboardInterrupt):
+            p.send(record=RECORD, callback=callback)
+    finally:
+        timer.cancel()
+        timer.join()
+        armed = False
+        time.sleep(0.05)  # a signal still pending runs the disarmed handler
+        signal.signal(signal.SIGINT, previous)
+    assert captured.get("waiting_for_space")
+    monkeypatch.undo()
+    try:
+        if error_before_interrupt:
+            assert not called.wait(0.2)
+        else:
+            _immediate_error(captured["cb"])
+            assert called.wait(5)
+            assert type(seen[0]) is IllegalStateError
+            assert str(seen[0]) == _NOT_IN_A_TRANSACTION
+        assert not p._futures  # noqa: SLF001
+        flush = threading.Thread(target=p.flush, daemon=True)
+        flush.start()
+        flush.join(5)
+        assert not flush.is_alive(), "flush() waits for the interrupted send"
+    finally:
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("error_before_cancel", [False, True])
+async def test_cancelling_a_transactional_send_waiting_for_space_leaves_nothing_to_flush(
+        monkeypatch: pytest.MonkeyPatch, error_before_cancel: bool) -> None:
+    # The async peer of the test above: cancelling the task awaiting send().
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_full_send(monkeypatch)
+    seen: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append(e)
+
+    task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
+    while not captured.get("waiting_for_space"):
+        await asyncio.sleep(0.01)
+    if error_before_cancel:
+        _immediate_error(captured["cb"])
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    monkeypatch.undo()
+    try:
+        if error_before_cancel:
+            await asyncio.sleep(0.2)
+            assert seen == []
+        else:
+            _immediate_error(captured["cb"])
+            for _ in range(500):
+                if seen:
+                    break
+                await asyncio.sleep(0.01)
+            assert type(seen[0]) is IllegalStateError
+            assert str(seen[0]) == _NOT_IN_A_TRANSACTION
+        assert not p._futures  # noqa: SLF001
+        await asyncio.wait_for(p.flush(), 5)
+    finally:
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        await p.close(timeout=0)
 
 
 def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(

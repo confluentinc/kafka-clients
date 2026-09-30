@@ -223,18 +223,24 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
                 if not _lib.Producer_on_space_available(c_producer, space_cb):
                     space = waiter
-        if space is not None:
-            await space
-        if waiting:
-            try:
-                if handed_over is not None:
-                    await handed_over
-            finally:
+        # Both waits clear `waiting` when they end, a cancellation included:
+        # left set, it would keep taking the immediate error from the callback
+        # and the future, and the tracked future would hang a later flush().
+        try:
+            if space is not None:
+                await space
+            if handed_over is not None:
+                await handed_over
+        finally:
+            if waiting:
                 with lock:
                     waiting = False
-            if rethrown is not None:
-                self._futures.discard(future)
-                raise rethrown
+                if rethrown is not None:
+                    # The record never reached the producer (Java's doSend
+                    # rethrows the error), so flush() has nothing to wait for.
+                    self._futures.discard(future)
+        if rethrown is not None:
+            raise rethrown
         return future
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:
