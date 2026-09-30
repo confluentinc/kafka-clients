@@ -2735,6 +2735,37 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 // Producer operations
 // ---------------------------------------------------------------------------
 
+/// Blocks until the dispatcher thread has run every job queued before this call.
+///
+/// The sync `flush` / `close` use it so that, as in Java, every record callback
+/// the operation caused has run when it returns. The async variants get the same
+/// guarantee for free: their own completion is queued behind those callbacks on
+/// the same FIFO queue.
+///
+/// A call made *on* the dispatcher thread (a delivery callback calling `flush`)
+/// returns at once instead: the jobs it would wait for are queued behind the
+/// callback it is running inside, so waiting would deadlock. If the dispatcher is
+/// already gone there is nothing to wait for.
+fn wait_for_dispatched_callbacks(handle: &ProducerHandle) {
+    let dispatcher_id = handle
+        .dispatcher
+        .lock()
+        .ok()
+        .and_then(|dispatcher| dispatcher.as_ref().map(|thread| thread.thread().id()));
+    if dispatcher_id.is_none() || dispatcher_id == Some(std::thread::current().id()) {
+        return;
+    }
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let barrier: CompletionJob = Box::new(move || {
+        let _ = reached_tx.send(());
+    });
+    if handle.completion_tx.send(barrier).is_ok() {
+        // Returns Err if the dispatcher dropped the job unrun; either way the
+        // queue ahead of the barrier is done.
+        let _ = reached_rx.recv();
+    }
+}
+
 /// Flushes all pending records.
 ///
 /// # Parameters
@@ -2776,12 +2807,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
         return;
     }
 
-    let guard = producer_mtx.lock().unwrap();
-    let rt = guard.runtime();
-    let result = match &*guard {
-        ProducerKind::Mock(mock, _) => rt.block_on(mock.flush()),
-        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.flush()),
+    let result = {
+        let guard = producer_mtx.lock().unwrap();
+        let rt = guard.runtime();
+        match &*guard {
+            ProducerKind::Mock(mock, _) => rt.block_on(mock.flush()),
+            ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.flush()),
+        }
     };
+    // Java's `flush()` returns only after every earlier record's callback has run
+    // (`completeFutureAndFireCallbacks` fires them before `produceFuture.done()`
+    // releases the flush). Here the record callbacks run on the dispatcher thread,
+    // so wait for it to reach the jobs they queued — the guard is already dropped,
+    // because a callback may call back into this producer.
+    wait_for_dispatched_callbacks(handle);
     if !out_error.is_null() {
         unsafe {
             *out_error = match result {
@@ -3101,12 +3140,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
         return;
     }
 
-    let guard = producer_mtx.lock().unwrap();
-    let rt = guard.runtime();
-    let result = match &*guard {
-        ProducerKind::Mock(mock, _) => rt.block_on(mock.close()),
-        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.close()),
+    let result = {
+        let guard = producer_mtx.lock().unwrap();
+        let rt = guard.runtime();
+        match &*guard {
+            ProducerKind::Mock(mock, _) => rt.block_on(mock.close()),
+            ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.close()),
+        }
     };
+    // As in `flush`: Java's `close()` joins the I/O thread, so every callback of a
+    // record completed by the close has run before it returns.
+    wait_for_dispatched_callbacks(handle);
     if !out_error.is_null() {
         unsafe {
             *out_error = match result {
@@ -7041,6 +7085,153 @@ mod tests {
         assert_eq!(events, expected, "every record callback runs before the flush completes");
 
         unsafe { close_and_destroy(producer as usize) };
+    }
+
+    /// Per-record state for the slow delivery callbacks below: counts deliveries,
+    /// and optionally calls back into the producer from inside the callback.
+    struct SlowDelivery {
+        delivered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        reentrant_flush: Option<(usize, std::sync::mpsc::Sender<bool>)>,
+    }
+
+    /// A delivery callback that takes a while, so a sync `flush` / `close` that
+    /// did not wait for the dispatcher would return before it finished.
+    unsafe extern "C" fn slow_delivery_cb(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let state = unsafe { Box::from_raw(user_data as *mut SlowDelivery) };
+        unsafe {
+            kafka_producer_RecordMetadata_destroy(metadata);
+            kafka_common_Error_destroy(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if let Some((producer, done)) = state.reentrant_flush {
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            unsafe { kafka_producer_Producer_flush(producer as *mut _, &mut err) };
+            let ok = err.is_null();
+            unsafe { kafka_common_Error_destroy(err) };
+            let _ = done.send(ok);
+        }
+        state.delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Sends `count` records with [`slow_delivery_cb`], each counting into `delivered`.
+    unsafe fn send_slow_records(
+        producer: *mut kafka_producer_Producer_t,
+        count: usize,
+        delivered: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let topic = CString::new("topic").unwrap();
+        for _ in 0..count {
+            let state = Box::new(SlowDelivery { delivered: std::sync::Arc::clone(delivered), reentrant_flush: None });
+            let mut pending = false;
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = unsafe {
+                kafka_producer_Producer_send_with_callback_cancellable(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    b"v".as_ptr(),
+                    1,
+                    slow_delivery_cb,
+                    Box::into_raw(state) as *mut _,
+                    std::ptr::null(),
+                    &mut pending,
+                    &mut err,
+                )
+            };
+            unsafe { assert_success(err) };
+            assert!(pending);
+            unsafe { kafka_producer_FutureRecordMetadata_destroy(future) };
+        }
+    }
+
+    /// The sync `flush` returns only after the callbacks of the records it
+    /// completed have run, as Java's `flush()` does — not merely after the records
+    /// completed, which leaves their callbacks queued on the dispatcher.
+    #[test]
+    fn test_sync_flush_returns_after_record_callbacks_ran() {
+        const RECORDS: usize = 5;
+        let producer = kafka_producer_MockProducer_new(false);
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        unsafe { send_slow_records(producer, RECORDS, &delivered) };
+        assert_eq!(
+            delivered.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the manual mock holds them"
+        );
+
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_flush(producer, &mut err) };
+        unsafe { assert_success(err) };
+
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), RECORDS);
+        unsafe { close_and_destroy(producer as usize) };
+    }
+
+    /// The sync `close` returns only after every queued record callback has run,
+    /// as Java's `close()` does by joining its I/O thread.
+    #[test]
+    fn test_sync_close_returns_after_record_callbacks_ran() {
+        const RECORDS: usize = 5;
+        // Auto-complete: every callback is queued at send time, then runs slowly.
+        let producer = kafka_producer_MockProducer_new(true);
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        unsafe { send_slow_records(producer, RECORDS, &delivered) };
+
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe { kafka_producer_Producer_close(producer, &mut err) };
+        unsafe { assert_success(err) };
+
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), RECORDS);
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// A sync `flush` called from inside a delivery callback — on the dispatcher
+    /// thread — must not wait for the dispatcher, which is busy running that very
+    /// callback.
+    #[test]
+    fn test_sync_flush_from_a_delivery_callback_does_not_deadlock() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+        let state = Box::new(SlowDelivery {
+            delivered: std::sync::Arc::clone(&delivered),
+            reentrant_flush: Some((producer as usize, done_tx)),
+        });
+        let topic = CString::new("topic").unwrap();
+        let mut pending = false;
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let future = unsafe {
+            kafka_producer_Producer_send_with_callback_cancellable(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                b"v".as_ptr(),
+                1,
+                slow_delivery_cb,
+                Box::into_raw(state) as *mut _,
+                std::ptr::null(),
+                &mut pending,
+                &mut err,
+            )
+        };
+        unsafe { assert_success(err) };
+        assert!(pending);
+        unsafe { kafka_producer_FutureRecordMetadata_destroy(future) };
+
+        let flushed = done_rx.recv_timeout(RETURNS_WITHIN).expect("the re-entrant flush returns");
+        assert!(flushed, "the re-entrant flush succeeds");
+        unsafe { close_and_destroy(producer as usize) };
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Validation failures happen before the callback exists: null return, an
