@@ -30,7 +30,13 @@ namespace Confluent.Kafka.Admin;
 /// task, which is the whole point of the view ("if a partial listing is sufficient",
 /// <c>:57-59</c>), while <see cref="AllByBrokerId"/> and <see cref="All"/> fail with the first
 /// error they encounter. The call itself fails only when the broker list could not be
-/// discovered.
+/// discovered — and then all three views fail with that error.
+/// </para>
+/// <para>
+/// ⚠ <b>The two stages resolve independently, as in Java.</b> <see cref="ByBrokerId"/>
+/// resolves as soon as the brokers are known, while their own tasks may still be running,
+/// and each broker's task resolves when <em>that</em> broker finishes — a fast broker is
+/// not held up by a slow or failing one.
 /// </para>
 /// <para>
 /// A listing's <see cref="TransactionListing.State"/> is decoded from Java's
@@ -43,8 +49,11 @@ public sealed class ListTransactionsResult
     private readonly Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>
         _byBrokerId;
 
-    /// <summary>Wraps the one broker-keyed future the ABI resolves.</summary>
-    /// <param name="byBrokerId">One settled task per broker, keyed by broker id.</param>
+    /// <summary>Wraps the outer, broker-keyed future — Java's <c>byBrokerId()</c>.</summary>
+    /// <param name="byBrokerId">
+    /// The future of the broker map; each value is that broker's own task, which may still be
+    /// pending when the map resolves.
+    /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="byBrokerId"/> is null.</exception>
     internal ListTransactionsResult(
         Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>> byBrokerId)
@@ -75,6 +84,20 @@ public sealed class ListTransactionsResult
     /// <c>allByBrokerId()</c> (<c>:92</c>).
     /// </summary>
     /// <returns>A task yielding the broker-keyed map of listings.</returns>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Fail-fast, as in Java</b> (<c>:92-118</c>): it completes with the full map once
+    /// every broker has succeeded, and fails with a broker's error <b>as soon as that broker
+    /// fails</b> — it does not wait for the brokers still running. "First" is first to
+    /// <em>complete</em>, not the lowest broker id.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Deviation, an empty map:</b> with no brokers this completes with an empty map. Java's
+    /// own loop never completes in that case — its <c>allFuture</c> is completed only from a
+    /// per-broker callback, and there are none — which is a quirk, not a contract; the core's
+    /// own synchronous listing returns an empty result there too.
+    /// </para>
+    /// </remarks>
     public Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBrokerId() =>
         Gather(_byBrokerId);
 
@@ -84,10 +107,22 @@ public sealed class ListTransactionsResult
         IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
             await byBrokerId.ConfigureAwait(false);
 
-        // WhenAll first, so a per-broker failure surfaces as the first error rather than as
-        // whichever entry happens to be enumerated first — the ABI delivers rows sorted by
-        // broker id, so "first" is the lowest broker id that failed.
-        await Task.WhenAll(brokers.Values).ConfigureAwait(false);
+        // In completion order, so the first broker to FAIL fails the view without waiting for
+        // the ones still running — Java's allByBrokerId(). Task.WhenAll would wait for all.
+        List<Task<IReadOnlyCollection<TransactionListing>>> pending =
+            new List<Task<IReadOnlyCollection<TransactionListing>>>(brokers.Values);
+        while (pending.Count > 0)
+        {
+            Task<IReadOnlyCollection<TransactionListing>> finished =
+                await Task.WhenAny(pending).ConfigureAwait(false);
+            if (finished.IsFaulted || finished.IsCanceled)
+            {
+                // Rethrows that broker's own exception (not an AggregateException).
+                await finished.ConfigureAwait(false);
+            }
+
+            pending.Remove(finished);
+        }
 
         Dictionary<int, IReadOnlyCollection<TransactionListing>> listings =
             new Dictionary<int, IReadOnlyCollection<TransactionListing>>(

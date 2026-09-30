@@ -377,11 +377,14 @@ public sealed class AdminP8SubmitArgumentTests
                 .DurationMs);
 
     /// <summary>
-    /// ⚠⚠ A <b>null</b> pattern and an <b>empty</b> pattern are distinct at the boundary: the
-    /// first is NULL (no filter), the second a string the broker evaluates.
+    /// ⚠ The pattern crosses <b>unchanged</b>: a <b>null</b> pattern as NULL, an <b>empty</b>
+    /// one as a pointer to <c>""</c>. Both mean "no pattern filter" — the core drops an empty
+    /// pattern from the request, as Java's <c>ListTransactionsHandler</c> does (header,
+    /// <c>kafka_admin_AdminClient_list_transactions</c>) — and folding one into the other is
+    /// the core's decision, not the binding's.
     /// </summary>
     [Fact]
-    public void ListTransactions_NullAndEmptyPatternAreDistinct()
+    public void ListTransactions_NullAndEmptyPatternCrossUnchanged()
     {
         Assert.True(
             CaptureListTransactions(
@@ -403,6 +406,21 @@ public sealed class AdminP8SubmitArgumentTests
                 new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-ünïcode-🎉.*" })
                 .Pattern);
 
+    /// <summary>
+    /// ⚠⚠ Each callback slot receives <b>its own</b> rooted production instance — the discovery
+    /// trampoline in the discovery slot, the per-broker one in the per-broker slot (M15/P13.3
+    /// F5: before the two-stage ABI there was one slot, and the stale declaration put the one
+    /// callback in the discovery slot).
+    /// </summary>
+    [Fact]
+    public void ListTransactions_PassesEachRootedCallbackInItsOwnSlot()
+    {
+        CapturedListTransactions captured = CaptureListTransactions(null);
+
+        Assert.Same(AdminCallbacks.ListTransactionsByBrokerId, captured.ByBrokerIdCallback);
+        Assert.Same(AdminCallbacks.ListTransactions, captured.Callback);
+    }
+
     // ---- helpers -------------------------------------------------------------------------
 
     private static CapturedListTransactions CaptureListTransactions(ListTransactionsOptions? options)
@@ -413,8 +431,10 @@ public sealed class AdminP8SubmitArgumentTests
         admin.ListTransactions(
             options,
             (handle, states, stateCount, producerIds, producerIdCount, durationMs, pattern,
-             timeoutMs, callback, data) =>
+             timeoutMs, byBrokerIdCallback, callback, data) =>
             {
+                captured.ByBrokerIdCallback = byBrokerIdCallback;
+                captured.Callback = callback;
                 captured.States = states.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
                 captured.StateCount = stateCount;
                 captured.ProducerIds = producerIds.ToArray();
@@ -426,12 +446,17 @@ public sealed class AdminP8SubmitArgumentTests
                 captured.UserData = data;
             });
 
-        AdminCallbacks.ListTransactions(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Settle the operation the way a discovery failure does: one owned error, no brokers.
+        AdminCallbacks.ListTransactionsByBrokerId(IntPtr.Zero, 0, CapturedError(), captured.UserData);
         return captured;
     }
 
     private sealed class CapturedListTransactions
     {
+        internal AdminCallbacks.ListTransactionsByBrokerIdCallback? ByBrokerIdCallback { get; set; }
+
+        internal AdminCallbacks.ListTransactionsCallback? Callback { get; set; }
+
         internal IReadOnlyList<string?> States { get; set; } = Array.Empty<string?>();
 
         internal int StateCount { get; set; }

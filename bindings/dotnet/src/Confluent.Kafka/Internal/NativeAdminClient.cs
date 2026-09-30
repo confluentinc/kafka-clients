@@ -849,7 +849,8 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// The <c>list_transactions_async</c> submit shape — ⚠ <b>two independent filters, each
-    /// with its own count</b>.
+    /// with its own count</b>, and <b>two callbacks</b>: the broker discovery, then one per
+    /// discovered broker.
     /// </summary>
     internal delegate void NativeListTransactionsSubmit(
         IntPtr admin,
@@ -860,6 +861,7 @@ internal sealed class NativeAdminClient : IDisposable
         long durationMs,
         IntPtr transactionalIdPattern,
         int timeoutMs,
+        AdminCallbacks.ListTransactionsByBrokerIdCallback byBrokerIdCallback,
         AdminCallbacks.ListTransactionsCallback callback,
         IntPtr userData);
 
@@ -4886,8 +4888,9 @@ internal sealed class NativeAdminClient : IDisposable
         ListTransactions(options, NativeMethods.AdminClientListTransactionsAsync);
 
     /// <summary>
-    /// Submits <c>listTransactions</c> and returns immediately with the one broker-keyed
-    /// awaitable Java's result holds.
+    /// Submits <c>listTransactions</c> and returns immediately with Java's
+    /// <c>byBrokerId()</c> shape: one awaitable over the broker map, whose per-broker
+    /// awaitables each resolve on their own.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -4897,10 +4900,21 @@ internal sealed class NativeAdminClient : IDisposable
     /// that reason.
     /// </para>
     /// <para>
-    /// ⚠ Three different neutral encodings survive to the wire: an empty filter array means
-    /// "every value"; a <b>negative</b> duration means no duration filter, so a <c>0</c> is a
-    /// real one; and a null pattern is distinct from an empty pattern, which the broker
-    /// evaluates (<c>h:10645-10652</c>).
+    /// ⚠ Neutral encodings: an empty filter array means "every value"; a <b>negative</b>
+    /// duration means no duration filter, so a <c>0</c> is a real one; and the pattern is
+    /// forwarded unchanged — NULL for <see langword="null"/>, a pointer to <c>""</c> for the
+    /// empty string. Both of those mean "no pattern filter": the core drops an empty pattern
+    /// from the request, as Java's <c>ListTransactionsHandler.buildBatchedRequest</c> does
+    /// (header, <c>kafka_admin_AdminClient_list_transactions</c>). The binding does not fold
+    /// one into the other itself — that is the core's decision, not a shape concern.
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>The countdown is armed for ONE callback here — the broker discovery — and the
+    /// discovery callback adds the per-broker ones</b>, because their number is known only
+    /// when it fires. It adds them <b>before</b> releasing its own count
+    /// (<see cref="AdminOperation.AddPendingCallbacks"/>), so the count cannot reach zero —
+    /// freeing the <see cref="GCHandle"/> — while a per-broker callback is still due. See
+    /// <see cref="ListTransactionsAdminOperation"/>.
     /// </para>
     /// </remarks>
     internal ListTransactionsResult ListTransactions(
@@ -4918,11 +4932,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         (long[] Values, int Count) producerIds = ProducerIdFilter(options);
 
-        SingleAdminOperation<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>
-            operation =
-                new SingleAdminOperation<
-                    IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>(
-                    "listTransactions");
+        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4939,11 +4949,17 @@ internal sealed class NativeAdminClient : IDisposable
 
             (IntPtr[] Values, int Count) states = StateFilter(options, pinned);
 
-            // ⚠ null stays NULL: an empty pattern is a legal value the broker evaluates.
+            // Forwarded as given: null stays NULL and "" stays "". The core treats both as
+            // "no pattern filter" (see the remarks); folding them here would be core logic.
             if (options?.FilteredTransactionalIdPattern is not null)
             {
                 pattern = Utf8Marshal.Pin(options.FilteredTransactionalIdPattern);
             }
+
+            // The discovery callback is the one callback known up front; it adds one per
+            // discovered broker before it releases its own. The submit's own token is
+            // released after the P/Invoke, so an inline discovery cannot release early.
+            operation.SetPendingCallbacks(1);
 
             submit(
                 _handle.DangerousGetHandle(),
@@ -4954,8 +4970,11 @@ internal sealed class NativeAdminClient : IDisposable
                 durationMs,
                 pattern?.Pointer ?? IntPtr.Zero,
                 timeoutMs,
+                AdminCallbacks.ListTransactionsByBrokerId,
                 AdminCallbacks.ListTransactions,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -4972,7 +4991,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListTransactionsResult(operation.Task);
+        return new ListTransactionsResult(operation.ByBrokerId);
     }
 
     /// <summary>

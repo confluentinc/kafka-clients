@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -771,9 +772,52 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, DeletedRecords> DeletedRecordsPerKeyValue =
         static value => new DeletedRecords(NativeMethods.DeletedRecordsLowWatermark(value));
 
-    /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
+    /// <summary>
+    /// <c>describeReplicaLogDirs</c>' <b>shape-4a</b> value reader — with the one per-key
+    /// outcome no other RPC has: an <b>absent</b> replica.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Both <c>value</c> and <c>error</c> NULL means the replica is absent from the
+    /// result</b> — Java's <c>values().get(replica) == null</c>, which only Java's
+    /// <c>MockAdminClient</c> produces (it skips a replica of a topic it does not know).
+    /// The shared per-key body calls this reader only when the error is NULL, so a NULL
+    /// <c>value</c> here is exactly that case (header,
+    /// <c>kafka_admin_AdminClient_describe_replica_log_dirs_callback_t</c>).
+    /// </para>
+    /// <para>
+    /// .NET cannot drop the key the way Java's map does — <c>Values</c> is handed to the
+    /// caller before any callback fires — and completing it with an empty
+    /// <c>ReplicaLogDirInfo</c> would invent data. So the key faults with the code and
+    /// message the core used for it before it reported the key as absent, exactly as the
+    /// Python binding does (<see cref="AbsentKey"/>). The throw is caught by the per-key
+    /// no-throw boundary and faults this one replica only.
+    /// </para>
+    /// </remarks>
     internal static readonly Func<IntPtr, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>
-        ReplicaLogDirInfoPerKeyValue = LogDirMarshal.CopyOutReplicaInfo;
+        ReplicaLogDirInfoPerKeyValue = static value =>
+            value == IntPtr.Zero ? throw AbsentKey() : LogDirMarshal.CopyOutReplicaInfo(value);
+
+    /// <summary>
+    /// The error a per-key admin result that is <b>absent</b> resolves with: code <c>-4</c>
+    /// (<c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c>), not retriable, and the message
+    /// the core used to synthesise for such a key.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built directly rather than through <c>kafka_common_Error_new</c>, which maps a
+    /// non-protocol code such as <c>-4</c> to <c>UnknownServerError</c> (header,
+    /// <c>kafka_common_Error_new</c>) and so cannot mint it. Python does the same
+    /// (<c>_ABSENT_KEY_ERROR_CODE</c> / <c>_ABSENT_KEY_ERROR_MESSAGE</c> in <c>admin.py</c>).
+    /// </remarks>
+    /// <returns>A fresh exception per key.</returns>
+    internal static KafkaException AbsentKey() =>
+        new KafkaException(
+            AbsentKeyErrorCode,
+            "the requested key was not present in the admin RPC's response",
+            isRetriable: false);
+
+    /// <summary><c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c>.</summary>
+    private const int AbsentKeyErrorCode = -4;
 
     /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
     internal static readonly Func<IntPtr, ListOffsetsResult.ListOffsetsResultInfo>
@@ -1656,81 +1700,213 @@ internal static class AdminCallbacks
             s_destroyDescribeProducersResult);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_list_transactions_callback_t</c> (<c>h:1426</c>). ⚠ A
-    /// <b>per-broker</b> failure arrives inside <paramref name="result"/>, borrowed;
-    /// <paramref name="error"/> — a broker-discovery failure — is <b>owned</b>.
+    /// <c>kafka_admin_ListTransactionsResult_by_broker_id_callback_t</c> — the broker
+    /// discovery, Java's <c>byBrokerId()</c> outer future. Fired <b>exactly once</b>.
     /// </summary>
+    /// <remarks>
+    /// On success <paramref name="brokerIds"/> holds <paramref name="count"/> distinct ids,
+    /// <b>borrowed for the call only</b>, and <paramref name="error"/> is null; on failure
+    /// <paramref name="brokerIds"/> is null, <paramref name="count"/> is <c>0</c>, and
+    /// <paramref name="error"/> is <b>owned</b> — and no per-broker callback follows (header,
+    /// <c>kafka_admin_ListTransactionsResult_by_broker_id_callback_t</c>).
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListTransactionsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void ListTransactionsByBrokerIdCallback(
+        IntPtr brokerIds, int count, IntPtr error, IntPtr userData);
 
-    /// <summary>The rooted instance passed to every <c>list_transactions_async</c> submission.</summary>
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_transactions_callback_t</c> — one discovered broker's
+    /// own outcome, fired once per broker the discovery announced, as that broker finishes.
+    /// </summary>
+    /// <remarks>
+    /// Exactly one of <paramref name="value"/> / <paramref name="error"/> is non-null, and
+    /// <b>both are owned</b>: <paramref name="value"/> is a
+    /// <c>kafka_admin_ListTransactionsResult_t</c> carrying this one broker at index <c>0</c>
+    /// (freed with <c>kafka_admin_ListTransactionsResult_destroy</c>), and
+    /// <paramref name="error"/> is that broker's failure (header,
+    /// <c>kafka_admin_AdminClient_list_transactions_callback_t</c>).
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListTransactionsCallback(
+        int brokerId, IntPtr value, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The rooted discovery instance passed to every <c>list_transactions_async</c> submission.
+    /// </summary>
+    internal static readonly ListTransactionsByBrokerIdCallback ListTransactionsByBrokerId =
+        OnListTransactionsByBrokerId;
+
+    /// <summary>
+    /// The rooted per-broker instance passed to every <c>list_transactions_async</c> submission.
+    /// </summary>
     internal static readonly ListTransactionsCallback ListTransactions = OnListTransactions;
 
     /// <summary>
-    /// <c>listTransactions</c>' broker-id key reader. ⚠ <c>TKey</c> is an <see langword="int"/>
-    /// — the first non-reference key in the binding — which the walker's
-    /// <c>where TKey : notnull</c> accepts unchanged.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, int> ListTransactionsKey =
-        static (result, index) => NativeMethods.ListTransactionsResultGetBrokerId(result, index);
-
-    /// <summary>
-    /// <c>listTransactions</c>' per-broker error, read as a <b>value</b>: Java keeps it inside
-    /// the map its one future carries (<c>ListTransactionsResult.java:36</c>), so a broker
-    /// failing does not fault the call.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, KafkaException?> ListTransactionsOptionalError =
-        BorrowedOptionalError(NativeMethods.ListTransactionsResultGetError);
-
-    /// <summary>
-    /// <c>listTransactions</c>' per-broker value: Java's own
-    /// <c>KafkaFuture&lt;Collection&lt;TransactionListing&gt;&gt;</c>, already settled —
-    /// faulted from that broker's borrowed error, or carrying its listing walk.
+    /// ⚠⚠ <c>listTransactions</c>' <b>discovery</b> trampoline — the first of the two stages
+    /// (see <see cref="ListTransactionsAdminOperation"/>).
     /// </summary>
     /// <remarks>
-    /// ⚠ The inner walk is bounded by <c>get_listing_count(i)</c> — <b>never</b> by the outer
-    /// count, which counts <em>brokers</em> (<c>h:10225-10228</c>).
+    /// <para>
+    /// ⚠⚠ <b>On success the per-broker callbacks are added to the countdown FIRST</b> — before
+    /// anything that can throw, and necessarily before this callback releases its own count
+    /// in the <c>finally</c>. Native fires <paramref name="count"/> per-broker callbacks
+    /// whatever this body does, so the count taken from the ABI argument is what they will
+    /// release; added after the release, the countdown could reach zero in between and every
+    /// per-broker callback would then recover its context from a freed <c>GCHandle</c>.
+    /// </para>
+    /// <para>
+    /// The ids are copied out with <see cref="Marshal.Copy(IntPtr, int[], int, int)"/>: they
+    /// are borrowed for this call only. An error is <b>owned</b> and goes through
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, which frees it exactly once; it faults
+    /// the outer stage, and so every one of the three public views.
+    /// </para>
     /// </remarks>
-    internal static readonly Func<IntPtr, int, Task<IReadOnlyCollection<TransactionListing>>>
-        ListTransactionsValue = static (result, index) =>
+    private static void OnListTransactionsByBrokerId(
+        IntPtr brokerIds, int count, IntPtr error, IntPtr userData)
+    {
+        ListTransactionsAdminOperation? context = null;
+        IntPtr ownedError = error;
+        try
         {
-            KafkaException? error = ListTransactionsOptionalError(result, index);
-            return error is not null
-                ? FaultedListings(error)
-                : Task.FromResult(TransactionListingMarshal.ReadListings(result, index));
-        };
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (ListTransactionsAdminOperation)handle.Target!;
 
-    private static readonly KeyedResultMarshal.CountAccessor s_listTransactionsCount =
-        NativeMethods.ListTransactionsResultCount;
+            if (ownedError != IntPtr.Zero)
+            {
+                // Hand the error to FromHandle, which frees it in its own finally.
+                IntPtr consumed = ownedError;
+                ownedError = IntPtr.Zero;
+                context.FailDiscovery(KafkaException.FromHandle(consumed)!);
+            }
+            else
+            {
+                context.AddPendingCallbacks(count);
+                context.PublishBrokers(CopyBrokerIds(brokerIds, count));
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.FailDiscovery(exception);
+        }
+        finally
+        {
+            if (ownedError != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(ownedError);
+            }
 
-    private static readonly Action<IntPtr> s_destroyListTransactionsResult =
-        NativeMethods.ListTransactionsResultDestroy;
+            context?.ReleaseOne();
+        }
+    }
 
     /// <summary>
-    /// ⚠⚠ <c>listTransactions</c>' shape-3 trampoline — <b>the aggregate walker, with the
-    /// per-broker error supplied inside the VALUE reader.</b> Java holds one
-    /// <c>KafkaFuture&lt;Map&lt;Integer, KafkaFutureImpl&lt;…&gt;&gt;&gt;</c>
-    /// (<c>ListTransactionsResult.java:35</c>), so only the broker-discovery failure is the
-    /// call's error; the per-broker futures live inside the map.
+    /// ⚠⚠ <c>listTransactions</c>' <b>per-broker</b> trampoline — the second stage. Resolves
+    /// <b>that one broker's</b> awaitable and releases one countdown slot.
     /// </summary>
-    private static void OnListTransactions(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteAggregateRpc(
-            result,
-            error,
-            userData,
-            s_listTransactionsCount,
-            ListTransactionsKey,
-            ListTransactionsValue,
-            EqualityComparer<int>.Default,
-            s_destroyListTransactionsResult);
-
-    private static Task<IReadOnlyCollection<TransactionListing>> FaultedListings(KafkaException error)
+    /// <remarks>
+    /// <para>
+    /// ⚠ Both handles are owned and freed on <b>every</b> path: the value in the inner
+    /// <c>finally</c> (null-safe <c>ListTransactionsResult_destroy</c>, after its listings are
+    /// copied out), the error by <see cref="KafkaException.FromHandle(IntPtr)"/> — or by the
+    /// outer <c>finally</c> when the context could not be recovered.
+    /// </para>
+    /// <para>
+    /// ⚠ A broker the discovery did not announce "cannot happen" per the header. If it does,
+    /// what arrived is destroyed and the slot released — never a throw across the boundary.
+    /// A value and an error that are <b>both</b> null would also break the header's contract;
+    /// that faults this broker with a message naming it rather than reading a NULL handle.
+    /// </para>
+    /// </remarks>
+    private static void OnListTransactions(int brokerId, IntPtr value, IntPtr error, IntPtr userData)
     {
-        TaskCompletionSource<IReadOnlyCollection<TransactionListing>> source =
-            new TaskCompletionSource<IReadOnlyCollection<TransactionListing>>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-        source.SetException(error);
-        return source.Task;
+        ListTransactionsAdminOperation? context = null;
+        IntPtr ownedError = error;
+        try
+        {
+            try
+            {
+                GCHandle handle = GCHandle.FromIntPtr(userData);
+                context = (ListTransactionsAdminOperation)handle.Target!;
+
+                IntPtr consumed = ownedError;
+                ownedError = IntPtr.Zero;
+                KafkaException? failure = KafkaException.FromHandle(consumed);
+
+                if (!context.IsAnnounced(brokerId))
+                {
+                    // Not a broker this operation is waiting on: nothing to resolve.
+                }
+                else if (failure is not null)
+                {
+                    context.SetBrokerException(brokerId, failure);
+                }
+                else if (value == IntPtr.Zero)
+                {
+                    context.SetBrokerException(
+                        brokerId,
+                        new KafkaException(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "The listTransactions result carried neither listings nor an error for broker {0}.",
+                                brokerId)));
+                }
+                else
+                {
+                    // The value carries exactly this one broker, at index 0 (header).
+                    context.SetBrokerResult(brokerId, TransactionListingMarshal.ReadListings(value, 0));
+                }
+            }
+            finally
+            {
+                NativeMethods.ListTransactionsResultDestroy(value);
+            }
+        }
+        catch (Exception exception)
+        {
+            // Per-callback no-throw boundary: never unwind into native, and never fault the
+            // other brokers, which have their own callbacks.
+            context?.SetBrokerException(brokerId, exception);
+        }
+        finally
+        {
+            if (ownedError != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(ownedError);
+            }
+
+            context?.ReleaseOne();
+        }
+    }
+
+    /// <summary>
+    /// Copies the discovery's <b>borrowed</b> broker-id array out before the callback returns.
+    /// </summary>
+    /// <param name="brokerIds">The borrowed <c>const int32_t*</c>.</param>
+    /// <param name="count">Its length, as the ABI reported it.</param>
+    /// <returns>The owned ids.</returns>
+    /// <exception cref="KafkaException">A positive count came with a NULL array.</exception>
+    private static int[] CopyBrokerIds(IntPtr brokerIds, int count)
+    {
+        if (count <= 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        if (brokerIds == IntPtr.Zero)
+        {
+            // Reading it would dereference NULL on the foreign thread — an uncatchable crash.
+            throw new KafkaException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "The listTransactions broker discovery reported {0} broker(s) but no broker ids.",
+                    count));
+        }
+
+        int[] ids = new int[count];
+        Marshal.Copy(brokerIds, ids, 0, count);
+        return ids;
     }
 
     /// <summary>

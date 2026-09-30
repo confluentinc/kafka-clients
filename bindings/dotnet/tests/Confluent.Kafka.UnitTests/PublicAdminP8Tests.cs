@@ -507,6 +507,12 @@ public sealed class PublicAdminP8Tests
     /// (<c>test_mock_admin.c:5982-6005</c>) — including <see cref="ListTransactionsResult.ByBrokerId"/>,
     /// which survives a <em>per-broker</em> failure but not this one.
     /// </summary>
+    /// <remarks>
+    /// Since M15/P13.3 this failure arrives through the two-stage ABI's <b>discovery</b>
+    /// callback (the core mock fails the top-level future, <c>mock_admin_client.rs</c>), so this
+    /// is the real-native proof that the discovery slot is wired: code <c>35</c>
+    /// (<c>UNSUPPORTED_VERSION</c>) and the core's exact message on every view.
+    /// </remarks>
     [Fact]
     public async Task ListTransactions_FailsEveryViewWithJavasOwnMessage()
     {
@@ -514,15 +520,9 @@ public sealed class PublicAdminP8Tests
 
         ListTransactionsResult result = admin.ListTransactions();
 
-        Assert.Equal(
-            "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All())).Message);
-        Assert.Equal(
-            "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.ByBrokerId())).Message);
-        Assert.Equal(
-            "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.AllByBrokerId())).Message);
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.ByBrokerId()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.AllByBrokerId()));
     }
 
     /// <summary>Every filter set at once still reaches the same top-level failure.</summary>
@@ -540,7 +540,7 @@ public sealed class PublicAdminP8Tests
                 FilteredTransactionalIdPattern = "txn-.*",
             });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
     }
 
     [Fact]
@@ -564,7 +564,7 @@ public sealed class PublicAdminP8Tests
         ListTransactionsResult result =
             admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
     }
 
     [Fact]
@@ -591,5 +591,15 @@ public sealed class PublicAdminP8Tests
 
         await Assert.ThrowsAsync<KafkaException>(() => abort);
         await Assert.ThrowsAsync<KafkaException>(() => terminate);
+    }
+
+    /// <summary>
+    /// The core mock's <c>listTransactions</c> refusal: <c>unsupported_version("Not implemented
+    /// yet")</c>, Java's own mock message — code <c>35</c>, not retriable.
+    /// </summary>
+    private static void AssertNotImplemented(KafkaException exception)
+    {
+        Assert.Equal(35, exception.Code);
+        Assert.Equal("Not implemented yet", exception.Message);
     }
 }

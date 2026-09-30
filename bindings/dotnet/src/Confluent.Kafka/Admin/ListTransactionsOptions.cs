@@ -30,10 +30,9 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ <b>Three different neutral encodings.</b> The two collection filters conflate null with
 /// empty and both mean "every transaction"; <see cref="FilteredDuration"/> is neutral at
 /// <c>-1</c>, so a <c>0</c> is a real filter; and <see cref="FilteredTransactionalIdPattern"/>
-/// distinguishes <see langword="null"/> (no filter) from <c>""</c> (a pattern the broker
-/// evaluates). Java's javadoc (<c>:119-120</c>) says the pattern's "empty" means no filter, but
-/// the field has no initializer, so the default is <see langword="null"/> — the code is the
-/// contract.
+/// defaults to <see langword="null"/> — the field has no initializer — while <c>""</c> also
+/// means no filter on the wire, as Java's javadoc (<c>:119-120</c>) says: the request drops an
+/// empty pattern (<c>ListTransactionsHandler.buildBatchedRequest</c>).
 /// </para>
 /// <para>
 /// Deviation: Java's <c>filteredStates()</c> (<c>:93</c>) / <c>filteredProducerIds()</c>
@@ -96,9 +95,11 @@ public sealed class ListTransactionsOptions
     /// <c>filteredTransactionalIdPattern()</c> (<c>:122</c>).
     /// </summary>
     /// <remarks>
-    /// ⚠ <see langword="null"/> and <c>""</c> are distinct at the boundary: the empty string is a
-    /// legal pattern the broker evaluates, so it must not be normalized to <see langword="null"/>
-    /// or vice versa.
+    /// ⚠ <see langword="null"/> and <c>""</c> are distinct <em>values</em> of this option — they
+    /// are unequal, as Java's <c>equals</c> makes them — but both mean "no pattern filter":
+    /// Java's javadoc says so (<c>:119-120</c>), and the request drops an empty pattern, as
+    /// Java's <c>ListTransactionsHandler.buildBatchedRequest</c> does. The binding forwards
+    /// either one unchanged and leaves that to the core.
     /// </remarks>
     public string? FilteredTransactionalIdPattern { get; set; }
 

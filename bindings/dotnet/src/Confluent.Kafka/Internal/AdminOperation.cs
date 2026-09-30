@@ -117,6 +117,53 @@ internal abstract class AdminOperation
         Volatile.Write(ref _pendingCallbacks, (callbacks < 0 ? 0 : callbacks) + 1);
 
     /// <summary>
+    /// Adds <paramref name="callbacks"/> to a countdown that is <b>already running</b> — for
+    /// an RPC whose callback count is learned from one of its own callbacks rather than from
+    /// the request (<c>listTransactions</c>: the broker discovery announces how many
+    /// per-broker callbacks follow).
+    /// </summary>
+    /// <param name="callbacks">The callbacks native will additionally make. Non-positive is a no-op.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The caller must still hold a count of its own when it adds</b> — in practice,
+    /// the announcing callback adds <em>before</em> it calls <see cref="ReleaseOne"/>. Added
+    /// after, the count could touch zero in between: <see cref="FreeGcHandle"/> would run,
+    /// and each later callback would recover its context from a freed <see cref="GCHandle"/>
+    /// (a use-after-free, not a leak).
+    /// </para>
+    /// <para>
+    /// ⚠ So an add to a count that is <b>not</b> positive is refused with
+    /// <see cref="InvalidOperationException"/> rather than resurrecting a released operation:
+    /// the compare-and-swap below never lifts the count off zero. Unreachable while the rule
+    /// above holds — it turns a violated ordering into a loud failure instead of a silent
+    /// double finalization.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The countdown had already reached zero.</exception>
+    internal void AddPendingCallbacks(int callbacks)
+    {
+        if (callbacks <= 0)
+        {
+            return;
+        }
+
+        int current;
+        do
+        {
+            current = Volatile.Read(ref _pendingCallbacks);
+            if (current <= 0)
+            {
+                throw new InvalidOperationException(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Cannot add {0} pending callback(s) to an admin operation that has already been released.",
+                        callbacks));
+            }
+        }
+        while (Interlocked.CompareExchange(ref _pendingCallbacks, current + callbacks, current) != current);
+    }
+
+    /// <summary>
     /// One per-key callback has finished resolving its own key. At zero — the last of the
     /// N callbacks and the submit token, in whatever order they land — the operation is
     /// finalized (<see cref="OnAllCallbacksComplete"/>) and then released.

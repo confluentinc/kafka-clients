@@ -94,9 +94,11 @@ public class KafkaException : Exception
     /// <summary>
     /// Initializes a new instance from the values copied out of a
     /// <c>kafka_common_Error_t</c> handle. Used by
-    /// <see cref="FromBorrowedHandle(IntPtr)"/> — the only place a classified
-    /// <see cref="KafkaException"/> is constructed; <see cref="FromHandle(IntPtr)"/>
-    /// delegates to it and additionally frees the handle.
+    /// <see cref="FromBorrowedHandle(IntPtr)"/>; <see cref="FromHandle(IntPtr)"/>
+    /// delegates to it and additionally frees the handle. Also used by the admin absent-key
+    /// error (<c>AdminCallbacks.AbsentKey</c>), whose code <c>-4</c> no
+    /// <c>kafka_common_Error_t</c> can carry — <c>kafka_common_Error_new</c> maps a
+    /// non-protocol code to <c>UnknownServerError</c>.
     /// </summary>
     internal KafkaException(int code, string? message, bool isRetriable)
         : base(message)

@@ -408,17 +408,6 @@ public sealed class AdminP4ReaderWiringTests
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.FenceProducersValue))));
 
     /// <summary>
-    /// <c>listTransactions</c>' per-broker optional-error <b>value</b> reader captures
-    /// <c>kafka_admin_ListTransactionsResult_get_error</c> — its own, not one of the four
-    /// byte-identical twins already tracked above (M15/P8).
-    /// </summary>
-    [Fact]
-    public void ListTransactionsOptionalError_CapturesItsOwnErrorAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_ListTransactionsResult_get_error" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.ListTransactionsOptionalError))));
-
-    /// <summary>
     /// <c>describeDelegationToken</c>' <b>element</b> reader captures
     /// <c>kafka_admin_DescribeDelegationTokenResult_get_token</c> (M15/P7).
     /// </summary>
@@ -492,7 +481,6 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.DescribeClientQuotasValue),
             nameof(AdminCallbacks.DescribeDelegationTokenValue),
             nameof(AdminCallbacks.FenceProducersValue),
-            nameof(AdminCallbacks.ListTransactionsOptionalError),
         };
 
         List<string> signatures = readers
@@ -560,7 +548,6 @@ public sealed class AdminP4ReaderWiringTests
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
                 nameof(AdminCallbacks.FenceProducersValue),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
-                nameof(AdminCallbacks.ListTransactionsOptionalError),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),

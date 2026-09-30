@@ -171,7 +171,7 @@ public sealed class AdminLogDirsLifetimeTests
 
     /// <summary>
     /// ⚠⚠ <b><c>describeReplicaLogDirs</c>' result can omit a requested key, and the honest
-    /// outcome is a FAULT naming that key.</b>
+    /// outcome is a FAULT on that key alone — the absent-key error, code <c>-4</c>.</b>
     /// </summary>
     /// <remarks>
     /// <para>
@@ -195,14 +195,20 @@ public sealed class AdminLogDirsLifetimeTests
     /// rather than hanging or being invented.
     /// </para>
     /// <para>
-    /// ⚠ <b>The message is the CORE's since the per-key ABI, and it no longer names the
-    /// key</b> — <c>admin_async_per_key_op</c> fires its own synthetic error for a key its
-    /// <c>entries</c> omitted, so the binding's <c>FailUncompleted</c> sweep never reaches
-    /// it. A diagnosability loss, accepted as core behaviour rather than papered over.
+    /// ⚠ <b>The BINDING supplies this fault since M15/P13.3 (F10).</b> The core now reports an
+    /// absent key by invoking the per-key callback with <b>both</b> the value and the error
+    /// NULL — it no longer synthesizes an error of its own — so the per-key value reader
+    /// (<c>AdminCallbacks.ReplicaLogDirInfoPerKeyValue</c>) builds the absent-key exception
+    /// directly: code <c>-4</c>, not retriable, and the message the core used to synthesise
+    /// for such a key.
+    /// It cannot come from <c>kafka_common_Error_new</c>, which maps a non-protocol code such
+    /// as <c>-4</c> to <c>UNKNOWN_SERVER_ERROR</c>, so the code is the discriminating
+    /// assertion here. The message still does not name the key; the key is the awaitable's
+    /// own dictionary key.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task AReplicaTheMockOmits_FaultsThatKeyWithAMessageNamingIt()
+    public async Task AReplicaTheMockOmits_FaultsThatKeyWithTheAbsentKeyError()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -223,13 +229,32 @@ public sealed class AdminLogDirsLifetimeTests
         KafkaException missing = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.Values[unknown]), s_deadline);
 
-        // ⚠ The CORE now supplies this message, not the binding: `admin_async_per_key_op`
-        // fires a synthetic error for a key its `entries` omitted, so the managed
-        // FailUncompleted sweep never sees the key and the message no longer names it.
-        Assert.Equal("the requested key was not present in the admin RPC's response", missing.Message);
+        AssertAbsentKey(missing);
 
-        // …and All() therefore faults as well.
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        // …and All() therefore faults as well, with the same error.
+        AssertAbsentKey(await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline));
+    }
+
+    /// <summary>
+    /// The per-key value reader turns a both-NULL callback into the absent-key fault itself,
+    /// without the mock — the unit-level half of the test above, and the one a mutation of
+    /// the reader's NULL branch is measured against.
+    /// </summary>
+    [Fact]
+    public void ThePerKeyReplicaReader_FaultsANullValueAsTheAbsentKey()
+    {
+        AssertAbsentKey(
+            Assert.Throws<KafkaException>(() => AdminCallbacks.ReplicaLogDirInfoPerKeyValue(IntPtr.Zero)));
+    }
+
+    /// <summary>
+    /// The absent-key error, exactly: code <c>-4</c>, not retriable, the core's message.
+    /// </summary>
+    private static void AssertAbsentKey(KafkaException exception)
+    {
+        Assert.Equal(-4, exception.Code);
+        Assert.False(exception.IsRetriable);
+        Assert.Equal("the requested key was not present in the admin RPC's response", exception.Message);
     }
 
     /// <summary>

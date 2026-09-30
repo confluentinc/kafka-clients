@@ -163,13 +163,18 @@ internal static class LogDirMarshal
     }
 
     /// <summary>
-    /// Copies one borrowed <c>ReplicaLogDirInfo_t</c> out.
+    /// Copies one <c>ReplicaLogDirInfo_t</c> out — borrowed from the flattened result, or
+    /// the per-key callback's own (owned, destroyed by the caller after this returns).
     /// </summary>
-    /// <param name="info">The borrowed info pointer.</param>
+    /// <param name="info">The info pointer.</param>
     /// <returns>The owned info.</returns>
     /// <exception cref="KafkaException">
-    /// The ABI produced no info for a key whose <c>get_error</c> was null — unreachable for
-    /// the same reason as <see cref="CopyOutMap"/>'s.
+    /// <paramref name="info"/> is NULL. ⚠ On the per-key path a NULL info with a NULL error
+    /// is <b>reachable</b> since M15/P13.3 — it is how the core reports an <em>absent</em>
+    /// replica — but the per-key value reader
+    /// (<see cref="AdminCallbacks.ReplicaLogDirInfoPerKeyValue"/>) turns that case into the
+    /// absent-key fault <em>before</em> calling this, so this guard is reached only by a
+    /// caller that bypasses it.
     /// </exception>
     internal static DescribeReplicaLogDirsResult.ReplicaLogDirInfo CopyOutReplicaInfo(IntPtr info)
     {

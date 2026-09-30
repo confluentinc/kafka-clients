@@ -4218,15 +4218,29 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DescribeProducersResultDestroy(IntPtr result);
 
-    // ---- M15/P8: listTransactions (one aggregate future over a broker-keyed map) ----
+    // ---- M15/P8 → M15/P13.3: listTransactions (Java's byBrokerId() — a future of per-broker futures) ----
 
     /// <summary>
     /// ⚠ <b>Two independent filters, each with its own count.</b> The states are
     /// <c>TransactionState.toString()</c> names, matched case-sensitively;
     /// <paramref name="durationMs"/> is neutral at any negative value (Java's own <c>-1</c>
-    /// default); and <paramref name="transactionalIdPattern"/> distinguishes NULL (no filter)
-    /// from an empty string (<c>h:10638-10652</c>).
+    /// default); and <paramref name="transactionalIdPattern"/> means "no pattern filter" both
+    /// when NULL and when empty — the core drops an empty pattern from the request, as Java's
+    /// <c>ListTransactionsHandler.buildBatchedRequest</c> does (header,
+    /// <c>kafka_admin_AdminClient_list_transactions</c>).
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Two callbacks share <paramref name="userData"/>, in this order</b> (header,
+    /// <c>kafka_admin_AdminClient_list_transactions_async</c>):
+    /// <paramref name="byBrokerIdCallback"/> fires <b>exactly once</b> (the broker discovery),
+    /// then <paramref name="callback"/> fires once per discovered broker, never before the
+    /// discovery has returned and never at all after a discovery error. The two slots have
+    /// different delegate types, so they cannot be transposed at a call site — but a
+    /// declaration that predates the discovery slot still compiles and is only caught at run
+    /// time (M15/P13.3 F5: the one callback landed in the discovery slot and
+    /// <paramref name="userData"/> in the per-broker slot). The parameter order is pinned by
+    /// reflection for that reason.
+    /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_transactions_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientListTransactionsAsync(
         IntPtr admin,
@@ -4237,8 +4251,14 @@ internal static partial class NativeMethods
         long durationMs,
         IntPtr transactionalIdPattern,
         int timeoutMs,
+        AdminCallbacks.ListTransactionsByBrokerIdCallback byBrokerIdCallback,
         AdminCallbacks.ListTransactionsCallback callback,
         IntPtr userData);
+
+    // ⚠ Count / GetBrokerId / GetError are not read by the two-stage bridge (M15/P13.3 F5):
+    // each per-broker callback delivers its broker id and its error as arguments, and its
+    // value carries that one broker at index 0. They stay declared because the header still
+    // exports them.
 
     /// <summary>⚠ The number of <b>brokers</b>, not of listings.</summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_count", CallingConvention = CallingConvention.Cdecl)]
