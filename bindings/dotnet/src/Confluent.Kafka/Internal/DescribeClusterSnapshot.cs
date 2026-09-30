@@ -46,7 +46,10 @@ internal sealed class DescribeClusterSnapshot
     /// <c>controller()</c>, which yields null when the controller id is
     /// <c>NO_CONTROLLER_ID</c> (<c>KafkaAdminClient.java:2531-2534</c>).
     /// </param>
-    /// <param name="clusterId">The cluster id — Java's <c>clusterId()</c>.</param>
+    /// <param name="clusterId">
+    /// The cluster id, or <see langword="null"/> when the cluster reported none — Java's
+    /// <c>clusterId()</c>, null on the old-broker <c>Metadata</c> fallback (M15/P13.3 D15).
+    /// </param>
     /// <param name="authorizedOperations">
     /// The authorized operations, or <see langword="null"/> when the broker did not report
     /// them at all — Java's <c>authorizedOperations()</c>, whose javadoc says the value "will
@@ -56,7 +59,7 @@ internal sealed class DescribeClusterSnapshot
     internal DescribeClusterSnapshot(
         IReadOnlyCollection<Node> nodes,
         Node? controller,
-        string clusterId,
+        string? clusterId,
         IReadOnlyCollection<AclOperation>? authorizedOperations)
     {
         Nodes = nodes;
@@ -72,7 +75,7 @@ internal sealed class DescribeClusterSnapshot
     internal Node? Controller { get; }
 
     /// <inheritdoc cref="Nodes"/>
-    internal string ClusterId { get; }
+    internal string? ClusterId { get; }
 
     /// <inheritdoc cref="Nodes"/>
     internal IReadOnlyCollection<AclOperation>? AuthorizedOperations { get; }

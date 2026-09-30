@@ -223,6 +223,42 @@ public sealed class PublicAdminNewTopicValueTests
     }
 
     /// <summary>
+    /// M15/P13.3 D16 — a <see langword="null"/> config <b>value</b> is Java's null map value,
+    /// which <c>configs(Map)</c> accepts: equality, the hash code and <c>ToString</c> all
+    /// handle it without throwing, and it is neither equal to the empty string nor to an
+    /// absent key.
+    /// </summary>
+    [Fact]
+    public void NullConfigValue_IsHandledByEqualityHashAndToString()
+    {
+        NewTopic left = new NewTopic("t", 1, (short)1)
+        {
+            Configs = new Dictionary<string, string> { ["retention.ms"] = null! },
+        };
+        NewTopic right = new NewTopic("t", 1, (short)1)
+        {
+            Configs = new Dictionary<string, string> { ["retention.ms"] = null! },
+        };
+
+        Assert.True(left.Equals(right));
+        Assert.True(right.Equals(left));
+        Assert.Equal(left.GetHashCode(), right.GetHashCode());
+
+        // Null is a value of its own: not "", and not a missing key.
+        NewTopic empty = new NewTopic("t", 1, (short)1) { Configs = Configs(("retention.ms", "")) };
+        NewTopic absent = new NewTopic("t", 1, (short)1) { Configs = new Dictionary<string, string>() };
+        Assert.False(left.Equals(empty));
+        Assert.False(empty.Equals(left));
+        Assert.False(left.Equals(absent));
+        Assert.False(absent.Equals(left));
+
+        // Java's StringBuilder prints a null value as "null".
+        Assert.Equal(
+            "(name=t, numPartitions=1, replicationFactor=1, replicasAssignments=null, configs={retention.ms=null})",
+            left.ToString());
+    }
+
+    /// <summary>
     /// Java's exact <c>toString</c> (<c>NewTopic.java:149-157</c>): <c>default</c> for an
     /// unset count, <c>-1</c> printed as itself, and the maps in <c>AbstractMap</c> /
     /// <c>AbstractCollection</c> form — single-entry maps, so the order is fixed.

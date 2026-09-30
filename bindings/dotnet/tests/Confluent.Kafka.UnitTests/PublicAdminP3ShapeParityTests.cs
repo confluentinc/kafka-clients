@@ -105,13 +105,16 @@ public sealed class PublicAdminP3ShapeParityTests
 
     /// <summary>
     /// <see cref="DescribeClusterResult"/> publishes Java's four accessors as <b>methods</b>
-    /// yielding tasks, two of them nullable.
+    /// yielding tasks, three of them nullable.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>The two nullable returns are the point of this test.</b> A binding that read the
+    /// ⚠ <b>The three nullable returns are the point of this test.</b> A binding that read the
     /// authorized-operations <em>count</em> instead of the gate would still compile against
     /// a non-nullable <c>Task&lt;IReadOnlyCollection&lt;AclOperation&gt;&gt;</c>, so the
-    /// annotation is what forces the null to remain expressible at all.
+    /// annotation is what forces the null to remain expressible at all. The cluster id joined
+    /// them in M15/P13.3 (D15): the ABI now returns NULL where Java's <c>clusterId()</c> is null
+    /// (the old-broker <c>Metadata</c> fallback), which no mock can produce — so the
+    /// annotation is the only thing a unit test can pin.
     /// </remarks>
     [Fact]
     public void DescribeClusterResult_PublishesJavasFourAccessors()
@@ -139,14 +142,24 @@ public sealed class PublicAdminP3ShapeParityTests
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter));
         }
 
-        // Non-null values: Java's nodes() and clusterId() futures always carry one.
+        // Non-null value: Java's nodes() future always carries one.
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(nodes.ReturnParameter, 1));
-        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(clusterId.ReturnParameter, 1));
 
         // Nullable values: see the class remarks for the Java citation behind each.
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(controller.ReturnParameter, 1));
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(clusterId.ReturnParameter, 1));
         Assert.Equal(
             NullableAnnotation.Annotated, NullableAnnotation.Flag(authorizedOperations.ReturnParameter, 1));
+
+#if NET8_0_OR_GREATER
+        // The same reading through the runtime's own decoder, where it exists (.NET 6+): an
+        // independent check on the hand-rolled one above, for the accessor that changed.
+        NullabilityInfo clusterIdInfo = new NullabilityInfoContext().Create(clusterId.ReturnParameter);
+        Assert.Equal(NullabilityState.NotNull, clusterIdInfo.ReadState);
+        Assert.Equal(NullabilityState.Nullable, Assert.Single(clusterIdInfo.GenericTypeArguments).ReadState);
+        NullabilityInfo nodesInfo = new NullabilityInfoContext().Create(nodes.ReturnParameter);
+        Assert.Equal(NullabilityState.NotNull, Assert.Single(nodesInfo.GenericTypeArguments).ReadState);
+#endif
 
         // Java's result has no properties and no other accessor.
         Assert.Empty(typeof(DescribeClusterResult).GetProperties());

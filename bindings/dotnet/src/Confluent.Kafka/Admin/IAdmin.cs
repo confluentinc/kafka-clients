@@ -50,6 +50,19 @@ namespace Confluent.Kafka.Admin;
 /// operation is in flight is safe and simply defers the native release until that
 /// operation completes.
 /// </para>
+/// <para>
+/// ⚠ <b>A key string that cannot cross the C ABI unchanged is rejected.</b> Where a
+/// method's <see cref="ArgumentException"/> entry says so, a string that makes up a result
+/// key — a topic name (also inside a <see cref="TopicPartition"/> or
+/// <see cref="TopicPartitionReplica"/>), a config resource name, a group id, a transactional
+/// id, a feature name, a SCRAM user name, a quota entity type or name, or an ACL resource
+/// name, principal or host — throws <see cref="ArgumentException"/> when it contains a NUL
+/// character (<c>'\0'</c>) or an unpaired UTF-16 surrogate, before anything is sent. The
+/// native client receives every string as NUL-terminated UTF-8, where such a string would
+/// arrive truncated or altered — so <c>"a\0b"</c> would name <c>"a"</c>, and two different
+/// keys could arrive as one, leaving the call unable to complete. Java has no such limit,
+/// because a Java string never crosses a C boundary.
+/// </para>
 /// </remarks>
 public interface IAdmin : IDisposable, IAsyncDisposable
 {
@@ -71,8 +84,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newTopics"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="newTopics"/> contains a null element, or a topic carries a null
-    /// configuration value.
+    /// <paramref name="newTopics"/> contains a null element, or a topic name containing a NUL
+    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks). A
+    /// null configuration value is <em>not</em> rejected: it is sent as Java's null (see
+    /// <see cref="NewTopic.Configs"/>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
@@ -114,7 +129,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topics"/> is a name collection containing a null element.
+    /// <paramref name="topics"/> is a name collection containing a null element, or a
+    /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
@@ -146,7 +163,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topics"/> is a name collection containing a null element.
+    /// <paramref name="topics"/> is a name collection containing a null element, or a
+    /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is
@@ -201,7 +220,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newPartitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="newPartitions"/> contains a null topic name or a null entry.
+    /// <paramref name="newPartitions"/> contains a null topic name or a null entry, or a
+    /// topic name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -233,7 +254,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="recordsToDelete"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="recordsToDelete"/> contains a topic partition with a null topic, or
-    /// a null entry.
+    /// a null entry, or a topic containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -354,7 +376,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="resources"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="resources"/> contains a null element.
+    /// <paramref name="resources"/> contains a null element, or a resource name containing a NUL
+    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -390,7 +413,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="configs"/> contains a null resource, a null operation collection, or
-    /// a null operation.
+    /// a null operation, or a resource name containing a NUL character or an unpaired surrogate
+    /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -440,7 +464,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory —
     /// the ABI would silently skip such a row, leaving the caller holding an awaitable for a
-    /// replica the broker was never asked about.
+    /// replica the broker was never asked about. Also thrown for a replica whose topic
+    /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -464,7 +489,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <returns>One awaitable per replica, each carrying where that replica's log lives.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicas"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="replicas"/> contains a null element.
+    /// <paramref name="replicas"/> contains a null element, or a replica whose topic
+    /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -537,7 +563,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="reassignments"/> contains a topic partition with a null topic.
+    /// <paramref name="reassignments"/> contains a topic partition with a null topic, or
+    /// with a topic containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -675,7 +703,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicPartitionOffsets"/> contains a topic partition with a null
-    /// topic, or a null spec.
+    /// topic, or a null spec, or a topic containing a NUL character or an unpaired surrogate (see
+    /// the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.IsolationLevel</c> is not one of
@@ -797,7 +826,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="groupIds"/> contains a null element.
+    /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
+    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
@@ -836,7 +866,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="groupIds"/> contains a null element.
+    /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
+    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
@@ -871,6 +902,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// committed offsets or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="groupId"/> contains a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
     /// would silently substitute a default.
@@ -909,7 +944,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupSpecs"/> contains a null group id, a null spec, a null
-    /// selected topic, or a repeated group id.
+    /// selected topic, or a repeated group id, or a group id containing a NUL character or an
+    /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
@@ -934,6 +970,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// See <see cref="DeleteConsumerGroupsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
+    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
@@ -995,7 +1035,11 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="CreateAclsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="acls"/> is null.</exception>
-    /// <exception cref="ArgumentException"><paramref name="acls"/> contains a null element.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="acls"/> contains a null element, or a binding whose resource name,
+    /// principal or host contains a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
@@ -1025,7 +1069,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="filters"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="filters"/> contains a null element.
+    /// <paramref name="filters"/> contains a null element, or a filter whose resource name,
+    /// principal or host contains a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks). A null name, principal or host means "any" and is
+    /// accepted.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1111,7 +1158,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="entries"/> contains a null element.
+    /// <paramref name="entries"/> contains a null element, or an alteration whose entity has
+    /// a type or name containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1160,7 +1209,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="alterations"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="alterations"/> contains a null element.
+    /// <paramref name="alterations"/> contains a null element, or an alteration whose user
+    /// name contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1284,7 +1335,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="featureUpdates"/> is empty, or contains a blank or null name, or a null
     /// update — the two Java rejects before enqueuing anything
-    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>).
+    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — or a feature name
+    /// containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1314,7 +1366,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
-    /// silently.
+    /// silently, or an id containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1337,7 +1390,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
-    /// silently.
+    /// silently, or an id containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1363,7 +1417,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, which the
-    /// ABI would skip silently.
+    /// ABI would skip silently, or with a topic containing a NUL character or an unpaired surrogate
+    /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.

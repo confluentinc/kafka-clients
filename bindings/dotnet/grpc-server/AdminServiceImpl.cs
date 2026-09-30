@@ -410,7 +410,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 await TranslateAdmin.Resolve(result.Nodes()).ConfigureAwait(false);
             (Node? controller, Proto.KafkaError? controllerError) =
                 await TranslateAdmin.Resolve(result.Controller()).ConfigureAwait(false);
-            (string clusterId, Proto.KafkaError? clusterIdError) =
+            (string? clusterId, Proto.KafkaError? clusterIdError) =
                 await TranslateAdmin.Resolve(result.ClusterId()).ConfigureAwait(false);
             (IReadOnlyCollection<AclOperation>? operations, Proto.KafkaError? operationsError) =
                 await TranslateAdmin.Resolve(result.AuthorizedOperations()).ConfigureAwait(false);
@@ -421,7 +421,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 return new Proto.DescribeClusterResponse { Error = error };
             }
 
-            Proto.ClusterDescription description = new Proto.ClusterDescription { ClusterId = clusterId };
+            // Java's clusterId() is null on the old-broker Metadata fallback, and a proto3
+            // string cannot be null, so it is sent as "" — as the C server sends it (its `cstr`
+            // maps NULL to "") (M15/P13.3 D15).
+            Proto.ClusterDescription description = new Proto.ClusterDescription { ClusterId = clusterId ?? "" };
             foreach (Node node in nodes)
             {
                 description.Nodes.Add(Translate.NodeToProto(node));

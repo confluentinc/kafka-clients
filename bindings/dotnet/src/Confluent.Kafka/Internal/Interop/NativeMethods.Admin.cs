@@ -807,7 +807,8 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// <c>kafka_admin_DescribeClusterResult_cluster_id</c> — Java's <c>clusterId()</c>,
-    /// borrowed and NUL-terminated (ffi §B3 row 2).
+    /// borrowed and NUL-terminated (ffi §B3 row 2), or NULL where Java's is null: the
+    /// old-broker <c>Metadata</c> fallback, whose cluster id is nullable.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_cluster_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeClusterResultClusterId(IntPtr result);

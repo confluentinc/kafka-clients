@@ -111,11 +111,10 @@ internal static class DescribeClusterMarshal
         // (KafkaAdminClient.java:2531-2534). NodeMarshal.CopyOut already maps null → null.
         Node? controller = NodeMarshal.CopyOut(NativeMethods.DescribeClusterResultController(result));
 
-        // NUL-terminated, borrowed (ffi §B3 row 2) — copied out here. Java's clusterId() is
-        // a String, so a defensive null normalizes to empty rather than falsifying the
-        // non-nullable annotation.
-        string clusterId =
-            Utf8Marshal.PtrToString(NativeMethods.DescribeClusterResultClusterId(result)) ?? string.Empty;
+        // NUL-terminated, borrowed (ffi §B3 row 2) — copied out here. ⚠ A NULL pointer is
+        // Java's null clusterId() (the old-broker Metadata fallback) and stays null: folding it
+        // into "" would report an id the cluster never gave (M15/P13.3 D15).
+        string? clusterId = Utf8Marshal.PtrToString(NativeMethods.DescribeClusterResultClusterId(result));
 
         IReadOnlyCollection<AclOperation>? authorizedOperations = AuthorizedOperationsMarshal.CopyOut(
             result, hasAuthorizedOperations, s_authorizedOperationCount, s_authorizedOperation);

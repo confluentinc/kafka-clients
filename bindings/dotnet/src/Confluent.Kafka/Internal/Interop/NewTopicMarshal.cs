@@ -75,6 +75,17 @@ internal static class NewTopicMarshal
                 foreach (KeyValuePair<string, string> entry in topic.Configs)
                 {
                     using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
+
+                    // ⚠ A null value is Java's null map value, which configs(Map) accepts and
+                    // sends: the header keeps a NULL `value` as that null, distinct from ""
+                    // (kafka_admin_NewTopic_put_config). The annotation says non-null, but the
+                    // map is the caller's and can hold one (M15/P13.3 D16).
+                    if (entry.Value is null)
+                    {
+                        NativeMethods.NewTopicPutConfig(handle, key.Pointer, IntPtr.Zero);
+                        continue;
+                    }
+
                     using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
                     NativeMethods.NewTopicPutConfig(handle, key.Pointer, value.Pointer);
                 }

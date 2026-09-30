@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Two of the four are genuinely nullable, and that is contract rather than an edge
+/// ⚠ <b>Three of the four are genuinely nullable, and that is contract rather than an edge
 /// case.</b> <see cref="Controller"/> yields <see langword="null"/> when the cluster
 /// reports no controller (Java completes the future with the node looked up from
 /// <c>controllerId</c>, and returns <see langword="null"/> for
@@ -38,7 +38,10 @@ namespace Confluent.Kafka.Admin;
 /// The ABI carries that distinction in a <em>separate</em> gate rather than in a count —
 /// <c>kafka_admin_DescribeClusterResult_has_authorized_operations</c>, because a count of
 /// 0 covers both "not reported" and "reported, none authorized" — so reading the count
-/// alone would silently collapse null into empty.
+/// alone would silently collapse null into empty. <see cref="ClusterId"/> yields
+/// <see langword="null"/> where Java's <c>clusterId()</c> does: a broker too old for
+/// <c>DescribeCluster</c> is answered through the <c>Metadata</c> fallback, whose cluster id
+/// is nullable (header, <c>kafka_admin_DescribeClusterResult_cluster_id</c>; M15/P13.3 D15).
 /// </para>
 /// <para>
 /// ⚠ <b>Four projections of ONE completion, not four requests</b> — and this is the
@@ -81,7 +84,7 @@ public sealed class DescribeClusterResult
 {
     private readonly Task<IReadOnlyCollection<Node>> _nodes;
     private readonly Task<Node?> _controller;
-    private readonly Task<string> _clusterId;
+    private readonly Task<string?> _clusterId;
     private readonly Task<IReadOnlyCollection<AclOperation>?> _authorizedOperations;
 
     /// <summary>
@@ -117,9 +120,17 @@ public sealed class DescribeClusterResult
     /// </remarks>
     public Task<Node?> Controller() => _controller;
 
-    /// <summary>The cluster id — Java's <c>clusterId()</c> (<c>:66</c>).</summary>
-    /// <returns>A task yielding the cluster id.</returns>
-    public Task<string> ClusterId() => _clusterId;
+    /// <summary>
+    /// The cluster id, or <see langword="null"/> when the cluster reported none — Java's
+    /// <c>clusterId()</c> (<c>:66</c>).
+    /// </summary>
+    /// <returns>A task yielding the cluster id or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// ⚠ <b>A null id is a successful outcome, not a failure</b>, and it is not the empty
+    /// string: the task completes with <see langword="null"/> when the answer came through the
+    /// old-broker <c>Metadata</c> fallback without an id (see the type remarks).
+    /// </remarks>
+    public Task<string?> ClusterId() => _clusterId;
 
     /// <summary>
     /// The cluster's authorized operations, or <see langword="null"/> when the broker did
@@ -148,7 +159,7 @@ public sealed class DescribeClusterResult
     private static async Task<Node?> ProjectController(Task<DescribeClusterSnapshot> future) =>
         (await future.ConfigureAwait(false)).Controller;
 
-    private static async Task<string> ProjectClusterId(Task<DescribeClusterSnapshot> future) =>
+    private static async Task<string?> ProjectClusterId(Task<DescribeClusterSnapshot> future) =>
         (await future.ConfigureAwait(false)).ClusterId;
 
     private static async Task<IReadOnlyCollection<AclOperation>?> ProjectAuthorizedOperations(

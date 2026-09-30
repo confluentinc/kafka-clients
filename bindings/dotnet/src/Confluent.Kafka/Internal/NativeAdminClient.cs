@@ -1046,19 +1046,11 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException("The topics to create must not contain a null element.", nameof(newTopics));
             }
 
-            if (topic.Configs is not null)
-            {
-                foreach (KeyValuePair<string, string> entry in topic.Configs)
-                {
-                    if (entry.Value is null)
-                    {
-                        throw new ArgumentException(
-                            $"Configuration value for key '{entry.Key}' on topic '{topic.Name}' must not be null.",
-                            nameof(newTopics));
-                    }
-                }
-            }
-
+            // A null configuration value is NOT rejected: Java's NewTopic.configs(Map) accepts
+            // one and sends it, and the ABI keeps a NULL value as Java's null
+            // (kafka_admin_NewTopic_put_config), so NewTopicMarshal passes it through
+            // (M15/P13.3 D16).
+            AdminKeyStrings.Validate(topic.Name, nameof(newTopics));
             if (seen.Add(topic.Name))
             {
                 requested.Add(topic);
@@ -1478,6 +1470,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The new-partitions map must not contain a null topic name.", nameof(newPartitions));
             }
 
+            AdminKeyStrings.Validate(entry.Key, nameof(newPartitions));
+
             if (entry.Value is null)
             {
                 throw new ArgumentException(
@@ -1637,6 +1631,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The records-to-delete map must not contain a topic partition with a null topic.",
                     nameof(recordsToDelete));
             }
+
+            AdminKeyStrings.Validate(entry.Key.Topic, nameof(recordsToDelete));
 
             if (entry.Value is null)
             {
@@ -2125,6 +2121,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The configs map must not contain a null resource.", nameof(configs));
             }
 
+            AdminKeyStrings.Validate(entry.Key.Name, nameof(configs));
+
             if (entry.Value is null)
             {
                 throw new ArgumentException(
@@ -2420,6 +2418,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The replica assignment must not contain a null replica.", nameof(replicaAssignment));
             }
 
+            AdminKeyStrings.Validate(entry.Key.Topic, nameof(replicaAssignment));
+
             // The ABI skips a row whose log dir is NULL, which would silently drop this
             // replica. The topic cannot be null — TopicPartitionReplica's constructor
             // rejects that — so the guard lives there and is not restated here.
@@ -2579,6 +2579,8 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException(
                     "The replicas must not contain a null element.", nameof(replicas));
             }
+
+            AdminKeyStrings.Validate(replica.Topic, nameof(replicas));
 
             if (seen.Add(replica))
             {
@@ -2858,6 +2860,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The reassignments map must not contain a topic partition with a null topic.",
                     nameof(reassignments));
             }
+
+            AdminKeyStrings.Validate(entry.Key.Topic, nameof(reassignments));
 
             // ⚠ De-duplicated by the CORE's equality — (topic, partition) by value, the
             // struct's own IEquatable — first occurrence kept, as the core keeps it (M15/P13.3
@@ -3945,6 +3949,14 @@ internal sealed class NativeAdminClient : IDisposable
                     "The client quota alterations must not contain a null element.", nameof(entries));
             }
 
+            // The entity IS the key: both halves of each entry reach the core as C strings. A
+            // null name (the default entity) passes.
+            foreach (KeyValuePair<string, string?> part in alteration.Entity.Entries)
+            {
+                AdminKeyStrings.Validate(part.Key, nameof(entries));
+                AdminKeyStrings.Validate(part.Value, nameof(entries));
+            }
+
             // Every alteration is sent, a repeated entity's included (F7); only the key set
             // is distinct, first occurrence first, as the core keys its callbacks.
             alterations.Add(alteration);
@@ -4155,6 +4167,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The SCRAM credential alterations must not contain a null element.",
                     nameof(alterations));
             }
+
+            AdminKeyStrings.Validate(alteration.User, nameof(alterations));
 
             rows.Add(alteration);
             if (seen.Add(alteration.User))
@@ -4655,6 +4669,10 @@ internal sealed class NativeAdminClient : IDisposable
                     "Provided feature can not be empty.", nameof(featureUpdates));
             }
 
+            // After Java's own blank check, so a name Java calls blank ("\0" is: its trim
+            // strips every char <= ' ') keeps Java's message.
+            AdminKeyStrings.Validate(entry.Key, nameof(featureUpdates));
+
             if (entry.Value is null)
             {
                 throw new ArgumentException(
@@ -4939,6 +4957,13 @@ internal sealed class NativeAdminClient : IDisposable
         // De-duplicated because Java keys its result on a Map, and null-topic-checked because
         // the ABI would skip such an entry silently and desynchronize the parallel arrays.
         List<TopicPartition> keys = DistinctPartitions(partitions, nameof(partitions));
+
+        // Here rather than in DistinctPartitions, whose other callers (electLeaders,
+        // listPartitionReassignments) answer with one callback and key no countdown.
+        foreach (TopicPartition key in keys)
+        {
+            AdminKeyStrings.Validate(key.Topic, nameof(partitions));
+        }
 
         KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation =
             new KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState>(
@@ -5490,6 +5515,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The offsets map must not contain a topic partition with a null topic.",
                     nameof(topicPartitionOffsets));
             }
+
+            AdminKeyStrings.Validate(entry.Key.Topic, nameof(topicPartitionOffsets));
 
             if (entry.Value is null)
             {
@@ -6114,6 +6141,8 @@ internal sealed class NativeAdminClient : IDisposable
                     "The group specs must not contain a null group id.", nameof(groupSpecs));
             }
 
+            AdminKeyStrings.Validate(entry.Key, nameof(groupSpecs));
+
             // A dictionary already guarantees this, but the parameter is an interface a caller
             // may implement; a repeat would make the per-key bridge ambiguous about which
             // spec won, and the core rejects it too.
@@ -6449,6 +6478,7 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException("The resources must not contain a null element.", parameterName);
             }
 
+            AdminKeyStrings.Validate(resource.Name, parameterName);
             if (seen.Add(resource))
             {
                 keys.Add(resource);
@@ -6690,6 +6720,9 @@ internal sealed class NativeAdminClient : IDisposable
                     $"The {elementNoun} must not contain a null element.", parameterName);
             }
 
+            // Before the de-dup: a name that collapses at the ABI would be two keys here and
+            // one callback there (M15/P13.3 (c)).
+            AdminKeyStrings.Validate(name, parameterName);
             if (seen.Add(name))
             {
                 keys.Add(name);
@@ -6760,6 +6793,9 @@ internal sealed class NativeAdminClient : IDisposable
                     "The ACL bindings must not contain a null element.", parameterName);
             }
 
+            AdminKeyStrings.Validate(acl.Pattern.Name, parameterName);
+            AdminKeyStrings.Validate(acl.Entry.Principal, parameterName);
+            AdminKeyStrings.Validate(acl.Entry.Host, parameterName);
             if (seen.Add(acl))
             {
                 keys.Add(acl);
@@ -6789,6 +6825,11 @@ internal sealed class NativeAdminClient : IDisposable
                     "The ACL filters must not contain a null element.", parameterName);
             }
 
+            // A null name / principal / host means "any" and passes; only a string the ABI
+            // would change is rejected.
+            AdminKeyStrings.Validate(filter.PatternFilter.Name, parameterName);
+            AdminKeyStrings.Validate(filter.EntryFilter.Principal, parameterName);
+            AdminKeyStrings.Validate(filter.EntryFilter.Host, parameterName);
             if (seen.Add(filter))
             {
                 keys.Add(filter);

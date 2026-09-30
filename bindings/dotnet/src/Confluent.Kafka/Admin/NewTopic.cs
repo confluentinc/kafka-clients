@@ -208,6 +208,14 @@ public sealed class NewTopic
     /// property, or mutating the dictionary behind it, <b>changes the hash code</b>, exactly
     /// as it does in Java. Do not do either while the topic is a key in a hash-based
     /// collection.
+    /// <para>
+    /// A <see langword="null"/> <b>value</b> is accepted and sent as Java's null config value,
+    /// as <c>configs(Map)</c> sends it — distinct from the empty string. The annotation stays
+    /// <c>string</c> rather than <c>string?</c> so that an ordinary
+    /// <c>Dictionary&lt;string, string&gt;</c> can be assigned without a nullability warning;
+    /// equality, the hash code and <see cref="ToString"/> all handle a null value (M15/P13.3
+    /// D16).
+    /// </para>
     /// </remarks>
     public IReadOnlyDictionary<string, string>? Configs { get; set; }
 

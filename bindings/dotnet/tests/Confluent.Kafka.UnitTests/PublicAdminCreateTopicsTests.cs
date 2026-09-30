@@ -361,6 +361,48 @@ public sealed class PublicAdminCreateTopicsTests
     }
 
     /// <summary>
+    /// M15/P13.3 D16 — Java's <c>NewTopic.configs(Map)</c> accepts a null value and sends it,
+    /// and the ABI keeps a NULL <c>value</c> as that null (header,
+    /// <c>kafka_admin_NewTopic_put_config</c>). So the topic is created, and both the
+    /// <c>createTopics</c> config result and <c>describeConfigs</c> report the entry with a
+    /// <see langword="null"/> value — not the empty string, and not a missing entry.
+    /// </summary>
+    [Fact]
+    public async Task NullConfigValue_IsSentAsJavasNull()
+    {
+        const string Topic = "d16-null-config";
+        const string Name = "retention.ms";
+
+        using MockAdminClient admin = new MockAdminClient(1);
+
+        CreateTopicsResult created = admin.CreateTopics(new[]
+        {
+            new NewTopic(Topic, 1, 1)
+            {
+                Configs = new Dictionary<string, string> { [Name] = null!, ["cleanup.policy"] = "compact" },
+            },
+        });
+
+        await TestTimeout.Run(created.All, s_deadline);
+
+        Config fromCreate = default!;
+        await TestTimeout.Run(async () => fromCreate = await created.Config(Topic), s_deadline);
+        ConfigEntry? createEntry = fromCreate.Get(Name);
+        Assert.NotNull(createEntry);
+        Assert.Null(createEntry!.Value);
+        Assert.Equal("compact", fromCreate.Get("cleanup.policy")!.Value);
+
+        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        DescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
+        Config fromDescribe = default!;
+        await TestTimeout.Run(async () => fromDescribe = await described.Values[resource], s_deadline);
+        ConfigEntry? describeEntry = fromDescribe.Get(Name);
+        Assert.NotNull(describeEntry);
+        Assert.Null(describeEntry!.Value);
+        Assert.Equal("compact", fromDescribe.Get("cleanup.policy")!.Value);
+    }
+
+    /// <summary>
     /// Every precondition fires <b>before</b> any native call, with the .NET exception
     /// the mistake deserves rather than a <see cref="KafkaException"/> (ffi §B5), and
     /// names its parameter.
@@ -382,17 +424,8 @@ public sealed class PublicAdminCreateTopicsTests
             nullElement.Message,
             StringComparison.Ordinal);
 
-        NewTopic withNullConfigValue = new NewTopic("bad-config", 1, 1)
-        {
-            Configs = new Dictionary<string, string> { ["k"] = null! },
-        };
-        ArgumentException nullConfig =
-            Assert.Throws<ArgumentException>(() => admin.CreateTopics(new[] { withNullConfigValue }));
-        Assert.Equal("newTopics", nullConfig.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'k' on topic 'bad-config' must not be null.",
-            nullConfig.Message,
-            StringComparison.Ordinal);
+        // A null configuration VALUE is no longer a precondition failure: it is Java's null,
+        // and it is sent (M15/P13.3 D16 — see NullConfigValue_IsSentAsJavasNull).
 
         // A negative timeout would be silently reinterpreted by the ABI as "unset", so it
         // is rejected rather than forwarded.

@@ -204,6 +204,10 @@ public sealed class MockAdminClient : IAdmin
             throw new ArgumentNullException(nameof(groupId));
         }
 
+        // Here, so that a rejected id blames this overload's own parameter rather than the
+        // batched form's `groupSpecs` (M15/P13.3 (c)).
+        AdminKeyStrings.Validate(groupId, nameof(groupId));
+
         // Java's default overload (Admin.java:912-918): delegate to the batched form
         // with a fresh spec, whose null TopicPartitions means "every committed
         // partition", and let the batched form ignore any partitions on the options.
