@@ -65,6 +65,10 @@ RUN apt-get update && \
 
 COPY --from=builder /build/build/kafka_grpc_server /usr/local/bin/kafka_grpc_server
 
+# The server defaults to 127.0.0.1; bind all interfaces so it is reachable
+# through the container's published port.
+ENV GRPC_HOST=0.0.0.0
+
 EXPOSE 50052
 
 # The Rust BackendPool waits for "listening" on stderr — keep server.cc's

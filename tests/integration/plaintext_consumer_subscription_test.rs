@@ -166,9 +166,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// `auto.offset.reset=earliest` and `enable.auto.commit=false` so the
 /// tests' explicit `seek` / `commit_sync` / `commit_async` calls (where
 /// applicable) are the only offset-state transitions.
-fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -178,6 +178,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -186,22 +187,23 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
 /// Build a `ProducerConfig` aligned with the existing producer
 /// integration tests (acks=all so produced records are durable before
 /// the consumer reads them).
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
-fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -408,7 +410,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     let topic3 = ctx.topic("tblab1"); // does not match "t.*c"
     let group_id = ctx.group_id("g_re2j_pattern_subscription");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     // Java `@BeforeEach`: createTopic("topic", 2, ...).
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic1).await;
@@ -417,7 +419,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -481,12 +483,12 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     let topic1 = ctx.topic("topic1");
     let group_id = ctx.group_id("g_re2j_pattern_subscription_fetch");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic1).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -534,13 +536,13 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     let topic2 = ctx.topic("topic2");
     let group_id = ctx.group_id("g_re2j_pattern_expand");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic1).await;
     ensure_topic_with_2_partitions(&producer, &topic2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -607,12 +609,12 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     let topic2 = ctx.topic("newTopic2");
     let group_id = ctx.group_id("g_topic_id_re2j_offsets");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic1).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -703,14 +705,14 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     let topic2 = ctx.topic("topic2");
     let group_id = ctx.group_id("g_pattern_and_topic");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic1).await;
     ensure_topic_with_2_partitions(&producer, &topic11).await;
     ensure_topic_with_2_partitions(&producer, &topic2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -766,7 +768,7 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
     let group_id = ctx.group_id("g_invalid_regex");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -822,13 +824,13 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     let other_topic = ctx.topic("other");
     let group_id = ctx.group_id("g_expanding");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     // Note: Java creates the `other` topic AFTER the first
     // `awaitAssignment` call. We mirror that ordering below.
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -871,13 +873,13 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     let other_topic = ctx.topic("other");
     let group_id = ctx.group_id("g_shrinking");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &other_topic).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -924,12 +926,12 @@ async fn test_async_consumer_unsubscribe_topic() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_unsubscribe_topic");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -985,7 +987,7 @@ async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
     let group_id = ctx.group_id("g_invalid_topic_unsubscribe");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1010,7 +1012,7 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
     let group_id = ctx.group_id("g_invalid_topic_close");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
