@@ -114,15 +114,15 @@ if [[ "$TEST" == python-* ]]; then
   rustup default stable
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
-  echo "== Building Rust (FFI, release) in $REPO =="
-  cd "$REPO"
+  echo "== Building Rust (FFI, release) in $REPO/rust =="
+  cd "$REPO/rust"
   RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release
   echo "== Creating venv + building the _confluentkafka extension =="
   python3 -m venv "$REPO/venv"
   set +u; . "$REPO/venv/bin/activate"; set -u
   pip install --upgrade pip setuptools wheel
-  ( cd "$REPO/bindings/python" && \
-    CONFLUENT_KAFKA_LIB_DIR="$REPO/target/release" CFLAGS="-O2 -march=native" pip install -e . )
+  ( cd "$REPO/python" && \
+    CONFLUENT_KAFKA_LIB_DIR="$REPO/rust/target/release" CFLAGS="-O2 -march=native" pip install -e . )
   pip install "confluent-kafka>=2.13.0" psutil
   if [ "$TEST" = "python-consumer" ]; then
     KVER="${KAFKA_VERSION:-4.2.0}"
@@ -166,10 +166,10 @@ apt-cache policy librdkafka-dev
 echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 export PATH="$HOME/.cargo/bin:$PATH"
+( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
 cd "$REPO"
-RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release
-cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT="$REPO" -DCMAKE_C_FLAGS="-O2 -march=native"
-cmake --build bindings/c/build --target producer_perf_test
+cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DCMAKE_C_FLAGS="-O2 -march=native"
+cmake --build c/build --target producer_perf_test
 echo "== Bootstrap complete =="
 """
 
@@ -200,17 +200,17 @@ cd "$REPO"
 case "$TEST" in
   rust-native)
     echo "######## Rust native producer perf test ########"
-    METRICS_FILE="$RESULTS/rust-native.jsonl" cargo xtask producer-perf-test --test-threads=1
+    ( cd "$REPO/rust" && METRICS_FILE="$RESULTS/rust-native.jsonl" cargo xtask producer-perf-test --test-threads=1 )
     ;;
   c-v3)
     echo "######## C v3 (Rust client via C FFI) ########"
     mkdir -p "$RESULTS/c-v3"
-    ( cd "$RESULTS/c-v3" && CLIENT_VERSION=3 "$REPO/bindings/c/build/producer_perf_test" )
+    ( cd "$RESULTS/c-v3" && CLIENT_VERSION=3 "$REPO/c/build/producer_perf_test" )
     ;;
   c-v2)
     echo "######## C v2 (librdkafka baseline) ########"
     mkdir -p "$RESULTS/c-v2"
-    ( cd "$RESULTS/c-v2" && CLIENT_VERSION=2 "$REPO/bindings/c/build/producer_perf_test" )
+    ( cd "$RESULTS/c-v2" && CLIENT_VERSION=2 "$REPO/c/build/producer_perf_test" )
     ;;
   java)
     echo "######## Java producer perf test (Apache Kafka client) ########"
@@ -226,7 +226,7 @@ case "$TEST" in
     set +u; . "$REPO/venv/bin/activate"; set -u
     mkdir -p "$RESULTS/python-producer"
     ( cd "$RESULTS/python-producer" && \
-      python "$REPO/bindings/python/test/performance/producer_performance_test.py" )
+      python "$REPO/python/test/performance/producer_performance_test.py" )
     ;;
   python-consumer)
     echo "######## Python consumer perf test (ASYNC=${ASYNC:-False}, CLIENT_VERSION=${CLIENT_VERSION:-3}) ########"
@@ -236,7 +236,7 @@ case "$TEST" in
     export KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
     mkdir -p "$RESULTS/python-consumer"
     ( cd "$RESULTS/python-consumer" && \
-      python "$REPO/bindings/python/test/performance/consumer_performance_test.py" )
+      python "$REPO/python/test/performance/consumer_performance_test.py" )
     ;;
   *)
     echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer)" >&2

@@ -111,7 +111,7 @@ Both are driven by **one `tokio::spawn`ed background task per `AdminClient`
 instance** (mirrors `AdminClientRunnable` — Java has one thread, one
 pending-calls queue, no separate managers). This is simpler than the
 consumer's `RequestManagers` list. Reuse `NetworkClient` / `KafkaClient`
-(`src/network_client.rs`, `src/kafka_client.rs`) exactly as Producer's
+(`rust/src/network_client.rs`, `rust/src/kafka_client.rs`) exactly as Producer's
 `Sender` and Consumer's `NetworkClientDelegate` already do.
 
 **How to apply:**
@@ -155,7 +155,7 @@ needed by the four topic RPCs — note the deferral in the phase self-review.
 ## 4. `KafkaFuture` reuse and required extension
 
 Admin's `*Result` types hold `KafkaFuture<T>` (the public, already-present
-`src/common/kafka_future.rs` type). But on the current branch that type is
+`rust/src/common/kafka_future.rs` type). But on the current branch that type is
 **pre-resolved-only** — it exposes `KafkaFuture::completed(result)`,
 `get`, `get_with_timeout`, `is_done`, and is `Clone`. It has NO completable
 handle, no `all_of`, no `then_apply`, no `when_complete`.
@@ -211,7 +211,7 @@ surface; callers rely on per-key granularity.
 ## 6. Module layout
 
 ```
-src/admin/
+rust/src/admin/
   mod.rs                     # Admin trait
   admin_client.rs            # AdminClient::create(config) factory -> Box<dyn Admin>
   admin_client_config.rs     # AdminClientConfig (plain struct + from_properties, no AbstractConfig)
@@ -226,13 +226,13 @@ src/admin/
 ```
 
 `TopicCollection` lives in `org.apache.kafka.common` (not `admin`) →
-`src/common/topic_collection.rs`. `Node` / `Cluster` / `Uuid` /
-`TopicPartitionInfo` are `common` types (reuse or add under `src/common/`).
-Wire wrappers go in `src/common/requests/`.
+`rust/src/common/topic_collection.rs`. `Node` / `Cluster` / `Uuid` /
+`TopicPartitionInfo` are `common` types (reuse or add under `rust/src/common/`).
+Wire wrappers go in `rust/src/common/requests/`.
 
 ## 7. Wire wrappers require enum wiring
 
-`ConcreteRequest` / `ConcreteResponse` (`src/common/requests/`) are **enums**
+`ConcreteRequest` / `ConcreteResponse` (`rust/src/common/requests/`) are **enums**
 (one variant per API), not traits. Adding a new admin RPC's wire type means:
 
   1. Add a variant to `ConcreteRequest` and `ConcreteResponse`.
@@ -268,7 +268,7 @@ Wire wrappers go in `src/common/requests/`.
 Java ships it in the clients *test* jar, without `@InterfaceAudience.Public`,
 so by the audience rules it would be crate-private. It stays public, together
 with its C and Python bindings, through an entry in
-`xtask/public-audience-allowlist.txt`: the crate has no separate test artifact,
+`rust/xtask/public-audience-allowlist.txt`: the crate has no separate test artifact,
 so the allow-list stands in for Java's test jar.
 
 **The governing principle: mirror Java's `MockAdminClient` method-for-method.**
@@ -321,10 +321,10 @@ trait.
 ## 11. Bindings (C FFI / Python): branch-state caveat
 
 The Milestone-11 plan's bindings sections assume a consumer FFI
-(`src/ffi/consumer.rs`), a `consumer.py`, and an **async C API with a
+(`rust/src/ffi/consumer.rs`), a `consumer.py`, and an **async C API with a
 `CompletionJob`/dispatcher** to mirror. On the
 `dev/admin-client-implementation` branch **none of these exist**: the only
-FFI is `src/ffi/producer.rs`, which is **fully synchronous** (`block_on`
+FFI is `rust/src/ffi/producer.rs`, which is **fully synchronous** (`block_on`
 under a `Mutex`), and the only Python binding is `producer.py`
 (`concurrent.futures.Future` + a completion-callback closure; the batching
 dispatcher lives in the hand-written C extension `_confluentkafka.c`, not

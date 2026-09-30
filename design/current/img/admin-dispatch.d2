@@ -1,6 +1,6 @@
 # The two admin dispatch patterns.
 #
-# Source of truth for design/current/admin-dispatch.svg.
+# Source of truth for design/current/img/admin-dispatch.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: both patterns run on the SAME single background
@@ -9,7 +9,7 @@
 
 direction: down
 
-api: "Admin trait — 46 sync fn (+ async fn close)\neach returns a *Result holding one KafkaFuture<T> per key" {
+api: "Admin trait — 44 RPCs as sync fn (+ async close / close_with_timeout)\neach returns a *Result holding one KafkaFuture<T> per key" {
   style.fill: "#eef6ff"
 }
 
@@ -31,10 +31,10 @@ task: "AdminClientRunnable<C: KafkaClient> — one tokio::spawn" {
   }
 }
 
-providers: "NodeProvider (call.rs) variants:\nController, LeastLoaded, MetadataUpdate,\nConstantNodeId(i32),\nLeastLoadedBrokerOrActiveKController"
+providers: "NodeProvider (internals/call.rs:86) variants:\nController, LeastLoaded, MetadataUpdate,\nConstantNodeId(i32),\nLeastLoadedBrokerOrActiveKController"
 strategies: "Lookup strategies:\nPartitionLeaderStrategy (+ PartitionLeaderCache),\nCoordinatorStrategy (GROUP | TRANSACTION),\nAllBrokersStrategy, StaticBrokerStrategy"
 
-api -> task: "enqueue (channel) + poke wakeup"
+api -> task: "Call over mpsc + poke wakeup"
 task.pattern1 -> providers: "picks the node via" {style.stroke-dash: 3}
 task.pattern2.lookup -> strategies: "one of" {style.stroke-dash: 3}
 
