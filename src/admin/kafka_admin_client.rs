@@ -204,11 +204,20 @@ use crate::leave_group_request_data::MemberIdentity;
 use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsTopics;
 use crate::update_features_request_data::FeatureUpdateKey;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{self, AtomicI32};
 
 /// The default reason sent in a `LeaveGroup` request when an admin removes a
 /// member without providing one. Mirrors
 /// `KafkaAdminClient.DEFAULT_LEAVE_GROUP_REASON`.
 const DEFAULT_LEAVE_GROUP_REASON: &str = "member was removed by an admin";
+
+/// Process-wide counter for deriving a default `client.id`.
+///
+/// Corresponds to Java's `static AtomicInteger ADMIN_CLIENT_ID_SEQUENCE`
+/// (`KafkaAdminClient.java:325`), which starts at 1. Crate-level (not
+/// per-instance) to match Java's static scope, so successive admin clients in
+/// one process get distinct ids.
+static ADMIN_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
@@ -303,8 +312,26 @@ impl KafkaAdminClient {
         Self::new_inner(config).map_err(|e| Error::kafka_message_source("Failed to create new KafkaAdminClient", e))
     }
 
+    /// Returns the configured `client.id`, or generates `adminclient-<n>` when
+    /// it is empty.
+    ///
+    /// Translated from `KafkaAdminClient.generateClientId`
+    /// (`KafkaAdminClient.java:478-483`); `<n>` comes from the process-wide
+    /// [`ADMIN_CLIENT_ID_SEQUENCE`], starting at 1.
+    pub(crate) fn generate_client_id(config: &AdminClientConfig) -> String {
+        let client_id = config.client_id();
+        if !client_id.is_empty() {
+            return client_id.to_string();
+        }
+        format!(
+            "adminclient-{}",
+            ADMIN_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
+        )
+    }
+
     fn new_inner(config: AdminClientConfig) -> Result<Self, Error> {
-        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
+        let client_id = Self::generate_client_id(&config);
+        let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
         let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
@@ -336,7 +363,7 @@ impl KafkaAdminClient {
             Some(config.ssl_config()),
             Some(config.sasl_config()),
             None,
-            config.client_id(),
+            &client_id,
             log_context.clone(),
         )
         // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
@@ -353,7 +380,7 @@ impl KafkaAdminClient {
         let client = NetworkClient::with_metadata_updater(
             selector,
             metadata_manager.updater(),
-            config.client_id(),
+            &client_id,
             100, // max in-flight requests per connection (admin sends <= 1 per node)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
@@ -369,16 +396,20 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
 
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context)?;
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time_provider, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
+    ///
+    /// `client_id` is the resolved id from [`generate_client_id`](Self::generate_client_id),
+    /// not `config.client_id()`, which may be empty.
     fn build<C: KafkaClient + Send + 'static>(
         client: C,
         metadata_manager: AdminMetadataManager,
         config: &AdminClientConfig,
+        client_id: String,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         log_context: LogContext,
     ) -> Result<(Self, AdminClientRunnable<C>), Error> {
@@ -413,7 +444,7 @@ impl KafkaAdminClient {
         );
 
         let shared = Shared {
-            client_id: config.client_id().to_string(),
+            client_id,
             default_api_timeout_ms: config.default_api_timeout_ms(),
             request_timeout_ms: config.request_timeout_ms(),
             admin_tx,
@@ -5182,7 +5213,10 @@ impl KafkaAdminClient {
         config: &AdminClientConfig,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> (Self, AdminClientRunnable<C>) {
-        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
+        // Java's `AdminClientUnitTestEnv` goes through `createInternal`, which
+        // resolves the id with `generateClientId` exactly like production.
+        let client_id = Self::generate_client_id(config);
+        let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
@@ -5192,7 +5226,7 @@ impl KafkaAdminClient {
         metadata_manager.update(cluster, (time_provider)());
         // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
         // fixture, so panicking here is the right test behaviour.
-        Self::build(client, metadata_manager, config, time_provider, log_context)
+        Self::build(client, metadata_manager, config, client_id, time_provider, log_context)
             .expect("the admin retry backoff constants are valid")
     }
 }
@@ -5348,6 +5382,41 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
         (admin, runnable, time, nodes)
+    }
+
+    /// Translated from `KafkaAdminClientTest.testGenerateClientId`.
+    #[test]
+    fn test_generate_client_id() {
+        let conf = |client_id: &str| {
+            let mut props = HashMap::new();
+            props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+            props.insert("client.id".to_string(), client_id.to_string());
+            AdminClientConfig::new(&props).unwrap()
+        };
+        let mut ids = HashSet::new();
+        for _ in 0..10 {
+            let id = KafkaAdminClient::generate_client_id(&conf(""));
+            assert!(!ids.contains(&id), "Got duplicate id {id}");
+            ids.insert(id);
+        }
+        assert_eq!("myCustomId", KafkaAdminClient::generate_client_id(&conf("myCustomId")));
+    }
+
+    /// Beyond Java's test: the generated form is `adminclient-<n>`, and it is
+    /// what the client carries (`Shared.client_id`), not the empty config
+    /// value. Mirrors Java's `testMetricsReporterAutoGeneratedClientId`
+    /// asserting the resolved id on the constructed client.
+    #[test]
+    fn test_generated_client_id_is_used_by_the_client() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let id = admin.shared.client_id.clone();
+        let n = id
+            .strip_prefix("adminclient-")
+            .unwrap_or_else(|| panic!("unexpected generated id {id}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {id}");
+
+        let (admin, _runnable, _time, _nodes) = env_with_props(&[("client.id", "myCustomId")]);
+        assert_eq!(admin.shared.client_id, "myCustomId");
     }
 
     /// Like [`env_with_props`], but with a configurable broker count (mirrors
