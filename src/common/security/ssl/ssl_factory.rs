@@ -749,9 +749,9 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // Cert first, then key.
         let cert_then_key = dir.join("cert_then_key.pem");
         std::fs::write(&cert_then_key, format!("{TEST_CLIENT_CERT}\n{TEST_CLIENT_KEY}")).unwrap();
-        let config = SslConfig {
+        let config = SslConfigs {
             keystore_location: Some(cert_then_key.to_str().unwrap().to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let (certs, _key) = load_client_identity(&config)
             .unwrap()
@@ -761,9 +761,9 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // Key first, then cert (reverse order) — reading must be order-independent.
         let key_then_cert = dir.join("key_then_cert.pem");
         std::fs::write(&key_then_cert, format!("{TEST_CLIENT_KEY}\n{TEST_CLIENT_CERT}")).unwrap();
-        let config = SslConfig {
+        let config = SslConfigs {
             keystore_location: Some(key_then_cert.to_str().unwrap().to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let (certs, _key) = load_client_identity(&config)
             .unwrap()
@@ -779,7 +779,7 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // result), so it exercises the `map_err` branch rather than the
         // `is_empty()` branch.
         let malformed = "-----BEGIN CERTIFICATE-----\nMIIC+jCCAeKgAwIBAgIUH4OJqMpyw6s1/MSNeTBVyyZ3tAww\n";
-        let config = SslConfig { truststore_certificates: Some(malformed.to_string()), ..SslConfig::default() };
+        let config = SslConfigs { truststore_certificates: Some(malformed.to_string()), ..SslConfigs::default() };
         let err = SslFactory::new(&config).unwrap_err().to_string();
         // Our prefix is byte-identical to the pre-migration message; only the
         // interpolated suffix is library-owned text, now sourced from
@@ -799,10 +799,10 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // Passing a cert PEM as the key must skip the cert section, find no key,
         // and produce our exact "No private key found" message — the `Ok(None)`
         // path that `.next().transpose()` preserves (not a parse error).
-        let config = SslConfig {
+        let config = SslConfigs {
             keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
             keystore_key: Some(TEST_CLIENT_CERT.to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let err = load_client_identity(&config).unwrap_err();
         assert_eq!(err.to_string(), "No private key found in inline keystore key");
@@ -815,10 +815,10 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // `rustls_pemfile::private_key` accepted. Parsing does not check the key
         // against the cert chain, so any cert works as the chain.
         let load = |key_pem: &str| -> PrivateKeyDer<'static> {
-            let config = SslConfig {
+            let config = SslConfigs {
                 keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
                 keystore_key: Some(key_pem.to_string()),
-                ..SslConfig::default()
+                ..SslConfigs::default()
             };
             let (_certs, key) = load_client_identity(&config).unwrap().unwrap();
             key
