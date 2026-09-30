@@ -1744,7 +1744,6 @@ where
         use crate::ApiVersions;
         use crate::ClientUtils;
         use crate::DefaultHostResolver;
-        use crate::MetadataRecoveryStrategy;
         use crate::NetworkClient;
         use crate::common::internals::ClusterResourceListeners;
         use crate::common::network::ChannelBuilders;
@@ -1926,8 +1925,10 @@ where
             true, // discover_broker_versions — mirrors Java
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            config.metadata_max_age_ms, // rebootstrap_trigger_ms
-            MetadataRecoveryStrategy::None,
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // both from the config; the default strategy is `rebootstrap`.
+            config.metadata_recovery_rebootstrap_trigger_ms,
+            config.metadata_recovery_strategy,
             log_context,
         );
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
