@@ -189,7 +189,9 @@ struct FfiConsumerHandle {
     /// **current** notify at callback time. The embedder registers it once and
     /// wakes whichever of its calls wait: re-registering it per operation would
     /// let a call the access guard then rejects take it from the call in flight.
-    pending_callback_notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
+    /// Each queued notification holds its own reference to the registration, so
+    /// `user_data` stays valid until that notification has run.
+    pending_callback_notify: Arc<Mutex<Option<Arc<PendingCallbackNotify>>>>,
 }
 
 // SAFETY: `acquire()` guarantees at most one thread/future accesses
@@ -1772,37 +1774,35 @@ struct PendingRebalanceCallback {
 /// Queues `entry` for delivery on the embedder's thread and fires the notify
 /// registered with [`kafka_consumer_Consumer_set_pending_callback_notify`] (on
 /// the dispatcher thread, so it may take the embedder's lock, e.g. the GIL).
-/// Reads the CURRENT notify from the shared slot, since the embedder may
-/// re-register it per blocking op.
+///
+/// The queued job holds its own reference to the registration, so its
+/// `user_data` is released only after the notification has run, even if the
+/// consumer is destroyed (which detaches the dispatcher with jobs still queued)
+/// or the notify is replaced in the meantime.
 fn enqueue_pending(
     queue: &Mutex<std::collections::VecDeque<PendingRebalanceCallback>>,
     completion_tx: &std::sync::mpsc::Sender<CompletionJob>,
-    notify: &Mutex<Option<PendingCallbackNotify>>,
+    notify: &Mutex<Option<Arc<PendingCallbackNotify>>>,
     entry: PendingRebalanceCallback,
 ) {
     queue.lock().unwrap().push_back(entry);
-    let snapshot = notify
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|n| NotifySnapshot { notify: n.notify, user_data: n.target.user_data });
-    if let Some(snapshot) = snapshot {
+    let registration = notify.lock().unwrap().clone();
+    if let Some(registration) = registration {
         enqueue_or_run_inline(
             completion_tx,
             Box::new(move || {
-                // Move the whole `Send` snapshot in (not its raw-pointer field,
-                // which Rust 2021 disjoint capture would grab instead).
-                let snapshot = snapshot;
                 // SAFETY: `notify` + `user_data` were supplied together by the
-                // embedder and remain valid until the consumer is destroyed.
-                unsafe { (snapshot.notify)(snapshot.user_data) };
+                // embedder, and `registration` keeps `user_data` alive (its
+                // destroy hook has not run) for as long as this job holds it.
+                unsafe { (registration.notify)(registration.target.user_data) };
             }),
         );
     }
 }
 
 /// The registered C notification fired when a callback is enqueued. Owns
-/// `user_data` and fires the destroy hook on drop.
+/// `user_data` and fires the destroy hook on drop, which happens once the slot
+/// and every queued notification holding it have let go.
 struct PendingCallbackNotify {
     notify: kafka_consumer_Consumer_pending_callback_notify_t,
     target: CallbackTarget,
@@ -1812,29 +1812,15 @@ struct PendingCallbackNotify {
 // dispatcher thread.
 unsafe impl Send for PendingCallbackNotify {}
 
-/// A registered pending-callback notify, snapshot for a
-/// [`CallerThreadRebalanceListener`]. `Send + Sync` so the listener's futures
-/// are `Send` under `#[async_trait]`; the embedder owns the thread-safety of
-/// `user_data` (as with [`CallbackTarget`]).
-#[derive(Clone, Copy)]
-struct NotifySnapshot {
-    notify: kafka_consumer_Consumer_pending_callback_notify_t,
-    user_data: *mut c_void,
-}
-// SAFETY: the raw `user_data` is the embedder's; the notify only ever runs on
-// the dispatcher thread, and the embedder is responsible for its thread-safety.
-unsafe impl Send for NotifySnapshot {}
-unsafe impl Sync for NotifySnapshot {}
-
 /// Adapts the core [`ConsumerRebalanceListener`] trait to the caller-thread
 /// delivery queue on an [`FfiConsumerHandle`].
 struct CallerThreadRebalanceListener {
     queue: Arc<Mutex<std::collections::VecDeque<PendingRebalanceCallback>>>,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
-    /// The handle's live notify slot, read at callback time so re-registration
-    /// (the async client hops onto the running op's loop each blocking op) takes
-    /// effect. `None` inside means the embedder has not registered one.
-    notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
+    /// The handle's notify slot, read at callback time, so a notify registered
+    /// after subscribing is used. `None` inside means the embedder has not
+    /// registered one.
+    notify: Arc<Mutex<Option<Arc<PendingCallbackNotify>>>>,
 }
 
 impl CallerThreadRebalanceListener {
@@ -1914,8 +1900,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 ) {
     let h = unsafe { handle_ref(consumer) };
-    let mut slot = h.pending_callback_notify.lock().unwrap();
-    *slot = Some(PendingCallbackNotify { notify, target: CallbackTarget { user_data, destroy: user_data_destroy } });
+    let registration =
+        Arc::new(PendingCallbackNotify { notify, target: CallbackTarget { user_data, destroy: user_data_destroy } });
+    let replaced = h.pending_callback_notify.lock().unwrap().replace(registration);
+    // Dropped outside the lock. A replaced registration is released once the
+    // notifications already queued with it have run.
+    drop(replaced);
 }
 
 /// Subscribes to `topics` with a caller-thread rebalance listener (async).
@@ -6577,5 +6567,121 @@ mod tests {
         }
         assert_eq!(notified.load(Ordering::SeqCst), 1);
         unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// The order in which a pending-callback notify and its destroy hook ran.
+    type NotifyLog = Mutex<Vec<&'static str>>;
+
+    unsafe extern "C" fn log_notify(user_data: *mut c_void) {
+        let log = unsafe { &*(user_data as *const NotifyLog) };
+        log.lock().unwrap().push("notify");
+    }
+
+    unsafe extern "C" fn log_notify_destroy(user_data: *mut c_void) {
+        let log = unsafe { &*(user_data as *const NotifyLog) };
+        log.lock().unwrap().push("destroy");
+    }
+
+    /// A log the detached dispatcher may still use after the consumer is gone.
+    fn notify_log() -> (&'static NotifyLog, *mut c_void) {
+        let log: &'static NotifyLog = Box::leak(Box::new(Mutex::new(Vec::new())));
+        (log, log as *const NotifyLog as *mut c_void)
+    }
+
+    fn pending_revoked_entry() -> PendingRebalanceCallback {
+        let (ack, _) = tokio::sync::oneshot::channel();
+        PendingRebalanceCallback { method: PENDING_METHOD_REVOKED, partitions: Vec::new(), ack, job: None }
+    }
+
+    /// Holds the dispatcher on a job until the returned sender is dropped.
+    fn hold_dispatcher(tx: &std::sync::mpsc::Sender<CompletionJob>) -> std::sync::mpsc::Sender<()> {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        enqueue_or_run_inline(
+            tx,
+            Box::new(move || {
+                let _ = gate.recv();
+            }),
+        );
+        release
+    }
+
+    fn wait_for_entries(log: &NotifyLog, count: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while log.lock().unwrap().len() < count && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Replacing the notify while a notification is queued with it releases the
+    /// old `user_data` only after that notification has run.
+    #[test]
+    fn a_replaced_notify_is_released_after_its_queued_notification() {
+        let c = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        let h = unsafe { handle_ref(c) };
+        let (log, log_ptr) = notify_log();
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(c, log_notify, log_ptr, Some(log_notify_destroy))
+        };
+
+        let release = hold_dispatcher(&h.completion_tx);
+        enqueue_pending(
+            &h.pending_rebalance_callbacks,
+            &h.completion_tx,
+            &h.pending_callback_notify,
+            pending_revoked_entry(),
+        );
+        let replacement = AtomicI32::new(0);
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(
+                c,
+                count_notify,
+                &replacement as *const AtomicI32 as *mut c_void,
+                None,
+            )
+        };
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "released while its notification is still queued"
+        );
+
+        drop(release);
+        wait_for_entries(log, 2);
+        assert_eq!(*log.lock().unwrap(), ["notify", "destroy"]);
+        assert_eq!(
+            replacement.load(Ordering::SeqCst),
+            0,
+            "the queued notification used the old notify"
+        );
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// `Consumer_destroy` detaches the dispatcher with jobs still queued: a
+    /// queued notification keeps its registration, so the destroy hook runs
+    /// after it rather than inside `destroy`.
+    #[test]
+    fn destroy_releases_the_notify_after_its_queued_notification() {
+        let c = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        let h = unsafe { handle_ref(c) };
+        let (log, log_ptr) = notify_log();
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(c, log_notify, log_ptr, Some(log_notify_destroy))
+        };
+
+        let release = hold_dispatcher(&h.completion_tx);
+        enqueue_pending(
+            &h.pending_rebalance_callbacks,
+            &h.completion_tx,
+            &h.pending_callback_notify,
+            pending_revoked_entry(),
+        );
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "released by destroy while its notification is still queued"
+        );
+
+        drop(release);
+        wait_for_entries(log, 2);
+        assert_eq!(*log.lock().unwrap(), ["notify", "destroy"]);
     }
 }
