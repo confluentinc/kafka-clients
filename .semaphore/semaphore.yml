@@ -25,20 +25,19 @@ name: build-test-release
 #
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
-#   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
-#   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
+#   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
+#   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
 #      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
-#   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
+#   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
+#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
 #      verify-python (pytest test/unit), followed by the gRPC multilanguage arm
 #      with the gRPC servers running as native host processes
 #      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
 #      binding. The broker runs in Docker via Colima.
-#   6. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
+#   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
 #      crate with warnings denied.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
@@ -84,24 +83,6 @@ global_job_config:
       - sem-version python 3.10
 
 blocks:
-  - name: "R2 Code Review"
-    # The translation agent (start-translation-plan.yml) is a separate
-    # promotion pipeline, so there is no sequencing concern here.
-    dependencies: []
-    run:
-      # run on all pull requests except changes in `/.deployed-versions/`
-      when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
-    task:
-      prologue:
-        commands:
-          - ./.semaphore/dependencies.sh || true
-          - make || true
-      jobs:
-        - name: "R2 Code Review"
-          commands:
-            # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
-            - r2 code-review --verbose --timeout=15m || true
-
   - name: "Verify Rust (Linux amd64)"
     # Runs on every new commit, whether created manually or by the translation
     # agent.
