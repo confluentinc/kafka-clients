@@ -22,7 +22,7 @@ docker run -d --name kafka-examples -p 9092:9092 \
   -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
   -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
   -e KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
-  apache/kafka:4.3.0
+  apache/kafka:latest
 ```
 
 Tear down with `docker rm -f kafka-examples`. This also deletes all topic data.
