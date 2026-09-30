@@ -25,6 +25,8 @@ use crate::common::GroupType;
 ///
 /// Corresponds to `org.apache.kafka.common.GroupState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.GroupState")]
 pub enum GroupState {
     /// An unrecognized group state (e.g. a state newer than this client).
     Unknown,
@@ -69,6 +71,7 @@ impl GroupState {
     ///
     /// Returns [`GroupState::Unknown`] if the name is unrecognized, mirroring
     /// Java's `parse`.
+    #[doc(alias = "org.apache.kafka.common.GroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
             "UNKNOWN" => Self::Unknown,
@@ -92,6 +95,7 @@ impl GroupState {
     ///
     /// Panics if `type` is [`GroupType::Unknown`], mirroring Java's
     /// `IllegalArgumentException("Group type not known")`.
+    #[doc(alias = "org.apache.kafka.common.GroupState#groupStatesForType")]
     pub fn group_states_for_type(group_type: GroupType) -> HashSet<GroupState> {
         match group_type {
             GroupType::Classic => [

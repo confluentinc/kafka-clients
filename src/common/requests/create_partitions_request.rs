@@ -23,12 +23,13 @@ use crate::CreatePartitionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::create_partitions_response_data::CreatePartitionsTopicResult;
 
-use super::{ConcreteRequest, ConcreteResponse, CreatePartitionsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, CreatePartitionsResponse, RequestBuilder};
 
 /// A CreatePartitions request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.CreatePartitionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest")]
 pub struct CreatePartitionsRequest {
     data: CreatePartitionsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct CreatePartitionsRequest {
 
 impl CreatePartitionsRequest {
     /// Creates a new `CreatePartitionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#CreatePartitionsRequest")]
     pub fn new(data: CreatePartitionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#data")]
     pub fn data(&self) -> &CreatePartitionsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl CreatePartitionsRequest {
     /// Mirrors `CreatePartitionsRequest.getErrorResponse` (which uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = CreatePartitionsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -87,6 +91,7 @@ impl CreatePartitionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreatePartitionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -103,14 +108,16 @@ impl std::fmt::Display for CreatePartitionsRequest {
 ///
 /// Corresponds to `CreatePartitionsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct CreatePartitionsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest$Builder")]
+pub struct Builder {
     data: CreatePartitionsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl CreatePartitionsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest$Builder#Builder")]
     pub fn new(data: CreatePartitionsRequestData) -> Self {
         Self {
             data,
@@ -120,7 +127,7 @@ impl CreatePartitionsRequestBuilder {
     }
 }
 
-impl RequestBuilder for CreatePartitionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CREATE_PARTITIONS
     }
@@ -133,8 +140,8 @@ impl RequestBuilder for CreatePartitionsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::CreatePartitions(CreatePartitionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -170,7 +177,7 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
@@ -178,9 +185,9 @@ mod tests {
         data.set_topics(vec![topic("round-trip-topic", 6)]);
         data.set_timeout_ms(30000);
         data.set_validate_only(true);
-        let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
+        let mut request = AbstractRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreatePartitionsRequest::parse(&mut readable, 3).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");
@@ -210,7 +217,7 @@ mod tests {
         data.set_topics(vec![topic("t", 3)]);
         data.set_timeout_ms(100);
         data.set_validate_only(false);
-        let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
+        let mut request = AbstractRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // topics array length + 1
@@ -238,7 +245,7 @@ mod tests {
         data.set_topics(vec![t]);
         data.set_timeout_ms(100);
         data.set_validate_only(false);
-        let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
+        let mut request = AbstractRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // topics array length + 1

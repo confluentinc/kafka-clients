@@ -25,12 +25,14 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult")]
 pub struct UpdateFeaturesResult {
     futures: HashMap<String, KafkaFuture<()>>,
 }
 
 impl UpdateFeaturesResult {
     /// Creates a result from the per-feature futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult#UpdateFeaturesResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -39,6 +41,7 @@ impl UpdateFeaturesResult {
     /// status of individual feature updates.
     ///
     /// Mirrors `values()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.futures
     }
@@ -46,6 +49,7 @@ impl UpdateFeaturesResult {
     /// Return a future which succeeds if all the feature updates succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }
@@ -55,8 +59,8 @@ impl UpdateFeaturesResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {

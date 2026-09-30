@@ -23,7 +23,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,9 +32,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::PartitionInfo;
-use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestBuilder, metadata_request};
 use crate::consumer::ConsumerConfig;
 
 use super::RequestManager;
@@ -83,6 +83,7 @@ pub(crate) struct TopicMetadataRequestManagerInner {
 /// `&self` and route through the interior `Mutex` slot.
 ///
 /// Java: `org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager")]
 pub(crate) struct TopicMetadataRequestManager {
     inner: Arc<TopicMetadataRequestManagerInner>,
 }
@@ -92,6 +93,7 @@ pub(crate) struct TopicMetadataRequestManager {
 /// [`TimedRequestState`] (which itself extends `RequestState` in Java) with
 /// the request's `topic` (or `None` for all-topics), the unique request
 /// id, and a one-shot ack channel used to resolve the caller's future.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager$TopicMetadataRequestState")]
 pub(crate) struct TopicMetadataRequestState {
     /// Unique id used to match responses back to this state object.
     id: u64,
@@ -106,6 +108,9 @@ pub(crate) struct TopicMetadataRequestState {
 impl TopicMetadataRequestState {
     /// Returns the topic this state was created for, or `None` for an
     /// all-topics request. Java: `topic()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager$TopicMetadataRequestState#topic"
+    )]
     pub(crate) fn topic(&self) -> Option<&str> {
         self.topic.as_deref()
     }
@@ -148,6 +153,9 @@ impl TopicMetadataRequestState {
 impl TopicMetadataRequestManager {
     /// Constructs a new [`TopicMetadataRequestManager`]. Mirrors Java's
     /// `TopicMetadataRequestManager(LogContext, Time, ConsumerConfig)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#TopicMetadataRequestManager"
+    )]
     pub(crate) fn new(config: &ConsumerConfig) -> Self {
         let inner = Arc::new(TopicMetadataRequestManagerInner {
             inflight_requests: Mutex::new(Vec::new()),
@@ -197,6 +205,7 @@ impl TopicMetadataRequestManager {
     /// a receiver the caller awaits for the result.
     ///
     /// Java: `requestTopicMetadata(String topic, long deadlineMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#requestTopicMetadata")]
     pub(crate) fn request_topic_metadata(
         &self,
         topic: String,
@@ -209,6 +218,7 @@ impl TopicMetadataRequestManager {
     /// receiver the caller awaits for the result.
     ///
     /// Java: `requestAllTopicsMetadata(long deadlineMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#requestAllTopicsMetadata")]
     pub(crate) fn request_all_topics_metadata(&self, deadline_ms: i64) -> oneshot::Receiver<TopicMetadataResult> {
         Self::enqueue(&self.inner, None, deadline_ms)
     }
@@ -432,43 +442,47 @@ impl TopicMetadataRequestManager {
             state.timed_state.on_send_attempt(current_time_ms);
 
             let builder: Box<dyn RequestBuilder> = match state.topic.as_deref() {
-                Some(topic) => Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
+                Some(topic) => Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
                     Some(&[topic]),
                     self.inner.allow_auto_topic_creation,
                 )),
-                None => Box::new(MetadataRequestBuilder::all_topics()),
+                None => Box::new(metadata_request::Builder::all_topics()),
             };
             let mut req = UnsentRequest::new(builder, None);
             let response_rx = req.take_response_receiver().expect("receiver fresh");
             let inner_for_handler = Arc::clone(&self.inner);
             let request_id = state.id;
+            let handler = req.handler();
             tokio::spawn(async move {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
+                // Java: `handleError(exception, unsent.handler().completionTimeMs())`
+                // on failure, `handleError(e, response.receivedTimeMs())` when the
+                // response cannot be handled — the time the response arrived, not
+                // the time the request was sent.
                 match response_rx.await {
-                    Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                        Some(ConcreteResponse::Metadata(resp)) => {
-                            Self::on_response_inner(&inner_for_handler, request_id, now_ms, &resp);
-                        },
-                        _ => {
-                            Self::on_failure_inner(
-                                &inner_for_handler,
-                                request_id,
-                                now_ms,
-                                Error::new(Errors::UnknownServerError),
-                            );
-                        },
+                    Ok(Ok(mut client_response)) => {
+                        let received_time_ms = client_response.received_time_ms();
+                        match client_response.take_response_body() {
+                            Some(ConcreteResponse::Metadata(resp)) => {
+                                Self::on_response_inner(&inner_for_handler, request_id, received_time_ms, &resp);
+                            },
+                            _ => {
+                                Self::on_failure_inner(
+                                    &inner_for_handler,
+                                    request_id,
+                                    received_time_ms,
+                                    Error::new(Errors::UnknownServerError),
+                                );
+                            },
+                        }
                     },
                     Ok(Err(err)) => {
-                        Self::on_failure_inner(&inner_for_handler, request_id, now_ms, err);
+                        Self::on_failure_inner(&inner_for_handler, request_id, handler.completion_time_ms(), err);
                     },
                     Err(_recv) => {
                         Self::on_failure_inner(
                             &inner_for_handler,
                             request_id,
-                            now_ms,
+                            handler.completion_time_ms(),
                             Error::new(Errors::NetworkError),
                         );
                     },
@@ -504,8 +518,8 @@ impl RequestManager for TopicMetadataRequestManager {
 mod tests {
     use crate::ClientResponse;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
@@ -598,6 +612,9 @@ mod tests {
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestTopicMetadata`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testPoll_SuccessfulRequestTopicMetadata"
+    )]
     async fn test_poll_successful_request_topic_metadata() {
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata("hello".to_string(), i64::MAX);
@@ -607,6 +624,9 @@ mod tests {
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestAllTopicsMetadata`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testPoll_SuccessfulRequestAllTopicsMetadata"
+    )]
     async fn test_poll_successful_request_all_topics_metadata() {
         let mut manager = setup_manager();
         let _rx = manager.request_all_topics_metadata(i64::MAX);
@@ -717,6 +737,7 @@ mod tests {
     /// error, sleep past the deadline, and observe both the inflight
     /// queue empty *and* the future completed exceptionally.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testExpiringRequest")]
     async fn test_expiring_request() {
         let topic = "hello";
         let mut manager = setup_manager();
@@ -803,6 +824,7 @@ mod tests {
     /// Drives the `on_failure(TimeoutException)` path explicitly and
     /// verifies the exponential-backoff math.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testNetworkTimeout")]
     async fn test_network_timeout() {
         let topic = "hello";
         let mut manager = setup_manager();
@@ -885,7 +907,7 @@ mod tests {
             unsent.request_builder().expect("builder still present").api_key()
         );
         // Java cross-checks `assertInstanceOf(MetadataRequest.class, ...)`;
-        // the Rust equivalent is matching on the `ConcreteRequest`
+        // the Rust equivalent is matching on the `AbstractRequest`
         // variant the builder produces.
         let concrete = unsent
             .request_builder_mut()
@@ -893,7 +915,7 @@ mod tests {
             .build()
             .expect("builder.build() ok");
         let metadata = match &concrete {
-            crate::common::requests::ConcreteRequest::Metadata(m) => m,
+            crate::common::requests::AbstractRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),
         };
         let topic_names = metadata.topics().expect("not all-topics");
@@ -919,7 +941,7 @@ mod tests {
             .build()
             .expect("builder.build() ok");
         let metadata = match &concrete {
-            crate::common::requests::ConcreteRequest::Metadata(m) => m,
+            crate::common::requests::AbstractRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),
         };
         assert!(metadata.is_all_topics(), "all-topics request has no topic list");

@@ -24,6 +24,7 @@ use crate::common::{KafkaFuture, Node};
 /// The result of the `Admin::describe_cluster` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult")]
 pub struct DescribeClusterResult {
     nodes: KafkaFuture<Vec<Node>>,
     controller: KafkaFuture<Option<Node>>,
@@ -33,6 +34,7 @@ pub struct DescribeClusterResult {
 
 impl DescribeClusterResult {
     /// Creates a new result from the four per-attribute futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#DescribeClusterResult")]
     pub(crate) fn new(
         nodes: KafkaFuture<Vec<Node>>,
         controller: KafkaFuture<Option<Node>>,
@@ -43,6 +45,7 @@ impl DescribeClusterResult {
     }
 
     /// Returns a future which yields a collection of nodes in the cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#nodes")]
     pub fn nodes(&self) -> KafkaFuture<Vec<Node>> {
         self.nodes.clone()
     }
@@ -50,11 +53,13 @@ impl DescribeClusterResult {
     /// Returns a future which yields the current controller node in the cluster.
     ///
     /// The value is `None` if there is no current controller.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#controller")]
     pub fn controller(&self) -> KafkaFuture<Option<Node>> {
         self.controller.clone()
     }
 
     /// Returns a future which yields the id of the cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#clusterId")]
     pub fn cluster_id(&self) -> KafkaFuture<String> {
         self.cluster_id.clone()
     }
@@ -63,6 +68,7 @@ impl DescribeClusterResult {
     ///
     /// The value is `None` if the operations were not requested or the broker
     /// omitted them.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#authorizedOperations")]
     pub fn authorized_operations(&self) -> KafkaFuture<Option<BTreeSet<AclOperation>>> {
         self.authorized_operations.clone()
     }

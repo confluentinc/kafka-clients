@@ -28,12 +28,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.WriteTxnMarkersResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse")]
 pub struct WriteTxnMarkersResponse {
     data: WriteTxnMarkersResponseData,
 }
 
 impl WriteTxnMarkersResponse {
     /// Creates a new `WriteTxnMarkersResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#WriteTxnMarkersResponse")]
     pub fn new(data: WriteTxnMarkersResponseData) -> Self {
         Self { data }
     }
@@ -44,6 +46,7 @@ impl WriteTxnMarkersResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#data")]
     pub fn data(&self) -> &WriteTxnMarkersResponseData {
         &self.data
     }
@@ -57,6 +60,7 @@ impl WriteTxnMarkersResponse {
     ///
     /// `WriteTxnMarkersResponse` has no throttle time field in its schema, so
     /// Java returns `DEFAULT_THROTTLE_TIME` (0).
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         0
     }
@@ -65,6 +69,7 @@ impl WriteTxnMarkersResponse {
     ///
     /// The response schema does not support a throttle time, so this is a no-op
     /// (mirrors Java's overridden `maybeSetThrottleTimeMs`).
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {}
 
     /// Whether the client should throttle on this response.
@@ -78,6 +83,7 @@ impl WriteTxnMarkersResponse {
     /// Returns the error counts aggregated across all partition results.
     ///
     /// Mirrors `WriteTxnMarkersResponse.errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for marker in &self.data.markers {
@@ -96,6 +102,7 @@ impl WriteTxnMarkersResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = WriteTxnMarkersResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -142,7 +149,7 @@ mod tests {
         data.set_markers(vec![marker_result(42, Errors::None)]);
         let mut concrete = super::super::ConcreteResponse::WriteTxnMarkers(WriteTxnMarkersResponse::new(data));
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = WriteTxnMarkersResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().markers.len(), 1);
         assert_eq!(parsed.data().markers[0].producer_id, 42);

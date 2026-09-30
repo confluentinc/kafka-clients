@@ -27,12 +27,13 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::Op;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity};
 
-use super::{AlterClientQuotasResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterClientQuotasResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterClientQuotas request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AlterClientQuotasRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest")]
 pub struct AlterClientQuotasRequest {
     data: AlterClientQuotasRequestData,
     version: i16,
@@ -40,11 +41,13 @@ pub struct AlterClientQuotasRequest {
 
 impl AlterClientQuotasRequest {
     /// Creates a new `AlterClientQuotasRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#AlterClientQuotasRequest")]
     pub fn new(data: AlterClientQuotasRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#data")]
     pub fn data(&self) -> &AlterClientQuotasRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AlterClientQuotasRequest {
     ///
     /// Mirrors `AlterClientQuotasRequest.entries()`. A `remove` op maps back to
     /// an [`Op`] with a `None` value (quota removal).
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#entries")]
     pub fn entries(&self) -> Vec<ClientQuotaAlteration> {
         let mut entries = Vec::with_capacity(self.data.entries.len());
         for entry_data in &self.data.entries {
@@ -90,6 +94,7 @@ impl AlterClientQuotasRequest {
     /// Returns whether this is a validate-only request.
     ///
     /// Mirrors `AlterClientQuotasRequest.validateOnly()`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#validateOnly")]
     pub fn validate_only(&self) -> bool {
         self.data.validate_only
     }
@@ -98,6 +103,7 @@ impl AlterClientQuotasRequest {
     ///
     /// Mirrors `AlterClientQuotasRequest.getErrorResponse`: every requested
     /// entity is echoed back with the given error code/message.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response_entries = Vec::with_capacity(self.data.entries.len());
         for entry_data in &self.data.entries {
@@ -127,6 +133,7 @@ impl AlterClientQuotasRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterClientQuotasRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -143,18 +150,20 @@ impl std::fmt::Display for AlterClientQuotasRequest {
 ///
 /// Corresponds to `AlterClientQuotasRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct AlterClientQuotasRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest$Builder")]
+pub struct Builder {
     data: AlterClientQuotasRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterClientQuotasRequestBuilder {
+impl Builder {
     /// Creates a builder from a collection of alterations, mirroring
     /// `AlterClientQuotasRequest.Builder(Collection, boolean)`.
     ///
     /// An [`Op`] with a `None` value is encoded as `remove=true` with a
     /// placeholder `value=0.0` (Java's `op.value() == null` handling).
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest$Builder#Builder")]
     pub fn new(entries: &[ClientQuotaAlteration], validate_only: bool) -> Self {
         let mut entry_data = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -190,7 +199,7 @@ impl AlterClientQuotasRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterClientQuotasRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_CLIENT_QUOTAS
     }
@@ -203,8 +212,8 @@ impl RequestBuilder for AlterClientQuotasRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterClientQuotas(AlterClientQuotasRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterClientQuotas(AlterClientQuotasRequest::new(
             self.data.clone(),
             version,
         )))
@@ -233,8 +242,8 @@ mod tests {
                 Op::new("producer_byte_rate", None),
             ],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
-        let ConcreteRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&alterations, false);
+        let AbstractRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected AlterClientQuotas request");
         };
         let ops = &r.data().entries[0].ops;
@@ -255,8 +264,8 @@ mod tests {
                 Op::new("producer_byte_rate", None),
             ],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, true);
-        let ConcreteRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&alterations, true);
+        let AbstractRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected AlterClientQuotas request");
         };
         assert!(r.validate_only());
@@ -274,10 +283,10 @@ mod tests {
             vec![Op::new("consumer_byte_rate", Some(10000.0))],
         )];
         let version = ApiKeys::ALTER_CLIENT_QUOTAS.latest_version();
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.entries(), alterations);
     }
@@ -291,7 +300,7 @@ mod tests {
             entity("u1"),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -327,7 +336,7 @@ mod tests {
             default_entity(),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -355,7 +364,7 @@ mod tests {
             entity(""),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&empty_named, false);
+        let mut builder = Builder::new(&empty_named, false);
         let mut request = builder.build_version(1).unwrap();
         let empty_bytes = request.serialize().unwrap().into_buffer();
         assert_eq!(bytes.as_slice()[7], 0x00, "default entity name must be wire-null");
@@ -377,10 +386,10 @@ mod tests {
             ClientQuotaAlteration::new(entity(""), vec![Op::new("consumer_byte_rate", Some(2.0))]),
         ];
         let version = ApiKeys::ALTER_CLIENT_QUOTAS.latest_version();
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         let decoded = parsed.entries();
         assert_eq!(decoded.len(), 2);

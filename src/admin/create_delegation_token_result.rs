@@ -25,19 +25,22 @@ use crate::common::security::token::delegation::DelegationToken;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.CreateDelegationTokenResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult")]
 pub struct CreateDelegationTokenResult {
     delegation_token: KafkaFuture<DelegationToken>,
 }
 
 impl CreateDelegationTokenResult {
     /// Creates a new result from the delegation-token future.
-    pub fn new(delegation_token: KafkaFuture<DelegationToken>) -> Self {
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult#CreateDelegationTokenResult")]
+    pub(crate) fn new(delegation_token: KafkaFuture<DelegationToken>) -> Self {
         Self { delegation_token }
     }
 
     /// Returns a future which yields a delegation token.
     ///
     /// Mirrors `CreateDelegationTokenResult.delegationToken()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult#delegationToken")]
     pub fn delegation_token(&self) -> &KafkaFuture<DelegationToken> {
         &self.delegation_token
     }

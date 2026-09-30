@@ -103,8 +103,8 @@
 //! - `kafka_admin_ConsumerGroupDescription_has_authorized_operations`
 //! - `kafka_admin_ClassicGroupDescription_has_authorized_operations`
 //! - `kafka_admin_DescribeClusterResult_has_authorized_operations`
-//! - `kafka_admin_TopicPartitionInfo_has_elr`
-//! - `kafka_admin_TopicPartitionInfo_has_last_known_elr`
+//! - `kafka_common_TopicPartitionInfo_has_elr`
+//! - `kafka_common_TopicPartitionInfo_has_last_known_elr`
 //!
 //! An in-band `-1` sentinel was rejected because a count flows straight into
 //! `malloc(count * sizeof *p)` and into `for (size_t i = 0; i < count; i++)`,
@@ -123,7 +123,7 @@
 // FFI function names follow the kafka_<TypeName>_<method> convention with
 // PascalCase type names, which intentionally differs from Rust's snake_case
 // convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use crate::common::requests::DescribeClientQuotasRequest;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -131,6 +131,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::admin::KafkaAdminClient;
 use crate::admin::config_entry::{ConfigSource, ConfigType};
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
@@ -154,21 +155,10 @@ use crate::admin::{
     UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
     UserScramCredentialsDescription,
 };
-// `listClientMetricsResources` (superseded by `listConfigResources` filtered to
-// CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
-// deprecated in
-// Java 4.1 but still part of the `Admin` surface, so the FFI exposes them for
-// parity. A `#![deny(warnings)]` crate needs the `use` item itself allowed, not
-// only the functions.
-#[allow(deprecated)]
-use crate::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, KafkaAdminClient, ListClientMetricsResourcesOptions,
-    ListConsumerGroupsOptions,
-};
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op as ClientQuotaOp,
 };
@@ -954,7 +944,7 @@ fn option_timeout(timeout_ms: i32) -> Option<i32> {
 /// `UNKNOWN` member codes it `0`**, so one constant serves them all; the list
 /// below is the current set of sites rather than the reason the value is `0`:
 /// `ResourceType`, `PatternType`, `AclOperation`, `AclPermissionType`,
-/// `ConfigResourceType` and `ScramMechanism`.
+/// `config_resource::Type` and `ScramMechanism`.
 const UNKNOWN_ENUM_CODE: i8 = 0;
 
 /// Narrows a C `int32_t` enum code to the `int8_t` Kafka defines its enums
@@ -971,7 +961,7 @@ const UNKNOWN_ENUM_CODE: i8 = 0;
 ///   - **The enum has an `UNKNOWN` member.** Fall through to it with
 ///     [`enum_code_or_unknown`]. That extends the enum's own total function
 ///     (Java's `CODE_TO_VALUE.getOrDefault(code, UNKNOWN)`, mirrored by
-///     `AclOperation::from_code` and `ConfigResourceType::for_id`) to the wider
+///     `AclOperation::from_code` and `config_resource::Type::for_id`) to the wider
 ///     C input type.
 ///   - **The enum has none** — the quota filter's `MATCH_TYPE_*` are bare wire
 ///     constants, and `AlterConfigOp::OpType::for_id` returns an `Option` —
@@ -1399,7 +1389,7 @@ unsafe fn read_records_to_delete(
         let offset = unsafe { *before_offsets.add(i) };
         out.insert(
             TopicPartition::new(name, partition),
-            RecordsToDelete::with_before_offset(offset),
+            RecordsToDelete::before_offset_with_offset(offset),
         );
     }
     out
@@ -1997,11 +1987,11 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
 
 /// Opaque handle to a `TopicPartitionInfo`.
 #[repr(C)]
-pub struct kafka_admin_TopicPartitionInfo_t {
+pub struct kafka_common_TopicPartitionInfo_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_TopicPartitionInfo_t`].
+/// Backing state for [`kafka_common_TopicPartitionInfo_t`].
 ///
 /// Node lists are owned here so [`kafka_common_Node_t`] pointers handed out by
 /// the getters stay valid for the lifetime of the owning result handle.
@@ -2029,12 +2019,12 @@ impl TopicPartitionInfoInner {
     }
 }
 
-/// Casts a `*const kafka_admin_TopicPartitionInfo_t` to a reference.
+/// Casts a `*const kafka_common_TopicPartitionInfo_t` to a reference.
 ///
 /// # Safety
 ///
 /// `info` must be a non-null borrowed pointer from a `TopicDescription` getter.
-unsafe fn partition_info_ref(info: *const kafka_admin_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
+unsafe fn partition_info_ref(info: *const kafka_common_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
     unsafe { &*(info as *const TopicPartitionInfoInner) }
 }
 
@@ -2056,8 +2046,8 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.partition
 }
@@ -2068,8 +2058,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.leader.as_ref() {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
@@ -2083,8 +2073,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.replicas.len() as i32
 }
@@ -2095,8 +2085,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(&unsafe { partition_info_ref(info) }.replicas, index)
@@ -2108,8 +2098,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.isr.len() as i32
 }
@@ -2120,8 +2110,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(&unsafe { partition_info_ref(info) }.isr, index)
@@ -2129,14 +2119,14 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
 
 /// Returns the number of eligible leader replicas, always non-negative. An
 /// absent ELR set (Java's `elr()` returns null) and a reported-but-empty one both
-/// count 0; use [`kafka_admin_TopicPartitionInfo_has_elr`] to tell them apart.
+/// count 0; use [`kafka_common_TopicPartitionInfo_has_elr`] to tell them apart.
 ///
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }
         .elr
@@ -2151,7 +2141,9 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kafka_admin_TopicPartitionInfo_t) -> bool {
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
+) -> bool {
     unsafe { partition_info_ref(info) }.elr.is_some()
 }
 
@@ -2162,8 +2154,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kaf
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.elr.as_ref() {
@@ -2175,14 +2167,14 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
 /// Returns the number of last-known eligible leader replicas, always
 /// non-negative. An absent set (Java's `lastKnownElr()` returns null) and a
 /// reported-but-empty one both count 0; use
-/// [`kafka_admin_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
+/// [`kafka_common_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
 ///
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }
         .last_known_elr
@@ -2197,8 +2189,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_last_known_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> bool {
     unsafe { partition_info_ref(info) }.last_known_elr.is_some()
 }
@@ -2210,8 +2202,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.last_known_elr.as_ref() {
@@ -2317,12 +2309,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     description: *const kafka_admin_TopicDescription_t,
     index: i32,
-) -> *const kafka_admin_TopicPartitionInfo_t {
+) -> *const kafka_common_TopicPartitionInfo_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { description_ref(description) }.partitions.get(index as usize) {
-        Some(info) => info as *const TopicPartitionInfoInner as *const kafka_admin_TopicPartitionInfo_t,
+        Some(info) => info as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t,
         None => std::ptr::null(),
     }
 }
@@ -4167,7 +4159,7 @@ unsafe fn read_config_resources(
             continue;
         }
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
+        let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
         out.push(ConfigResource::new(resource_type, name));
     }
     out
@@ -4249,7 +4241,7 @@ unsafe fn read_alter_config_ops(
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
         let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
@@ -5752,175 +5744,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
 /// # Safety
 ///
 /// `type_codes` must be null or have `count` readable entries.
-unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<ConfigResourceType> {
+unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<config_resource::Type> {
     unsafe { read_i32s(type_codes, count) }
         .into_iter()
-        .map(|code| ConfigResourceType::for_id(enum_code_or_unknown(code)))
+        .map(|code| config_resource::Type::for_id(enum_code_or_unknown(code)))
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// listClientMetricsResources
-// ---------------------------------------------------------------------------
-
-/// Opaque handle to a `ListClientMetricsResourcesResult`.
-#[repr(C)]
-pub struct kafka_admin_ListClientMetricsResourcesResult_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_admin_ListClientMetricsResourcesResult_t`].
-///
-/// Java's `ClientMetricsResourceListing` carries only a name, so the handle
-/// exposes names directly instead of a sub-handle per listing. There is a single
-/// future, hence no per-key errors.
-struct ListClientMetricsResourcesResultInner {
-    names: Vec<CString>,
-}
-
-/// Flattens the client-metrics resource listings into the C handle, sorted by
-/// name (Java returns an unordered collection, but C indexes it).
-#[allow(deprecated)]
-fn box_list_client_metrics_resources_result(
-    listings: Vec<ClientMetricsResourceListing>,
-) -> *mut kafka_admin_ListClientMetricsResourcesResult_t {
-    let mut names: Vec<CString> = listings.iter().map(|l| to_cstring(l.name())).collect();
-    names.sort();
-    Box::into_raw(Box::new(ListClientMetricsResourcesResultInner { names }))
-        as *mut kafka_admin_ListClientMetricsResourcesResult_t
-}
-
-/// Casts a `*const kafka_admin_ListClientMetricsResourcesResult_t` to a
-/// reference.
-///
-/// # Safety
-///
-/// `result` must be a non-null handle from a `list_client_metrics_resources`
-/// call.
-unsafe fn list_client_metrics_resources_result_ref(
-    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
-) -> &'static ListClientMetricsResourcesResultInner {
-    unsafe { &*(result as *const ListClientMetricsResourcesResultInner) }
-}
-
-/// Returns the number of client-metrics resources.
-///
-/// # Safety
-///
-/// `result` must be a valid `list_client_metrics_resources` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_count(
-    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
-) -> i32 {
-    unsafe { list_client_metrics_resources_result_ref(result) }.names.len() as i32
-}
-
-/// Returns the name of the resource at `index` (borrowed), or null if out of
-/// range. Entries are sorted by name.
-///
-/// # Safety
-///
-/// `result` must be a valid `list_client_metrics_resources` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_get_name(
-    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
-    index: i32,
-) -> *const c_char {
-    cstring_at(&unsafe { list_client_metrics_resources_result_ref(result) }.names, index)
-}
-
-/// Destroys a `list_client_metrics_resources` result handle. Safe with null
-/// (no-op).
-///
-/// # Safety
-///
-/// `result` must be null or a valid `list_client_metrics_resources` result
-/// handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_destroy(
-    result: *mut kafka_admin_ListClientMetricsResourcesResult_t,
-) {
-    if !result.is_null() {
-        unsafe { drop(Box::from_raw(result as *mut ListClientMetricsResourcesResultInner)) };
-    }
-}
-
-/// Completion callback for
-/// [`kafka_admin_AdminClient_list_client_metrics_resources_async`].
-///
-/// Exactly one of `result` / `error` is non-null and the callback owns it.
-pub type kafka_admin_AdminClient_list_client_metrics_resources_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListClientMetricsResourcesResult_t, *mut kafka_common_Error_t, *mut c_void);
-
-/// Lists the cluster's client-metrics resources (synchronous).
-///
-/// Mirrors Java's `Admin.listClientMetricsResources`, which is **deprecated
-/// since 4.1** in favour of `listConfigResources` filtered to
-/// `CLIENT_METRICS`; it is exposed for parity. On success writes a
-/// [`kafka_admin_ListClientMetricsResourcesResult_t`] to `*out_result` (free with
-/// [`kafka_admin_ListClientMetricsResourcesResult_destroy`]) and returns null.
-/// Java has a single future here, so any failure is a call failure and is
-/// returned.
-///
-/// # Safety
-///
-/// `admin` must be a valid handle; `out_result` must be null or writable.
-#[unsafe(no_mangle)]
-#[allow(deprecated)]
-pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
-    admin: *const kafka_admin_AdminClient_t,
-    timeout_ms: i32,
-    out_result: *mut *mut kafka_admin_ListClientMetricsResourcesResult_t,
-) -> *mut kafka_common_Error_t {
-    let options = ListClientMetricsResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome =
-        unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources_with_options(options).all())) };
-    unsafe { finish_sync(outcome, out_result, box_list_client_metrics_resources_result) }
-}
-
-/// Lists the cluster's client-metrics resources asynchronously. See
-/// [`kafka_admin_AdminClient_list_client_metrics_resources`].
-///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
-///
-/// # Safety
-///
-/// `admin` must be a valid handle from an admin-client constructor.
-#[unsafe(no_mangle)]
-#[allow(deprecated)]
-pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_async(
-    admin: *const kafka_admin_AdminClient_t,
-    timeout_ms: i32,
-    callback: kafka_admin_AdminClient_list_client_metrics_resources_callback_t,
-    user_data: *mut c_void,
-) {
-    let options = ListClientMetricsResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    unsafe {
-        admin_async_value_op(
-            admin,
-            user_data,
-            move |a| Ok(a.list_client_metrics_resources_with_options(options).all()),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(listings) => (box_list_client_metrics_resources_result(listings), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
-            },
-        )
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -8566,118 +8394,6 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     unsafe { group_listing_ref(listing) }.is_simple_consumer_group
 }
 
-/// Opaque handle to a `ConsumerGroupListing` (Java's
-/// `org.apache.kafka.clients.admin.ConsumerGroupListing`, deprecated since 4.1
-/// in favour of `GroupListing`).
-///
-/// Borrowed from the owning `list_consumer_groups` result handle; valid until
-/// that handle is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_admin_ConsumerGroupListing_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_admin_ConsumerGroupListing_t`].
-struct ConsumerGroupListingInner {
-    group_id_c: CString,
-    is_simple_consumer_group: bool,
-    group_state_c: Option<CString>,
-    state_c: Option<CString>,
-    group_type_c: Option<CString>,
-}
-
-impl ConsumerGroupListingInner {
-    #[allow(deprecated)]
-    fn new(listing: &ConsumerGroupListing) -> Self {
-        Self {
-            group_id_c: to_cstring(listing.group_id()),
-            is_simple_consumer_group: listing.is_simple_consumer_group(),
-            group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
-            state_c: listing.state().map(|s| to_cstring(s.name())),
-            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
-        }
-    }
-}
-
-/// Casts a `*const kafka_admin_ConsumerGroupListing_t` to a reference.
-///
-/// # Safety
-///
-/// `listing` must be a non-null borrowed pointer from a `list_consumer_groups`
-/// result getter.
-unsafe fn consumer_group_listing_ref(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> &'static ConsumerGroupListingInner {
-    unsafe { &*(listing as *const ConsumerGroupListingInner) }
-}
-
-/// Returns the consumer group id (borrowed). Java's `groupId()`.
-///
-/// # Safety
-///
-/// `listing` must be a valid borrowed consumer-group-listing pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> *const c_char {
-    unsafe { consumer_group_listing_ref(listing) }.group_id_c.as_ptr()
-}
-
-/// Returns whether the group is simple. Java's `isSimpleConsumerGroup()`.
-///
-/// # Safety
-///
-/// `listing` must be a valid borrowed consumer-group-listing pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_group(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> bool {
-    unsafe { consumer_group_listing_ref(listing) }.is_simple_consumer_group
-}
-
-/// Returns the `GroupState` name (borrowed), or null when Java's
-/// `groupState()` is `Optional.empty()`.
-///
-/// # Safety
-///
-/// `listing` must be a valid borrowed consumer-group-listing pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.group_state_c)
-}
-
-/// Returns the deprecated `ConsumerGroupState` name (borrowed), or null when
-/// Java's `state()` is `Optional.empty()`.
-///
-/// This is Java's deprecated `state()`, which maps `groupState()` through
-/// `ConsumerGroupState.parse(...)`; the two therefore differ only for the group
-/// states `ConsumerGroupState` does not model.
-///
-/// # Safety
-///
-/// `listing` must be a valid borrowed consumer-group-listing pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_state(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.state_c)
-}
-
-/// Returns the `GroupType` name (borrowed), or null when Java's `type()` is
-/// `Optional.empty()`.
-///
-/// # Safety
-///
-/// `listing` must be a valid borrowed consumer-group-listing pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_type(
-    listing: *const kafka_admin_ConsumerGroupListing_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.group_type_c)
-}
-
 /// Opaque handle to a `MemberAssignment` (Java's
 /// `org.apache.kafka.clients.admin.MemberAssignment`).
 ///
@@ -8991,7 +8707,6 @@ struct ConsumerGroupDescriptionInner {
     members: Vec<MemberDescriptionInner>,
     partition_assignor_c: CString,
     group_type_c: CString,
-    state_c: CString,
     group_state_c: CString,
     coordinator: Option<Node>,
     /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
@@ -9009,7 +8724,6 @@ impl ConsumerGroupDescriptionInner {
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
             partition_assignor_c: to_cstring(description.partition_assignor()),
             group_type_c: to_cstring(description.group_type().name()),
-            state_c: to_cstring(description.state().name()),
             group_state_c: to_cstring(description.group_state().name()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
@@ -9111,20 +8825,6 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
     unsafe { consumer_group_description_ref(description) }.group_type_c.as_ptr()
-}
-
-/// Returns the deprecated `ConsumerGroupState` name (borrowed), e.g.
-/// `"Stable"`. Java's deprecated `state()`, which maps `groupState()` through
-/// `ConsumerGroupState.parse(...)`.
-///
-/// # Safety
-///
-/// `description` must be a valid borrowed consumer-group-description pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
-    description: *const kafka_admin_ConsumerGroupDescription_t,
-) -> *const c_char {
-    unsafe { consumer_group_description_ref(description) }.state_c.as_ptr()
 }
 
 /// Returns the `GroupState` name (borrowed), e.g. `"Stable"`. Java's
@@ -9664,9 +9364,6 @@ type GroupVoidOutcomes = HashMap<String, Result<(), Error>>;
 type PartitionVoidOutcomes = HashMap<TopicPartition, Result<(), Error>>;
 /// The `valid()` listings and unkeyed `errors()` of `listGroups`.
 type ListGroupsOutcome = (Vec<GroupListing>, Vec<Error>);
-/// The `valid()` listings and unkeyed `errors()` of `listConsumerGroups`.
-#[allow(deprecated)]
-type ListConsumerGroupsOutcome = (Vec<ConsumerGroupListing>, Vec<Error>);
 /// Per-group outcomes of `describeConsumerGroups`.
 type DescribeConsumerGroupsOutcomes = HashMap<String, Result<ConsumerGroupDescription, Error>>;
 /// Per-group outcomes of `describeClassicGroups`.
@@ -9818,31 +9515,6 @@ unsafe fn list_groups_options(
                 .into_iter()
                 .collect(),
         )
-        .with_types(unsafe { read_group_types(types, type_count) })
-        .set_timeout_ms(option_timeout(timeout_ms))
-}
-
-/// Builds `ListConsumerGroupsOptions` from the flat C option parameters.
-///
-/// Java also has the deprecated `inStates(Set<ConsumerGroupState>)`, which is
-/// defined as `inGroupStates(states.map(s -> GroupState.parse(s.toString())))`.
-/// The two therefore accept the same strings here, so C exposes only
-/// `group_states`; a caller holding `ConsumerGroupState` names passes them in
-/// the same array.
-///
-/// # Safety
-///
-/// The two name arrays must be null or have their stated counts.
-#[allow(deprecated)]
-unsafe fn list_consumer_groups_options(
-    group_states: *const *const c_char,
-    group_state_count: i32,
-    types: *const *const c_char,
-    type_count: i32,
-    timeout_ms: i32,
-) -> ListConsumerGroupsOptions {
-    ListConsumerGroupsOptions::new()
-        .in_group_states(unsafe { read_group_states(group_states, group_state_count) })
         .with_types(unsafe { read_group_types(types, type_count) })
         .set_timeout_ms(option_timeout(timeout_ms))
 }
@@ -10080,23 +9752,6 @@ fn submit_list_groups(
     }
 }
 
-/// Submits `listConsumerGroups` and returns a future over its `valid()` /
-/// `errors()` split.
-#[allow(deprecated)]
-fn submit_list_consumer_groups(
-    admin: &dyn Admin,
-    options: ListConsumerGroupsOptions,
-) -> impl std::future::Future<Output = Result<ListConsumerGroupsOutcome, Error>> + Send + use<> {
-    let result = admin.list_consumer_groups_with_options(options);
-    let valid = result.valid();
-    let errors = result.errors();
-    async move {
-        let valid = valid.get().await;
-        let errors = errors.get().await;
-        Ok((valid?, errors?))
-    }
-}
-
 /// Submits `describeConsumerGroups` and returns the collect-all future over its
 /// per-group futures.
 fn submit_describe_consumer_groups(
@@ -10242,7 +9897,7 @@ fn submit_remove_members_from_consumer_group(
 //      `deleteConsumerGroupOffsets`, `removeMembersFromConsumerGroup`)
 //   - one future split into `valid()` + `errors()`
 //                                   -> two independent lists, no key at all
-//     (`listGroups`, `listConsumerGroups`)
+//     (`listGroups`)
 // ---------------------------------------------------------------------------
 
 /// Opaque handle to a flattened `ListGroupsResult`.
@@ -10360,117 +10015,6 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka_admin_ListGroupsResult_t) {
     if !result.is_null() {
         unsafe { drop(Box::from_raw(result as *mut ListGroupsResultInner)) };
-    }
-}
-
-/// Opaque handle to a flattened `ListConsumerGroupsResult`.
-#[repr(C)]
-pub struct kafka_admin_ListConsumerGroupsResult_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_admin_ListConsumerGroupsResult_t`]. Same
-/// `valid()` / `errors()` split as [`ListGroupsResultInner`].
-struct ListConsumerGroupsResultInner {
-    valid: Vec<ConsumerGroupListingInner>,
-    errors: Vec<ErrorInner>,
-}
-
-/// Flattens the `listConsumerGroups` outcome into the C handle.
-fn box_list_consumer_groups_result(outcome: ListConsumerGroupsOutcome) -> *mut kafka_admin_ListConsumerGroupsResult_t {
-    let (valid, errors) = outcome;
-    Box::into_raw(Box::new(ListConsumerGroupsResultInner {
-        valid: valid.iter().map(ConsumerGroupListingInner::new).collect(),
-        errors: errors.into_iter().map(error_inner).collect(),
-    })) as *mut kafka_admin_ListConsumerGroupsResult_t
-}
-
-/// Casts a `*const kafka_admin_ListConsumerGroupsResult_t` to a reference.
-///
-/// # Safety
-///
-/// `result` must be a non-null handle from a `list_consumer_groups` call.
-unsafe fn list_consumer_groups_result_ref(
-    result: *const kafka_admin_ListConsumerGroupsResult_t,
-) -> &'static ListConsumerGroupsResultInner {
-    unsafe { &*(result as *const ListConsumerGroupsResultInner) }
-}
-
-/// Returns the number of successfully listed consumer groups (Java's
-/// `valid()`).
-///
-/// # Safety
-///
-/// `result` must be a valid `list_consumer_groups` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_valid_count(
-    result: *const kafka_admin_ListConsumerGroupsResult_t,
-) -> i32 {
-    unsafe { list_consumer_groups_result_ref(result) }.valid.len() as i32
-}
-
-/// Returns the listing at `index` (borrowed), or null if out of range.
-///
-/// # Safety
-///
-/// `result` must be a valid `list_consumer_groups` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_valid(
-    result: *const kafka_admin_ListConsumerGroupsResult_t,
-    index: i32,
-) -> *const kafka_admin_ConsumerGroupListing_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    match unsafe { list_consumer_groups_result_ref(result) }.valid.get(index as usize) {
-        Some(listing) => listing as *const ConsumerGroupListingInner as *const kafka_admin_ConsumerGroupListing_t,
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns the number of per-broker errors (Java's `errors()`).
-///
-/// # Safety
-///
-/// `result` must be a valid `list_consumer_groups` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_error_count(
-    result: *const kafka_admin_ListConsumerGroupsResult_t,
-) -> i32 {
-    unsafe { list_consumer_groups_result_ref(result) }.errors.len() as i32
-}
-
-/// Returns the error at `index` (borrowed), or null if out of range. Do not
-/// destroy it.
-///
-/// **This list is not parallel to the listings** — see
-/// [`kafka_admin_ListGroupsResult_get_error`], which has the same shape.
-///
-/// # Safety
-///
-/// `result` must be a valid `list_consumer_groups` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_error(
-    result: *const kafka_admin_ListConsumerGroupsResult_t,
-    index: i32,
-) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    error_ptr(unsafe { list_consumer_groups_result_ref(result) }.errors.get(index as usize))
-}
-
-/// Destroys a `list_consumer_groups` result handle. Safe with null (no-op).
-///
-/// # Safety
-///
-/// `result` must be null or a valid `list_consumer_groups` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_destroy(
-    result: *mut kafka_admin_ListConsumerGroupsResult_t,
-) {
-    if !result.is_null() {
-        unsafe { drop(Box::from_raw(result as *mut ListConsumerGroupsResultInner)) };
     }
 }
 
@@ -11438,114 +10982,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
 }
 
 // ---------------------------------------------------------------------------
-// listConsumerGroups
-// ---------------------------------------------------------------------------
-
-/// Completion callback for
-/// [`kafka_admin_AdminClient_list_consumer_groups_async`].
-///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListConsumerGroupsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`.
-pub type kafka_admin_AdminClient_list_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
-
-/// Lists the consumer groups in the cluster, blocking until the listing has
-/// resolved (synchronous).
-///
-/// This is `listConsumerGroups(ListConsumerGroupsOptions)`, which is
-/// **deprecated since Kafka 4.1** in favour of
-/// [`kafka_admin_AdminClient_list_groups`] — that call returns `GroupListing`s
-/// covering every group type, not just consumer groups. It is exposed here for
-/// parity with the Java `Admin` surface, which still declares it.
-///
-/// On success writes a [`kafka_admin_ListConsumerGroupsResult_t`] to
-/// `*out_result` (free it with
-/// [`kafka_admin_ListConsumerGroupsResult_destroy`]) and returns null. A
-/// per-broker failure is not a call failure; see
-/// [`kafka_admin_AdminClient_list_groups`], which has the same result shape.
-///
-/// # Parameters
-///
-/// - `group_states` / `group_state_count`: filter by `GroupState`, using Java's
-///   `toString()` names. Java's deprecated `inStates(Set<ConsumerGroupState>)`
-///   is defined as `inGroupStates(...)` over `GroupState.parse(...)` of those
-///   same names, so a caller holding `ConsumerGroupState` names passes them in
-///   this array too.
-/// - `types` / `type_count`: filter by `GroupType`, using Java's `toString()`
-///   names.
-/// - `timeout_ms`: per-request timeout, or negative for the client default.
-///
-/// # Safety
-///
-/// `admin` must be a valid handle; each name array must be null or have its
-/// stated number of valid C strings; `out_result` must be null or writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups(
-    admin: *const kafka_admin_AdminClient_t,
-    group_states: *const *const c_char,
-    group_state_count: i32,
-    types: *const *const c_char,
-    type_count: i32,
-    timeout_ms: i32,
-    out_result: *mut *mut kafka_admin_ListConsumerGroupsResult_t,
-) -> *mut kafka_common_Error_t {
-    let options =
-        unsafe { list_consumer_groups_options(group_states, group_state_count, types, type_count, timeout_ms) };
-    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_consumer_groups(a, options))) };
-    unsafe { finish_sync(outcome, out_result, box_list_consumer_groups_result) }
-}
-
-/// Lists the consumer groups asynchronously. See
-/// [`kafka_admin_AdminClient_list_consumer_groups`].
-///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
-///
-/// # Safety
-///
-/// `admin` must be a valid handle; each name array must be null or have its
-/// stated number of valid C strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups_async(
-    admin: *const kafka_admin_AdminClient_t,
-    group_states: *const *const c_char,
-    group_state_count: i32,
-    types: *const *const c_char,
-    type_count: i32,
-    timeout_ms: i32,
-    callback: kafka_admin_AdminClient_list_consumer_groups_callback_t,
-    user_data: *mut c_void,
-) {
-    let options =
-        unsafe { list_consumer_groups_options(group_states, group_state_count, types, type_count, timeout_ms) };
-    unsafe {
-        admin_async_future_op(
-            admin,
-            user_data,
-            move |a| Ok(submit_list_consumer_groups(a, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcome) => (box_list_consumer_groups_result(outcome), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
-            },
-        )
-    };
-}
-
-// ---------------------------------------------------------------------------
 // describeConsumerGroups
 // ---------------------------------------------------------------------------
 
@@ -12380,7 +11816,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §3 the C
 // spelling is `kafka_common_*`. `kafka_common_Node_t` and
 // `kafka_common_Error_t` are the existing precedent. Naming these
-// `kafka_admin_*` would repeat the `kafka_consumer_TopicPartition_t` mistake
+// `kafka_admin_*` would repeat the `kafka_common_TopicPartition_t` mistake
 // in a second public surface.
 //
 // The three handles below are **output-only and borrowed**: they are interior
@@ -12395,7 +11831,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // `AccessControlEntry`) are flattened onto the binding rather than getting
 // handles of their own, following B2's treatment of
 // `LogDirDescription.ReplicaInfo`. The accessor names keep Java's field names,
-// so `kafka_common_AclBinding_resource_name` is `pattern().name()` and
+// so `kafka_common_acl_AclBinding_resource_name` is `pattern().name()` and
 // `..._principal` is `entry().principal()`.
 //
 // All four ACL enums have a numeric `code()` in Java
@@ -12411,11 +11847,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// Borrowed from the owning `create_acls` / `describe_acls` / `delete_acls`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_AclBinding_t {
+pub struct kafka_common_acl_AclBinding_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_AclBinding_t`].
+/// Backing state for [`kafka_common_acl_AclBinding_t`].
 ///
 /// `AclBinding`'s two components are flattened: `pattern()`'s three fields and
 /// `entry()`'s four. Every string is non-nullable on a *binding* (only a
@@ -12461,17 +11897,17 @@ impl AclBindingInner {
         )
     }
 
-    fn as_ptr(&self) -> *const kafka_common_AclBinding_t {
-        self as *const AclBindingInner as *const kafka_common_AclBinding_t
+    fn as_ptr(&self) -> *const kafka_common_acl_AclBinding_t {
+        self as *const AclBindingInner as *const kafka_common_acl_AclBinding_t
     }
 }
 
-/// Casts a `*const kafka_common_AclBinding_t` to a reference.
+/// Casts a `*const kafka_common_acl_AclBinding_t` to a reference.
 ///
 /// # Safety
 ///
 /// `binding` must be a non-null borrowed pointer from an ACL result getter.
-unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static AclBindingInner {
+unsafe fn acl_binding_ref(binding: *const kafka_common_acl_AclBinding_t) -> &'static AclBindingInner {
     unsafe { &*(binding as *const AclBindingInner) }
 }
 
@@ -12485,7 +11921,9 @@ unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.resource_type
 }
 
@@ -12495,8 +11933,8 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const k
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
-    binding: *const kafka_common_AclBinding_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_name(
+    binding: *const kafka_common_acl_AclBinding_t,
 ) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.resource_name_c.as_ptr()
 }
@@ -12511,7 +11949,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.pattern_type
 }
 
@@ -12522,7 +11962,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const ka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_principal(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
 }
 
@@ -12532,7 +11974,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_host(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
 }
 
@@ -12547,7 +11991,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_comm
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_operation(binding: *const kafka_common_acl_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.operation
 }
 
@@ -12560,7 +12004,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_permission_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.permission_type
 }
 
@@ -12570,11 +12016,11 @@ pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const
 /// Borrowed from the owning `delete_acls` result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_AclBindingFilter_t {
+pub struct kafka_common_acl_AclBindingFilter_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_AclBindingFilter_t`].
+/// Backing state for [`kafka_common_acl_AclBindingFilter_t`].
 ///
 /// A *filter* differs from a binding in exactly two ways, both of which the C
 /// surface has to preserve: its three string fields are genuinely nullable
@@ -12630,26 +12076,26 @@ impl AclBindingFilterInner {
     }
 }
 
-/// Casts a `*const kafka_common_AclBindingFilter_t` to a reference.
+/// Casts a `*const kafka_common_acl_AclBindingFilter_t` to a reference.
 ///
 /// # Safety
 ///
 /// `filter` must be a non-null borrowed pointer from a `delete_acls` result
 /// getter.
-unsafe fn acl_binding_filter_ref(filter: *const kafka_common_AclBindingFilter_t) -> &'static AclBindingFilterInner {
+unsafe fn acl_binding_filter_ref(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'static AclBindingFilterInner {
     unsafe { &*(filter as *const AclBindingFilterInner) }
 }
 
 /// Returns `patternFilter().resourceType().code()`. See
-/// [`kafka_common_AclBinding_resource_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_resource_type`] for the codes; a filter may also
 /// carry ANY=1, which matches every resource type.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.resource_type
 }
@@ -12662,14 +12108,14 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_name(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.resource_name_c)
 }
 
 /// Returns `patternFilter().patternType().code()`. See
-/// [`kafka_common_AclBinding_pattern_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_pattern_type`] for the codes; a filter may also
 /// carry ANY=1 (any pattern type) and MATCH=2 (literal, prefixed and wildcard
 /// patterns that would match the name).
 ///
@@ -12677,8 +12123,8 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.pattern_type
 }
@@ -12690,8 +12136,8 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_principal(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.principal_c)
 }
@@ -12703,36 +12149,36 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_host(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_host(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.host_c)
 }
 
 /// Returns `entryFilter().operation().code()`. See
-/// [`kafka_common_AclBinding_operation`] for the codes; a filter may also carry
+/// [`kafka_common_acl_AclBinding_operation`] for the codes; a filter may also carry
 /// ANY=1.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_operation(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_operation(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.operation
 }
 
 /// Returns `entryFilter().permissionType().code()`. See
-/// [`kafka_common_AclBinding_permission_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_permission_type`] for the codes; a filter may also
 /// carry ANY=1.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_permission_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.permission_type
 }
@@ -12743,11 +12189,11 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
 /// Borrowed from the owning `describe_client_quotas` / `alter_client_quotas`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_ClientQuotaEntity_t {
+pub struct kafka_common_quota_ClientQuotaEntity_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_ClientQuotaEntity_t`].
+/// Backing state for [`kafka_common_quota_ClientQuotaEntity_t`].
 ///
 /// Java's entity is a `Map<String, String>` from entity type (`"user"`,
 /// `"client-id"`, `"ip"`) to entity name, with a **null value meaning the
@@ -12793,18 +12239,20 @@ impl ClientQuotaEntityInner {
             .collect()
     }
 
-    fn as_ptr(&self) -> *const kafka_common_ClientQuotaEntity_t {
-        self as *const ClientQuotaEntityInner as *const kafka_common_ClientQuotaEntity_t
+    fn as_ptr(&self) -> *const kafka_common_quota_ClientQuotaEntity_t {
+        self as *const ClientQuotaEntityInner as *const kafka_common_quota_ClientQuotaEntity_t
     }
 }
 
-/// Casts a `*const kafka_common_ClientQuotaEntity_t` to a reference.
+/// Casts a `*const kafka_common_quota_ClientQuotaEntity_t` to a reference.
 ///
 /// # Safety
 ///
 /// `entity` must be a non-null borrowed pointer from a client-quota result
 /// getter.
-unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_t) -> &'static ClientQuotaEntityInner {
+unsafe fn client_quota_entity_ref(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
+) -> &'static ClientQuotaEntityInner {
     unsafe { &*(entity as *const ClientQuotaEntityInner) }
 }
 
@@ -12815,8 +12263,8 @@ unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entry_count(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> i32 {
     unsafe { client_quota_entity_ref(entity) }.entry_types_c.len() as i32
 }
@@ -12828,8 +12276,8 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_type(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
     index: i32,
 ) -> *const c_char {
     cstring_at(&unsafe { client_quota_entity_ref(entity) }.entry_types_c, index)
@@ -12838,7 +12286,7 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
 /// Returns the entity name at `index` (borrowed), or null if out of range **or
 /// if the entry names the built-in default entity** for its type.
 ///
-/// The two nulls are told apart by [`kafka_common_ClientQuotaEntity_entry_count`]:
+/// The two nulls are told apart by [`kafka_common_quota_ClientQuotaEntity_entry_count`]:
 /// an `index` below the count always denotes a present entry, so a null there
 /// means "default entity", Java's null map value. A name of `""` is a real,
 /// distinct name and comes back as a pointer to an empty string.
@@ -12847,8 +12295,8 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
     index: i32,
 ) -> *const c_char {
     if index < 0 {
@@ -12938,7 +12386,7 @@ unsafe fn optional_string_at(strings: *const *const c_char, index: usize) -> Opt
 /// # Safety
 ///
 /// Every array must be non-null with at least `index + 1` entries.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_binding_at(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -12972,7 +12420,7 @@ unsafe fn read_acl_binding_at(
 ///
 /// Each array must be null, or have `count` entries; string entries must be
 /// NULL or valid C strings.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_bindings(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -13058,7 +12506,7 @@ unsafe fn build_acl_binding_filter(
 ///
 /// Each array must be null, or have `count` entries; string entries must be
 /// NULL or valid C strings.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_binding_filters(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -13249,7 +12697,7 @@ unsafe fn read_client_quota_entity(
 ///
 /// Each array must be null, or have `count` entries, each of which is null or
 /// has the matching per-row count of entries.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_client_quota_alterations(
     entity_types: *const *const *const c_char,
     entity_names: *const *const *const c_char,
@@ -13468,7 +12916,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     result: *const kafka_admin_CreateAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -13558,7 +13006,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kaf
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     result: *const kafka_admin_DescribeAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -13670,12 +13118,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBindingFilter_t {
+) -> *const kafka_common_acl_AclBindingFilter_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
-        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t,
+        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t,
         None => std::ptr::null(),
     }
 }
@@ -13737,7 +13185,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
     result_index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => match &entry.binding {
             Some(binding) => binding.as_ptr(),
@@ -13880,7 +13328,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
     index: i32,
-) -> *const kafka_common_ClientQuotaEntity_t {
+) -> *const kafka_common_quota_ClientQuotaEntity_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -14051,7 +13499,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     result: *const kafka_admin_AlterClientQuotasResult_t,
     index: i32,
-) -> *const kafka_common_ClientQuotaEntity_t {
+) -> *const kafka_common_quota_ClientQuotaEntity_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -14126,7 +13574,7 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// # Parameters
 ///
 /// - `resource_types`: `ResourceType` codes; see
-///   [`kafka_common_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
+///   [`kafka_common_acl_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
 ///   `ResourcePattern` constructor rejects it.
 /// - `resource_names`: resource names; a NULL entry is rejected.
 /// - `pattern_types`: `PatternType` codes; ANY (1) and MATCH (2) are rejected,
@@ -14148,7 +13596,6 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -14202,7 +13649,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -14297,7 +13743,6 @@ pub type kafka_admin_AdminClient_describe_acls_callback_t =
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_type: i32,
@@ -14347,7 +13792,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_type: i32,
@@ -14429,7 +13873,6 @@ pub type kafka_admin_AdminClient_delete_acls_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -14481,7 +13924,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -14578,7 +14020,6 @@ pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const c_char,
@@ -14618,7 +14059,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const c_char,
@@ -14720,7 +14160,6 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 /// entries; string entries must be NULL or valid C strings; `out_result` must
 /// be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const *const c_char,
@@ -14775,7 +14214,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const *const c_char,
@@ -15165,11 +14603,11 @@ unsafe fn read_partition_offsets(
 /// Borrowed from the owning delegation-token result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_KafkaPrincipal_t {
+pub struct kafka_common_security_auth_KafkaPrincipal_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_KafkaPrincipal_t`].
+/// Backing state for [`kafka_common_security_auth_KafkaPrincipal_t`].
 struct KafkaPrincipalInner {
     principal_type_c: CString,
     name_c: CString,
@@ -15185,17 +14623,19 @@ impl KafkaPrincipalInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_KafkaPrincipal_t {
-        self as *const KafkaPrincipalInner as *const kafka_common_KafkaPrincipal_t
+    fn as_ptr(&self) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+        self as *const KafkaPrincipalInner as *const kafka_common_security_auth_KafkaPrincipal_t
     }
 }
 
-/// Casts a `*const kafka_common_KafkaPrincipal_t` to a reference.
+/// Casts a `*const kafka_common_security_auth_KafkaPrincipal_t` to a reference.
 ///
 /// # Safety
 ///
 /// `principal` must be a non-null borrowed pointer from a token getter.
-unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -> &'static KafkaPrincipalInner {
+unsafe fn kafka_principal_ref(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
+) -> &'static KafkaPrincipalInner {
     unsafe { &*(principal as *const KafkaPrincipalInner) }
 }
 
@@ -15205,8 +14645,8 @@ unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
     unsafe { kafka_principal_ref(principal) }.principal_type_c.as_ptr()
 }
@@ -15217,8 +14657,8 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
     unsafe { kafka_principal_ref(principal) }.name_c.as_ptr()
 }
@@ -15230,8 +14670,8 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> bool {
     unsafe { kafka_principal_ref(principal) }.token_authenticated
 }
@@ -15239,14 +14679,14 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
 /// Opaque handle to a `TokenInformation` (Java's
 /// `org.apache.kafka.common.security.token.delegation.TokenInformation`).
 ///
-/// Borrowed from the owning [`kafka_common_DelegationToken_t`]; valid until the
+/// Borrowed from the owning [`kafka_common_security_token_delegation_DelegationToken_t`]; valid until the
 /// result handle that owns the token is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_TokenInformation_t {
+pub struct kafka_common_security_token_delegation_TokenInformation_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_TokenInformation_t`].
+/// Backing state for [`kafka_common_security_token_delegation_TokenInformation_t`].
 struct TokenInformationInner {
     token_id_c: CString,
     owner: KafkaPrincipalInner,
@@ -15270,18 +14710,20 @@ impl TokenInformationInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_TokenInformation_t {
-        self as *const TokenInformationInner as *const kafka_common_TokenInformation_t
+    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_TokenInformation_t {
+        self as *const TokenInformationInner as *const kafka_common_security_token_delegation_TokenInformation_t
     }
 }
 
-/// Casts a `*const kafka_common_TokenInformation_t` to a reference.
+/// Casts a `*const kafka_common_security_token_delegation_TokenInformation_t` to a reference.
 ///
 /// # Safety
 ///
 /// `info` must be a non-null borrowed pointer from
-/// [`kafka_common_DelegationToken_token_info`].
-unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) -> &'static TokenInformationInner {
+/// [`kafka_common_security_token_delegation_DelegationToken_token_info`].
+unsafe fn token_information_ref(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> &'static TokenInformationInner {
     unsafe { &*(info as *const TokenInformationInner) }
 }
 
@@ -15291,8 +14733,8 @@ unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) ->
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const c_char {
     unsafe { token_information_ref(info) }.token_id_c.as_ptr()
 }
@@ -15304,9 +14746,9 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
-    info: *const kafka_common_TokenInformation_t,
-) -> *const kafka_common_KafkaPrincipal_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     unsafe { token_information_ref(info) }.owner.as_ptr()
 }
 
@@ -15318,9 +14760,9 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
-    info: *const kafka_common_TokenInformation_t,
-) -> *const kafka_common_KafkaPrincipal_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     unsafe { token_information_ref(info) }.token_requester.as_ptr()
 }
 
@@ -15330,8 +14772,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewer_count(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i32 {
     unsafe { token_information_ref(info) }.renewers.len() as i32
 }
@@ -15343,10 +14785,10 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_get_renewer(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
     index: i32,
-) -> *const kafka_common_KafkaPrincipal_t {
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -15362,8 +14804,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_issue_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.issue_timestamp
 }
@@ -15374,8 +14816,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.expiry_timestamp
 }
@@ -15387,8 +14829,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_max_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.max_timestamp
 }
@@ -15400,11 +14842,11 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
 /// `describe_delegation_token` result handle; valid until that handle is
 /// destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_DelegationToken_t {
+pub struct kafka_common_security_token_delegation_DelegationToken_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_DelegationToken_t`].
+/// Backing state for [`kafka_common_security_token_delegation_DelegationToken_t`].
 ///
 /// The HMAC is raw bytes, not a string: it is a SHA-512 MAC and can contain
 /// NULs, so it crosses as a pointer plus a length rather than as a `CString`.
@@ -15425,18 +14867,20 @@ impl DelegationTokenInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_DelegationToken_t {
-        self as *const DelegationTokenInner as *const kafka_common_DelegationToken_t
+    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_DelegationToken_t {
+        self as *const DelegationTokenInner as *const kafka_common_security_token_delegation_DelegationToken_t
     }
 }
 
-/// Casts a `*const kafka_common_DelegationToken_t` to a reference.
+/// Casts a `*const kafka_common_security_token_delegation_DelegationToken_t` to a reference.
 ///
 /// # Safety
 ///
 /// `token` must be a non-null borrowed pointer from a delegation-token result
 /// getter.
-unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> &'static DelegationTokenInner {
+unsafe fn delegation_token_ref(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
+) -> &'static DelegationTokenInner {
     unsafe { &*(token as *const DelegationTokenInner) }
 }
 
@@ -15447,9 +14891,9 @@ unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> 
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
-    token: *const kafka_common_DelegationToken_t,
-) -> *const kafka_common_TokenInformation_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
+) -> *const kafka_common_security_token_delegation_TokenInformation_t {
     unsafe { delegation_token_ref(token) }.token_info.as_ptr()
 }
 
@@ -15466,8 +14910,8 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
 /// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
-    token: *const kafka_common_DelegationToken_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
     out_len: *mut i32,
 ) -> *const u8 {
     let inner = unsafe { delegation_token_ref(token) };
@@ -15483,8 +14927,8 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
-    token: *const kafka_common_DelegationToken_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
 ) -> *const c_char {
     unsafe { delegation_token_ref(token) }.hmac_base64_c.as_ptr()
 }
@@ -15604,7 +15048,7 @@ unsafe fn read_kafka_principals(
 ///
 /// Every array must be null, or have `count` entries; byte pointers must be
 /// null or readable for their matching length.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_scram_alterations(
     users: *const *const c_char,
     is_deletions: *const bool,
@@ -16048,7 +15492,6 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
 /// pointer readable for its matching length; `out_result` must be null or
 /// writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     admin: *const kafka_admin_AdminClient_t,
     users: *const *const c_char,
@@ -16110,7 +15553,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_async(
     admin: *const kafka_admin_AdminClient_t,
     users: *const *const c_char,
@@ -16245,7 +15687,6 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
     renewer_principal_types: *const *const c_char,
@@ -16291,7 +15732,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
     renewer_principal_types: *const *const c_char,
@@ -16360,7 +15800,7 @@ pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
 /// # Parameters
 ///
 /// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
 ///   required.
 /// - `renew_time_period_ms`: how much longer the token should live; negative
 ///   keeps Java's `-1`, meaning the broker's
@@ -16469,7 +15909,7 @@ pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
 /// # Parameters
 ///
 /// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
 ///   required.
 /// - `expiry_time_period_ms`: `>= 0` moves the expiry to
 ///   `min(now + expiry_time_period_ms, maxTimestamp)`; **negative expires the
@@ -16602,7 +16042,6 @@ pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
 /// `owner_count` entries, each NULL or a valid C string; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
     has_owners_filter: bool,
@@ -16644,7 +16083,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
     has_owners_filter: bool,
@@ -16843,7 +16281,6 @@ pub type kafka_admin_AdminClient_update_features_callback_t =
 /// entries, with name entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     admin: *const kafka_admin_AdminClient_t,
     features: *const *const c_char,
@@ -16884,7 +16321,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     admin: *const kafka_admin_AdminClient_t,
     features: *const *const c_char,
@@ -17265,7 +16701,7 @@ unsafe fn create_delegation_token_result_ref(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
-) -> *const kafka_common_DelegationToken_t {
+) -> *const kafka_common_security_token_delegation_DelegationToken_t {
     unsafe { create_delegation_token_result_ref(result) }.token.as_ptr()
 }
 
@@ -17428,7 +16864,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
     index: i32,
-) -> *const kafka_common_DelegationToken_t {
+) -> *const kafka_common_security_token_delegation_DelegationToken_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -19172,7 +18608,6 @@ pub type kafka_admin_AdminClient_describe_producers_callback_t =
 /// have `count` entries each, with topic entries NULL or valid C strings;
 /// `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     admin: *const kafka_admin_AdminClient_t,
     topics: *const *const c_char,
@@ -19210,7 +18645,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     admin: *const kafka_admin_AdminClient_t,
     topics: *const *const c_char,
@@ -19418,7 +18852,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
     admin: *const kafka_admin_AdminClient_t,
     topic: *const c_char,
@@ -19695,7 +19128,6 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     admin: *const kafka_admin_AdminClient_t,
     states: *const *const c_char,
@@ -19743,7 +19175,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     admin: *const kafka_admin_AdminClient_t,
     states: *const *const c_char,
@@ -19808,7 +19239,8 @@ mod tests {
     use crate::admin::ConfigEntryOptionsBuilder;
     use crate::admin::config_entry::ConfigSynonym;
     use crate::admin::{FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange};
-    use crate::common::{ClassicGroupState, Errors};
+    use crate::common::ClassicGroupState;
+    use crate::common::protocol::Errors;
 
     fn text(value: &CString) -> &str {
         value.to_str().expect("CString holds UTF-8")
@@ -20133,7 +19565,7 @@ mod tests {
         let flat = LogDirDescriptionInner::new(&description);
 
         let error = flat.error.as_ref().expect("log dir reported an error");
-        assert_eq!(error.error.code(), Errors::KafkaStorageError.code());
+        assert_eq!(error.error.error().code(), Errors::KafkaStorageError.code());
         assert_eq!(flat.total_bytes, 2_000);
         assert_eq!(flat.usable_bytes, 1_000);
         assert_eq!(flat.replicas.len(), 1);
@@ -20633,19 +20065,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn list_consumer_groups_options_routes_each_array_to_its_own_filter() {
-        let states = c_strings(&["Empty"]);
-        let types = c_strings(&["Consumer", "Classic"]);
-        let (sp, tp) = (c_ptrs(&states), c_ptrs(&types));
-
-        let options = unsafe { list_consumer_groups_options(sp.as_ptr(), 1, tp.as_ptr(), 2, 8_000) };
-        assert_eq!(options.group_states(), &HashSet::from([GroupState::Empty]));
-        assert_eq!(options.types(), &HashSet::from([GroupType::Consumer, GroupType::Classic]));
-        assert_eq!(options.timeout_ms(), Some(8_000));
-    }
-
-    #[test]
     fn read_group_states_matches_java_parse_including_the_unknown_fallback() {
         // Java's `GroupState.parse` upper-cases before lookup and falls back to
         // UNKNOWN, so casing is irrelevant and a bogus name is not an error.
@@ -21093,14 +20512,10 @@ mod tests {
                 CStr::from_ptr(kafka_admin_ConsumerGroupDescription_partition_assignor(value)).to_str(),
                 Ok("range")
             );
-            // `type()`, `state()` and `groupState()` are three distinct strings.
+            // `type()` and `groupState()` are distinct strings.
             assert_eq!(
                 CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_type(value)).to_str(),
                 Ok("Consumer")
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_state(value)).to_str(),
-                Ok("Stable")
             );
             assert_eq!(
                 CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_state(value)).to_str(),
@@ -21383,25 +20798,25 @@ mod tests {
             ],
         ));
         let p = |inner: &TopicPartitionInfoInner| {
-            inner as *const TopicPartitionInfoInner as *const kafka_admin_TopicPartitionInfo_t
+            inner as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t
         };
         unsafe {
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&absent)), 0);
-            assert!(!kafka_admin_TopicPartitionInfo_has_elr(p(&absent)));
-            assert!(kafka_admin_TopicPartitionInfo_elr(p(&absent), 0).is_null());
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
-            assert!(!kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&absent)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&absent)), 0);
+            assert!(!kafka_common_TopicPartitionInfo_has_elr(p(&absent)));
+            assert!(kafka_common_TopicPartitionInfo_elr(p(&absent), 0).is_null());
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
+            assert!(!kafka_common_TopicPartitionInfo_has_last_known_elr(p(&absent)));
 
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported_empty)));
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported_empty)));
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
 
             // Distinct lengths, so swapping the two accessors fails.
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported)), 1);
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
-            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported)));
-            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported)), 1);
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
+            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported)));
+            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
     }
 
@@ -21473,49 +20888,6 @@ mod tests {
             assert!(kafka_admin_ListGroupsResult_get_valid(result, 3).is_null());
             assert!(kafka_admin_ListGroupsResult_get_valid(result, -1).is_null());
             kafka_admin_ListGroupsResult_destroy(result);
-        }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn list_consumer_groups_result_exposes_both_state_views() {
-        let outcome = (
-            vec![ConsumerGroupListing::with_group_state_group_type(
-                "cg1",
-                Some(GroupState::Stable),
-                Some(GroupType::Classic),
-                true,
-            )],
-            vec![Error::new(Errors::GroupAuthorizationFailed)],
-        );
-        let result = box_list_consumer_groups_result(outcome);
-        unsafe {
-            assert_eq!(kafka_admin_ListConsumerGroupsResult_valid_count(result), 1);
-            assert_eq!(kafka_admin_ListConsumerGroupsResult_error_count(result), 1);
-            let listing = kafka_admin_ListConsumerGroupsResult_get_valid(result, 0);
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_id(listing)).to_str(),
-                Ok("cg1")
-            );
-            assert!(kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_state(listing)).to_str(),
-                Ok("Stable")
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_ConsumerGroupListing_state(listing)).to_str(),
-                Ok("Stable")
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_type(listing)).to_str(),
-                Ok("Classic")
-            );
-            let error = kafka_admin_ListConsumerGroupsResult_get_error(result, 0);
-            assert_eq!(
-                common::kafka_common_Error_code(error) as i32,
-                Errors::GroupAuthorizationFailed.code() as i32
-            );
-            kafka_admin_ListConsumerGroupsResult_destroy(result);
         }
     }
 
@@ -21740,14 +21112,26 @@ mod tests {
         let inner = AclBindingInner::new(&acl_binding("orders-", "User:alice"));
         let b = inner.as_ptr();
         unsafe {
-            assert_eq!(kafka_common_AclBinding_resource_type(b), i32::from(ResourceType::Topic.code()));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_resource_name(b)).to_str(), Ok("orders-"));
-            assert_eq!(kafka_common_AclBinding_pattern_type(b), i32::from(PatternType::Prefixed.code()));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_principal(b)).to_str(), Ok("User:alice"));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
-            assert_eq!(kafka_common_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
             assert_eq!(
-                kafka_common_AclBinding_permission_type(b),
+                kafka_common_acl_AclBinding_resource_type(b),
+                i32::from(ResourceType::Topic.code())
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(b)).to_str(),
+                Ok("orders-")
+            );
+            assert_eq!(
+                kafka_common_acl_AclBinding_pattern_type(b),
+                i32::from(PatternType::Prefixed.code())
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_principal(b)).to_str(),
+                Ok("User:alice")
+            );
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
+            assert_eq!(kafka_common_acl_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
+            assert_eq!(
+                kafka_common_acl_AclBinding_permission_type(b),
                 i32::from(AclPermissionType::Deny.code())
             );
         }
@@ -21820,30 +21204,36 @@ mod tests {
             ),
         ));
         unsafe {
-            let a = &any as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
-            assert!(kafka_common_AclBindingFilter_resource_name(a).is_null());
-            assert!(kafka_common_AclBindingFilter_principal(a).is_null());
-            assert!(kafka_common_AclBindingFilter_host(a).is_null());
+            let a = &any as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
+            assert!(kafka_common_acl_AclBindingFilter_resource_name(a).is_null());
+            assert!(kafka_common_acl_AclBindingFilter_principal(a).is_null());
+            assert!(kafka_common_acl_AclBindingFilter_host(a).is_null());
             // `AclBindingFilter::any()` is ANY on all four enums.
             assert_eq!(
-                kafka_common_AclBindingFilter_resource_type(a),
+                kafka_common_acl_AclBindingFilter_resource_type(a),
                 i32::from(ResourceType::Any.code())
             );
             assert_eq!(
-                kafka_common_AclBindingFilter_pattern_type(a),
+                kafka_common_acl_AclBindingFilter_pattern_type(a),
                 i32::from(PatternType::Any.code())
             );
-            assert_eq!(kafka_common_AclBindingFilter_operation(a), i32::from(AclOperation::Any.code()));
             assert_eq!(
-                kafka_common_AclBindingFilter_permission_type(a),
+                kafka_common_acl_AclBindingFilter_operation(a),
+                i32::from(AclOperation::Any.code())
+            );
+            assert_eq!(
+                kafka_common_acl_AclBindingFilter_permission_type(a),
                 i32::from(AclPermissionType::Any.code())
             );
 
-            let e = &empty as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
-            assert!(!kafka_common_AclBindingFilter_resource_name(e).is_null());
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(e)).to_str(), Ok(""));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_principal(e)).to_str(), Ok(""));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_host(e)).to_str(), Ok(""));
+            let e = &empty as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
+            assert!(!kafka_common_acl_AclBindingFilter_resource_name(e).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(e)).to_str(),
+                Ok("")
+            );
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_principal(e)).to_str(), Ok(""));
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_host(e)).to_str(), Ok(""));
         }
     }
 
@@ -22068,14 +21458,14 @@ mod tests {
             // Sorted by resource name, so "a-topic" comes first.
             let first = kafka_admin_CreateAclsResult_get_binding(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(first)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(first)).to_str(),
                 Ok("a-topic")
             );
             assert!(kafka_admin_CreateAclsResult_get_error(result, 0).is_null());
 
             let second = kafka_admin_CreateAclsResult_get_binding(result, 1);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_principal(second)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBinding_principal(second)).to_str(),
                 Ok("User:zoe")
             );
             assert_eq!(
@@ -22099,14 +21489,14 @@ mod tests {
         unsafe {
             assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
                     kafka_admin_DescribeAclsResult_get_binding(result, 0)
                 ))
                 .to_str(),
                 Ok("z-topic")
             );
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
                     kafka_admin_DescribeAclsResult_get_binding(result, 1)
                 ))
                 .to_str(),
@@ -22153,16 +21543,16 @@ mod tests {
             // Sorted by the filter's fields, so "a-filter" is index 0.
             let f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f0)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f0)).to_str(),
                 Ok("a-filter")
             );
             assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
             assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 0), 2);
             // Entry 0: a binding, no exception.
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(kafka_admin_DeleteAclsResult_get_binding(
-                    result, 0, 0
-                )))
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
+                    kafka_admin_DeleteAclsResult_get_binding(result, 0, 0)
+                ))
                 .to_str(),
                 Ok("deleted-topic")
             );
@@ -22178,7 +21568,7 @@ mod tests {
             // which is a different thing from a filter that matched nothing.
             let f2 = kafka_admin_DeleteAclsResult_get_filter(result, 2);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f2)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f2)).to_str(),
                 Ok("z-filter")
             );
             assert_eq!(
@@ -22397,36 +21787,36 @@ mod tests {
         ]));
         let e = inner.as_ptr();
         unsafe {
-            assert_eq!(kafka_common_ClientQuotaEntity_entry_count(e), 3);
+            assert_eq!(kafka_common_quota_ClientQuotaEntity_entry_count(e), 3);
             // Sorted by entity type: client-id, ip, user.
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
                 Ok("client-id")
             );
             // Present but empty: a pointer to "", not null.
-            let empty = kafka_common_ClientQuotaEntity_get_entry_name(e, 0);
+            let empty = kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 0);
             assert!(!empty.is_null());
             assert_eq!(CStr::from_ptr(empty).to_str(), Ok(""));
 
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
                 Ok("ip")
             );
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
                 Ok("10.0.0.1")
             );
 
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
                 Ok("user")
             );
             // The default entity: a null name at an in-range index.
-            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 2).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 2).is_null());
 
-            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, 3).is_null());
-            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 3).is_null());
-            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, -1).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 3).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 3).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, -1).is_null());
         }
     }
 
@@ -22449,7 +21839,7 @@ mod tests {
             // Entities sorted by their (type, name) pairs: alice before bob.
             let alice = kafka_admin_DescribeClientQuotasResult_get_entity(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
                 Ok("alice")
             );
             assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 0), 2);
@@ -22502,7 +21892,7 @@ mod tests {
             assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
             let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
                 Ok("alice")
             );
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
@@ -23211,38 +22601,49 @@ mod tests {
             // The HMAC contains an interior NUL, so only the length says how
             // long it is -- a CString would have truncated it to one byte.
             let mut len = 0i32;
-            let hmac = kafka_common_DelegationToken_hmac(handle, &mut len);
+            let hmac = kafka_common_security_token_delegation_DelegationToken_hmac(handle, &mut len);
             assert_eq!(len, 3);
             assert_eq!(std::slice::from_raw_parts(hmac, len as usize), &[0x01, 0x00, 0x02]);
-            let encoded = CStr::from_ptr(kafka_common_DelegationToken_hmac_as_base64_string(handle));
+            let encoded = CStr::from_ptr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
+                handle,
+            ));
             assert_eq!(encoded.to_str().expect("utf8"), base64);
 
-            let info = kafka_common_DelegationToken_token_info(handle);
-            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(info));
+            let info = kafka_common_security_token_delegation_DelegationToken_token_info(handle);
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(info));
             assert_eq!(id.to_str().expect("utf8"), "token-id-1");
-            assert_eq!(kafka_common_TokenInformation_issue_timestamp(info), 1_000);
-            assert_eq!(kafka_common_TokenInformation_max_timestamp(info), 9_000);
-            assert_eq!(kafka_common_TokenInformation_expiry_timestamp(info), 5_000);
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info),
+                1_000
+            );
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_max_timestamp(info),
+                9_000
+            );
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info),
+                5_000
+            );
 
-            let owner = kafka_common_TokenInformation_owner(info);
-            let owner_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(owner));
+            let owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
+            let owner_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(owner));
             assert_eq!(owner_name.to_str().expect("utf8"), "owner");
-            let requester = kafka_common_TokenInformation_token_requester(info);
-            let requester_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(requester));
+            let requester = kafka_common_security_token_delegation_TokenInformation_token_requester(info);
+            let requester_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(requester));
             assert_eq!(requester_name.to_str().expect("utf8"), "requester");
 
-            assert_eq!(kafka_common_TokenInformation_renewer_count(info), 2);
-            let renewer0 = kafka_common_TokenInformation_get_renewer(info, 0);
-            let renewer0_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer0));
-            let renewer0_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(renewer0));
+            assert_eq!(kafka_common_security_token_delegation_TokenInformation_renewer_count(info), 2);
+            let renewer0 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 0);
+            let renewer0_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer0));
+            let renewer0_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(renewer0));
             assert_eq!(renewer0_type.to_str().expect("utf8"), "User");
             assert_eq!(renewer0_name.to_str().expect("utf8"), "renewer-1");
-            let renewer1 = kafka_common_TokenInformation_get_renewer(info, 1);
-            let renewer1_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer1));
+            let renewer1 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 1);
+            let renewer1_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer1));
             assert_eq!(renewer1_type.to_str().expect("utf8"), "Group");
-            assert!(kafka_common_TokenInformation_get_renewer(info, 2).is_null());
-            assert!(kafka_common_TokenInformation_get_renewer(info, -1).is_null());
-            assert!(!kafka_common_KafkaPrincipal_token_authenticated(owner));
+            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 2).is_null());
+            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, -1).is_null());
+            assert!(!kafka_common_security_auth_KafkaPrincipal_token_authenticated(owner));
 
             kafka_admin_DescribeDelegationTokenResult_destroy(result);
         }
@@ -23307,13 +22708,15 @@ mod tests {
         let result = box_create_delegation_token_result(DelegationToken::new(info, vec![0xff]));
         unsafe {
             let handle = kafka_admin_CreateDelegationTokenResult_get_token(result);
-            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(kafka_common_DelegationToken_token_info(
-                handle,
-            )));
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(
+                kafka_common_security_token_delegation_DelegationToken_token_info(handle),
+            ));
             assert_eq!(id.to_str().expect("utf8"), "token-id-2");
             // No renewers is a legal token: only the owner may renew it.
             assert_eq!(
-                kafka_common_TokenInformation_renewer_count(kafka_common_DelegationToken_token_info(handle)),
+                kafka_common_security_token_delegation_TokenInformation_renewer_count(
+                    kafka_common_security_token_delegation_DelegationToken_token_info(handle)
+                ),
                 0
             );
             kafka_admin_CreateDelegationTokenResult_destroy(result);

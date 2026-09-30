@@ -29,9 +29,11 @@
 /// Generic event-processor seam. Phase 6 / Phase 10 supply
 /// implementations for the [`super::ApplicationEvent`]
 /// and [`super::BackgroundEvent`] enum types.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.EventProcessor")]
 pub(crate) trait EventProcessor<E>: Send + 'static {
     /// Process a single event. Called once per event drained from the
     /// channel; impls dispatch to the appropriate request manager or
     /// listener.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.EventProcessor#process")]
     fn process(&mut self, event: E);
 }

@@ -63,6 +63,7 @@ pub trait SampledStatKind: Send + Sync {
 /// The mutable sample ring + cursor are guarded by a single [`Mutex`] mirroring
 /// Java's sensor `synchronized`. This lock is taken per-fetch / per-partition,
 /// never per-record on the hot path (CLAUDE.md §11/§27).
+#[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat")]
 pub struct SampledStat {
     initial_value: f64,
     kind: Box<dyn SampledStatKind>,
@@ -78,6 +79,7 @@ struct SampledStatInner {
 impl SampledStat {
     /// Create a `SampledStat` with the given initial value and per-subclass
     /// behaviour.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat#SampledStat")]
     pub fn new(initial_value: f64, kind: Box<dyn SampledStatKind>) -> Self {
         Self {
             initial_value,
@@ -107,6 +109,7 @@ impl SampledStat {
     /// Allow configuring the time window for this sampled stat (Java
     /// `withTimeWindow(long window, TimeUnit unit)`; the conversion to ms is done
     /// by the caller, mirroring `Rate`'s use of `withTimeWindow`).
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat#SampledStat")]
     pub(crate) fn with_time_window_ms(&self, window_ms: i64) {
         self.inner.lock().expect("sampled stat mutex poisoned").time_window_ms = window_ms;
     }
@@ -115,6 +118,7 @@ impl SampledStat {
     ///
     /// Public so `Rate::window_size` can purge before computing the window size,
     /// matching Java's `protected` visibility used by `Rate`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat#purgeObsoleteSamples")]
     pub(crate) fn purge_obsolete_samples(&self, config: &MetricConfig, now: i64) {
         let mut inner = self.inner.lock().expect("sampled stat mutex poisoned");
         Self::purge_obsolete_samples_locked(&mut inner, self.initial_value, config, now);
@@ -129,6 +133,7 @@ impl SampledStat {
 
     // ---- internal helpers operating on a locked inner ----
 
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat#newSample")]
     fn new_sample(initial_value: f64, time_window_ms: i64, time_ms: i64) -> Sample {
         if time_window_ms > 0 {
             Sample::with_time_window_ms(initial_value, time_ms, time_window_ms)
@@ -228,26 +233,30 @@ impl Measurable for SampledStat {
 
 /// A single sample within a [`SampledStat`].
 ///
-/// Mirrors `SampledStat.Sample`. Fields are public to the crate so subclass
-/// `update`/`combine` implementations can read/write them exactly as Java does.
+/// Mirrors `SampledStat.Sample`. Java exposes the fields publicly to
+/// `SampledStat` subclasses; here a [`SampledStatKind`] implementation reads
+/// them through getters and writes the ones Java's stats write through setters.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample")]
 pub struct Sample {
     /// The initial (reset) value of this sample.
-    pub initial_value: f64,
+    pub(crate) initial_value: f64,
     /// The number of events recorded into this sample.
-    pub event_count: i64,
+    pub(crate) event_count: i64,
     /// The time the sample started.
-    pub start_time_ms: i64,
+    pub(crate) start_time_ms: i64,
     /// The time of the last event recorded into the sample.
-    pub last_event_ms: i64,
+    pub(crate) last_event_ms: i64,
     /// The accumulated value of the sample.
-    pub value: f64,
+    pub(crate) value: f64,
     /// The per-sample time window (or `-1` to use the config's window).
-    pub time_window_ms: i64,
+    pub(crate) time_window_ms: i64,
 }
 
 impl Sample {
     /// Create a sample with no explicit time window.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#Sample")]
     pub fn new(initial_value: f64, now: i64) -> Self {
         Self {
             initial_value,
@@ -260,6 +269,7 @@ impl Sample {
     }
 
     /// Create a sample with an explicit time window.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#Sample")]
     pub fn with_time_window_ms(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
         Self {
             initial_value,
@@ -272,6 +282,7 @@ impl Sample {
     }
 
     /// Reset the sample for reuse at `now`, keeping its configured initial value.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#reset")]
     pub fn reset(&mut self, now: i64) {
         self.event_count = 0;
         self.start_time_ms = now;
@@ -290,6 +301,7 @@ impl Sample {
     }
 
     /// Whether this sample's window is complete at `time_ms`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#isComplete")]
     pub fn is_complete(&self, time_ms: i64, config: &MetricConfig) -> bool {
         let window_ms = if self.time_window_ms > 0 {
             self.time_window_ms
@@ -298,15 +310,76 @@ impl Sample {
         };
         time_ms - self.start_time_ms >= window_ms || self.event_count >= config.event_window()
     }
+
+    /// The initial (reset) value of this sample.
+    ///
+    /// Java's public `Sample.initialValue`.
+    pub fn initial_value(&self) -> f64 {
+        self.initial_value
+    }
+
+    /// The number of events recorded into this sample.
+    ///
+    /// Java's public `Sample.eventCount`.
+    pub fn event_count(&self) -> i64 {
+        self.event_count
+    }
+
+    /// The time the sample started.
+    ///
+    /// Java's public `Sample.startTimeMs`.
+    pub fn start_time_ms(&self) -> i64 {
+        self.start_time_ms
+    }
+
+    /// The time of the last event recorded into the sample.
+    ///
+    /// Java's public `Sample.lastEventMs`.
+    pub fn last_event_ms(&self) -> i64 {
+        self.last_event_ms
+    }
+
+    /// The accumulated value of the sample.
+    ///
+    /// Java's public `Sample.value`.
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// The per-sample time window (or `-1` to use the config's window).
+    ///
+    /// Java's public `Sample.timeWindowMs`.
+    pub fn time_window_ms(&self) -> i64 {
+        self.time_window_ms
+    }
+
+    /// Sets the number of events recorded into this sample, as Java's
+    /// `SampledStat.record` does through the public `Sample.eventCount`.
+    pub fn set_event_count(&mut self, event_count: i64) {
+        self.event_count = event_count;
+    }
+
+    /// Sets the time of the last event recorded into the sample, as Java's
+    /// `SampledStat.record` does through the public `Sample.lastEventMs`.
+    pub fn set_last_event_ms(&mut self, last_event_ms: i64) {
+        self.last_event_ms = last_event_ms;
+    }
+
+    /// Sets the accumulated value of the sample, as Java's `Avg`, `Max`, `Min`
+    /// and `WindowedSum` do through the public `Sample.value`.
+    pub fn set_value(&mut self, value: f64) {
+        self.value = value;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::internals::TimeUnit;
+    use crate::common::metrics::TimeUnit;
     use crate::common::metrics::stats::{Avg, Max, Min, WindowedCount, WindowedSum};
-    use crate::common::metrics::{Measurable, Stat, Time};
+    use crate::common::metrics::{Measurable, Stat};
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
     use std::sync::Arc;
 
     // A SampledStat whose measure() returns the number of samples (sum of
@@ -336,6 +409,7 @@ mod tests {
 
     // SampledStatTest.testSampleIsPurgedIfDoesntOverlap
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsPurgedIfDoesntOverlap")]
     fn test_sample_is_purged_if_doesnt_overlap() {
         let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
@@ -350,6 +424,7 @@ mod tests {
 
     // SampledStatTest.testSampleIsKeptIfOverlaps
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsKeptIfOverlaps")]
     fn test_sample_is_kept_if_overlaps() {
         let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
@@ -364,6 +439,7 @@ mod tests {
 
     // SampledStatTest.testSampleIsKeptIfOverlapsAndExtra
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsKeptIfOverlapsAndExtra")]
     fn test_sample_is_kept_if_overlaps_and_extra() {
         let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();

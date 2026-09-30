@@ -22,13 +22,14 @@ use std::io;
 use crate::RenewDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, RenewDelegationTokenResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, RenewDelegationTokenResponse, RequestBuilder};
 
 /// A RenewDelegationToken request.
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.RenewDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest")]
 pub struct RenewDelegationTokenRequest {
     data: RenewDelegationTokenRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct RenewDelegationTokenRequest {
 
 impl RenewDelegationTokenRequest {
     /// Creates a new `RenewDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#RenewDelegationTokenRequest")]
     pub fn new(data: RenewDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#data")]
     pub fn data(&self) -> &RenewDelegationTokenRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl RenewDelegationTokenRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `RenewDelegationTokenRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::RenewDelegationToken(RenewDelegationTokenResponse::prepare_response(throttle_time_ms, *error))
     }
@@ -72,6 +76,7 @@ impl RenewDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = RenewDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -91,14 +96,16 @@ impl std::fmt::Display for RenewDelegationTokenRequest {
 ///
 /// Corresponds to `RenewDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct RenewDelegationTokenRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest$Builder")]
+pub struct Builder {
     data: RenewDelegationTokenRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl RenewDelegationTokenRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: RenewDelegationTokenRequestData) -> Self {
         Self {
             data,
@@ -108,7 +115,7 @@ impl RenewDelegationTokenRequestBuilder {
     }
 }
 
-impl RequestBuilder for RenewDelegationTokenRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::RENEW_DELEGATION_TOKEN
     }
@@ -121,8 +128,8 @@ impl RequestBuilder for RenewDelegationTokenRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(
             self.data.clone(),
             version,
         )))
@@ -165,9 +172,9 @@ mod tests {
     fn serialize_parse_round_trip() {
         let version = ApiKeys::RENEW_DELEGATION_TOKEN.latest_version();
         let mut request =
-            ConcreteRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(request_data(), version));
+            AbstractRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = RenewDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().hmac, b"the-hmac");
         assert_eq!(parsed.data().renew_period_ms, 3_600_000);
@@ -180,7 +187,7 @@ mod tests {
         let mut data = RenewDelegationTokenRequestData::new();
         data.hmac = vec![0xDE, 0xAD];
         data.renew_period_ms = 1;
-        let mut request = ConcreteRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(data, 2));
+        let mut request = AbstractRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(data, 2));
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
             0x03, 0xDE, 0xAD, // hmac: compact bytes len (2 + 1) then raw bytes

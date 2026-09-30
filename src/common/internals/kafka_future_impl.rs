@@ -81,10 +81,7 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
     ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
-    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
-    /// a later admin tier.
-    #[allow(dead_code)]
+    /// Only reached via [`KafkaFutureImpl::when_complete`].
     fn on_complete(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
@@ -145,6 +142,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
 /// Per CLAUDE.md (classes in an `internal`/`internals` package use only
 /// `pub(crate)`), this handle is crate-internal; only the public
 /// [`KafkaFuture`] view crosses the API boundary.
+#[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl")]
 // `KafkaFutureImpl` is a foundational prerequisite for the admin client
 // (Milestone 11): admin RPCs create these handles, return the public
 // `KafkaFuture` view synchronously, and complete them later from the
@@ -155,6 +153,7 @@ pub(crate) struct KafkaFutureImpl<T: Clone + Send + Sync + 'static> {
 
 impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     /// Create a new, uncompleted future handle.
+    #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#KafkaFutureImpl")]
     pub(crate) fn new() -> Self {
         Self { state: Arc::new(Completable::new()) }
     }
@@ -163,6 +162,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     /// methods. Returns `true` if this call completed the future.
     ///
     /// Translated from `KafkaFutureImpl.complete`.
+    #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#complete")]
     pub(crate) fn complete(&self, value: T) -> bool {
         self.state.set(Ok(value))
     }
@@ -173,11 +173,13 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     /// Translated from `KafkaFutureImpl.completeExceptionally`. The Rust name
     /// differs from the Java one because CLAUDE.md §2 keeps the word
     /// "exception" out of Rust identifiers.
+    #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#complete")]
     pub(crate) fn complete_with_error(&self, error: Error) -> bool {
         self.state.set(Err(error))
     }
 
     /// Whether this future is complete.
+    #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#isDone")]
     pub(crate) fn is_done(&self) -> bool {
         self.state.is_done()
     }
@@ -187,9 +189,8 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     ///
     /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
     /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves. That chaining arrives with a
-    /// later admin tier (Phase-1 topic RPCs do not chain calls).
-    #[allow(dead_code)]
+    /// (e.g. `describeCluster().nodes()`) resolves.
+    #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#whenComplete")]
     pub(crate) fn when_complete<F>(&self, action: F)
     where
         F: FnOnce(&Result<T, Error>) + Send + 'static,

@@ -242,22 +242,54 @@ def _proto_offset_entries_to_dict(entries):
     }
 
 
-def _proto_to_group_metadata(proto_gm):
-    """Build the C-backed :class:`consumer.ConsumerGroupMetadata` from the
-    producer proto's ``ConsumerGroupMetadata`` message.
+class GroupMetadataStore:
+    """Server-side group-metadata objects, by id, shared by the producer and
+    consumer services of one server.
 
-    ``group_id`` / ``generation_id`` / ``member_id`` are always present;
-    ``group_instance_id`` is proto3 ``optional`` (present only for a static
-    member), so an absent one becomes ``None`` — which the constructor passes to
-    the FFI as ``NULL`` (Java's ``Optional.empty()``). The returned object owns a
-    fresh Rust handle that ``Producer.send_offsets_to_transaction`` feeds back
-    into the FFI.
+    ``ConsumerService.GroupMetadata`` adds what ``Consumer.group_metadata()``
+    returned, and ``ProducerService.SendOffsetsToTransaction`` passes it back to
+    ``Producer.send_offsets_to_transaction``: :class:`consumer.ConsumerGroupMetadata`
+    has no constructor (Java deprecated its constructors in 4.2), so an object a
+    consumer handed out is the only one a producer can take.
+    ``ConsumerService.ReleaseGroupMetadata`` drops it when the Rust client drops
+    its last reference, and its Rust handle is freed on GC. The object holds its
+    own reference to the metadata, so it stays valid after its consumer closes.
+
+    Locked because the sync server serves each RPC on its own worker thread.
     """
-    return kc.ConsumerGroupMetadata(
-        proto_gm.group_id,
-        proto_gm.generation_id,
-        proto_gm.member_id,
-        proto_gm.group_instance_id if proto_gm.HasField("group_instance_id") else None,
+
+    def __init__(self):
+        self._entries = {}
+        self._next_id = 1
+        self._lock = threading.Lock()
+
+    def add(self, group_metadata):
+        with self._lock:
+            group_metadata_id = self._next_id
+            self._next_id += 1
+            self._entries[group_metadata_id] = group_metadata
+        return group_metadata_id
+
+    def get(self, group_metadata_id):
+        """The stored object, or ``None`` for an unknown (or released) id."""
+        with self._lock:
+            return self._entries.get(group_metadata_id)
+
+    def release(self, group_metadata_id):
+        """Drop the object; unknown ids are ignored."""
+        with self._lock:
+            self._entries.pop(group_metadata_id, None)
+
+
+def _group_metadata_to_proto(group_metadata):
+    """The four fields of a :class:`consumer.ConsumerGroupMetadata` as the
+    producer proto's ``ConsumerGroupMetadata`` message. ``group_instance_id`` is
+    ``None`` for a dynamic member, which leaves the proto3 ``optional`` unset."""
+    return pb.ConsumerGroupMetadata(
+        group_id=group_metadata.group_id,
+        generation_id=group_metadata.generation_id,
+        member_id=group_metadata.member_id,
+        group_instance_id=group_metadata.group_instance_id,
     )
 
 
@@ -854,13 +886,6 @@ def _admin_list_config_resources_response(resources):
         resources=[_admin_config_resource_to_proto(r) for r in resources])
 
 
-def _admin_list_client_metrics_resources_response(resources):
-    """`[ClientMetricsResourceListing]` ->
-    ListClientMetricsResourcesResponse. Whole-value, as above."""
-    return apb.ListClientMetricsResourcesResponse(
-        resources=[apb.ClientMetricsResourceListing(name=r.name) for r in resources])
-
-
 def _admin_log_dir_description_to_proto(description):
     """admin.py LogDirDescription -> proto LogDirDescription.
 
@@ -1055,7 +1080,7 @@ def _admin_list_offsets_response(outcomes):
 # admin.py's group methods hand back the same resolved shapes as the earlier
 # slices, with two exceptions worth naming here:
 #
-#   - list_groups / list_consumer_groups return a *pair* of lists,
+#   - list_groups returns a *pair* of lists,
 #     `([listing], [KafkaError])`, because Java's ListGroupsResult splits one
 #     future into valid() and an unkeyed errors() collection. The two are
 #     independent and generally of different length, so nothing may be zipped or
@@ -1099,34 +1124,6 @@ def _admin_list_groups_response(outcome):
         # error, which is what the C++ server does (`if (listing_err != nullptr)`
         # shortens `listing_errors`). Mapping it would preserve the length and
         # invent content, so the two servers would disagree on both.
-        listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
-
-
-def _admin_consumer_group_listing_to_proto(listing):
-    """admin.py ConsumerGroupListing -> proto ConsumerGroupListing.
-
-    Both `group_state` and the deprecated `state` cross even though Java derives
-    the second from the first: a backend that dropped one is a finding, and the
-    Rust client checks the pair.
-    """
-    out = apb.ConsumerGroupListing(
-        group_id=listing.group_id,
-        is_simple_consumer_group=bool(listing.is_simple_consumer_group))
-    if listing.group_state is not None:
-        out.group_state = listing.group_state
-    if listing.state is not None:
-        out.state = listing.state
-    if listing.group_type is not None:
-        out.group_type = listing.group_type
-    return out
-
-
-def _admin_list_consumer_groups_response(outcome):
-    """`([ConsumerGroupListing], [KafkaError])` -> ListConsumerGroupsResponse."""
-    valid, errors = outcome
-    return apb.ListConsumerGroupsResponse(
-        valid=[_admin_consumer_group_listing_to_proto(listing) for listing in valid],
-        # Null entries skipped, as in [_admin_list_groups_response].
         listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
 
 
@@ -1186,7 +1183,6 @@ def _admin_consumer_group_description_to_proto(description):
         members=[_admin_member_description_to_proto(m) for m in description.members],
         partition_assignor=description.partition_assignor,
         group_type=description.group_type,
-        state=description.state,
         group_state=description.group_state)
     node = _node_to_proto(description.coordinator)
     if node is not None:

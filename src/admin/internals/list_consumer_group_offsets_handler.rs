@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::OffsetFetchRequestData;
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsSpec};
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::RequestUtils;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetFetchRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_fetch_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
@@ -41,6 +41,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 /// Corresponds to `ListConsumerGroupOffsetsHandler`. `V` is
 /// [`GroupOffsets`] (Java's `Map<TopicPartition, OffsetAndMetadata>`, where a
 /// `None` value means "no committed offset").
+#[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler")]
 pub(crate) struct ListConsumerGroupOffsetsHandler {
     require_stable: bool,
     group_specs: HashMap<String, ListConsumerGroupOffsetsSpec>,
@@ -50,6 +51,9 @@ pub(crate) struct ListConsumerGroupOffsetsHandler {
 
 impl ListConsumerGroupOffsetsHandler {
     /// Creates a handler.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#ListConsumerGroupOffsetsHandler"
+    )]
     pub(crate) fn new(
         group_specs: HashMap<String, ListConsumerGroupOffsetsSpec>,
         require_stable: bool,
@@ -66,10 +70,12 @@ impl ListConsumerGroupOffsetsHandler {
     /// Creates the future bundle for the given group ids.
     ///
     /// Mirrors `ListConsumerGroupOffsetsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#newFuture")]
     pub(crate) fn new_future(group_ids: &[String]) -> SimpleAdminApiFuture<CoordinatorKey, GroupOffsets> {
         SimpleAdminApiFuture::for_keys(Self::coordinator_keys(group_ids))
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#coordinatorKeys")]
     fn coordinator_keys<'a>(group_ids: impl IntoIterator<Item = &'a String>) -> HashSet<CoordinatorKey> {
         group_ids.into_iter().map(CoordinatorKey::by_group_id).collect()
     }
@@ -78,6 +84,7 @@ impl ListConsumerGroupOffsetsHandler {
     /// owned by this handler (its group specs). A violation is a programming
     /// error (Java throws `IllegalArgumentException`); the driver only ever
     /// passes keys drawn from the handler's own future.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#validateKeys")]
     fn validate_keys(&self, group_ids: &HashSet<CoordinatorKey>) {
         let keys = Self::coordinator_keys(self.group_specs.keys());
         assert!(
@@ -88,7 +95,8 @@ impl ListConsumerGroupOffsetsHandler {
 
     /// Builds a single (possibly batched) `OffsetFetch` request for the given
     /// group ids. Mirrors `buildBatchedRequest`.
-    pub(crate) fn build_batched_request(&self, group_ids: &HashSet<CoordinatorKey>) -> OffsetFetchRequestBuilder {
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#buildBatchedRequest")]
+    pub(crate) fn build_batched_request(&self, group_ids: &HashSet<CoordinatorKey>) -> offset_fetch_request::Builder {
         let mut data = OffsetFetchRequestData::new();
         data.set_require_stable(self.require_stable);
         let groups = group_ids
@@ -120,9 +128,10 @@ impl ListConsumerGroupOffsetsHandler {
             })
             .collect();
         data.set_groups(groups);
-        OffsetFetchRequestBuilder::for_topic_names(data, false)
+        offset_fetch_request::Builder::for_topic_names(data, false)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#handleGroupError")]
     fn handle_group_error(
         &self,
         group_id: CoordinatorKey,
@@ -283,7 +292,7 @@ mod tests {
 
     use super::*;
     use crate::OffsetFetchResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, OffsetFetchResponse};
     use crate::offset_fetch_response_data::{
         OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
@@ -360,7 +369,7 @@ mod tests {
 
     fn build_offset_fetch(mut request: Box<dyn RequestBuilder>) -> OffsetFetchRequestData {
         match request.build().unwrap() {
-            crate::common::requests::ConcreteRequest::OffsetFetch(r) => r.data().clone(),
+            crate::common::requests::AbstractRequest::OffsetFetch(r) => r.data().clone(),
             other => panic!("expected OffsetFetch request, got {}", other.api_key().name()),
         }
     }
@@ -371,6 +380,7 @@ mod tests {
 
     /// Translated from `testBuildRequest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testBuildRequest")]
     fn test_build_request() {
         let handler = ListConsumerGroupOffsetsHandler::new(single_group_spec(), false, log_context());
         let data = handler.build_batched_request(&coordinator_keys(&[GROUP0])).data().clone();
@@ -386,6 +396,9 @@ mod tests {
 
     /// Translated from `testBuildRequestWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testBuildRequestWithMultipleGroups"
+    )]
     fn test_build_request_with_multiple_groups() {
         let mut specs = multi_group_specs();
         specs.insert(GROUP3.to_string(), spec(&[tp("t3", 0), tp("t3", 1)]));
@@ -422,6 +435,9 @@ mod tests {
 
     /// Translated from `testBuildRequestBatchGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testBuildRequestBatchGroups"
+    )]
     fn test_build_request_batch_groups() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         let mut requests = handler.build_request(1, &coordinator_keys(&[GROUP0, GROUP1, GROUP2]));
@@ -434,6 +450,9 @@ mod tests {
 
     /// Translated from `testBuildRequestDoesNotBatchGroup`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testBuildRequestDoesNotBatchGroup"
+    )]
     fn test_build_request_does_not_batch_group() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         // Disable batching (mirrors the driver's NoBatched downgrade).
@@ -524,12 +543,18 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testSuccessfulHandleResponse"
+    )]
     fn test_successful_handle_response() {
         assert_completed(&handle_single_group_error(Errors::None), GROUP0, &HashMap::new());
     }
 
     /// Translated from `testSuccessfulHandleResponseWithOnePartitionError`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testSuccessfulHandleResponseWithOnePartitionError"
+    )]
     fn test_successful_handle_response_with_one_partition_error() {
         for error in [
             Errors::UnknownTopicOrPartition,
@@ -549,6 +574,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleResponseWithOnePartitionErrorWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testSuccessfulHandleResponseWithOnePartitionErrorWithMultipleGroups"
+    )]
     fn test_successful_handle_response_with_one_partition_error_with_multiple_groups() {
         for error in [
             Errors::UnknownTopicOrPartition,
@@ -592,6 +620,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleResponseWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testSuccessfulHandleResponseWithMultipleGroups"
+    )]
     fn test_successful_handle_response_with_multiple_groups() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         let groups = vec![
@@ -608,6 +639,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testUnmappedHandleResponse"
+    )]
     fn test_unmapped_handle_response() {
         assert_unmapped(&handle_single_group_error(Errors::CoordinatorNotAvailable), &[GROUP0]);
         assert_unmapped(&handle_single_group_error(Errors::NotCoordinator), &[GROUP0]);
@@ -615,6 +649,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleResponseWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testUnmappedHandleResponseWithMultipleGroups"
+    )]
     fn test_unmapped_handle_response_with_multiple_groups() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         let groups = vec![
@@ -629,12 +666,18 @@ mod tests {
 
     /// Translated from `testRetriableHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testRetriableHandleResponse"
+    )]
     fn test_retriable_handle_response() {
         assert_retriable(&handle_single_group_error(Errors::CoordinatorLoadInProgress));
     }
 
     /// Translated from `testRetriableHandleResponseWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testRetriableHandleResponseWithMultipleGroups"
+    )]
     fn test_retriable_handle_response_with_multiple_groups() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         let groups = vec![
@@ -649,6 +692,9 @@ mod tests {
 
     /// Translated from `testFailedHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testFailedHandleResponse"
+    )]
     fn test_failed_handle_response() {
         assert_failed(
             &handle_single_group_error(Errors::GroupAuthorizationFailed),
@@ -669,6 +715,9 @@ mod tests {
 
     /// Translated from `testFailedHandleResponseWithMultipleGroups`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandlerTest#testFailedHandleResponseWithMultipleGroups"
+    )]
     fn test_failed_handle_response_with_multiple_groups() {
         let handler = ListConsumerGroupOffsetsHandler::new(multi_group_specs(), false, log_context());
         let groups = vec![

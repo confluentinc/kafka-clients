@@ -25,6 +25,7 @@ use crate::common::{GroupState, GroupType};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListGroupsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions")]
 pub struct ListGroupsOptions {
     timeout_ms: Option<i32>,
     group_states: HashSet<GroupState>,

@@ -23,6 +23,7 @@ use crate::common::record::internal::RecordBatch;
 
 /// The metadata for a record that has been acknowledged by the server.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata")]
 pub struct RecordMetadata {
     /// The offset of the record in the topic/partition.
     offset: i64,
@@ -49,6 +50,7 @@ impl RecordMetadata {
     pub const UNKNOWN_PARTITION: i32 = -1;
 
     /// Creates a new instance with the provided parameters.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#RecordMetadata")]
     pub fn new(
         topic_partition: TopicPartition,
         base_offset: i64,
@@ -68,45 +70,53 @@ impl RecordMetadata {
     }
 
     /// Indicates whether the record metadata includes the offset.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#hasOffset")]
     pub fn has_offset(&self) -> bool {
         self.offset != RecordMetadata::INVALID_OFFSET
     }
 
     /// The offset of the record in the topic/partition.
     /// Returns -1 if [`has_offset()`](Self::has_offset) returns false.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// Indicates whether the record metadata includes the timestamp.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#hasTimestamp")]
     pub fn has_timestamp(&self) -> bool {
         self.timestamp != RecordBatch::NO_TIMESTAMP
     }
 
     /// The timestamp of the record in the topic/partition.
     /// Returns -1 if [`has_timestamp()`](Self::has_timestamp) returns false.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The size of the serialized, uncompressed key in bytes.
     /// Returns -1 if key is null.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#serializedKeySize")]
     pub fn serialized_key_size(&self) -> i32 {
         self.serialized_key_size
     }
 
     /// The size of the serialized, uncompressed value in bytes.
     /// Returns -1 if value is null.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#serializedValueSize")]
     pub fn serialized_value_size(&self) -> i32 {
         self.serialized_value_size
     }
 
     /// The topic the record was appended to.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#topic")]
     pub fn topic(&self) -> &str {
         self.topic_partition.topic()
     }
 
     /// The partition the record was sent to.
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#partition")]
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()
     }
@@ -129,6 +139,7 @@ mod tests {
 
     /// Translated from `RecordMetadataTest.testConstructionWithMissingBatchIndex`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadataTest#testConstructionWithMissingBatchIndex")]
     fn test_construction_with_missing_batch_index() {
         let tp = TopicPartition::new("foo".to_string(), 0);
         let timestamp = 2340234_i64;
@@ -147,6 +158,7 @@ mod tests {
 
     /// Translated from `RecordMetadataTest.testConstructionWithBatchIndexOffset`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadataTest#testConstructionWithBatchIndexOffset")]
     fn test_construction_with_batch_index_offset() {
         let tp = TopicPartition::new("foo".to_string(), 0);
         let timestamp = 2340234_i64;

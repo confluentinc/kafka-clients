@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.NetworkException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The server disconnected before a response was received.
     ///
-    /// Corresponds to Java's `NetworkException`, error code [`Errors::NetworkError`].
+    /// Corresponds to Java's `NetworkException`, error code `Errors::NetworkError`.
     ///
     /// Java `extends` chain:
     ///    `NetworkException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NetworkException")]
     NetworkError,
     code: Errors::NetworkError,
     extends: [

@@ -51,11 +51,10 @@ from producer import KafkaError  # shared error type
 # .group_id / .generation_id / .member_id / .group_instance_id + repr surface as
 # the former pure-Python dataclass, and additionally carries the handle that
 # Producer.send_offsets_to_transaction feeds back into the FFI (see
-# producer-transactions-python-plan.md §6.1). A consumer obtains one from
-# Consumer.group_metadata(); it is also directly constructible as
-# ConsumerGroupMetadata(group_id, generation_id, member_id, group_instance_id=None)
-# for callers that hold the raw fields (e.g. rebuilding it from the wire), with
-# group_instance_id=None for a non-static member.
+# producer-transactions-python-plan.md §6.1). Consumer.group_metadata() is the
+# only way to get one: Java deprecated the ConsumerGroupMetadata constructors in
+# 4.2 (the class becomes an interface in 5.0), so the type cannot be
+# instantiated from Python.
 from _confluentkafka import ConsumerGroupMetadata  # noqa: F401  (re-exported)
 
 _log = logging.getLogger(__name__)

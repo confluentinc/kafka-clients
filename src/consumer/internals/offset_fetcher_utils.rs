@@ -22,7 +22,7 @@
 //! classic-consumer `OffsetFetcher` is out of scope per
 //! `consumer-threading.md` §20.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use crate::consumer::ConsumerNoOffsetForPartitionError;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +50,7 @@ use super::{FetchPosition, LogTruncation, SubscriptionState};
 ///
 /// Translated from `OffsetFetcherUtils.ListOffsetData`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils$ListOffsetData")]
 pub(crate) struct ListOffsetData {
     /// The fetched offset.
     pub offset: i64,
@@ -62,6 +63,7 @@ pub(crate) struct ListOffsetData {
 }
 
 impl ListOffsetData {
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils$ListOffsetData#ListOffsetData")]
     pub(crate) fn new(offset: i64, timestamp: Option<i64>, leader_epoch: Option<i32>) -> Self {
         Self { offset, timestamp, leader_epoch }
     }
@@ -71,6 +73,7 @@ impl ListOffsetData {
 ///
 /// Translated from `OffsetFetcherUtils.ListOffsetResult`.
 #[derive(Default, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils$ListOffsetResult")]
 pub(crate) struct ListOffsetResult {
     /// Per-partition fetched offsets.
     pub fetched_offsets: HashMap<TopicPartition, ListOffsetData>,
@@ -79,6 +82,7 @@ pub(crate) struct ListOffsetResult {
 }
 
 impl ListOffsetResult {
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils$ListOffsetResult#ListOffsetResult")]
     pub(crate) fn new(
         fetched_offsets: HashMap<TopicPartition, ListOffsetData>,
         partitions_to_retry: HashSet<TopicPartition>,
@@ -90,6 +94,7 @@ impl ListOffsetResult {
 /// Translates `org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils`:
 /// its static helpers are associated functions, its instance fields are the
 /// struct's fields.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils")]
 pub(crate) struct OffsetFetcherUtils {
     /// `Arc` clone shared with the `OffsetsRequestManager`. Held so that
     /// Java's instance methods that read/write `metadata` and
@@ -112,6 +117,9 @@ impl OffsetFetcherUtils {
     /// topic-level permission (v3+).
     ///
     /// Translated from `OffsetFetcherUtils.hasUsableOffsetForLeaderEpochVersion`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#hasUsableOffsetForLeaderEpochVersion"
+    )]
     pub(crate) fn has_usable_offset_for_leader_epoch_version(node_api_versions: &NodeApiVersions) -> bool {
         match node_api_versions.api_version(&ApiKeys::OFFSET_FOR_LEADER_EPOCH) {
             Some(version) => OffsetsForLeaderEpochRequest::supports_topic_permission(version.max_version),
@@ -123,6 +131,7 @@ impl OffsetFetcherUtils {
     /// [`FetchPosition::current_leader`], dropping entries without a leader.
     ///
     /// Translated from `OffsetFetcherUtils.regroupFetchPositionsByLeader`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#regroupFetchPositionsByLeader")]
     pub(crate) fn regroup_fetch_positions_by_leader(
         partition_map: &HashMap<TopicPartition, FetchPosition>,
     ) -> HashMap<Node, HashMap<TopicPartition, FetchPosition>> {
@@ -138,6 +147,7 @@ impl OffsetFetcherUtils {
     /// Returns the set of topics referenced by the given partition iterator.
     ///
     /// Translated from `OffsetFetcherUtils.topicsForPartitions`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#topicsForPartitions")]
     pub(crate) fn topics_for_partitions<'a, I>(partitions: I) -> HashSet<String>
     where
         I: IntoIterator<Item = &'a TopicPartition>,
@@ -153,6 +163,7 @@ impl OffsetFetcherUtils {
     /// would NPE on null).
     ///
     /// Translated from `OffsetFetcherUtils.regroupPartitionMapByNode`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#regroupPartitionMapByNode")]
     pub(crate) fn regroup_partition_map_by_node<T: Clone>(
         metadata: &ConsumerMetadata,
         partition_map: &HashMap<TopicPartition, T>,
@@ -187,6 +198,7 @@ impl OffsetFetcherUtils {
     /// public-class constructor here and silently produced `None` for every
     /// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
     /// rejected `timestamp == -1`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#buildOffsetsForTimesResult")]
     pub(crate) fn build_offsets_for_times_result(
         timestamps_to_search: &HashMap<TopicPartition, i64>,
         fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
@@ -211,6 +223,7 @@ impl OffsetFetcherUtils {
     /// `OffsetFetcherUtils(LogContext, ConsumerMetadata, SubscriptionState, Time, long, ApiVersions)`
     /// (`OffsetFetcherUtils.java:73`), which constructs its own
     /// [`PositionsValidator`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#OffsetFetcherUtils")]
     pub(crate) fn new(
         metadata: std::sync::Arc<ConsumerMetadata>,
         subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
@@ -227,6 +240,7 @@ impl OffsetFetcherUtils {
     /// Java: the seven-argument overload taking the shared
     /// `PositionsValidator` (`OffsetFetcherUtils.java:83`). Per CLAUDE.md §2
     /// the overload carrying the extra parameter is named after it.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#OffsetFetcherUtils")]
     pub(crate) fn with_positions_validator(
         metadata: std::sync::Arc<ConsumerMetadata>,
         subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
@@ -259,6 +273,7 @@ impl OffsetFetcherUtils {
     ///
     /// Returns [`TopicAuthorizationError`] if any partition response
     /// carried `TOPIC_AUTHORIZATION_FAILED`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#handleListOffsetResponse")]
     pub(crate) fn handle_list_offset_response(
         &self,
         response: &ListOffsetsResponse,
@@ -336,6 +351,7 @@ impl OffsetFetcherUtils {
 
     /// Updates the `SubscriptionState` HW / LSO for each fetched partition,
     /// matching Java's `updateSubscriptionState`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#updateSubscriptionState")]
     pub(crate) fn update_subscription_state(
         &self,
         fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
@@ -377,6 +393,7 @@ impl OffsetFetcherUtils {
     ///
     /// Propagates the error from [`SubscriptionState`] if the partition is not
     /// assigned.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#maybeSetPartitionEndOffsetRequest")]
     pub(crate) fn maybe_set_partition_end_offset_request(&self, partition: &TopicPartition) -> Result<bool, Error> {
         let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
         if subs.partition_end_offset_requested(partition)? {
@@ -400,6 +417,7 @@ impl OffsetFetcherUtils {
     /// Mirrors Java's `OffsetFetcherUtils.clearPartitionEndOffsetRequests`
     /// (AK 4.3.1). The sole caller is the classic-consumer `OffsetFetcher`
     /// (untranslated per consumer-threading.md §20).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#clearPartitionEndOffsetRequests")]
     pub(crate) fn clear_partition_end_offset_requests<'a, I>(&self, partitions: I)
     where
         I: IntoIterator<Item = &'a TopicPartition>,
@@ -442,6 +460,7 @@ impl OffsetFetcherUtils {
     /// Returns the cached reset error (if any) or
     /// `Error` (NoOffsetForPartition) when a partition needs reset
     /// but its strategy carries no timestamp.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#getOffsetResetStrategyForPartitions")]
     pub(crate) fn get_offset_reset_strategy_for_partitions(
         &self,
         now_ms: i64,
@@ -477,6 +496,7 @@ impl OffsetFetcherUtils {
     ///
     /// Propagates any cached validate-positions error from
     /// [`Self::maybe_set_validate_error`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#refreshAndGetPartitionsToValidate")]
     pub(crate) fn refresh_and_get_partitions_to_validate(
         &self,
         now_ms: i64,
@@ -489,6 +509,7 @@ impl OffsetFetcherUtils {
     /// valid position.
     ///
     /// Java: `OffsetFetcherUtils.validatePositionsOnMetadataChange()` (`:183`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#validatePositionsOnMetadataChange")]
     pub(crate) fn validate_positions_on_metadata_change(&self) {
         self.positions_validator
             .validate_positions_on_metadata_change(&self.api_versions);
@@ -496,6 +517,7 @@ impl OffsetFetcherUtils {
 
     /// Resets a partition's position to the offset returned by a
     /// `ListOffsets` response, mirroring Java's `resetPositionIfNeeded`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#resetPositionIfNeeded")]
     pub(crate) fn reset_position_if_needed(
         &self,
         partition: &TopicPartition,
@@ -521,6 +543,9 @@ impl OffsetFetcherUtils {
     /// Mirrors Java's `onSuccessfulResponseForResettingPositions`. Updates
     /// the retry timer for partitions that need retry and resets the
     /// position for partitions that returned an offset.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#onSuccessfulResponseForResettingPositions"
+    )]
     pub(crate) fn on_successful_response_for_resetting_positions(
         &self,
         result: &ListOffsetResult,
@@ -545,6 +570,9 @@ impl OffsetFetcherUtils {
     /// retry timer for all `reset_timestamps` partitions and caches the
     /// error for the next call to `get_offset_reset_strategy_for_partitions`
     /// (unless retriable).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#onFailedResponseForResettingPositions"
+    )]
     pub(crate) fn on_failed_response_for_resetting_positions(
         &self,
         reset_timestamps: &HashMap<TopicPartition, ListOffsetsPartition>,
@@ -565,6 +593,9 @@ impl OffsetFetcherUtils {
     /// Mirrors Java's `onSuccessfulResponseForValidatingPositions`. Runs
     /// `SubscriptionState::maybe_complete_validation` per partition and
     /// returns any detected log truncations.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#onSuccessfulResponseForValidatingPositions"
+    )]
     pub(crate) fn on_successful_response_for_validating_positions(
         &self,
         fetch_positions: &HashMap<TopicPartition, FetchPosition>,
@@ -592,6 +623,9 @@ impl OffsetFetcherUtils {
     /// Mirrors Java's `onFailedResponseForValidatingPositions`. Bumps the
     /// retry timer for all `fetch_positions` keys and caches the error
     /// (unless retriable).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#onFailedResponseForValidatingPositions"
+    )]
     pub(crate) fn on_failed_response_for_validating_positions(
         &self,
         fetch_positions: &HashMap<TopicPartition, FetchPosition>,

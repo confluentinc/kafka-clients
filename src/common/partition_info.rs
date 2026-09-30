@@ -20,6 +20,7 @@ use super::Node;
 
 /// This is used to describe per-partition state in the MetadataResponse.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.PartitionInfo")]
 pub struct PartitionInfo {
     topic: String,
     partition: i32,
@@ -31,6 +32,7 @@ pub struct PartitionInfo {
 
 impl PartitionInfo {
     /// Creates a new `PartitionInfo` with no offline replicas.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#PartitionInfo")]
     pub fn new(
         topic: String,
         partition: i32,
@@ -42,6 +44,7 @@ impl PartitionInfo {
     }
 
     /// Creates a new `PartitionInfo` with offline replicas.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#PartitionInfo")]
     pub fn with_offline_replicas(
         topic: String,
         partition: i32,
@@ -54,33 +57,39 @@ impl PartitionInfo {
     }
 
     /// The topic name.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
     /// The partition id.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
     /// The node currently acting as a leader for this partition, or `None` if there is no leader.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#leader")]
     pub fn leader(&self) -> Option<&Node> {
         self.leader.as_ref()
     }
 
     /// The complete set of replicas for this partition regardless of whether they are alive or up-to-date. The preferred replica
     /// is the head of the list.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#replicas")]
     pub fn replicas(&self) -> &[Node] {
         &self.replicas
     }
 
     /// The subset of the replicas that are in sync, that is caught-up to the leader and ready to
     /// take over as leader if the leader should fail.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#inSyncReplicas")]
     pub fn in_sync_replicas(&self) -> &[Node] {
         &self.in_sync_replicas
     }
 
     /// The subset of the replicas that are offline.
+    #[doc(alias = "org.apache.kafka.common.PartitionInfo#offlineReplicas")]
     pub fn offline_replicas(&self) -> &[Node] {
         &self.offline_replicas
     }
@@ -111,6 +120,7 @@ impl std::hash::Hash for PartitionInfo {
 }
 
 /// Format node ids from a slice for display.
+#[doc(alias = "org.apache.kafka.common.PartitionInfo#formatNodeIds")]
 fn format_node_ids(nodes: &[Node]) -> String {
     let mut b = String::from("[");
     for (i, node) in nodes.iter().enumerate() {

@@ -25,12 +25,13 @@ use crate::alter_replica_log_dirs_response_data::{AlterReplicaLogDirPartitionRes
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{AlterReplicaLogDirsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterReplicaLogDirsResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterReplicaLogDirs request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AlterReplicaLogDirsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest")]
 pub struct AlterReplicaLogDirsRequest {
     data: AlterReplicaLogDirsRequestData,
     version: i16,
@@ -38,11 +39,13 @@ pub struct AlterReplicaLogDirsRequest {
 
 impl AlterReplicaLogDirsRequest {
     /// Creates a new `AlterReplicaLogDirsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#AlterReplicaLogDirsRequest")]
     pub fn new(data: AlterReplicaLogDirsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#data")]
     pub fn data(&self) -> &AlterReplicaLogDirsRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl AlterReplicaLogDirsRequest {
     /// Returns the requested destination log directory per topic partition.
     ///
     /// Mirrors `AlterReplicaLogDirsRequest.partitionDirs`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#partitionDirs")]
     pub fn partition_dirs(&self) -> HashMap<TopicPartition, String> {
         let mut result = HashMap::new();
         for alter_dir in &self.data.dirs {
@@ -81,6 +85,7 @@ impl AlterReplicaLogDirsRequest {
     /// partition of every topic with the given error.
     ///
     /// Mirrors `AlterReplicaLogDirsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AlterReplicaLogDirsResponseData::new();
         let mut results = Vec::new();
@@ -113,6 +118,7 @@ impl AlterReplicaLogDirsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterReplicaLogDirsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -129,14 +135,16 @@ impl std::fmt::Display for AlterReplicaLogDirsRequest {
 ///
 /// Corresponds to `AlterReplicaLogDirsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct AlterReplicaLogDirsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder")]
+pub struct Builder {
     data: AlterReplicaLogDirsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterReplicaLogDirsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder#Builder")]
     pub fn new(data: AlterReplicaLogDirsRequestData) -> Self {
         Self {
             data,
@@ -146,7 +154,7 @@ impl AlterReplicaLogDirsRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterReplicaLogDirsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_REPLICA_LOG_DIRS
     }
@@ -159,8 +167,8 @@ impl RequestBuilder for AlterReplicaLogDirsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -188,6 +196,7 @@ mod tests {
 
     /// Mirrors `AlterReplicaLogDirsRequestTest.testErrorResponse`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequestTest#testErrorResponse")]
     fn test_error_response() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/data0", vec![topic("topic", vec![0, 1, 2])])]);
@@ -209,6 +218,7 @@ mod tests {
 
     /// Mirrors `AlterReplicaLogDirsRequestTest.testPartitionDir`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequestTest#testPartitionDir")]
     fn test_partition_dir() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![
@@ -225,15 +235,15 @@ mod tests {
         assert_eq!(request.partition_dirs(), expect);
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/data0", vec![topic("round-trip-topic", vec![3, 4])])]);
-        let mut request = ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterReplicaLogDirsRequest::parse(&mut readable, 2).unwrap();
         assert_eq!(parsed.data().dirs.len(), 1);
         assert_eq!(parsed.data().dirs[0].path, "/data0");
@@ -255,7 +265,7 @@ mod tests {
     fn serialize_known_byte_vector_v2() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/d", vec![topic("t", vec![5])])]);
-        let mut request = ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // dirs array length + 1

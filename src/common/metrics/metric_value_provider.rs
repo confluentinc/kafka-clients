@@ -15,7 +15,8 @@
 //! Super-interface for `Measurable` or `Gauge` that provides metric values
 //! (`org.apache.kafka.common.metrics.MetricValueProvider`).
 
-use crate::common::metrics::{Gauge, Measurable, MetricConfig, MetricValue};
+use crate::common::MetricValue;
+use crate::common::metrics::{Gauge, Measurable, MetricConfig};
 
 /// Super-interface for [`Measurable`] or [`Gauge`] that provides metric values.
 ///
@@ -24,6 +25,8 @@ use crate::common::metrics::{Gauge, Measurable, MetricConfig, MetricValue};
 /// [`crate::common::Metric::metric_value`] returns an erased value, we model the
 /// provider as an enum over the two concrete kinds rather than a generic trait;
 /// the produced value is the type-erased [`MetricValue`].
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
 pub enum MetricValueProvider {
     /// A measurable quantity (produces an `f64`).
     Measurable(Box<dyn Measurable>),
@@ -36,6 +39,7 @@ impl MetricValueProvider {
     ///
     /// * `config` - The configuration for this metric
     /// * `now` - The POSIX time in milliseconds the measurement is being taken
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider#value")]
     pub fn value(&self, config: &MetricConfig, now: i64) -> MetricValue {
         match self {
             MetricValueProvider::Measurable(m) => MetricValue::Double(m.measure(config, now)),

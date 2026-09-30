@@ -23,6 +23,7 @@
 /// Translates the Java static-utility class
 /// `org.apache.kafka.clients.CommonClientConfigs`, which has no instance state,
 /// so it becomes a unit struct hosting its statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.CommonClientConfigs")]
 pub struct CommonClientConfigs;
 
 impl CommonClientConfigs {

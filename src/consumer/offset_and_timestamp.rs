@@ -31,6 +31,7 @@ use crate::common::Error;
 /// value as in Java. See
 /// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp")]
 pub struct OffsetAndTimestamp {
     timestamp: i64,
     offset: i64,
@@ -44,6 +45,7 @@ impl OffsetAndTimestamp {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp")]
     pub fn new(offset: i64, timestamp: i64) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, timestamp, None)
     }
@@ -54,6 +56,7 @@ impl OffsetAndTimestamp {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp")]
     pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, Error> {
         if offset < 0 {
             return Err(Error::local_illegal_argument("Invalid negative offset"));
@@ -65,11 +68,13 @@ impl OffsetAndTimestamp {
     }
 
     /// The timestamp.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The offset.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
@@ -77,6 +82,7 @@ impl OffsetAndTimestamp {
     /// Get the leader epoch corresponding to the offset that was found (if
     /// one exists). This can be provided to `seek()` to ensure the log hasn't
     /// been truncated prior to fetching.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
     }

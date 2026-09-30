@@ -24,12 +24,14 @@ use crate::admin::ConfigEntry;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.Config`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.Config")]
 pub struct Config {
     entries: HashMap<String, ConfigEntry>,
 }
 
 impl Config {
     /// Create a configuration instance with the provided entries.
+    #[doc(alias = "org.apache.kafka.clients.admin.Config#Config")]
     pub fn new(entries: impl IntoIterator<Item = ConfigEntry>) -> Self {
         let mut map = HashMap::new();
         for entry in entries {
@@ -39,12 +41,14 @@ impl Config {
     }
 
     /// Configuration entries for a resource.
+    #[doc(alias = "org.apache.kafka.clients.admin.Config#entries")]
     pub fn entries(&self) -> impl Iterator<Item = &ConfigEntry> {
         self.entries.values()
     }
 
     /// Get the configuration entry with the provided name or `None` if there
     /// isn't one.
+    #[doc(alias = "org.apache.kafka.clients.admin.Config#get")]
     pub fn get(&self, name: &str) -> Option<&ConfigEntry> {
         self.entries.get(name)
     }

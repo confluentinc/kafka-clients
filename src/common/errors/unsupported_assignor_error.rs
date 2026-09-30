@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnsupportedAssignorException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The assignor or its version range is not supported by the consumer group.
     ///
-    /// Corresponds to Java's `UnsupportedAssignorException`, error code [`Errors::UnsupportedAssignor`].
+    /// Corresponds to Java's `UnsupportedAssignorException`, error code `Errors::UnsupportedAssignor`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedAssignorException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedAssignorException")]
     UnsupportedAssignorError,
     code: Errors::UnsupportedAssignor,
     extends: [

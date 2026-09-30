@@ -898,8 +898,11 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     );
 
     let config = ConsumerConfig::new(&props)?;
-    let consumer =
-        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
+    let consumer = KafkaConsumer::new::<String, String>(
+        config,
+        Box::new(StringDeserializer::new()),
+        Box::new(StringDeserializer::new()),
+    )?;
 
     // Java always constructs with `useAsyncCommit = false` (createFromArgs line
     // 716), so async commit is never taken even though the field exists.
@@ -953,13 +956,13 @@ optional arguments:\n\
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confluent_kafka::consumer::{AutoOffsetResetStrategy, MockConsumer};
+    use confluent_kafka::consumer::MockConsumer;
     use indexmap::IndexMap;
 
     // ---- construction helpers ----------------------------------------------
 
     fn mock_consumer() -> Box<dyn Consumer<String, String>> {
-        Box::new(MockConsumer::<String, String>::new(AutoOffsetResetStrategy::EARLIEST))
+        Box::new(MockConsumer::<String, String>::new("earliest").unwrap())
     }
 
     fn verifiable_with(max_messages: i32, verbose: bool) -> VerifiableConsumer {
@@ -1323,7 +1326,7 @@ mod tests {
             Ok(_) => panic!("expected classic group protocol to be unsupported"),
             Err(e) => e,
         };
-        assert_eq!(error.error(), confluent_kafka::common::protocol::Errors::UnsupportedVersion);
+        assert!(matches!(error, Error::UnsupportedVersion(_)), "unexpected error: {error:?}");
     }
 
     // ---- properties parsing -------------------------------------------------

@@ -29,6 +29,8 @@
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AclOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.acl.AclOperation")]
 pub enum AclOperation {
     /// Represents any `AclOperation` which this client cannot understand,
     /// perhaps because this client is too old.
@@ -70,6 +72,7 @@ pub enum AclOperation {
 
 impl AclOperation {
     /// Return the code of this operation.
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperation#code")]
     pub fn code(&self) -> i8 {
         match self {
             AclOperation::Unknown => 0,
@@ -93,6 +96,7 @@ impl AclOperation {
 
     /// Return the `AclOperation` with the provided code or [`AclOperation::Unknown`]
     /// if one cannot be found.
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperation#fromCode")]
     pub fn from_code(code: i8) -> AclOperation {
         match code {
             0 => AclOperation::Unknown,
@@ -119,6 +123,7 @@ impl AclOperation {
     ///
     /// Returns the `AclOperation`, or [`AclOperation::Unknown`] if the string
     /// could not be matched (case-insensitive).
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperation#fromString")]
     pub fn from_string(str: &str) -> AclOperation {
         match str.to_uppercase().as_str() {
             "UNKNOWN" => AclOperation::Unknown,
@@ -142,6 +147,7 @@ impl AclOperation {
     }
 
     /// Return true if this operation is [`AclOperation::Unknown`].
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperation#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == AclOperation::Unknown
     }
@@ -260,6 +266,7 @@ mod tests {
 
     /// Mirrors `AclOperationTest.testIsUnknown`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testIsUnknown")]
     fn test_is_unknown() {
         for info in &INFOS {
             assert_eq!(
@@ -274,6 +281,7 @@ mod tests {
 
     /// Mirrors `AclOperationTest.testCode`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testCode")]
     fn test_code() {
         assert_eq!(VALUES.len(), INFOS.len());
         for info in &INFOS {
@@ -297,6 +305,7 @@ mod tests {
 
     /// Mirrors `AclOperationTest.testName`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testName")]
     fn test_name() {
         for info in &INFOS {
             assert_eq!(
@@ -312,6 +321,7 @@ mod tests {
 
     /// Mirrors `AclOperationTest.testExhaustive`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testExhaustive")]
     fn test_exhaustive() {
         assert_eq!(INFOS.len(), VALUES.len());
         for (i, info) in INFOS.iter().enumerate() {

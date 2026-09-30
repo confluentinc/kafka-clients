@@ -30,17 +30,20 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// IEEE-754 `f64` addition Java performs in `total += value`; the CAS only
 /// serializes concurrent recorders, exactly as Java's sensor `synchronized` does.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeSum")]
 pub struct CumulativeSum {
     total: AtomicU64,
 }
 
 impl CumulativeSum {
     /// Create a `CumulativeSum` initialized to `0.0`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeSum#CumulativeSum")]
     pub fn new() -> Self {
         Self::with_value(0.0)
     }
 
     /// Create a `CumulativeSum` initialized to `value`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeSum#CumulativeSum")]
     pub fn with_value(value: f64) -> Self {
         Self { total: AtomicU64::new(value.to_bits()) }
     }

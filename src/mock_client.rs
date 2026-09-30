@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! A mock implementation of [`KafkaClient`] for testing.
 //!
 //! Translated from `org.apache.kafka.clients.MockClient`.
@@ -27,9 +27,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use tokio::sync::Notify;
 
-use crate::common::requests::ConcreteRequest;
+use crate::common::requests::AbstractRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
+use crate::common::utils::Time;
 use crate::common::{Error, Node};
 
 use super::ClientRequest;
@@ -138,7 +139,7 @@ impl MockConnectionState {
 /// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
 /// supplies one, and the assertions live *inside* it — so a port without matchers
 /// silently drops them.
-pub type RequestMatcher = Box<dyn Fn(&ConcreteRequest) -> bool + Send>;
+pub type RequestMatcher = Box<dyn Fn(&AbstractRequest) -> bool + Send>;
 
 /// A queued future response to be delivered when a matching request is sent.
 struct FutureResponse {
@@ -165,8 +166,8 @@ struct FutureResponse {
 pub struct MockClient {
     /// Correlation ID counter.
     correlation: AtomicI32,
-    /// Current time provider.
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Connection states per node.
     connections: HashMap<String, MockConnectionState>,
     /// Queued requests (sent but not yet responded to).
@@ -207,11 +208,9 @@ pub struct MockClient {
     /// `MockClient.advanceTimeDuringPoll` flag (`MockClient.java:74`, `:145-147`,
     /// applied at `:346-348`).
     ///
-    /// Java's `MockClient` holds a whole `Time`, so its flag is a plain `boolean` and
-    /// the sleep goes to `time.sleep(timeoutMs)`. This port holds only `Time`'s read
-    /// half ([`Self::time_provider`]), so the write half is injected here instead.
-    /// Threading Java's full `Time` interface through the producer is the larger change
-    /// PLAN §9.19 tracks on its own account; this keeps the addition inside the mock.
+    /// Java's flag is a plain `boolean` and the sleep goes to `time.sleep(timeoutMs)`.
+    /// The crate's [`Time`] translates only the clock reads, not `sleep` (a blocking
+    /// call with no async counterpart on the trait), so the sleep is injected here.
     advance_time_during_poll: Option<Arc<dyn Fn(i64) + Send + Sync>>,
 }
 
@@ -223,17 +222,17 @@ impl MockClient {
     /// `Collections.emptyList()` (`:769`), and `StaticMetadataUpdater` extends it overriding
     /// only `fetchNodes()` (`:783-791`) — so Java's no-nodes form is exactly the
     /// static-nodes form with an empty list, which is what this forwards to.
-    pub fn new(time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
-        Self::with_static_nodes(Vec::new(), time_provider)
+    pub fn new(time: Arc<dyn Time>) -> Self {
+        Self::with_static_nodes(Vec::new(), time)
     }
 
-    /// Creates a new `MockClient` with the given static nodes and time provider.
+    /// Creates a new `MockClient` with the given static nodes and time.
     ///
     /// Translates `MockClient(Time time, List<Node> staticNodes)` (`MockClient.java:105-107`).
-    pub fn with_static_nodes(static_nodes: Vec<Node>, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+    pub fn with_static_nodes(static_nodes: Vec<Node>, time: Arc<dyn Time>) -> Self {
         Self {
             correlation: AtomicI32::new(0),
-            time_provider,
+            time,
             connections: HashMap::new(),
             requests: VecDeque::new(),
             responses: VecDeque::new(),
@@ -280,26 +279,26 @@ impl MockClient {
 
     /// Back off the connection to the specified node.
     pub fn backoff(&mut self, node: &Node, duration_ms: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.connection_state(node.id_string()).backing_off_until_ms = now + duration_ms;
     }
 
     /// Mark a node as unreachable for the specified duration.
     pub fn set_unreachable(&mut self, node: &Node, duration_ms: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.disconnect_node(node.id_string());
         self.connection_state(node.id_string()).unreachable_until_ms = now + duration_ms;
     }
 
     /// Throttle a node connection.
     pub fn throttle(&mut self, node: &Node, duration_ms: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.connection_state(node.id_string()).throttled_until_ms = now + duration_ms;
     }
 
     /// Delay the ready state for a node.
     pub fn delay_ready(&mut self, node: &Node, duration_ms: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.connection_state(node.id_string()).ready_delayed_until_ms = now + duration_ms;
     }
 
@@ -338,7 +337,7 @@ impl MockClient {
     }
 
     fn disconnect_node(&mut self, node_id: &str) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         // Create disconnect responses for all pending requests to this node
         let mut remaining = VecDeque::new();
         while let Some(mut request) = self.requests.pop_front() {
@@ -403,7 +402,7 @@ impl MockClient {
     /// Queue up a response with a possible disconnect flag.
     pub fn respond_disconnected(&mut self, response: ConcreteResponse, disconnected: bool) {
         let mut request = self.requests.pop_front().expect("No requests pending for inbound response");
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         let version = request.request_builder().latest_allowed_version();
         let header = request.make_header(version).expect("Failed to create header");
         let callback = request.take_callback();
@@ -433,7 +432,7 @@ impl MockClient {
     ///
     /// If `index` is out of range.
     pub fn respond_to_request(&mut self, index: usize, response: ConcreteResponse) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         let mut request = self
             .requests
             .remove(index)
@@ -462,7 +461,7 @@ impl MockClient {
 
     /// Respond to the first pending request to the given node, with a disconnect flag.
     pub fn respond_from_disconnected(&mut self, response: ConcreteResponse, node: &Node, disconnected: bool) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         let node_id = node.id_string().to_string();
         let idx = self
             .requests
@@ -696,7 +695,7 @@ impl KafkaClient for MockClient {
 
     fn connection_failed(&self, node: &Node) -> bool {
         if let Some(state) = self.connections.get(node.id_string()) {
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             state.is_backing_off(now)
         } else {
             false
@@ -737,7 +736,7 @@ impl KafkaClient for MockClient {
             //     test pay for a build it never reads. Nothing downstream of a matched
             //     future response reads the request body, so the narrower build is
             //     equivalent.
-            //   - Safety: `ProduceRequestBuilder::build_version` *drains* its builder —
+            //   - Safety: `produce_request::Builder::build_version` *drains* its builder —
             //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
             //     (`common/requests/produce_request.rs:307`) — so a second build of the
             //     same request yields empty `topic_data`. Java's
@@ -930,13 +929,12 @@ impl KafkaClient for MockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
     use crate::common::requests::FindCoordinatorResponse;
-    use std::sync::atomic::AtomicI64;
+    use crate::common::utils::MockTime;
 
-    fn time_provider() -> Arc<dyn Fn() -> i64 + Send + Sync> {
-        let clock = Arc::new(AtomicI64::new(1));
-        Arc::new(move || clock.load(Ordering::SeqCst))
+    fn time() -> Arc<dyn Time> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0))
     }
 
     fn node() -> Node {
@@ -953,8 +951,8 @@ mod tests {
     /// (`MockClient.java:92-94`, `:769`, `:783-791`).
     #[test]
     fn test_new_matches_new_nodes_with_no_nodes() {
-        let plain = MockClient::new(time_provider());
-        let explicit = MockClient::with_static_nodes(Vec::new(), time_provider());
+        let plain = MockClient::new(time());
+        let explicit = MockClient::with_static_nodes(Vec::new(), time());
         assert!(plain.nodes.is_empty());
         assert_eq!(plain.nodes, explicit.nodes);
     }
@@ -963,10 +961,10 @@ mod tests {
     /// forwards to (`MockClient.java:435-437`).
     #[test]
     fn test_prepare_response_from_matches_disconnected_form() {
-        let mut base = MockClient::new(time_provider());
+        let mut base = MockClient::new(time());
         base.prepare_response_from(response(), &node());
 
-        let mut explicit = MockClient::new(time_provider());
+        let mut explicit = MockClient::new(time());
         explicit.prepare_response_from_disconnected(response(), &node(), false);
 
         assert_eq!(base.future_responses.len(), 1);
@@ -982,10 +980,10 @@ mod tests {
     /// (`MockClient.java:449-451`), and both retain the matcher and the node.
     #[test]
     fn test_prepare_response_from_matcher_matches_disconnected_form() {
-        let mut base = MockClient::new(time_provider());
+        let mut base = MockClient::new(time());
         base.prepare_response_from_matcher(Box::new(|_| true), response(), &node());
 
-        let mut explicit = MockClient::new(time_provider());
+        let mut explicit = MockClient::new(time());
         explicit.prepare_response_from_matcher_disconnected(Box::new(|_| true), response(), &node(), false);
 
         let (a, b) = (&base.future_responses[0], &explicit.future_responses[0]);
@@ -999,7 +997,7 @@ mod tests {
     /// node-scoped forms (`MockClient.java:453-455`, `:461-463`).
     #[test]
     fn test_prepare_response_from_carries_disconnected_flag() {
-        let mut client = MockClient::new(time_provider());
+        let mut client = MockClient::new(time());
         client.prepare_response_from_disconnected(response(), &node(), true);
         client.prepare_response_from_matcher_disconnected(Box::new(|_| true), response(), &node(), true);
 

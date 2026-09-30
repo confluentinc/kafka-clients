@@ -25,23 +25,27 @@ use crate::common::acl::AclBinding;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreateAclsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult")]
 pub struct CreateAclsResult {
     futures: HashMap<AclBinding, KafkaFuture<()>>,
 }
 
 impl CreateAclsResult {
     /// Creates a new result from the per-binding futures.
-    pub fn new(futures: HashMap<AclBinding, KafkaFuture<()>>) -> Self {
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#CreateAclsResult")]
+    pub(crate) fn new(futures: HashMap<AclBinding, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
 
     /// Return a map from ACL bindings to futures which can be used to check the
     /// status of the creation of each ACL binding.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#values")]
     pub fn values(&self) -> &HashMap<AclBinding, KafkaFuture<()>> {
         &self.futures
     }
 
     /// Return a future which succeeds only if all the ACL creations succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

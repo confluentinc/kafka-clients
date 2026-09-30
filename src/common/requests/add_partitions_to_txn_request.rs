@@ -23,7 +23,7 @@
 //! `v3_and_below_*` fields. From v4 it is a *broker* request, carrying a
 //! collection of transactions so a broker can batch-verify several at once
 //! (KIP-890). A producer only ever sends the v3-and-below shape — see
-//! [`AddPartitionsToTxnRequestBuilder::for_client`].
+//! [`Builder::for_client`].
 //!
 //! # Scope: broker-side request inspection is not translated
 //!
@@ -42,7 +42,7 @@
 //! `EndTransactionMarker` are out of scope for this client-only port (see
 //! `design/history/Milestone-11/PLAN.md` §1.1). Translating them would add
 //! permanently unreachable code that `#![deny(warnings)]` would force us to
-//! mask with `#[allow(dead_code)]`.
+//! mask with `#[expect(dead_code)]`.
 
 use std::collections::HashMap;
 use std::io;
@@ -54,8 +54,8 @@ use crate::add_partitions_to_txn_response_data::{AddPartitionsToTxnPartitionResu
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
+use super::AbstractRequest;
 use super::AddPartitionsToTxnResponse;
-use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 
@@ -63,6 +63,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AddPartitionsToTxnRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest")]
 pub struct AddPartitionsToTxnRequest {
     data: AddPartitionsToTxnRequestData,
     version: i16,
@@ -81,11 +82,13 @@ impl AddPartitionsToTxnRequest {
     pub const EARLIEST_BROKER_VERSION: i16 = 4;
 
     /// Creates a new `AddPartitionsToTxnRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#AddPartitionsToTxnRequest")]
     pub fn new(data: AddPartitionsToTxnRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#data")]
     pub fn data(&self) -> &AddPartitionsToTxnRequestData {
         &self.data
     }
@@ -109,6 +112,7 @@ impl AddPartitionsToTxnRequest {
     ///
     /// Corresponds to Java's static
     /// `getPartitions(AddPartitionsToTxnTopicCollection)`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#getPartitions")]
     pub fn get_partitions(topics: &[AddPartitionsToTxnTopic]) -> Vec<TopicPartition> {
         topics
             .iter()
@@ -127,6 +131,7 @@ impl AddPartitionsToTxnRequest {
     /// Below [`Self::EARLIEST_BROKER_VERSION`] the error is reported per partition, in
     /// the `results_by_topic_v3_and_below` field; from v4 it is a single
     /// top-level `error_code`. The throttle time is set either way.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AddPartitionsToTxnResponseData::new();
         if self.version < AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION {
@@ -144,6 +149,7 @@ impl AddPartitionsToTxnRequest {
     /// Builds a per-partition error result for every partition in `topics`.
     ///
     /// Corresponds to Java's private `errorResponseForTopics`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#errorResponseForTopics")]
     fn error_response_for_topics(
         topics: &[AddPartitionsToTxnTopic],
         error: &Errors,
@@ -173,6 +179,7 @@ impl AddPartitionsToTxnRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AddPartitionsToTxnRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -190,17 +197,19 @@ impl std::fmt::Display for AddPartitionsToTxnRequest {
 /// Corresponds to `AddPartitionsToTxnRequest.Builder` in Java. Java exposes two
 /// named constructors; only the client one is translated (see the module docs).
 #[derive(Debug, Clone)]
-pub struct AddPartitionsToTxnRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder")]
+pub struct Builder {
     data: AddPartitionsToTxnRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AddPartitionsToTxnRequestBuilder {
+impl Builder {
     /// Creates a builder for a producer's own transaction, capped at
     /// [`AddPartitionsToTxnRequest::LAST_CLIENT_VERSION`].
     ///
     /// Corresponds to `AddPartitionsToTxnRequest.Builder.forClient`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder#forClient")]
     pub fn for_client(
         transactional_id: impl Into<String>,
         producer_id: i64,
@@ -229,6 +238,7 @@ impl AddPartitionsToTxnRequestBuilder {
     /// exist yet for this type, tracked as PLAN §9.14. The sort is still correct
     /// and load-bearing: without it the encoding varies run to run, so the tests
     /// could not be written at all.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder#buildTxnTopicCollection")]
     fn build_txn_topic_collection(partitions: &[TopicPartition]) -> Vec<AddPartitionsToTxnTopic> {
         let mut partition_map: HashMap<&str, Vec<i32>> = HashMap::new();
         for topic_partition in partitions {
@@ -257,7 +267,7 @@ impl AddPartitionsToTxnRequestBuilder {
     }
 }
 
-impl RequestBuilder for AddPartitionsToTxnRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ADD_PARTITIONS_TO_TXN
     }
@@ -270,9 +280,9 @@ impl RequestBuilder for AddPartitionsToTxnRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Java's `Builder.build(short)` performs no validation for this request.
-        Ok(ConcreteRequest::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(
+        Ok(AbstractRequest::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(
             self.data.clone(),
             version,
         )))
@@ -290,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_for_client_sets_v3_and_below_fields() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let data = builder.data();
 
         assert_eq!(data.v3_and_below_transactional_id, "txn-1");
@@ -304,7 +314,7 @@ mod tests {
     /// even though the API itself supports higher ones.
     #[test]
     fn test_for_client_caps_the_version_at_last_client_version() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &[tp("t", 0)]);
+        let builder = Builder::for_client("txn-1", 1, 0, &[tp("t", 0)]);
         assert_eq!(builder.latest_allowed_version(), AddPartitionsToTxnRequest::LAST_CLIENT_VERSION);
         assert_eq!(
             builder.oldest_allowed_version(),
@@ -318,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_build_txn_topic_collection_groups_by_topic() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client(
+        let builder = Builder::for_client(
             "txn-1",
             1,
             0,
@@ -337,7 +347,7 @@ mod tests {
     #[test]
     fn test_get_partitions_round_trips_the_collection() {
         let partitions = vec![tp("topic-a", 0), tp("topic-a", 2), tp("topic-b", 1)];
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &partitions);
+        let builder = Builder::for_client("txn-1", 1, 0, &partitions);
 
         let flattened = AddPartitionsToTxnRequest::get_partitions(&builder.data().v3_and_below_topics);
         assert_eq!(flattened, partitions);
@@ -351,17 +361,12 @@ mod tests {
     /// Below v4 the error is reported per partition, not top-level.
     #[test]
     fn test_get_error_response_v3_and_below_is_per_partition() {
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client(
-            "txn-1",
-            1,
-            0,
-            &[tp("topic-a", 0), tp("topic-a", 5), tp("topic-b", 1)],
-        );
+        let mut builder = Builder::for_client("txn-1", 1, 0, &[tp("topic-a", 0), tp("topic-a", 5), tp("topic-b", 1)]);
         let request = match builder
             .build_version(AddPartitionsToTxnRequest::LAST_CLIENT_VERSION)
             .expect("build")
         {
-            ConcreteRequest::AddPartitionsToTxn(request) => request,
+            AbstractRequest::AddPartitionsToTxn(request) => request,
             other => panic!("expected AddPartitionsToTxn, got {other:?}"),
         };
 
@@ -413,8 +418,7 @@ mod tests {
     fn test_serialization_round_trip_all_client_versions() {
         for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
         {
-            let mut builder =
-                AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0), tp("topic-b", 1)]);
+            let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0), tp("topic-b", 1)]);
             let mut built = builder.build_version(version).expect("build");
             let mut buffer = built.serialize().expect("serialize");
             buffer.flip();
@@ -434,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_api_key_and_version() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &[]);
+        let builder = Builder::for_client("txn-1", 1, 0, &[]);
         assert_eq!(builder.api_key(), &ApiKeys::ADD_PARTITIONS_TO_TXN);
         let request = AddPartitionsToTxnRequest::new(AddPartitionsToTxnRequestData::new(), 2);
         assert_eq!(request.api_key(), &ApiKeys::ADD_PARTITIONS_TO_TXN);
@@ -451,6 +455,7 @@ mod tests {
     /// Java parameterises over every API version via `@ApiKeyVersionsSource`;
     /// per `definition-of-done.md` §3 that becomes a loop.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequestTest#testConstructor")]
     fn test_constructor() {
         const PRODUCER_ID: i64 = 10;
         const PRODUCER_EPOCH: i16 = 1;
@@ -459,10 +464,9 @@ mod tests {
         for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
         {
             let partitions = vec![tp("topic", 0), tp("topic", 1)];
-            let mut builder =
-                AddPartitionsToTxnRequestBuilder::for_client("transaction1", PRODUCER_ID, PRODUCER_EPOCH, &partitions);
+            let mut builder = Builder::for_client("transaction1", PRODUCER_ID, PRODUCER_EPOCH, &partitions);
             let request = match builder.build_version(version).expect("build") {
-                ConcreteRequest::AddPartitionsToTxn(request) => request,
+                AbstractRequest::AddPartitionsToTxn(request) => request,
                 other => panic!("expected AddPartitionsToTxn, got {other:?}"),
             };
 
@@ -517,7 +521,7 @@ mod tests {
         // 0/1/2 exercises the same non-flexible layout. v2 is the last
         // non-flexible version.
         let version: i16 = 2;
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let mut built = builder.build_version(version).expect("build");
         let actual = built.serialize().expect("serialize");
 
@@ -578,7 +582,7 @@ mod tests {
     #[test]
     fn test_serialize_wire_bytes_v3_flexible() {
         let version: i16 = 3;
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let mut built = builder.build_version(version).expect("build");
         let actual = built.serialize().expect("serialize");
 

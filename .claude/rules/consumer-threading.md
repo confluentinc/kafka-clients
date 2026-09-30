@@ -24,7 +24,8 @@ blocks in Java:
     `async fn subscribe_with_pattern(...)`,
     `async fn subscribe_with_pattern_listener(...)`
   - `async fn unsubscribe()`, `async fn close()`,
-    `async fn close_with_timeout(...)`, `async fn close_with_options(...)`
+    `async fn close_with_options(...)` (Java's `@Deprecated close(Duration)`
+    is not translated — pass `CloseOptions::new_timeout(..)` instead)
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
 
 Java methods that do not block remain synchronous:
@@ -45,7 +46,7 @@ Two notes on the names above, so neither is "corrected" back later:
   - **The `_with_` infixes are mandated by CLAUDE.md §2**, which requires
     `<base>_with_<param1>_<param2>` for every overload beyond the
     intersection-of-parameters one. `subscribe_with_topics`,
-    `close_with_timeout`, `close_with_options`, `commit_sync_with_offsets` etc.
+    `close_with_options`, `commit_sync_with_offsets` etc.
     are therefore not verbose spellings to be shortened — the plain name is
     reserved for the overload that exists in Java with the intersection
     parameter set.
@@ -116,7 +117,9 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         fn subscription(&self) -> HashSet<String>;
         fn paused(&self) -> HashSet<TopicPartition>;
         fn wakeup(&self);
-        fn group_metadata(&self) -> ConsumerGroupMetadata;
+        // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
+        // its constructors; it becomes an interface in Kafka 5.0).
+        fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
         fn client_id(&self) -> &str;
     }
 
@@ -136,7 +139,13 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
 
 Implementations in Milestone 8:
 
-  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer.
+  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
+    `consumer.internals`, so it is `pub(crate)`: users reach it only through
+    `KafkaConsumer::new` / `new_consumer` as a `Box<dyn Consumer<K, V>>`.
+    `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
+    with no Java class; it stays public through an entry in
+    `xtask/public-audience-allowlist.txt`, because listeners need it for
+    in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
     (`add_record`, `set_pollable`, etc.) as inherent methods on the concrete
@@ -374,7 +383,7 @@ compatibility but is NOT in scope now.
     `ConsumerConfig`, `ConsumerRecord`, `ConsumerRecords`,
     `ConsumerGroupMetadata`, `ConsumerRebalanceListener`,
     `OffsetCommitCallback`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
-    `OffsetResetStrategy`, `GroupProtocol`, `CloseOptions`,
+    `GroupProtocol`, `CloseOptions`,
     `SubscriptionPattern`, the consumer exception hierarchy.
 
 **Out of scope (do NOT translate):**

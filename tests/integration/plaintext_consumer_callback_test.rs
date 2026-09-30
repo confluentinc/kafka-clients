@@ -161,8 +161,8 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(bootstrap),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("Failed to build test producer")
 }

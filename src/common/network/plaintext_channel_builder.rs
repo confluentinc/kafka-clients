@@ -38,9 +38,10 @@ use tokio::net::TcpStream;
 ///
 /// The `listener_name` is non-null when instantiated in the broker and `None` otherwise
 /// (client mode).
+#[doc(alias = "org.apache.kafka.common.network.PlaintextChannelBuilder")]
 pub struct PlaintextChannelBuilder {
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
 }
 
@@ -48,6 +49,7 @@ impl PlaintextChannelBuilder {
     /// Creates a new `PlaintextChannelBuilder`.
     ///
     /// `listener_name` is `Some` when instantiated in the broker and `None` otherwise.
+    #[doc(alias = "org.apache.kafka.common.network.PlaintextChannelBuilder#PlaintextChannelBuilder")]
     pub fn new(listener_name: Option<ListenerName>) -> Self {
         Self { listener_name }
     }

@@ -14,19 +14,20 @@
 
 //! Translated from `org.apache.kafka.common.errors.ListenerNotFoundException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// There is no listener on the leader broker that matches the listener on
     /// which metadata request was processed.
     ///
-    /// Corresponds to Java's `ListenerNotFoundException`, error code [`Errors::ListenerNotFound`].
+    /// Corresponds to Java's `ListenerNotFoundException`, error code `Errors::ListenerNotFound`.
     ///
     /// Java `extends` chain:
     ///    `ListenerNotFoundException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ListenerNotFoundException")]
     ListenerNotFoundError,
     code: Errors::ListenerNotFound,
     extends: [

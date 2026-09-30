@@ -38,7 +38,7 @@
 
 mod txn_common;
 
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 
 use txn_common::close_producer;
 use txn_common::plain_producer;
@@ -46,6 +46,7 @@ use txn_common::report;
 use txn_common::send_expect_failure;
 use txn_common::send_value_printed;
 use txn_common::transactional_producer;
+use txn_common::variant;
 
 const FENCING_TOPIC: &str = "txn-fencing";
 const INTERLEAVED_TOPIC: &str = "txn-interleaved";
@@ -127,11 +128,11 @@ async fn fencing_case(bootstrap: &str) -> Result<bool, String> {
         .and_then(|failure| failure.expect_via_future("A.send"))
     {
         Ok(error) => {
-            let fenced = matches!(error.error(), Errors::InvalidProducerEpoch | Errors::ProducerFenced);
+            let fenced = matches!(error, Error::InvalidProducerEpoch(_) | Error::ProducerFenced(_));
             ok &= report(
                 fenced,
                 "A.send failed with a fencing error",
-                format!("{:?}: {error}", error.error()),
+                format!("{}: {error}", variant(&error)),
             );
         },
         Err(unexpected) => ok &= report(false, "A.send failed", unexpected),

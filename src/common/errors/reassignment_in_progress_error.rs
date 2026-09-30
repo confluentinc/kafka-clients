@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.ReassignmentInProgressException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// A partition reassignment is in progress.
     ///
-    /// Corresponds to Java's `ReassignmentInProgressException`, error code [`Errors::ReassignmentInProgress`].
+    /// Corresponds to Java's `ReassignmentInProgressException`, error code `Errors::ReassignmentInProgress`.
     ///
     /// Java `extends` chain:
     ///    `ReassignmentInProgressException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ReassignmentInProgressException")]
     ReassignmentInProgressError,
     code: Errors::ReassignmentInProgress,
     extends: [

@@ -19,7 +19,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.RequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use super::PollResult;
 
@@ -40,6 +40,7 @@ use super::PollResult;
 /// - **`&mut self`** on the mutating methods — they update the manager's
 ///   internal [`super::RequestState`] (backoff, attempt
 ///   count, etc.).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager")]
 pub(crate) trait RequestManager: Send + 'static {
     /// During normal operation, a manager may need to send out network
     /// requests. Implementations return their need for network I/O by
@@ -52,6 +53,7 @@ pub(crate) trait RequestManager: Send + 'static {
     /// ensure the consumer can heartbeat in a timely fashion.
     ///
     /// Java: `PollResult poll(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager#poll")]
     fn poll(&mut self, current_time_ms: i64) -> PollResult;
 
     /// On shutdown a manager may need to send out final network requests.
@@ -60,6 +62,7 @@ pub(crate) trait RequestManager: Send + 'static {
     /// Java's `default PollResult pollOnClose(...) { return EMPTY; }`.
     ///
     /// Java: `default PollResult pollOnClose(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager#pollOnClose")]
     fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
         PollResult::empty()
     }
@@ -69,6 +72,7 @@ pub(crate) trait RequestManager: Send + 'static {
     /// this manager. Default `i64::MAX` matches Java's `Long.MAX_VALUE`.
     ///
     /// Java: `default long maximumTimeToWait(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager#maximumTimeToWait")]
     fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
         i64::MAX
     }
@@ -77,6 +81,7 @@ pub(crate) trait RequestManager: Send + 'static {
     /// for shutdown actions. Default no-op.
     ///
     /// Java: `default void signalClose()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager#signalClose")]
     fn signal_close(&mut self) {}
 }
 

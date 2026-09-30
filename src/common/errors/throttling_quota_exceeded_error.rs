@@ -17,13 +17,13 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::protocol::Errors;
 
 /// The request was throttled due to a quota violation.
 ///
 /// Corresponds to Java's `ThrottlingQuotaExceededException`, error code
-/// [`Errors::ThrottlingQuotaExceeded`].
+/// `Errors::ThrottlingQuotaExceeded`.
 ///
 /// Java `extends` chain:
 ///    `ThrottlingQuotaExceededException` -> `RetriableException` ->
@@ -33,19 +33,22 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// a field: Java's constructor is
 /// `ThrottlingQuotaExceededException(int throttleTimeMs, String message)`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException")]
 pub struct ThrottlingQuotaExceededError {
     message: String,
     /// The amount of time to wait before retrying, in milliseconds.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
 }
 
 impl ThrottlingQuotaExceededError {
     /// Create a new throttling quota exceeded error.
+    #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#ThrottlingQuotaExceededException")]
     pub fn new(throttle_time_ms: i32, message: impl Into<String>) -> Self {
         Self { message: message.into(), throttle_time_ms }
     }
 
     /// Create the error with the default message for its error code.
+    #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#ThrottlingQuotaExceededException")]
     pub fn with_default_message(throttle_time_ms: i32) -> Self {
         Self::new(throttle_time_ms, Errors::ThrottlingQuotaExceeded.message())
     }
@@ -58,6 +61,7 @@ impl ThrottlingQuotaExceededError {
     /// The amount of time to wait before retrying, in milliseconds.
     ///
     /// Mirrors Java's `ThrottlingQuotaExceededException.throttleTimeMs()`.
+    #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.throttle_time_ms
     }

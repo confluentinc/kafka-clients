@@ -18,7 +18,7 @@
 //! and uses the subset it needs. See `examples/README.md` for the map of
 //! which example covers which transactional use case and the run order.
 
-#![allow(dead_code)] // each example compiles its own copy and uses a subset
+#![expect(dead_code)] // each example compiles its own copy and uses a subset
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -93,8 +93,12 @@ pub fn transactional_producer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-        .map_err(|e| format!("building the producer: {e}"))
+    KafkaProducer::new(
+        config,
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
+    )
+    .map_err(|e| format!("building the producer: {e}"))
 }
 
 /// A plain (non-transactional) producer, for seeding and for the "mixed
@@ -108,8 +112,12 @@ pub fn plain_producer(bootstrap: &str, client_id: &str) -> Result<StringProducer
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-        .map_err(|e| format!("building the producer: {e}"))
+    KafkaProducer::new(
+        config,
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
+    )
+    .map_err(|e| format!("building the producer: {e}"))
 }
 
 /// A consumer for `group_id` at the given isolation level, reading from the
@@ -140,8 +148,12 @@ pub fn build_consumer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ConsumerConfig::new(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .map_err(|e| format!("building the consumer: {e}"))
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        config,
+        Box::new(ByteArrayDeserializer::default()),
+        Box::new(ByteArrayDeserializer::default()),
+    )
+    .map_err(|e| format!("building the consumer: {e}"))
 }
 
 /// Builds a record for partition 0 with key `key-{value}`.
@@ -389,6 +401,29 @@ pub async fn read_partition_idle(
 /// `base` repeated `times` times, flattened — what N producer runs append.
 pub fn repeated(base: &[&str], times: usize) -> Vec<String> {
     (0..times).flat_map(|_| base.iter().map(|s| (*s).to_string())).collect()
+}
+
+/// The `Error` variant's name, e.g. `RecordTooLarge` — how these reports name
+/// the error class. The crate exposes no public numeric error code: callers
+/// classify an error by its variant and predicates, as Java does by class.
+pub fn variant(error: &Error) -> String {
+    let debug = format!("{error:?}");
+    debug.split(['(', ' ', '{']).next().unwrap_or(&debug).to_string()
+}
+
+/// Java's `RequestUtils.isFatalException` (`RequestUtils.java`), rebuilt from
+/// the public predicates because the crate's translation is not public API.
+pub fn is_fatal(error: &Error) -> bool {
+    error.is_authentication_error()
+        || error.is_authorization_error()
+        || matches!(
+            error,
+            Error::MismatchedEndpointType(_)
+                | Error::SecurityDisabled(_)
+                | Error::UnsupportedVersion(_)
+                | Error::UnsupportedEndpointType(_)
+                | Error::UnsupportedForMessageFormat(_)
+        )
 }
 
 /// Prints one ✅/❌ verdict line and passes `ok` through for folding.

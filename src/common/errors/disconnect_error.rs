@@ -27,6 +27,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `DisconnectException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DisconnectException")]
     DisconnectError,
     extends: [
         is_kafka_error,

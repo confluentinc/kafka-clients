@@ -393,7 +393,7 @@ static void test_mock_admin_create_topics_replicas_assignment(void) {
         kafka_admin_DescribeTopicsResult_get_value(described, 0);
     TEST_ASSERT_NOT_NULL(d);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicDescription_partition_count(d));
-    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_TopicPartitionInfo_replica_count(
+    TEST_ASSERT_EQUAL_INT32(3, kafka_common_TopicPartitionInfo_replica_count(
         kafka_admin_TopicDescription_partition(d, 0)));
 
     kafka_admin_DescribeTopicsResult_destroy(described);
@@ -629,13 +629,13 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_TRUE(kafka_admin_TopicDescription_has_authorized_operations(d));
     TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_TopicDescription_authorized_operation(d, 0));
 
-    const kafka_admin_TopicPartitionInfo_t *p0 =
+    const kafka_common_TopicPartitionInfo_t *p0 =
         kafka_admin_TopicDescription_partition(d, 0);
     TEST_ASSERT_NOT_NULL(p0);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_partition(p0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_partition(p0));
     /* The mock puts every partition's leader on broker 0 and its replicas on
      * the first `replicationFactor` brokers. */
-    const kafka_common_Node_t *leader = kafka_admin_TopicPartitionInfo_leader(p0);
+    const kafka_common_Node_t *leader = kafka_common_TopicPartitionInfo_leader(p0);
     TEST_ASSERT_NOT_NULL(leader);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Node_id(leader));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(leader));
@@ -644,18 +644,18 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_EQUAL_INT32(9, host_len);
     TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
 
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_TopicPartitionInfo_replica_count(p0));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TopicPartitionInfo_replica_count(p0));
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(
-        kafka_admin_TopicPartitionInfo_replica(p0, 1)));
-    TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_replica(p0, 2));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_isr_count(p0));
+        kafka_common_TopicPartitionInfo_replica(p0, 1)));
+    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_replica(p0, 2));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_isr_count(p0));
     /* The mock reports an empty (not absent) ELR set: count 0 with the presence
      * bit set. An absent set would also count 0, with the bit clear. */
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_elr(p0));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_last_known_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_last_known_elr(p0));
-    TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_elr(p0, 0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_elr(p0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_last_known_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_last_known_elr(p0));
+    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_elr(p0, 0));
 
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, 2));
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, -1));
@@ -1916,102 +1916,6 @@ static void test_mock_admin_list_config_resources_async_null_handle(void) {
     TEST_ASSERT_FALSE(r.had_result);
 }
 
-// ---- listClientMetricsResources -------------------------------------------
-
-static void test_mock_admin_list_client_metrics_resources(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-
-    kafka_admin_ListClientMetricsResourcesResult_t *result = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListClientMetricsResourcesResult_count(result));
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-
-    /* Altering a CLIENT_METRICS resource creates it, which is how Java's mock
-     * seeds `clientMetricsConfigs` (MockAdminClient
-     * handleIncrementalResourceAlteration, CLIENT_METRICS branch). */
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-b", "interval.ms", "1000",
-                     OP_TYPE_SET);
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-a", "interval.ms", "2000",
-                     OP_TYPE_SET);
-
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListClientMetricsResourcesResult_count(result));
-    /* Sorted by name. */
-    TEST_ASSERT_EQUAL_STRING("cm-a",
-                             kafka_admin_ListClientMetricsResourcesResult_get_name(result, 0));
-    TEST_ASSERT_EQUAL_STRING("cm-b",
-                             kafka_admin_ListClientMetricsResourcesResult_get_name(result, 1));
-    TEST_ASSERT_NULL(kafka_admin_ListClientMetricsResourcesResult_get_name(result, 2));
-    TEST_ASSERT_NULL(kafka_admin_ListClientMetricsResourcesResult_get_name(result, -1));
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-    kafka_admin_ListClientMetricsResourcesResult_destroy(NULL);
-
-    /* The same resources show up through listConfigResources, the API that
-     * supersedes this deprecated one. */
-    const int32_t cm_only[1] = {RESOURCE_TYPE_CLIENT_METRICS};
-    kafka_admin_ListConfigResourcesResult_t *listed = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_config_resources(admin, cm_only, 1, -1, &listed));
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListConfigResourcesResult_count(listed));
-    kafka_admin_ListConfigResourcesResult_destroy(listed);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-typedef struct {
-    atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
-} list_client_metrics_async_result_t;
-
-static void on_list_client_metrics(kafka_admin_ListClientMetricsResourcesResult_t *result,
-                                   kafka_common_Error_t *error, void *user_data) {
-    list_client_metrics_async_result_t *r = (list_client_metrics_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_ListClientMetricsResourcesResult_count(result);
-        kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-    }
-    if (error != NULL) {
-        r->had_error = 1;
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
-}
-
-static void test_mock_admin_list_client_metrics_resources_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-async", "interval.ms", "1000",
-                     OP_TYPE_SET);
-
-    list_client_metrics_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_client_metrics_resources_async(admin, -1,
-                                                                on_list_client_metrics, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-/* A NULL handle must still honor the callback obligation, with an error. */
-static void test_mock_admin_list_client_metrics_resources_async_null_handle(void) {
-    list_client_metrics_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_client_metrics_resources_async(NULL, -1,
-                                                                on_list_client_metrics, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
-}
-
 // ---- describeLogDirs -------------------------------------------------------
 
 static void test_mock_admin_describe_log_dirs(void) {
@@ -2398,7 +2302,6 @@ static void test_mock_admin_b2_null_out_result(void) {
     TEST_ASSERT_NULL(kafka_admin_AdminClient_incremental_alter_configs(
         admin, types, names, keys, values, ops, 1, -1, false, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, -1, NULL));
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_log_dirs(admin, brokers, 1, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_replica_log_dirs(
         admin, topics, partitions, brokers, log_dirs, 1, -1, NULL));
@@ -3204,12 +3107,12 @@ static void test_mock_admin_b3_null_out_result(void) {
 // ---------------------------------------------------------------------------
 // B4 — groups and group offsets
 //
-// Java's own MockAdminClient implements only two of these nine RPCs
-// (`listGroups` / `listConsumerGroups` from `groupConfigs`, and
-// `listConsumerGroupOffsets` from `committedOffsets`); the other seven throw
+// Java's own MockAdminClient implements only two of these eight RPCs
+// (`listGroups` from `groupConfigs`, and `listConsumerGroupOffsets` from
+// `committedOffsets`); the other six throw
 // `UnsupportedOperationException("Not implemented yet")`, which the Rust mock
 // surfaces as an exceptional future per `admin-client.md` §9. So the tests
-// below split into round-trip tests for the first three and
+// below split into round-trip tests for the first two and
 // where-does-the-error-land tests for the rest — and the latter are not
 // filler: they pin whether a failure arrives per key or as the call's error,
 // which is exactly what each Java `*Result`'s future shape decides.
@@ -3374,74 +3277,6 @@ static void test_mock_admin_list_groups_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(0, r.had_result);
     TEST_ASSERT_EQUAL_INT(1, r.had_error);
-}
-
-// ---- listConsumerGroups ----------------------------------------------------
-
-static void test_mock_admin_list_consumer_groups_reports_seeded_groups(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    seed_group(admin, "lcg-a");
-
-    kafka_admin_ListConsumerGroupsResult_t *result = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_ListConsumerGroupsResult_valid_count(result));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListConsumerGroupsResult_error_count(result));
-
-    const kafka_admin_ConsumerGroupListing_t *listing =
-        kafka_admin_ListConsumerGroupsResult_get_valid(result, 0);
-    TEST_ASSERT_NOT_NULL(listing);
-    TEST_ASSERT_EQUAL_STRING("lcg-a", kafka_admin_ConsumerGroupListing_group_id(listing));
-    /* MockAdminClient.java:743 uses `new ConsumerGroupListing(g, false)`, whose
-     * state and type are empty Optionals: null strings here, not "Unknown". */
-    TEST_ASSERT_FALSE(kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_state(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_state(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_type(listing));
-
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupsResult_get_valid(result, 1));
-    kafka_admin_ListConsumerGroupsResult_destroy(result);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-typedef struct {
-    atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t valid_count;
-} list_consumer_groups_async_result_t;
-
-static void on_list_consumer_groups(kafka_admin_ListConsumerGroupsResult_t *result,
-                                    kafka_common_Error_t *error, void *user_data) {
-    list_consumer_groups_async_result_t *r = (list_consumer_groups_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    r->had_error = error != NULL;
-    if (result != NULL) {
-        r->valid_count = kafka_admin_ListConsumerGroupsResult_valid_count(result);
-        kafka_admin_ListConsumerGroupsResult_destroy(result);
-    }
-    if (error != NULL) {
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
-}
-
-static void test_mock_admin_list_consumer_groups_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    seed_group(admin, "lcg-async");
-
-    list_consumer_groups_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_consumer_groups_async(admin, NULL, 0, NULL, 0, -1,
-                                                       on_list_consumer_groups, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, r.had_result);
-    TEST_ASSERT_EQUAL_INT(0, r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.valid_count);
-
-    kafka_admin_AdminClient_destroy(admin);
 }
 
 // ---- describeConsumerGroups / describeClassicGroups ------------------------
@@ -4266,7 +4101,6 @@ static void test_mock_admin_b4_null_out_result(void) {
     const char *members[1] = {"i"};
 
     TEST_ASSERT_NULL(kafka_admin_AdminClient_list_groups(admin, NULL, 0, NULL, 0, NULL, 0, -1, NULL));
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, NULL));
     TEST_ASSERT_NULL(
         kafka_admin_AdminClient_describe_consumer_groups(admin, groups, 1, -1, false, NULL));
     TEST_ASSERT_NULL(
@@ -4347,25 +4181,25 @@ static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
     /* Sorted by resource type first, so GROUP (3) sorts after TOPIC (2): the
      * z-topic row is index 0 even though its name sorts last. Checking the
      * whole row together is what catches a column swap. */
-    const kafka_common_AclBinding_t *b0 = kafka_admin_CreateAclsResult_get_binding(result, 0);
+    const kafka_common_acl_AclBinding_t *b0 = kafka_admin_CreateAclsResult_get_binding(result, 0);
     TEST_ASSERT_NOT_NULL(b0);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_TOPIC, kafka_common_AclBinding_resource_type(b0));
-    TEST_ASSERT_EQUAL_STRING("z-topic", kafka_common_AclBinding_resource_name(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL, kafka_common_AclBinding_pattern_type(b0));
-    TEST_ASSERT_EQUAL_STRING("User:zoe", kafka_common_AclBinding_principal(b0));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.9", kafka_common_AclBinding_host(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_WRITE, kafka_common_AclBinding_operation(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY, kafka_common_AclBinding_permission_type(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_TOPIC, kafka_common_acl_AclBinding_resource_type(b0));
+    TEST_ASSERT_EQUAL_STRING("z-topic", kafka_common_acl_AclBinding_resource_name(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL, kafka_common_acl_AclBinding_pattern_type(b0));
+    TEST_ASSERT_EQUAL_STRING("User:zoe", kafka_common_acl_AclBinding_principal(b0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.9", kafka_common_acl_AclBinding_host(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_WRITE, kafka_common_acl_AclBinding_operation(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY, kafka_common_acl_AclBinding_permission_type(b0));
 
-    const kafka_common_AclBinding_t *b1 = kafka_admin_CreateAclsResult_get_binding(result, 1);
+    const kafka_common_acl_AclBinding_t *b1 = kafka_admin_CreateAclsResult_get_binding(result, 1);
     TEST_ASSERT_NOT_NULL(b1);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_GROUP, kafka_common_AclBinding_resource_type(b1));
-    TEST_ASSERT_EQUAL_STRING("a-group", kafka_common_AclBinding_resource_name(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_PREFIXED, kafka_common_AclBinding_pattern_type(b1));
-    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_AclBinding_principal(b1));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_AclBinding_host(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_READ, kafka_common_AclBinding_operation(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ALLOW, kafka_common_AclBinding_permission_type(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_GROUP, kafka_common_acl_AclBinding_resource_type(b1));
+    TEST_ASSERT_EQUAL_STRING("a-group", kafka_common_acl_AclBinding_resource_name(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_PREFIXED, kafka_common_acl_AclBinding_pattern_type(b1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_acl_AclBinding_principal(b1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_acl_AclBinding_host(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_READ, kafka_common_acl_AclBinding_operation(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ALLOW, kafka_common_acl_AclBinding_permission_type(b1));
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e = kafka_admin_CreateAclsResult_get_error(result, i);
@@ -4635,29 +4469,29 @@ static void test_mock_admin_delete_acls_reports_unsupported_per_filter(void) {
     TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DeleteAclsResult_count(result));
 
     /* Sorted by resource type: ANY (1) before TOPIC (2). */
-    const kafka_common_AclBindingFilter_t *f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
+    const kafka_common_acl_AclBindingFilter_t *f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
     TEST_ASSERT_NOT_NULL(f0);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_ANY, kafka_common_AclBindingFilter_resource_type(f0));
-    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_resource_name(f0));
-    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_principal(f0));
-    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_host(f0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_ANY, kafka_common_AclBindingFilter_pattern_type(f0));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_ANY, kafka_common_AclBindingFilter_operation(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_ANY, kafka_common_acl_AclBindingFilter_resource_type(f0));
+    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_resource_name(f0));
+    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_principal(f0));
+    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_host(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_ANY, kafka_common_acl_AclBindingFilter_pattern_type(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_ANY, kafka_common_acl_AclBindingFilter_operation(f0));
     TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ANY,
-                            kafka_common_AclBindingFilter_permission_type(f0));
+                            kafka_common_acl_AclBindingFilter_permission_type(f0));
 
-    const kafka_common_AclBindingFilter_t *f1 = kafka_admin_DeleteAclsResult_get_filter(result, 1);
+    const kafka_common_acl_AclBindingFilter_t *f1 = kafka_admin_DeleteAclsResult_get_filter(result, 1);
     TEST_ASSERT_NOT_NULL(f1);
     /* Present but empty: a pointer to "", never the null that means match-any. */
-    TEST_ASSERT_NOT_NULL(kafka_common_AclBindingFilter_resource_name(f1));
-    TEST_ASSERT_EQUAL_STRING("", kafka_common_AclBindingFilter_resource_name(f1));
-    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_AclBindingFilter_principal(f1));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_AclBindingFilter_host(f1));
+    TEST_ASSERT_NOT_NULL(kafka_common_acl_AclBindingFilter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("", kafka_common_acl_AclBindingFilter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_acl_AclBindingFilter_principal(f1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_acl_AclBindingFilter_host(f1));
     TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL,
-                            kafka_common_AclBindingFilter_pattern_type(f1));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_DESCRIBE, kafka_common_AclBindingFilter_operation(f1));
+                            kafka_common_acl_AclBindingFilter_pattern_type(f1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_DESCRIBE, kafka_common_acl_AclBindingFilter_operation(f1));
     TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY,
-                            kafka_common_AclBindingFilter_permission_type(f1));
+                            kafka_common_acl_AclBindingFilter_permission_type(f1));
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e = kafka_admin_DeleteAclsResult_get_error(result, i);
@@ -4867,24 +4701,24 @@ static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(v
 
     /* Sorted by (entity type, name) pairs: the ["client-id"=default,
      * "user"=alice] entity sorts before ["ip"=10.0.0.1]. */
-    const kafka_common_ClientQuotaEntity_t *e0 =
+    const kafka_common_quota_ClientQuotaEntity_t *e0 =
         kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
     TEST_ASSERT_NOT_NULL(e0);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_ClientQuotaEntity_entry_count(e0));
-    TEST_ASSERT_EQUAL_STRING("client-id", kafka_common_ClientQuotaEntity_get_entry_type(e0, 0));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_quota_ClientQuotaEntity_entry_count(e0));
+    TEST_ASSERT_EQUAL_STRING("client-id", kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 0));
     /* A null name at an in-range index is the built-in default entity, not an
      * absent entry and not the empty name. */
-    TEST_ASSERT_NULL(kafka_common_ClientQuotaEntity_get_entry_name(e0, 0));
-    TEST_ASSERT_EQUAL_STRING("user", kafka_common_ClientQuotaEntity_get_entry_type(e0, 1));
-    TEST_ASSERT_EQUAL_STRING("alice", kafka_common_ClientQuotaEntity_get_entry_name(e0, 1));
-    TEST_ASSERT_NULL(kafka_common_ClientQuotaEntity_get_entry_type(e0, 2));
+    TEST_ASSERT_NULL(kafka_common_quota_ClientQuotaEntity_get_entry_name(e0, 0));
+    TEST_ASSERT_EQUAL_STRING("user", kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 1));
+    TEST_ASSERT_EQUAL_STRING("alice", kafka_common_quota_ClientQuotaEntity_get_entry_name(e0, 1));
+    TEST_ASSERT_NULL(kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 2));
 
-    const kafka_common_ClientQuotaEntity_t *e1 =
+    const kafka_common_quota_ClientQuotaEntity_t *e1 =
         kafka_admin_AlterClientQuotasResult_get_entity(result, 1);
     TEST_ASSERT_NOT_NULL(e1);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_ClientQuotaEntity_entry_count(e1));
-    TEST_ASSERT_EQUAL_STRING("ip", kafka_common_ClientQuotaEntity_get_entry_type(e1, 0));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_ClientQuotaEntity_get_entry_name(e1, 0));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_quota_ClientQuotaEntity_entry_count(e1));
+    TEST_ASSERT_EQUAL_STRING("ip", kafka_common_quota_ClientQuotaEntity_get_entry_type(e1, 0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_quota_ClientQuotaEntity_get_entry_name(e1, 0));
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e =
@@ -5266,24 +5100,24 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
         admin, renewer_types, renewer_names, 2, NULL, NULL, 86400000, -1, &created));
     TEST_ASSERT_NOT_NULL(created);
 
-    const kafka_common_DelegationToken_t *token =
+    const kafka_common_security_token_delegation_DelegationToken_t *token =
         kafka_admin_CreateDelegationTokenResult_get_token(created);
     TEST_ASSERT_NOT_NULL(token);
-    const kafka_common_TokenInformation_t *info = kafka_common_DelegationToken_token_info(token);
+    const kafka_common_security_token_delegation_TokenInformation_t *info = kafka_common_security_token_delegation_DelegationToken_token_info(token);
     TEST_ASSERT_NOT_NULL(info);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TokenInformation_renewer_count(info));
-    const kafka_common_KafkaPrincipal_t *owner = kafka_common_TokenInformation_owner(info);
-    TEST_ASSERT_EQUAL_STRING("User", kafka_common_KafkaPrincipal_principal_type(owner));
-    TEST_ASSERT_EQUAL_STRING("owner-principal", kafka_common_KafkaPrincipal_name(owner));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_security_token_delegation_TokenInformation_renewer_count(info));
+    const kafka_common_security_auth_KafkaPrincipal_t *owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
+    TEST_ASSERT_EQUAL_STRING("User", kafka_common_security_auth_KafkaPrincipal_principal_type(owner));
+    TEST_ASSERT_EQUAL_STRING("owner-principal", kafka_common_security_auth_KafkaPrincipal_name(owner));
     TEST_ASSERT_EQUAL_STRING("second-renewer",
-                             kafka_common_KafkaPrincipal_name(
-                                 kafka_common_TokenInformation_get_renewer(info, 1)));
-    TEST_ASSERT_EQUAL_INT64(86400000, kafka_common_TokenInformation_max_timestamp(info));
+                             kafka_common_security_auth_KafkaPrincipal_name(
+                                 kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 1)));
+    TEST_ASSERT_EQUAL_INT64(86400000, kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
     /* Copy the token id out, not just the pointer: every getter on these
      * handles returns a borrow that dies with the result handle destroyed
      * below. Keeping the pointer reads freed memory -- and does so
      * intermittently, which is how this was caught. */
-    const char *token_id_borrowed = kafka_common_TokenInformation_token_id(info);
+    const char *token_id_borrowed = kafka_common_security_token_delegation_TokenInformation_token_id(info);
     TEST_ASSERT_NOT_NULL(token_id_borrowed);
     char token_id[128];
     TEST_ASSERT_TRUE(strlen(token_id_borrowed) < sizeof(token_id));
@@ -5292,13 +5126,13 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     /* The HMAC is borrowed from the same handle and needs the same treatment;
      * the mock uses the token id's bytes as the HMAC. */
     int32_t hmac_len = 0;
-    const uint8_t *hmac_borrowed = kafka_common_DelegationToken_hmac(token, &hmac_len);
+    const uint8_t *hmac_borrowed = kafka_common_security_token_delegation_DelegationToken_hmac(token, &hmac_len);
     TEST_ASSERT_TRUE(hmac_len > 0);
     uint8_t hmac[128];
     TEST_ASSERT_TRUE((size_t)hmac_len <= sizeof(hmac));
     memcpy(hmac, hmac_borrowed, (size_t)hmac_len);
     /* The base64 form is the same bytes, so it must be non-empty too. */
-    TEST_ASSERT_TRUE(strlen(kafka_common_DelegationToken_hmac_as_base64_string(token)) > 0);
+    TEST_ASSERT_TRUE(strlen(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token)) > 0);
     kafka_admin_CreateDelegationTokenResult_destroy(created);
 
     /* describeDelegationToken with no filter sees it. */
@@ -5307,10 +5141,10 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
                                                                        -1, &described));
     TEST_ASSERT_NOT_NULL(described);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeDelegationTokenResult_count(described));
-    const kafka_common_DelegationToken_t *listed =
+    const kafka_common_security_token_delegation_DelegationToken_t *listed =
         kafka_admin_DescribeDelegationTokenResult_get_token(described, 0);
     TEST_ASSERT_EQUAL_STRING(
-        token_id, kafka_common_TokenInformation_token_id(kafka_common_DelegationToken_token_info(listed)));
+        token_id, kafka_common_security_token_delegation_TokenInformation_token_id(kafka_common_security_token_delegation_DelegationToken_token_info(listed)));
     TEST_ASSERT_NULL(kafka_admin_DescribeDelegationTokenResult_get_token(described, 1));
     kafka_admin_DescribeDelegationTokenResult_destroy(described);
 
@@ -5375,10 +5209,10 @@ static void test_mock_admin_describe_delegation_token_owner_filter(void) {
     TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_delegation_token(admin, true, alice_types,
                                                                        alice_names, 1, -1, &result));
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeDelegationTokenResult_count(result));
-    const kafka_common_TokenInformation_t *info = kafka_common_DelegationToken_token_info(
+    const kafka_common_security_token_delegation_TokenInformation_t *info = kafka_common_security_token_delegation_DelegationToken_token_info(
         kafka_admin_DescribeDelegationTokenResult_get_token(result, 0));
     TEST_ASSERT_EQUAL_STRING("alice",
-                             kafka_common_KafkaPrincipal_name(kafka_common_TokenInformation_owner(info)));
+                             kafka_common_security_auth_KafkaPrincipal_name(kafka_common_security_token_delegation_TokenInformation_owner(info)));
     kafka_admin_DescribeDelegationTokenResult_destroy(result);
 
     /* The same owner arrays with the flag off describe everything again. */
@@ -5589,9 +5423,9 @@ static void on_create_delegation_token(kafka_admin_CreateDelegationTokenResult_t
     acl_async_result_t *r = (acl_async_result_t *)user_data;
     r->had_result = result != NULL;
     if (result != NULL) {
-        const kafka_common_TokenInformation_t *info =
-            kafka_common_DelegationToken_token_info(kafka_admin_CreateDelegationTokenResult_get_token(result));
-        r->count = kafka_common_TokenInformation_renewer_count(info);
+        const kafka_common_security_token_delegation_TokenInformation_t *info =
+            kafka_common_security_token_delegation_DelegationToken_token_info(kafka_admin_CreateDelegationTokenResult_get_token(result));
+        r->count = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
         kafka_admin_CreateDelegationTokenResult_destroy(result);
     }
     record_async_error(r, error);
@@ -6310,9 +6144,6 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_config_resources);
     RUN_TEST(test_mock_admin_list_config_resources_async);
     RUN_TEST(test_mock_admin_list_config_resources_async_null_handle);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources_async);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources_async_null_handle);
     RUN_TEST(test_mock_admin_describe_log_dirs);
     RUN_TEST(test_mock_admin_describe_log_dirs_async);
     RUN_TEST(test_mock_admin_describe_log_dirs_async_null_handle);
@@ -6349,8 +6180,6 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_groups_with_no_groups_is_empty);
     RUN_TEST(test_mock_admin_list_groups_async);
     RUN_TEST(test_mock_admin_list_groups_async_null_handle);
-    RUN_TEST(test_mock_admin_list_consumer_groups_reports_seeded_groups);
-    RUN_TEST(test_mock_admin_list_consumer_groups_async);
     RUN_TEST(test_mock_admin_describe_consumer_groups_reports_unsupported_per_group);
     RUN_TEST(test_mock_admin_describe_classic_groups_reports_unsupported_per_group);
     RUN_TEST(test_mock_admin_describe_consumer_groups_async);
