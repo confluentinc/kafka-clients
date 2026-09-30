@@ -102,9 +102,6 @@ impl SslConfigs {
 
     /// Config key: `ssl.secure.random.implementation`.
     pub const SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG: &str = "ssl.secure.random.implementation";
-
-    /// Config key: `ssl.engine.factory.class`.
-    pub const SSL_ENGINE_FACTORY_CLASS_CONFIG: &str = "ssl.engine.factory.class";
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +357,6 @@ mod tests {
             SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
             "ssl.secure.random.implementation"
         );
-        assert_eq!(SslConfigs::SSL_ENGINE_FACTORY_CLASS_CONFIG, "ssl.engine.factory.class");
         assert_eq!(SslConfigs::SSL_KEYMANAGER_ALGORITHM_CONFIG, "ssl.keymanager.algorithm");
         assert_eq!(SslConfigs::SSL_TRUSTMANAGER_ALGORITHM_CONFIG, "ssl.trustmanager.algorithm");
     }
