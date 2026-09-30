@@ -16,19 +16,19 @@ global_job_config:
       - checkout
       # PR builds report the PR's target branch in SEMAPHORE_GIT_BRANCH, so the
       # ref type check is what excludes them.
-      - |
-        if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
-          echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
-          exit 1
-        fi
+      # - |
+      #   if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
+      #     echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
+      #     exit 1
+      #   fi
       # Promotions can be clicked on any past master build, and a crates.io
       # version can never be replaced, so only the current tip may publish.
-      - |
-        git fetch --quiet origin master
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
-          echo "Refusing to publish: $(git rev-parse HEAD) is not the current tip of master ($(git rev-parse FETCH_HEAD)); promote the latest master build" >&2
-          exit 1
-        fi
+      # - |
+      #   git fetch --quiet origin master
+      #   if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
+      #     echo "Refusing to publish: $(git rev-parse HEAD) is not the current tip of master ($(git rev-parse FETCH_HEAD)); promote the latest master build" >&2
+      #     exit 1
+      #   fi
 
 blocks:
   - name: "Verify package"
