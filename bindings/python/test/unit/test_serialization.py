@@ -197,6 +197,17 @@ def test_uuid_bytes_are_the_dashed_form() -> None:
     assert uuid_serializer()(TOPIC, value) == b"0f14d0ab-9605-4a62-a9e4-5ed26688389b"
 
 
+def test_uuid_serializer_writes_text_not_the_binary_value() -> None:
+    # Java's UUIDSerializer writes UUID.toString() in the configured encoding:
+    # the 36-character dashed text, never the 16-byte binary value.
+    value = uuid.UUID("0f14d0ab-9605-4a62-a9e4-5ed26688389b")
+    data = uuid_serializer()(TOPIC, value)
+    assert data is not None and len(data) == 36 and data != value.bytes
+    utf16 = uuid_serializer()
+    _configured(utf16, {"value.serializer.encoding": "UTF-16BE"}, False)
+    assert utf16(TOPIC, value) == str(value).encode("utf-16-be")
+
+
 # --------------------------------------------------------------------------- #
 # stringSerdeShouldSupportDifferentEncodings / ConfigureThrowsOnUnknownEncoding
 # --------------------------------------------------------------------------- #
@@ -359,6 +370,21 @@ def test_uuid_deserializer_parses_as_java() -> None:
     with pytest.raises(SerializationError) as exc:
         deserializer(TOPIC, memoryview(b"x" * 40))
     assert str(exc.value.__cause__) == "UUID string too large"
+
+
+def test_uuid_deserializer_rejects_the_binary_value() -> None:
+    # Java's UUIDDeserializer decodes the bytes as text (a malformed byte becomes
+    # U+FFFD) and parses it with UUID.fromString, so the 16-byte binary value is
+    # not a UUID record; the serializer's own output reads back.
+    value = uuid.UUID("0f14d0ab-9605-4a62-a9e4-5ed26688389b")
+    deserializer = uuid_deserializer()
+    with pytest.raises(SerializationError) as exc:
+        deserializer(TOPIC, memoryview(value.bytes))
+    assert str(exc.value) == "Error parsing data into UUID"
+    assert isinstance(exc.value.__cause__, IllegalArgumentError)
+    data = uuid_serializer()(TOPIC, value)
+    assert data is not None
+    assert deserializer(TOPIC, memoryview(data)) == value
 
 
 def test_uuid_unsupported_encoding() -> None:
