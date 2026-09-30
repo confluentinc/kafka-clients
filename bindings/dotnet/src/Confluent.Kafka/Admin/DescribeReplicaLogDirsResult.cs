@@ -26,9 +26,8 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// The key is a <b>3-part</b> <see cref="TopicPartitionReplica"/>, reassembled from the
-/// result's <c>get_topic</c> / <c>get_partition</c> / <c>get_broker_id</c> accessors — the
-/// widest composite key in M15, and the reason the walker's key seam takes
-/// <c>(result, index)</c> rather than a single string.
+/// topic, partition id and broker id that each replica's own callback delivers — the
+/// widest composite key in M15.
 /// </para>
 /// <para>
 /// The per-replica error is <b>owned</b>: it arrives with that replica's own callback and is

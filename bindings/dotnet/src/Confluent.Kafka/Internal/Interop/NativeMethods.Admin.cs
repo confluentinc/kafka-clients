@@ -1076,46 +1076,6 @@ internal static partial class NativeMethods
         AdminCallbacks.DescribeConfigsCallback callback,
         IntPtr userData);
 
-    // ---- kafka_admin_DescribeConfigsResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeConfigsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConfigsResult_get_key_type</c> — <b>half</b> of the composite
-    /// key at <paramref name="index"/>: the <c>ConfigResource.Type.id()</c>, or <c>-1</c>
-    /// if out of range. Decoded through <see cref="ConfigResourceMarshal.TypeFromId"/>.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_key_type", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeConfigsResultGetKeyType(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConfigsResult_get_key_name</c> — the other half of the
-    /// composite key, borrowed and NUL-terminated, or null if out of range.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_key_name", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeConfigsResultGetKeyName(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConfigsResult_get_value</c> — that resource's configuration,
-    /// <b>borrowed</b>, or null if the resource failed or the index is out of range. The
-    /// walker reads the per-key error first, so a null reaching the value reader is the
-    /// unreachable case.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeConfigsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConfigsResult_get_error</c> — that resource's error, or null
-    /// if it succeeded. <b>BORROWED</b> (<c>const</c>, and the header adds "do not destroy
-    /// it") — read with <see cref="KafkaException.FromBorrowedHandle"/>, never destroyed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeConfigsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeConfigsResultDestroy(IntPtr result);
-
     // ---- M15/P3 Stage 2: incrementalAlterConfigs (result shape 2) ----
 
     /// <summary>
@@ -1159,41 +1119,15 @@ internal static partial class NativeMethods
         AdminCallbacks.IncrementalAlterConfigsCallback callback,
         IntPtr userData);
 
-    // ---- kafka_admin_AlterConfigsResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterConfigsResultCount(IntPtr result);
-
-    /// <inheritdoc cref="DescribeConfigsResultGetKeyType"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_key_type", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterConfigsResultGetKeyType(IntPtr result, int index);
-
-    /// <inheritdoc cref="DescribeConfigsResultGetKeyName"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_key_name", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterConfigsResultGetKeyName(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_AlterConfigsResult_get_error</c> — that resource's error, or null if
-    /// it was altered successfully. <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ There is deliberately no <c>_get_value</c> to declare beside this, and the header
-    /// states why: "Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
-    /// error <em>is</em> the success value" — result shape 2.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterConfigsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AlterConfigsResultDestroy(IntPtr result);
-
-    // ---- M15/P3 Stage 3: the log-dir value tree (borrowed views, ffi §B2 Category 4) ----
+    // ---- M15/P3 Stage 3: the log-dir value tree ----
     //
-    // A `LogDirDescriptionMap_t` comes from `DescribeLogDirsResult_get_value(i)`, a
-    // `LogDirDescription_t` from `LogDirDescriptionMap_get_value(j)`, and a
-    // `ReplicaLogDirInfo_t` from `DescribeReplicaLogDirsResult_get_value(i)`. None has a
-    // `_destroy`; all die with the one result root, and LogDirMarshal copies everything out
-    // before that happens.
+    // A `LogDirDescriptionMap_t` is the value the `describe_log_dirs` per-broker callback
+    // delivers, and a `ReplicaLogDirInfo_t` the value the `describe_replica_log_dirs`
+    // per-replica callback delivers. Both are OWNED by that callback and destroyed with
+    // their own `_destroy` (`LogDirDescriptionMapDestroy` / `ReplicaLogDirInfoDestroy`)
+    // after LogDirMarshal has copied them out. A `LogDirDescription_t` from
+    // `LogDirDescriptionMap_get_value(j)` is BORROWED from its map (ffi §B2 Category 4) and
+    // has no `_destroy`.
 
     [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescriptionMap_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int LogDirDescriptionMapCount(IntPtr map);
@@ -1211,9 +1145,9 @@ internal static partial class NativeMethods
     internal static extern IntPtr LogDirDescriptionMapGetValue(IntPtr map, int index);
 
     /// <summary>
-    /// <c>kafka_admin_LogDirDescription_error</c> — ⚠⚠ the <b>SECOND borrowed error</b> in
-    /// <c>describeLogDirs</c>, nested inside the value tree and distinct from the per-broker
-    /// <see cref="DescribeLogDirsResultGetError"/>.
+    /// <c>kafka_admin_LogDirDescription_error</c> — ⚠⚠ the <b>nested</b> error in
+    /// <c>describeLogDirs</c>, inside the value tree and distinct from the per-broker error
+    /// the <c>describe_log_dirs</c> callback delivers. That one is owned; this one is not.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>BORROWED</b> (<c>const</c>, and the header adds "do not destroy it") — read with
@@ -1320,39 +1254,6 @@ internal static partial class NativeMethods
         AdminCallbacks.DescribeLogDirsCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeLogDirsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeLogDirsResult_get_broker</c> — the key at
-    /// <paramref name="index"/>: a <b>bare scalar</b> broker id, the first such key in M15.
-    /// <c>-1</c> if out of range. Entries are sorted by broker id.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_broker", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeLogDirsResultGetBroker(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeLogDirsResult_get_value</c> — that broker's log-dir map,
-    /// <b>borrowed</b>, or null if the broker failed. The walker reads the per-key error
-    /// first, so a null reaching the value reader is the unreachable case.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeLogDirsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeLogDirsResult_get_error</c> — <b>that broker's</b> error, or
-    /// null if it answered. <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Distinct from <see cref="LogDirDescriptionError"/>, the second borrowed error
-    /// nested in the value tree. This one faults the key's task; that one does not.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeLogDirsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeLogDirsResultDestroy(IntPtr result);
-
     // ---- M15/P3 Stage 3: alterReplicaLogDirs (result shape 2, 3-part key) ----
 
     /// <summary>
@@ -1379,41 +1280,6 @@ internal static partial class NativeMethods
         AdminCallbacks.AlterReplicaLogDirsCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterReplicaLogDirsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_AlterReplicaLogDirsResult_get_topic</c> — one <b>third</b> of the
-    /// composite key at <paramref name="index"/>, borrowed and NUL-terminated. This result
-    /// declares no <c>get_key</c>; the key is
-    /// <c>(get_topic(i), get_partition(i), get_broker_id(i))</c>.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterReplicaLogDirsResultGetTopic(IntPtr result, int index);
-
-    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterReplicaLogDirsResultGetPartition(IntPtr result, int index);
-
-    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterReplicaLogDirsResultGetBrokerId(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_AlterReplicaLogDirsResult_get_error</c> — that replica's error, or
-    /// null if the move was accepted. <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ There is deliberately no <c>_get_value</c>, and the header says why: "Java's
-    /// per-replica future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the
-    /// success value" — result shape 2.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterReplicaLogDirsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AlterReplicaLogDirsResultDestroy(IntPtr result);
-
     // ---- M15/P3 Stage 3: describeReplicaLogDirs (result shape 1, 3-part key) ----
 
     /// <summary>
@@ -1435,38 +1301,6 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.DescribeReplicaLogDirsCallback callback,
         IntPtr userData);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeReplicaLogDirsResultCount(IntPtr result);
-
-    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeReplicaLogDirsResultGetTopic(IntPtr result, int index);
-
-    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeReplicaLogDirsResultGetPartition(IntPtr result, int index);
-
-    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeReplicaLogDirsResultGetBrokerId(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeReplicaLogDirsResult_get_value</c> — that replica's log-dir
-    /// info, <b>borrowed</b>, or null if the replica failed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeReplicaLogDirsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeReplicaLogDirsResult_get_error</c> — that replica's error, or
-    /// null if it was described successfully. <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeReplicaLogDirsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeReplicaLogDirsResultDestroy(IntPtr result);
 
     // ---- M15/P4 Stage 1: electLeaders (result shape 3 — an AGGREGATE over the map) ----
 

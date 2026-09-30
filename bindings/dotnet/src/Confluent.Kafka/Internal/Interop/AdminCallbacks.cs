@@ -943,16 +943,6 @@ internal static class AdminCallbacks
     internal static readonly DescribeReplicaLogDirsCallback DescribeReplicaLogDirs = OnDescribeReplicaLogDirs;
 
     /// <summary>
-    /// <c>describeReplicaLogDirs</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>ReplicaLogDirInfo_t</c>, copied out before the root dies.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>
-        ReplicaLogDirInfoValue =
-            static (result, index) =>
-                LogDirMarshal.CopyOutReplicaInfo(
-                    NativeMethods.DescribeReplicaLogDirsResultGetValue(result, index));
-
-    /// <summary>
     /// <c>listConfigResources</c>' element reader — sub-shape 3b, so this is a <b>value</b>
     /// reader with no key beside it. The element is <b>composite</b>, assembled from
     /// <c>get_type(i)</c> and <c>get_name(i)</c>, which is why the walker's reader seam

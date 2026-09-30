@@ -21,32 +21,30 @@ namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Copies the <c>describeLogDirs</c> / <c>describeReplicaLogDirs</c> value trees — a
-/// borrowed <c>LogDirDescriptionMap_t</c> and its <c>LogDirDescription_t</c> children, or a
-/// borrowed <c>ReplicaLogDirInfo_t</c> — into fully owned managed objects, so nothing
-/// survives the <c>*Result_destroy</c> that follows the walk (ffi §B2 Category 4 / §B4).
+/// <c>LogDirDescriptionMap_t</c> and its borrowed <c>LogDirDescription_t</c> children, or a
+/// <c>ReplicaLogDirInfo_t</c> — into fully owned managed objects, so nothing survives the
+/// value's own <c>_destroy</c>, which the per-key callback runs after this returns (ffi §B2
+/// Category 4 / §B4).
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>There is a SECOND borrowed <c>KafkaError</c> in this file, nested inside the
-/// value tree.</b> <c>LogDirDescription_error</c> is <c>const</c> — borrowed, never
-/// destroyed — and it is <b>distinct</b> from the per-key
-/// <c>DescribeLogDirsResult_get_error(i)</c> the walker reads. Both are read with
-/// <see cref="KafkaException.FromBorrowedHandle"/> and both die with the one result root.
-/// A reviewer scanning for "the error accessor" finds only one of the two.
+/// ⚠⚠ <b>There is a borrowed <c>KafkaError</c> in this file, nested inside the value
+/// tree.</b> <c>LogDirDescription_error</c> is <c>const</c> — borrowed from its map, never
+/// destroyed, read with <see cref="KafkaException.FromBorrowedHandle"/> — and it is
+/// <b>distinct</b> from the per-broker error the <c>describe_log_dirs</c> callback
+/// delivers, which is owned and read by <c>KeyedResultMarshal.CompleteKey</c>, not here. A
+/// reviewer scanning for "the error accessor" finds only one of the two.
 /// </para>
 /// <para>
-/// ⚠ <b>The two sites differ in how far a test can go, and that was MEASURED rather than
-/// assumed.</b> A destroy-after-read injected at the <em>per-key</em> site aborts the test
-/// host (exit code 0, with the run's own summary line still reading "Passed!"). The same
-/// injection at the <em>nested</em> site below changes nothing — not because it is covered
-/// elsewhere, but because the pointer there is always NULL on every broker-free path, which
-/// a control-positive confirmed by failing when it was null. So the nested read is a
-/// recorded coverage gap rather than a verified site; the measurement, and why the shape is
-/// nonetheless pinned, are written up once in
+/// ⚠ <b>The nested read is a recorded coverage gap, and that was MEASURED rather than
+/// assumed.</b> A destroy-after-read injected at the nested site below changes nothing —
+/// not because it is covered elsewhere, but because the pointer there is always NULL on
+/// every broker-free path, which a control-positive confirmed by failing when it was null.
+/// The measurement, and why the shape is nonetheless pinned, are written up once in
 /// <c>AdminLogDirsMarshalTests.TheNestedDirectoryError_IsAFieldOnASuccessfulDescription</c>.
 /// </para>
 /// <para>
-/// ⚠ <b>The two errors mean different things.</b> The per-key one says <em>that broker's
+/// ⚠ <b>The two errors mean different things.</b> The per-broker one says <em>that broker's
 /// query failed</em> and faults the key's <see cref="System.Threading.Tasks.Task"/>. The
 /// one here is a <b>field on a successfully returned description</b> — the broker answered,
 /// but that directory is offline (the header says so outright: "It is <em>not</em> the
@@ -76,18 +74,18 @@ internal static class LogDirMarshal
     private const long UnknownVolumeBytes = -1L;
 
     /// <summary>
-    /// Copies one borrowed <c>LogDirDescriptionMap_t</c> out: every log directory of one
-    /// broker, keyed by path.
+    /// Copies one <c>LogDirDescriptionMap_t</c> out: every log directory of one broker,
+    /// keyed by path.
     /// </summary>
     /// <param name="map">
-    /// The borrowed <c>get_value(i)</c> pointer. Valid only until the result root is
-    /// destroyed.
+    /// The broker's log-dir map, owned by the per-broker callback, which destroys it after
+    /// this returns.
     /// </param>
     /// <returns>The owned map.</returns>
     /// <exception cref="KafkaException">
-    /// The ABI produced no map for a key whose <c>get_error</c> was null — unreachable in
-    /// practice, since the header ties a null value to a non-null error and the walker
-    /// checks the error first.
+    /// The callback delivered neither a map nor an error for a broker — unreachable in
+    /// practice, since the header says exactly one of the two is non-null and
+    /// <c>KeyedResultMarshal.CompleteKey</c> reads the error first.
     /// </exception>
     internal static IReadOnlyDictionary<string, LogDirDescription> CopyOutMap(IntPtr map)
     {
@@ -126,7 +124,7 @@ internal static class LogDirMarshal
     /// <returns>The owned description.</returns>
     internal static LogDirDescription CopyOutDescription(IntPtr description)
     {
-        // ⚠ BORROWED — read, never destroy. This is the SECOND borrowed error in this RPC
+        // ⚠ BORROWED — read, never destroy. Unlike the per-broker error this one is not owned
         // (see the class remarks); it is a FIELD on a description the broker returned
         // successfully, not a failure of the query.
         KafkaException? error =
@@ -163,8 +161,8 @@ internal static class LogDirMarshal
     }
 
     /// <summary>
-    /// Copies one <c>ReplicaLogDirInfo_t</c> out — borrowed from the flattened result, or
-    /// the per-key callback's own (owned, destroyed by the caller after this returns).
+    /// Copies one <c>ReplicaLogDirInfo_t</c> out — the per-key callback's own (owned,
+    /// destroyed by the caller after this returns).
     /// </summary>
     /// <param name="info">The info pointer.</param>
     /// <returns>The owned info.</returns>
