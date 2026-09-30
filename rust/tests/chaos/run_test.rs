@@ -35,6 +35,7 @@ use super::config::{ActionKind, ChaosConfig};
 use super::harness::{ChaosHarness, WorkloadPool};
 use super::isolation;
 use super::reports::{self, ReportsHandle, RunReports};
+use super::workload::Backend;
 use confluent_kafka::admin::Admin;
 use futures_util::FutureExt as _;
 use rand::rngs::StdRng;
@@ -279,7 +280,7 @@ fn pick_topic(rng: &mut StdRng, harness: &ChaosHarness) -> String {
 /// `[1, CONSUMER_CNT]` — here bounded by `[min, max]`. The `min` base consumers
 /// are fixed (built up front, never removed); churn moves the `max - min`
 /// headroom on top of them, so live count = `min + dynamic ∈ [min, max]`.
-async fn churn_consumers(pool: &WorkloadPool<'_>, min: u32, max: u32, rng: &mut StdRng) {
+async fn churn_consumers(pool: &WorkloadPool<'_>, backend: Backend, min: u32, max: u32, rng: &mut StdRng) {
     // Stop a random batch of the currently-added dynamic consumers (down to the
     // fixed `min` floor — `dynamic` is exactly how many are removable).
     let dynamic = pool.dynamic_consumer_count() as u32;
@@ -294,7 +295,7 @@ async fn churn_consumers(pool: &WorkloadPool<'_>, min: u32, max: u32, rng: &mut 
     if headroom > 0 {
         let to_start = rng.random_range(1..=headroom);
         for _ in 0..to_start {
-            pool.add_consumer(super::workload::Backend::Rust).await;
+            pool.add_consumer(backend).await;
         }
     }
 }
@@ -446,7 +447,7 @@ async fn chaos_run() {
             // with min/max the bounds). The `min` base consumers are fixed and
             // never removed here; churn moves the `max - min` headroom on top.
             if let (Some(min), Some(max)) = (cfg.consumer_churn_min, cfg.consumer_churn_max) {
-                churn_consumers(&pool, min, max, &mut rng).await;
+                churn_consumers(&pool, cfg.added_consumer_backend(), min, max, &mut rng).await;
             }
 
             // --- Random (chaos-monkey) mode: draw one action + its parameters
@@ -454,7 +455,7 @@ async fn chaos_run() {
             // the next cycle. Rebalance add/remove still honour their cycles.
             if cfg.random {
                 if cfg.rebalance_add_cycle == Some(cycle_1based) {
-                    pool.add_consumer(super::workload::Backend::Rust).await;
+                    pool.add_consumer(cfg.added_consumer_backend()).await;
                 }
                 if cfg.rebalance_remove_cycle == Some(cycle_1based) {
                     pool.remove_consumer();
@@ -498,7 +499,7 @@ async fn chaos_run() {
             // it into the roll's down-window (mid-roll).
             if !inject_mid_roll {
                 if do_add {
-                    pool.add_consumer(super::workload::Backend::Rust).await;
+                    pool.add_consumer(cfg.added_consumer_backend()).await;
                 }
                 if do_remove {
                     pool.remove_consumer();
@@ -518,9 +519,10 @@ async fn chaos_run() {
                 // injects once.
                 if inject_mid_roll && spec.kind == ActionKind::BrokerRoll {
                     let pool_hook = &pool;
+                    let added_backend = cfg.added_consumer_backend();
                     let hook = async move {
                         if do_add {
-                            pool_hook.add_consumer(super::workload::Backend::Rust).await;
+                            pool_hook.add_consumer(added_backend).await;
                         }
                         if do_remove {
                             pool_hook.remove_consumer();
