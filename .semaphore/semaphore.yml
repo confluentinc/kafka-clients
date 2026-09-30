@@ -116,7 +116,7 @@ blocks:
           commands:
             # The submodule is a shallow clone; `lint-custom` reads the
             # Kafka tags pinned in xtask and fails without them.
-            - cargo xtask fetch-java-refs
+            - (cd rust && cargo xtask fetch-java-refs)
             - make verify-rust
         - name: "Verify Rust (Linux amd64) — ssl"
           commands:
@@ -200,7 +200,7 @@ blocks:
           commands:
             # The submodule is a shallow clone; `lint-custom` reads the
             # Kafka tags pinned in xtask and fails without them.
-            - cargo xtask fetch-java-refs
+            - (cd rust && cargo xtask fetch-java-refs)
             - make verify-rust-macos-docker
 
   - name: "Verify language bindings (macOS arm64)"
