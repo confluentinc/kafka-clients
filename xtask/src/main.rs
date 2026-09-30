@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         Some("generate-error-codes") => generate_error_codes()?,
         Some("check-bindings") => check_bindings_task()?,
         Some("java-deprecated") => java_deprecated()?,
+        Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
@@ -1026,6 +1027,22 @@ fn java_deprecated() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fetches the tags of [`java::lint_refs`] into the `kafka` submodule, one
+/// commit deep each, so a shallow clone (CI's) can run `lint-custom`, which
+/// reads those refs and fails without them.
+fn fetch_java_refs() -> anyhow::Result<()> {
+    let refs = java::lint_refs();
+    let mut args = vec!["-C", "kafka", "fetch", "--depth=1", "--no-tags", "origin"];
+    let specs: Vec<String> = refs.iter().map(|r| format!("+refs/tags/{r}:refs/tags/{r}")).collect();
+    args.extend(specs.iter().map(String::as_str));
+    let status = Command::new("git").args(&args).status()?;
+    if !status.success() {
+        anyhow::bail!("fetching {} into `kafka` failed", refs.join(", "));
+    }
+    println!("✅ Fetched {} into `kafka`", refs.join(", "));
+    Ok(())
+}
+
 fn print_help() {
     eprintln!(
         "Tasks:
@@ -1035,6 +1052,7 @@ fn print_help() {
   generate-error-codes  Regenerate the error-code constants for Python and the test harness
   check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
   java-deprecated List the Java client's @Deprecated API in design/current/java-deprecated.txt
+  fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline

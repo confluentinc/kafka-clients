@@ -108,6 +108,9 @@ blocks:
       jobs:
         - name: "verify-rust (Linux amd64)"
           commands:
+            # The submodule is a shallow clone; `lint-custom` reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - cargo xtask fetch-java-refs
             - make verify-rust
 
   - name: "Verify language bindings (Linux amd64)"
@@ -151,6 +154,9 @@ blocks:
       jobs:
         - name: "verify-rust (macOS arm64)"
           commands:
+            # The submodule is a shallow clone; `lint-custom` reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - cargo xtask fetch-java-refs
             - make verify-rust-macos-docker
 
   - name: "Build + unit test bindings (macOS)"

@@ -43,8 +43,9 @@ trait Rule {
     /// How to fix a violation, printed once after the rule's findings.
     fn hint(&self) -> &'static str;
 
-    /// Why the rule cannot run in this checkout, if it cannot; it is then
-    /// reported as skipped instead of being run.
+    /// Why the rule cannot run in this checkout, if it cannot. A rule that
+    /// cannot run fails the lint: a skip that exits 0 would let a checkout
+    /// without the `kafka` submodule pass while running only half the rules.
     fn skip_reason(&self) -> Option<String> {
         None
     }
@@ -82,7 +83,8 @@ pub fn lint_custom() -> anyhow::Result<()> {
 
     for rule in rules() {
         if let Some(reason) = rule.skip_reason() {
-            println!("⏭️  {}: skipped, {reason}", rule.name());
+            eprintln!("\n❌ {}: cannot run, {reason}", rule.name());
+            failed += 1;
             continue;
         }
         let mut findings = Vec::new();
@@ -1134,11 +1136,20 @@ impl NoDeprecatedTranslation {
         NoDeprecatedTranslation { stale_list: Self::stale_list(&list), index, baseline }
     }
 
-    /// Compares the checked-in list with the refs, when the refs are present.
+    /// Compares the checked-in list with the refs. A ref that cannot be read
+    /// is a finding too: otherwise a missing or mistyped ref would leave the
+    /// list unchecked while the rule passes.
     fn stale_list(list: &str) -> Option<String> {
         let mut expected = BTreeSet::new();
         for reference in java::DEPRECATION_REFS {
-            expected.extend(java::deprecated_items(&java::load_ref(reference)?));
+            let Some(classes) = java::load_ref(reference) else {
+                return Some(format!(
+                    "cannot check {} against Kafka `{reference}`: the ref is not in the `kafka` submodule \
+                     (run `cargo xtask fetch-java-refs`)",
+                    java::DEPRECATED_LIST
+                ));
+            };
+            expected.extend(java::deprecated_items(&classes));
         }
         let listed: BTreeSet<String> = list
             .lines()
@@ -1431,19 +1442,15 @@ struct PublicAudience {
     allow_errors: Vec<String>,
     /// Where the `[export] include` list is read from.
     cbindgen: PathBuf,
-    /// Where the disclaimers were read from, for the skip reason.
-    unsupported_source: String,
 }
 
 impl PublicAudience {
     fn new() -> Self {
         let index = JavaIndex::load();
         let public = parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default());
-        let (unsupported, unsupported_source) = match java::unsupported_packages_at_ref(java::AUDIENCE_REF) {
-            Some(packages) => (packages, format!("`kafka` at {}", java::AUDIENCE_REF)),
-            // Without the ref (a shallow clone), the working tree's disclaimers.
-            None => (java::unsupported_packages_in_tree(), format!("`{}`", java::JAVA_MAIN_ROOT)),
-        };
+        // Read at the ref, never from the working tree: the tree is the
+        // translated source (4.3.1), not the release whose disclaimers count.
+        let unsupported = java::unsupported_packages_at_ref(java::AUDIENCE_REF).unwrap_or_default();
         let (allow, allow_errors) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
         PublicAudience {
             index,
@@ -1452,7 +1459,6 @@ impl PublicAudience {
             allow,
             allow_errors,
             cbindgen: PathBuf::from(CBINDGEN_TOML),
-            unsupported_source,
         }
     }
 
@@ -1825,9 +1831,13 @@ impl Rule for PublicAudience {
         if self.public.is_empty() {
             return Some(format!("no Public list at `{PUBLIC_AUDIENCE_LIST}`"));
         }
-        self.unsupported
-            .is_empty()
-            .then(|| format!("no unsupported-API disclaimers found in {}", self.unsupported_source))
+        self.unsupported.is_empty().then(|| {
+            format!(
+                "no unsupported-API disclaimers at Kafka `{}`: the ref is not in the `kafka` submodule \
+                 (run `cargo xtask fetch-java-refs`)",
+                java::AUDIENCE_REF
+            )
+        })
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
@@ -2141,7 +2151,6 @@ mod tests {
             allow,
             allow_errors,
             cbindgen: dir.join("cbindgen.toml"),
-            unsupported_source: "fixture".to_string(),
         };
         (krate, rule)
     }

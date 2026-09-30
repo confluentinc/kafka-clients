@@ -474,6 +474,16 @@ pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
 /// unsupported-API disclaimers decide what the crate may make public.
 pub const AUDIENCE_REF: &str = "4.4.0-rc3";
 
+/// Every ref the lint reads: [`DEPRECATION_REFS`] and [`AUDIENCE_REF`],
+/// without duplicates.
+pub fn lint_refs() -> Vec<&'static str> {
+    let mut refs = DEPRECATION_REFS.to_vec();
+    if !refs.contains(&AUDIENCE_REF) {
+        refs.push(AUDIENCE_REF);
+    }
+    refs
+}
+
 /// The sentence a `package-info.java` carries when its package is not part of
 /// the supported API ("This package is not a supported Kafka API; the
 /// implementation may change without warning ...").
@@ -497,29 +507,6 @@ pub fn unsupported_packages_at_ref(reference: &str) -> Option<BTreeSet<String>> 
             .filter_map(|(rel, body)| unsupported_package(rel, &String::from_utf8_lossy(body)))
             .collect(),
     )
-}
-
-/// The packages carrying the unsupported-API disclaimer in the `kafka` working
-/// tree; empty when it is not checked out.
-pub fn unsupported_packages_in_tree() -> BTreeSet<String> {
-    fn walk(dir: &Path, rel: &mut Vec<String>, out: &mut BTreeSet<String>) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().is_dir() {
-                rel.push(name);
-                walk(&entry.path(), rel, out);
-                rel.pop();
-            } else if name == "package-info.java" {
-                let source = fs::read_to_string(entry.path()).unwrap_or_default();
-                let path = [rel.as_slice(), &[name]].concat().join("/");
-                out.extend(unsupported_package(&path, &source));
-            }
-        }
-    }
-    let mut out = BTreeSet::new();
-    walk(Path::new(JAVA_MAIN_ROOT), &mut Vec::new(), &mut out);
-    out
 }
 
 /// The files below [`JAVA_MAIN_ROOT`] at git ref `reference` whose path
