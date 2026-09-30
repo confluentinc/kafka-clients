@@ -1371,6 +1371,44 @@ async def test_async_send_suspends_on_full_and_close_unblocks() -> None:
     await asyncio.wait_for(task, timeout=5)
 
 
+async def test_cancelling_close_waits_for_its_teardown_before_closing_the_serializers() -> None:
+    # Cancelling the task awaiting close() lets the teardown (forcing an
+    # unfinished close, waiting for the calls in flight, joining the threads)
+    # end before the serializers close and close() raises CancelledError,
+    # however often the task is cancelled meanwhile (Copilot review, PR #187).
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    order: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+    real_teardown = p._teardown  # noqa: SLF001
+    real_close_serializers = p._close_serializers  # noqa: SLF001
+
+    def teardown(c_producer: int, force: bool) -> None:
+        started.set()
+        release.wait(10)
+        real_teardown(c_producer, force)
+        order.append("teardown")
+
+    def close_serializers() -> None:
+        order.append("serializers")
+        real_close_serializers()
+
+    p._teardown = teardown  # type: ignore[method-assign]  # noqa: SLF001
+    p._close_serializers = close_serializers  # type: ignore[method-assign]  # noqa: SLF001
+    task = asyncio.ensure_future(p.close())
+    assert await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done(), "close() returned while its teardown still runs"
+    assert order == []
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["teardown", "serializers"]
+
+
 # ===========================================================================
 # The async real producer
 # ===========================================================================

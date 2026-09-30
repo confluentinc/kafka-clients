@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._async import await_to_end
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -320,10 +321,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         finally:
             # Forces an unfinished close, waits for the calls still in flight,
             # then joins the send and poll threads: off the loop, and to its end
-            # even if this task is cancelled again meanwhile.
+            # even if this task is cancelled again meanwhile, so the serializers
+            # close after it.
             teardown = loop.run_in_executor(None, self._teardown, c_producer, not closed)
             try:
-                await asyncio.shield(teardown)
+                await await_to_end(teardown)
             finally:
                 self._close_serializers()
 

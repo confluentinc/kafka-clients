@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from datetime import timedelta
 from typing import Any
 
@@ -324,3 +325,37 @@ def test_every_stub_form_works() -> None:
     assert str(caught[0].message) == (
         "close(timeout) is deprecated. This method has been deprecated since Kafka 4.1 and "
         "should use close(option=...) instead.")
+
+
+async def test_cancelling_close_waits_for_its_teardown() -> None:
+    # Cancelling the task awaiting close() lets the close end, then raises
+    # CancelledError: close() returns only after _finish_close (waiting for the
+    # uses in flight, freeing the handle, closing the deserializers) has run,
+    # however often the task is cancelled meanwhile (Copilot review, PR #187).
+    # The mock's close() runs on the loop, so the real consumer: without a
+    # group.id it has no group to leave, and its close ends at once.
+    c = AsyncKafkaConsumer(configs={"bootstrap.servers": "localhost:1",
+                                    "group.protocol": "consumer"})
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    real_finish_close = c._finish_close  # noqa: SLF001
+
+    def finish_close() -> None:
+        started.set()
+        release.wait(10)
+        real_finish_close()
+        finished.set()
+
+    c._finish_close = finish_close  # type: ignore[method-assign]  # noqa: SLF001
+    task = asyncio.ensure_future(c.close())
+    assert await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done(), "close() returned while its teardown still runs"
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()

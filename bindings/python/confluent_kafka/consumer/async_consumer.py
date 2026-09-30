@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import java_forms
+from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import (
@@ -559,5 +560,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _finish_close_off_loop(self) -> None:
         """``_finish_close`` waits for the uses in flight and joins the core's
-        tasks: off the event loop."""
-        await asyncio.get_running_loop().run_in_executor(None, self._finish_close)
+        tasks: off the event loop, and to its end even if the task is cancelled
+        meanwhile, so ``close()`` does not return before it."""
+        await await_to_end(asyncio.get_running_loop().run_in_executor(None, self._finish_close))
