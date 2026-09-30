@@ -95,6 +95,8 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
 env_logger = "0.11"
+# The consumer example stops on Ctrl-C; the library itself needs no `signal`.
+tokio = { version = "1", features = ["signal"] }
 # Used by the multilanguage consumer client (impl Consumer is #[async_trait])
 # and to build ConsumerRecords.
 async-trait = "0.1"
