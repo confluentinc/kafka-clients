@@ -42,11 +42,6 @@ namespace Confluent.Kafka.Admin;
 /// (<c>INVALID_REPLICA_ASSIGNMENT</c>, <c>NO_REASSIGNMENT_IN_PROGRESS</c>, …). The
 /// per-partition error is <b>borrowed</b> from the result root and is never destroyed.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-partition <em>granularity</em> is fully
-/// preserved, but per-partition <em>timing independence</em> is not — the same recorded
-/// limitation as <see cref="CreatePartitionsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class AlterPartitionReassignmentsResult
 {

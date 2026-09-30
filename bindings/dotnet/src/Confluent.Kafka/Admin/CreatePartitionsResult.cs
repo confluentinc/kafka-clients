@@ -30,13 +30,6 @@ namespace Confluent.Kafka.Admin;
 /// that topic's partitions were created and hands back nothing; a topic that fails faults
 /// only <em>its own</em> <see cref="Task"/>.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-topic <em>granularity</em> is fully
-/// preserved, but per-topic <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future type
-/// and resolves every key together before reporting. The same recorded limitation as
-/// <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class CreatePartitionsResult
 {

@@ -30,13 +30,6 @@ namespace Confluent.Kafka.Admin;
 /// that group was deleted and hands back nothing; a group that fails faults only
 /// <em>its own</em> <see cref="Task"/> — Java's <c>deletedGroups()</c> (<c>:36-44</c>).
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-group <em>granularity</em> is fully preserved,
-/// but per-group <em>timing independence</em> is not: all the <see cref="Task"/>s complete
-/// at the same instant, because the C ABI has no future type and resolves every key together
-/// before reporting. The same recorded limitation as <see cref="CreateTopicsResult"/> and
-/// <see cref="CreatePartitionsResult"/>.
-/// </para>
 /// </remarks>
 public sealed class DeleteConsumerGroupsResult
 {

@@ -36,11 +36,6 @@ namespace Confluent.Kafka.Admin;
 /// future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value"
 /// (result shape 2).
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-replica <em>granularity</em> is fully
-/// preserved, but per-replica <em>timing independence</em> is not — the same recorded
-/// limitation as <see cref="CreatePartitionsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class AlterReplicaLogDirsResult
 {

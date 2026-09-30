@@ -43,11 +43,6 @@ namespace Confluent.Kafka.Admin;
 /// absences, because an absence nothing asserts is one a later phase "completes" without
 /// anything going red.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-topic <em>granularity</em> is fully
-/// preserved, but per-topic <em>timing independence</em> is not — the same recorded
-/// limitation as <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class DescribeTopicsResult
 {

@@ -33,11 +33,6 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// The per-replica error is <b>borrowed</b> from the result root and is never destroyed.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-replica <em>granularity</em> is fully
-/// preserved, but per-replica <em>timing independence</em> is not — the same recorded
-/// limitation as <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class DescribeReplicaLogDirsResult
 {

@@ -38,13 +38,6 @@ namespace Confluent.Kafka.Admin;
 /// rather than returning <see langword="null"/> — Java's <c>:43-46</c>. See its own
 /// remarks.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded (<c>definition-of-done.md</c> §7).</b> Per-partition
-/// <em>granularity</em> is fully preserved, but per-partition <em>timing independence</em>
-/// is not — the same recorded limitation as <see cref="CreatePartitionsResult"/>, for the
-/// same reason: the ABI settles the whole result together and has no <c>KafkaFuture</c>
-/// type with which to express independent timing.
-/// </para>
 /// </remarks>
 public sealed class ListOffsetsResult
 {

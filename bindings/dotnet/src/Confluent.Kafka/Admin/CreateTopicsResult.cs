@@ -33,15 +33,6 @@ namespace Confluent.Kafka.Admin;
 /// can await one topic without awaiting the others, and each carries <em>its own</em>
 /// outcome — a topic that failed faults only its own <see cref="Task"/>.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-topic <em>granularity</em> is fully
-/// preserved, but per-topic <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future
-/// type and resolves every key together before reporting. In Java a fast topic's future
-/// can complete before a slow one's. Nothing observable depends on this for correctness
-/// — <see cref="All"/> and per-topic awaiting behave identically either way — and the
-/// Python binding has the same limitation for the same reason.
-/// </para>
 /// </remarks>
 public sealed class CreateTopicsResult
 {

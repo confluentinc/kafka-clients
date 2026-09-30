@@ -38,13 +38,6 @@ namespace Confluent.Kafka.Admin;
 /// smooth, and a test asserts the shape so a later slice cannot quietly align them.
 /// </para>
 /// <para>
-/// <b>Deviation from Java, recorded (<c>definition-of-done.md</c> §7).</b> Per-group
-/// <em>granularity</em> is fully preserved, but per-group <em>timing independence</em> is
-/// not: all the <see cref="Task"/>s complete at the same instant, because the C ABI has no
-/// future type and resolves every key together before reporting. The same recorded
-/// limitation as <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
-/// <para>
 /// <b>Deviation from Java, recorded.</b> Java's <c>describedGroups()</c> hands back
 /// <c>new HashMap&lt;&gt;(futures)</c> (<c>:42</c>) — a defensive copy, because Java's
 /// <c>Map</c> is mutable and a caller could otherwise clear the result's own map.

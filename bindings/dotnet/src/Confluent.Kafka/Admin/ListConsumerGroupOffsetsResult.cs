@@ -57,13 +57,6 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> and
 /// <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> follow.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded (<c>definition-of-done.md</c> §7).</b> Per-group
-/// <em>granularity</em> is fully preserved, but per-group <em>timing independence</em> is
-/// not: all the <see cref="Task"/>s complete at the same instant, because the C ABI has no
-/// future type and resolves every key together before reporting. The same recorded
-/// limitation as <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class ListConsumerGroupOffsetsResult
 {

@@ -35,13 +35,6 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="LogDirDescription.Error"/> is non-null. Both underlying errors are
 /// <b>borrowed</b> from the result root and neither is ever destroyed.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-broker <em>granularity</em> is fully
-/// preserved, but per-broker <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future type
-/// and resolves every key together before reporting. The same recorded limitation as
-/// <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class DescribeLogDirsResult
 {

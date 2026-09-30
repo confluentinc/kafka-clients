@@ -36,13 +36,6 @@ namespace Confluent.Kafka.Admin;
 /// <c>?</c> annotation makes Java's contract visible in the signature, so the compiler
 /// warns instead — stricter than Java, without changing the shape.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-topic <em>granularity</em> is fully
-/// preserved, but per-topic <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future
-/// type and resolves every key together before reporting. The same recorded limitation as
-/// <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class DeleteTopicsResult
 {

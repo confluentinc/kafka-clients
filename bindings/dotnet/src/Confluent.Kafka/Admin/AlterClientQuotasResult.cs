@@ -33,12 +33,6 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ The dictionary is keyed by <see cref="ClientQuotaEntity"/> itself, so a lookup works
 /// with any value-equal entity.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-entity <em>granularity</em> is fully preserved,
-/// but per-entity <em>timing independence</em> is not: all the <see cref="Task"/>s complete
-/// at the same instant, because the C ABI has no future type and resolves every key together
-/// before reporting. The same recorded limitation as <see cref="CreateAclsResult"/>.
-/// </para>
 /// </remarks>
 public sealed class AlterClientQuotasResult
 {

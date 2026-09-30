@@ -33,12 +33,6 @@ namespace Confluent.Kafka.Admin;
 /// <c>Values[filter]</c> succeeding and <see cref="All"/> faulting is the correct, intended
 /// outcome of an inner failure — the two are supposed to disagree.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-filter <em>granularity</em> is fully preserved,
-/// but per-filter <em>timing independence</em> is not: all the <see cref="Task"/>s complete
-/// at the same instant, because the C ABI has no future type and resolves every key together
-/// before reporting. The same recorded limitation as <see cref="CreateAclsResult"/>.
-/// </para>
 /// </remarks>
 public sealed class DeleteAclsResult
 {

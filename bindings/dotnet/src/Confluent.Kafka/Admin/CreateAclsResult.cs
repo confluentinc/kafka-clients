@@ -34,13 +34,6 @@ namespace Confluent.Kafka.Admin;
 /// value-equal binding — <c>Values[new AclBinding(pattern, entry)]</c> hits the entry you
 /// requested.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-binding <em>granularity</em> is fully
-/// preserved, but per-binding <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future type
-/// and resolves every key together before reporting. The same recorded limitation as
-/// <see cref="CreateTopicsResult"/>.
-/// </para>
 /// </remarks>
 public sealed class CreateAclsResult
 {

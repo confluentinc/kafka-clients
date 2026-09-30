@@ -34,13 +34,6 @@ namespace Confluent.Kafka.Admin;
 /// so: "a per-resource failure is not a call failure". The per-resource error is
 /// <b>borrowed</b> from the result root and is never destroyed.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-resource <em>granularity</em> is fully
-/// preserved, but per-resource <em>timing independence</em> is not: all the
-/// <see cref="Task"/>s complete at the same instant, because the C ABI has no future type
-/// and resolves every key together before reporting. The same recorded limitation as
-/// <see cref="CreateTopicsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class DescribeConfigsResult
 {

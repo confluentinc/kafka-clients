@@ -26,10 +26,6 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ This type sits on an accessor set byte-identical to <see cref="UpdateFeaturesResult"/>'s
 /// (and to P6's <c>CreateAclsResult</c>), so a cross-wired reader would return a plausible
 /// answer; the readers are pinned apart by a wiring guard in the unit tests.
-/// <para>
-/// Per-user <em>granularity</em> is preserved; per-user <em>timing independence</em> is not —
-/// the recorded limitation every keyed admin result shares.
-/// </para>
 /// </remarks>
 public sealed class AlterUserScramCredentialsResult
 {

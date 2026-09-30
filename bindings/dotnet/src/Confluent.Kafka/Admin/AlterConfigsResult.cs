@@ -41,11 +41,6 @@ namespace Confluent.Kafka.Admin;
 /// nothing; a resource that fails faults only <em>its own</em> <see cref="Task"/>. The
 /// per-resource error is <b>borrowed</b> from the result root and is never destroyed.
 /// </para>
-/// <para>
-/// <b>Deviation from Java, recorded.</b> Per-resource <em>granularity</em> is fully
-/// preserved, but per-resource <em>timing independence</em> is not — the same recorded
-/// limitation as <see cref="CreatePartitionsResult"/>, for the same reason.
-/// </para>
 /// </remarks>
 public sealed class AlterConfigsResult
 {
