@@ -420,7 +420,10 @@ public sealed class MockAdminClient : IAdmin
     /// </summary>
     /// <param name="offsets">The beginning offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ArgumentException">
+    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// (see the <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
         _native.UpdateBeginningOffsets(offsets);
@@ -432,7 +435,10 @@ public sealed class MockAdminClient : IAdmin
     /// </summary>
     /// <param name="offsets">The end offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ArgumentException">
+    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// (see the <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
         _native.UpdateEndOffsets(offsets);
@@ -447,7 +453,10 @@ public sealed class MockAdminClient : IAdmin
     /// parameter; the real client has no such restriction.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ArgumentException">
+    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// (see the <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
         _native.UpdateConsumerGroupOffsets(offsets);
@@ -467,7 +476,10 @@ public sealed class MockAdminClient : IAdmin
     /// so the three levels travel together per feature — the shape Python binds too.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="featureLevels"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// A key is null, or contains a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     public void SetFeatureLevels(
         IReadOnlyDictionary<string, (short Level, short MinSupported, short MaxSupported)> featureLevels) =>

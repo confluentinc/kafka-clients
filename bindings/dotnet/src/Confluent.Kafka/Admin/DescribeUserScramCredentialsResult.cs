@@ -70,8 +70,13 @@ public sealed class DescribeUserScramCredentialsResult
     /// <param name="userName">The user to look up.</param>
     /// <returns>An awaitable over that user's description.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="userName"/> contains a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks): the lookup would otherwise ask for a different, truncated
+    /// user name.
+    /// </exception>
     /// <remarks>
-    /// The guard throws <b>synchronously</b> — this method is deliberately not <c>async</c>,
+    /// Both guards throw <b>synchronously</b> — this method is deliberately not <c>async</c>,
     /// so a precondition failure is not deferred into the returned <see cref="Task"/>
     /// (ffi §A5).
     /// </remarks>
@@ -81,6 +86,8 @@ public sealed class DescribeUserScramCredentialsResult
         {
             throw new ArgumentNullException(nameof(userName));
         }
+
+        AdminStrings.Validate(userName, nameof(userName));
 
         return DescriptionCore(userName);
     }

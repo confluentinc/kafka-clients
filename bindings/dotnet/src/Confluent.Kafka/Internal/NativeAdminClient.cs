@@ -1051,6 +1051,19 @@ internal sealed class NativeAdminClient : IDisposable
             // (kafka_admin_NewTopic_put_config), so NewTopicMarshal passes it through
             // (M15/P13.3 D16).
             AdminStrings.Validate(topic.Name, nameof(newTopics));
+
+            // The config names and values are pinned by NewTopicMarshal, after the operation
+            // is rooted, so they are checked here (ffi §B5 order): a NUL would truncate one
+            // into a different config (AdminStrings). A null value passes, as above.
+            if (topic.Configs is not null)
+            {
+                foreach (KeyValuePair<string, string> config in topic.Configs)
+                {
+                    AdminStrings.Validate(config.Key, nameof(newTopics));
+                    AdminStrings.Validate(config.Value, nameof(newTopics));
+                }
+            }
+
             if (seen.Add(topic.Name))
             {
                 requested.Add(topic);
@@ -2152,6 +2165,12 @@ internal sealed class NativeAdminClient : IDisposable
                         $"The operations for '{entry.Key}' must not contain a null element.", nameof(configs));
                 }
 
+                // The config name and value are request fields, not keys, but a NUL would
+                // still truncate them into a different config (AdminStrings). A null value
+                // passes: it is DELETE's null value, sent as a NULL pointer below.
+                AdminStrings.Validate(op.ConfigEntry.Name, nameof(configs));
+                AdminStrings.Validate(op.ConfigEntry.Value, nameof(configs));
+
                 rowResources.Add(entry.Key);
                 rowOps.Add(op);
             }
@@ -2428,6 +2447,9 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException(
                     $"The log directory for '{entry.Key}' must not be null.", nameof(replicaAssignment));
             }
+
+            // A NUL would truncate the path into a different log directory (AdminStrings).
+            AdminStrings.Validate(entry.Value, nameof(replicaAssignment));
 
             // ⚠ De-duplicated by the CORE's equality — the (topic, partition, broker id)
             // triple by value — first occurrence kept, as the core keeps it (M15/P13.3 F4,
@@ -3036,6 +3058,9 @@ internal sealed class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(groupId));
         }
 
+        // A NUL would truncate the id into a different group (AdminStrings).
+        AdminStrings.Validate(groupId, nameof(groupId));
+
         if (offsets is null)
         {
             throw new ArgumentNullException(nameof(offsets));
@@ -3067,6 +3092,13 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 throw new ArgumentException("Offset value must not be null.", nameof(offsets));
             }
+
+            // A NUL would truncate the topic or the metadata into a different one
+            // (AdminStrings). The metadata is checked itself, not the `?? string.Empty`
+            // fallback below: OffsetAndMetadata already stores a null as empty, and a null
+            // would pass the check anyway.
+            AdminStrings.Validate(entry.Key.Topic, nameof(offsets));
+            AdminStrings.Validate(entry.Value.Metadata, nameof(offsets));
 
             keys.Add(entry.Key);
             partitions[next] = entry.Key.Partition;
@@ -3195,6 +3227,9 @@ internal sealed class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(groupId));
         }
 
+        // A NUL would truncate the id into a different group (AdminStrings).
+        AdminStrings.Validate(groupId, nameof(groupId));
+
         if (partitions is null)
         {
             throw new ArgumentNullException(nameof(partitions));
@@ -3218,6 +3253,9 @@ internal sealed class NativeAdminClient : IDisposable
                     "The partitions collection must not contain a topic partition with a null topic.",
                     nameof(partitions));
             }
+
+            // A NUL would truncate the topic into a different one (AdminStrings).
+            AdminStrings.Validate(partition.Topic, nameof(partitions));
 
             if (seen.Add(partition))
             {
@@ -3409,6 +3447,11 @@ internal sealed class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(options));
         }
 
+        // A NUL would truncate the group id, the reason or a group instance id into a
+        // different one (AdminStrings); a null reason passes.
+        AdminStrings.Validate(groupId, nameof(groupId));
+        AdminStrings.Validate(options.Reason, nameof(options));
+
         int timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(RemoveMembersFromConsumerGroupOptions));
         bool removeAll = options.RemoveAll;
         IReadOnlyCollection<MemberToRemove> members = options.Members;
@@ -3419,6 +3462,7 @@ internal sealed class NativeAdminClient : IDisposable
             keys = new List<MemberToRemove>(members.Count);
             foreach (MemberToRemove member in members)
             {
+                AdminStrings.Validate(member.GroupInstanceId, nameof(options));
                 keys.Add(member);
             }
         }
@@ -3743,6 +3787,12 @@ internal sealed class NativeAdminClient : IDisposable
         ResourcePatternFilter pattern = filter.PatternFilter;
         AccessControlEntryFilter entry = filter.EntryFilter;
 
+        // A null component means "any" and passes; a NUL would truncate the filter into a
+        // different one (AdminStrings).
+        AdminStrings.Validate(pattern.Name, nameof(filter));
+        AdminStrings.Validate(entry.Principal, nameof(filter));
+        AdminStrings.Validate(entry.Host, nameof(filter));
+
         SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
             new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls");
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
@@ -3826,6 +3876,15 @@ internal sealed class NativeAdminClient : IDisposable
         if (options is not null)
         {
             timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClientQuotasOptions));
+        }
+
+        // Here, over the caller's filter, rather than in ClientQuotaMarshal.Pin, which runs
+        // after the operation is rooted (ffi §B5 order). A NUL would truncate the entity type
+        // or match name into a different one (AdminStrings); a null match name passes.
+        foreach (ClientQuotaFilterComponent component in filter.Components)
+        {
+            AdminStrings.Validate(component.EntityType, nameof(filter));
+            AdminStrings.Validate(component.MatchName, nameof(filter));
         }
 
         SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
@@ -3959,6 +4018,14 @@ internal sealed class NativeAdminClient : IDisposable
                 AdminStrings.Validate(part.Value, nameof(entries));
             }
 
+            // Each op's quota name is a request field, pinned by ClientQuotaMarshal after the
+            // operation is rooted, so it is checked here (ffi §B5 order): a NUL would truncate
+            // it into a different quota (AdminStrings).
+            foreach (ClientQuotaAlteration.Op op in alteration.Ops)
+            {
+                AdminStrings.Validate(op.Key, nameof(entries));
+            }
+
             // Every alteration is sent, a repeated entity's included (F7); only the key set
             // is distinct, first occurrence first, as the core keys its callbacks.
             alterations.Add(alteration);
@@ -4079,6 +4146,9 @@ internal sealed class NativeAdminClient : IDisposable
                     throw new ArgumentException(
                         "The users must not contain a null element.", nameof(users));
                 }
+
+                // A NUL would truncate the name into a different user (AdminStrings).
+                AdminStrings.Validate(user, nameof(users));
 
                 requested.Add(user);
             }
@@ -4271,6 +4341,18 @@ internal sealed class NativeAdminClient : IDisposable
                     "CreateDelegationTokenOptions.Renewers must not contain a null element.",
                     nameof(options));
             }
+
+            // Over the caller's principals, not in DelegationTokenMarshal.PinPrincipals, which
+            // runs after the operation is rooted (ffi §B5 order): a NUL would truncate a
+            // principal into a different one (AdminStrings).
+            AdminStrings.Validate(renewers[i].PrincipalType, nameof(options));
+            AdminStrings.Validate(renewers[i].Name, nameof(options));
+        }
+
+        if (owner is not null)
+        {
+            AdminStrings.Validate(owner.PrincipalType, nameof(options));
+            AdminStrings.Validate(owner.Name, nameof(options));
         }
 
         SingleAdminOperation<DelegationToken> operation =
@@ -4491,6 +4573,12 @@ internal sealed class NativeAdminClient : IDisposable
                     "DescribeDelegationTokenOptions.Owners must not contain a null element.",
                     nameof(options));
             }
+
+            // Over the caller's principals, not in DelegationTokenMarshal.PinPrincipals, which
+            // runs after the operation is rooted (ffi §B5 order): a NUL would truncate an owner
+            // into a different principal (AdminStrings).
+            AdminStrings.Validate(owners[i].PrincipalType, nameof(options));
+            AdminStrings.Validate(owners[i].Name, nameof(options));
         }
 
         SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation =
@@ -4962,13 +5050,6 @@ internal sealed class NativeAdminClient : IDisposable
         // the ABI would skip such an entry silently and desynchronize the parallel arrays.
         List<TopicPartition> keys = DistinctPartitions(partitions, nameof(partitions));
 
-        // Here rather than in DistinctPartitions, whose other callers (electLeaders,
-        // listPartitionReassignments) answer with one callback and key no countdown.
-        foreach (TopicPartition key in keys)
-        {
-            AdminStrings.Validate(key.Topic, nameof(partitions));
-        }
-
         KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation =
             new KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState>(
                 "describeProducers", keys, EqualityComparer<TopicPartition>.Default);
@@ -5077,6 +5158,10 @@ internal sealed class NativeAdminClient : IDisposable
         long durationMs = options?.FilteredDuration ?? -1L;
 
         (long[] Values, int Count) producerIds = ProducerIdFilter(options);
+
+        // A NUL would truncate the pattern into a different filter (AdminStrings); null
+        // passes, as "no pattern filter".
+        AdminStrings.Validate(options?.FilteredTransactionalIdPattern, nameof(options));
 
         ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
@@ -5227,6 +5312,9 @@ internal sealed class NativeAdminClient : IDisposable
                 nameof(spec));
         }
 
+        // A NUL would truncate the topic into a different one (AdminStrings).
+        AdminStrings.Validate(spec.TopicPartition.Topic, nameof(spec));
+
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
@@ -5298,6 +5386,9 @@ internal sealed class NativeAdminClient : IDisposable
         {
             throw new ArgumentNullException(nameof(transactionalId));
         }
+
+        // A NUL would truncate the id into a different transaction (AdminStrings).
+        AdminStrings.Validate(transactionalId, nameof(transactionalId));
 
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
@@ -5673,10 +5764,18 @@ internal sealed class NativeAdminClient : IDisposable
             timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListGroupsOptions));
 
             // Each getter already hands back a de-duplicated, immutable, null-element-free
-            // copy, so there is nothing left to validate on the protocol-type axis.
+            // copy, so the protocol-type axis needs only the C-string check below.
             groupStates = options.GroupStates;
             protocolTypes = options.ProtocolTypes;
             types = options.Types;
+        }
+
+        // The protocol types are the caller's own text (the other two axes are wire names
+        // the binding derives from its enums): a NUL would truncate one into a different
+        // filter (AdminStrings).
+        foreach (string protocolType in protocolTypes)
+        {
+            AdminStrings.Validate(protocolType, nameof(options));
         }
 
         // Encoded BEFORE the operation is rooted and before anything is pinned (ffi §B5), so
@@ -6189,6 +6288,9 @@ internal sealed class NativeAdminClient : IDisposable
                         nameof(groupSpecs));
                 }
 
+                // A NUL would truncate the topic into a different one (AdminStrings).
+                AdminStrings.Validate(partition.Topic, nameof(groupSpecs));
+
                 pairs.Add(partition);
             }
 
@@ -6427,14 +6529,17 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// De-duplicates a partition selection, preserving request order, and rejects a null
-    /// topic before it can reach the ABI.
+    /// topic, or one that cannot cross the C ABI unchanged, before it can reach the ABI.
     /// </summary>
     /// <remarks>
     /// De-duplication mirrors Java, whose parameter is a <c>Set</c>. The null-topic check is
     /// mandatory: a null topic (constructible, as in Java, or <c>default(TopicPartition)</c>)
     /// cannot cross the C ABI — the header skips such an entry silently, which would leave the
-    /// caller believing a partition was queried (M15/P13.2 D1). A negative partition is passed
-    /// through: the core (list reassignments) or the broker answers it.
+    /// caller believing a partition was queried (M15/P13.2 D1). So is the
+    /// <see cref="AdminStrings"/> check, for every caller: a NUL would truncate the topic into
+    /// a different one for electLeaders and listPartitionReassignments, and would also
+    /// collapse two keys of describeProducers' countdown into one (M15/P13.4). A negative
+    /// partition is passed through: the core (list reassignments) or the broker answers it.
     /// </remarks>
     private static List<TopicPartition> DistinctPartitions(
         IReadOnlyCollection<TopicPartition>? partitions, string parameterName)
@@ -6453,6 +6558,8 @@ internal sealed class NativeAdminClient : IDisposable
                 throw new ArgumentException(
                     "The partitions must not contain a topic partition with a null topic.", parameterName);
             }
+
+            AdminStrings.Validate(partition.Topic, parameterName);
 
             if (seen.Add(partition))
             {
@@ -7021,6 +7128,11 @@ internal sealed class NativeAdminClient : IDisposable
                         nameof(featureLevels));
                 }
 
+                // A NUL would truncate the name into a different feature (AdminStrings).
+                // Grouped with the null check: a throw here leaves only this method's own
+                // pins, which the finally releases, and no reference on the handle.
+                AdminStrings.Validate(entry.Key, nameof(featureLevels));
+
                 Utf8Marshal.PinnedUtf8String feature = Utf8Marshal.Pin(entry.Key);
                 pinned.Add(feature);
                 features[next] = feature.Pointer;
@@ -7074,6 +7186,11 @@ internal sealed class NativeAdminClient : IDisposable
                         "The offsets map must not contain a topic partition with a null topic.",
                         parameterName);
                 }
+
+                // A NUL would truncate the topic into a different one (AdminStrings).
+                // Grouped with the null check: a throw here leaves only this method's own
+                // pins, which the finally releases, and no reference on the handle.
+                AdminStrings.Validate(entry.Key.Topic, parameterName);
 
                 Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(entry.Key.Topic);
                 pinned.Add(topic);
