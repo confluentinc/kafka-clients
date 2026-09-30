@@ -22,10 +22,14 @@
 //! A [`Workload`] is built from a [`WorkloadSpec`] (role × backend) via
 //! [`build_workload`], so the orchestrator can mix backends — e.g. a Rust
 //! producer with a Python consumer — without knowing anything about
-//! `KafkaProducer` / `Consumer`. Every backend is reached through the existing
-//! `ProducerBackendFactory` / `ConsumerBackendFactory` abstraction
-//! (`tests/common/backend_factory.rs`), which already covers rust / python /
-//! c, so no new per-binding driver code is needed here.
+//! `KafkaProducer` / `Consumer`.
+//!
+//! The `rust` backend runs in-process: [`ProducerWorkload`] /
+//! [`ConsumerWorkload`] below drive the client directly. Every other backend
+//! runs inside its binding's multilanguage gRPC server, which executes the same
+//! loops against its own client and streams the events back
+//! ([`super::remote_workload`]); the server-side loops mirror the ones here, so
+//! a verdict means the same thing whichever binding produced or consumed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,14 +51,14 @@ use super::workload_config::{consumer_props, producer_props};
 pub enum Backend {
     /// Native Rust client, in-process (async-native).
     Rust,
-    /// Sync Python binding (`KafkaProducer`/`Consumer`), via the multilanguage
-    /// gRPC bridge (Docker image + `multilanguage-tests` feature required).
+    /// Sync Python binding (`KafkaProducer`/`Consumer`), run inside the Python
+    /// multilanguage gRPC server (`multilanguage-tests` feature required).
     Python,
     /// Asyncio-native Python binding (`AsyncKafkaProducer`/`AsyncKafkaConsumer`),
-    /// via a distinct gRPC server image — the async client-flavor variant.
+    /// run inside the asyncio gRPC server — the async client-flavor variant.
     PythonAsync,
-    /// C FFI, via the multilanguage gRPC bridge (Docker image +
-    /// `multilanguage-tests` feature required).
+    /// C FFI, run inside the C++ multilanguage gRPC server
+    /// (`multilanguage-tests` feature required).
     C,
 }
 
@@ -78,8 +82,8 @@ impl Backend {
         }
     }
 
-    /// Whether this backend runs through the gRPC bridge (needs a server
-    /// container + the `multilanguage-tests` feature).
+    /// Whether this backend runs inside a multilanguage gRPC server (needs
+    /// that server + the `multilanguage-tests` feature).
     pub fn is_grpc(self) -> bool {
         !matches!(self, Backend::Rust)
     }
@@ -140,10 +144,11 @@ pub struct WorkloadContext {
     /// Client-facing bootstrap (host-mapped ports) for the Rust backend — the
     /// listener matching the run's `--security-protocol`.
     pub bootstrap: String,
-    /// Container-network bootstrap for the gRPC (python/c) backends, whose
-    /// client runs inside a sibling container and must reach the broker by
-    /// container hostname. Always the PLAINTEXT container listener (a secured
-    /// run is rejected up front for gRPC backends, see `ChaosConfig::from_env`).
+    /// Container-network bootstrap for the gRPC (python/c) backends when their
+    /// server runs in a sibling container (`MULTILANG_BACKEND_MODE=container`),
+    /// which must reach the broker by container hostname: the CONTAINER
+    /// listener matching the run's `--security-protocol`. A natively launched
+    /// server runs on the host and uses [`Self::bootstrap`] instead.
     pub container_bootstrap: String,
     /// Client-side security keys for the run's `--security-protocol`
     /// (`workload_config::security_props`); empty for PLAINTEXT. Merged into
@@ -170,10 +175,12 @@ pub struct WorkloadContext {
 }
 
 impl WorkloadContext {
-    /// Bootstrap appropriate for `backend` (container-internal for gRPC
-    /// backends, host-mapped for the in-process Rust backend).
-    fn bootstrap_for(&self, backend: Backend) -> &str {
-        if backend.is_grpc() {
+    /// Bootstrap appropriate for `backend`: container-internal for a gRPC
+    /// backend whose server runs in a container, host-mapped for the in-process
+    /// Rust backend and for a natively launched gRPC server. Same rule as the
+    /// multilanguage factories' `needs_container_bootstrap`.
+    pub(crate) fn bootstrap_for(&self, backend: Backend) -> &str {
+        if backend.is_grpc() && grpc_uses_containers() {
             &self.container_bootstrap
         } else {
             &self.bootstrap
@@ -182,8 +189,23 @@ impl WorkloadContext {
 
     /// The current id of `topic`, or `Uuid::zero()` if the harness has not
     /// resolved it.
-    fn topic_id_for(&self, topic: &str) -> Uuid {
+    pub(crate) fn topic_id_for(&self, topic: &str) -> Uuid {
         topic_id_in(&self.topic_ids, topic)
+    }
+}
+
+/// Whether the gRPC backends' servers run in containers on the cluster's
+/// Docker network (`backend_pool::BackendMode::Container`) rather than as host
+/// processes. Without the `multilanguage-tests` feature there are no gRPC
+/// backends, so the answer is never consulted.
+fn grpc_uses_containers() -> bool {
+    #[cfg(feature = "multilanguage-tests")]
+    {
+        super::common::backend_pool::uses_containers()
+    }
+    #[cfg(not(feature = "multilanguage-tests"))]
+    {
+        false
     }
 }
 
@@ -271,11 +293,10 @@ pub trait Workload {
     async fn run(self: Box<Self>, stop: Arc<AtomicBool>);
 }
 
-/// Build a workload from its spec, wiring it to the right backend factory and
-/// the shared ledgers. `broker_network` is the Docker network the chaos
-/// cluster runs on — the gRPC (python/c) backends attach their client
-/// container to it. Async because starting a gRPC server container and opening
-/// its channel are async.
+/// Build a workload from its spec, wiring it to its backend and the shared
+/// ledgers. `broker_network` is the Docker network the chaos cluster runs on —
+/// a gRPC (python/c) backend's server container attaches to it. Async because
+/// starting a gRPC server and opening its channel are async.
 ///
 /// Returns `Err` with a clear message if a gRPC backend is requested without
 /// the `multilanguage-tests` feature.
@@ -325,12 +346,12 @@ async fn build_grpc_workload(
     verifier: Arc<dyn Verifier>,
     broker_network: &str,
 ) -> Result<Box<dyn Workload>, String> {
-    use super::common::backend_factory::{CGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory};
     use super::common::backend_pool::{BackendKind, get_or_start};
+    use super::remote_workload::RemoteWorkload;
 
-    // Start (or reuse) the backend's gRPC server container, attached to the
-    // chaos cluster's Docker network, and open a channel to it — exactly as
-    // the multilanguage test harness does.
+    // Start (or reuse) the backend's gRPC server, attached to the chaos
+    // cluster's Docker network when it runs in a container — exactly as the
+    // multilanguage test harness does — and hand it the whole workload.
     let kind = match spec.backend {
         Backend::Python => BackendKind::Python,
         Backend::PythonAsync => BackendKind::PythonAsync,
@@ -338,37 +359,8 @@ async fn build_grpc_workload(
         Backend::Rust => unreachable!("rust handled by build_workload"),
     };
     let handle = get_or_start(kind, broker_network).await;
-    let channel = handle.channel().await;
-
-    // Each factory is a distinct type, so build the workload inside the arm
-    // that knows the concrete factory (they all satisfy the generic bounds).
-    Ok(match (spec.role, spec.backend) {
-        (Role::Producer, Backend::Python) => {
-            Box::new(ProducerWorkload { factory: PythonGrpcFactory::new(channel), spec: spec.clone(), ctx, verifier })
-        },
-        (Role::Consumer, Backend::Python) => {
-            Box::new(ConsumerWorkload { factory: PythonGrpcFactory::new(channel), spec: spec.clone(), ctx, verifier })
-        },
-        (Role::Producer, Backend::PythonAsync) => Box::new(ProducerWorkload {
-            factory: PythonAsyncGrpcFactory::new(channel),
-            spec: spec.clone(),
-            ctx,
-            verifier,
-        }),
-        (Role::Consumer, Backend::PythonAsync) => Box::new(ConsumerWorkload {
-            factory: PythonAsyncGrpcFactory::new(channel),
-            spec: spec.clone(),
-            ctx,
-            verifier,
-        }),
-        (Role::Producer, Backend::C) => {
-            Box::new(ProducerWorkload { factory: CGrpcFactory::new(channel), spec: spec.clone(), ctx, verifier })
-        },
-        (Role::Consumer, Backend::C) => {
-            Box::new(ConsumerWorkload { factory: CGrpcFactory::new(channel), spec: spec.clone(), ctx, verifier })
-        },
-        (_, Backend::Rust) => unreachable!("rust handled by build_workload"),
-    })
+    let channel = handle.streaming_channel().await;
+    Ok(Box::new(RemoteWorkload::new(spec.clone(), ctx, verifier, channel)))
 }
 
 /// Build the producer value payload: the 8-byte big-endian logical `index`
@@ -409,19 +401,6 @@ where
 
     async fn run(self: Box<Self>, stop: Arc<AtomicBool>) {
         eprintln!("chaos: starting workload {}", self.label());
-        if self.spec.backend.is_grpc() {
-            // The bridge's `send` returns only once the remote binding has the
-            // broker's acknowledgement (`multilanguage_producer.rs`), so the
-            // loop below cannot pipeline: one record per bridge round trip, and
-            // `--rps` is an upper bound it will not reach.
-            eprintln!(
-                "chaos: NOTE {} sends through the gRPC bridge, which acknowledges each record before the next \
-                 is sent: throughput is bounded by one record per round trip, so --rps {} is a ceiling, not a \
-                 target, and the in-flight peak will read 1",
-                self.label(),
-                self.ctx.target_rps
-            );
-        }
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let producer = self
             .factory
@@ -639,13 +618,18 @@ impl ConsumerRebalanceListener for ChaosRebalanceListener {
     }
 }
 
+/// How long each consumer `poll()` waits for records. Also sent to the gRPC
+/// servers, whose consumer loops mirror this one (`remote_workload`).
+pub(crate) const POLL_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Pause after a failed `poll()` before polling again (see the consumer loop).
 const POLL_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// How often a sync-committing consumer reads its committed offsets back from
 /// the broker (one OffsetFetch) so the verifier can compare them with its own
 /// progress. Also done inside `on_partitions_revoked` and before `close()`.
-const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// Also sent to the gRPC servers (`remote_workload`).
+pub(crate) const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Record what the broker reports as committed for `consumer` — one
 /// [`WorkloadEvent::Committed`] per partition — or the error of the read-back
@@ -692,15 +676,6 @@ where
     async fn run(self: Box<Self>, stop: Arc<AtomicBool>) {
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let label = self.spec.label();
-        if self.spec.backend.is_grpc() && matches!(self.ctx.commit_mode, CommitMode::Async) {
-            // `multilanguage_consumer.rs` maps `commit_async` to a synchronous
-            // commit on the server side; the offsets are committed, but the
-            // async-commit timing `--commit async` is meant to exercise is not.
-            eprintln!(
-                "chaos: NOTE {label} commits through the gRPC bridge, which performs --commit async as a \
-                 synchronous commit; this consumer exercises sync-commit timing"
-            );
-        }
         let mut consumer = self
             .factory
             .create(consumer_props(
@@ -715,35 +690,24 @@ where
 
         // Subscribe to EVERY topic in the run (librdkafka passes all `-t` flags
         // to each consumer), not just one — so a multi-topic run's consumers
-        // cover all topics. The Rust backend registers a rebalance listener
-        // (see `ChaosRebalanceListener`); the gRPC bridge cannot carry a
-        // listener across the wire, so those consumers subscribe plainly and
-        // the verdict's callback counts show they did not exercise it.
+        // cover all topics — with the rebalance listener (see
+        // `ChaosRebalanceListener`).
         let closing = Arc::new(AtomicBool::new(false));
-        let subscribed = if self.spec.backend.is_grpc() {
-            consumer.subscribe_with_topics(self.ctx.topics.clone()).await
-        } else {
-            let listener = Arc::new(ChaosRebalanceListener {
-                consumer: label.clone(),
-                handle: consumer.handle(),
-                verifier: self.verifier.clone(),
-                closing: closing.clone(),
-            });
-            consumer.subscribe_with_topics_listener(self.ctx.topics.clone(), listener).await
-        };
-        subscribed.expect("chaos consumer subscribe failed");
+        let listener = Arc::new(ChaosRebalanceListener {
+            consumer: label.clone(),
+            handle: consumer.handle(),
+            verifier: self.verifier.clone(),
+            closing: closing.clone(),
+        });
+        consumer
+            .subscribe_with_topics_listener(self.ctx.topics.clone(), listener)
+            .await
+            .expect("chaos consumer subscribe failed");
 
-        // Committed-offset read-backs need the rebalance listener: the
-        // verifier compares each committed offset with this consumer's
-        // consumption *since the partition was assigned*, and only the
-        // listener's `on_partitions_assigned` events tell it when that
-        // restarts. gRPC consumers have no listener (see above), so a
-        // read-back from them would be compared against stale progress.
-        let check_commits = !self.spec.backend.is_grpc();
         let mut last_commit_check = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
-            let records = match consumer.poll(Duration::from_millis(500)).await {
+            let records = match consumer.poll(POLL_TIMEOUT).await {
                 Ok(records) => records,
                 Err(err) => {
                     eprintln!("chaos {label}: poll error: {err}");
@@ -802,8 +766,7 @@ where
                     // after a *sync* commit: an async one may not have reached
                     // the broker yet, so its read-back would prove nothing.
                     Ok(())
-                        if check_commits
-                            && matches!(self.ctx.commit_mode, CommitMode::Sync)
+                        if matches!(self.ctx.commit_mode, CommitMode::Sync)
                             && last_commit_check.elapsed() >= COMMIT_CHECK_INTERVAL =>
                     {
                         last_commit_check = Instant::now();
@@ -821,11 +784,10 @@ where
             // Last read-back: with no poll after this commit, every assigned
             // partition's committed offset must be this consumer's last
             // consumed offset + 1, or the next owner starts in the wrong place.
-            Ok(()) if check_commits => {
+            Ok(()) => {
                 let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
                 record_committed(self.verifier.as_ref(), &label, consumer.committed(&assigned).await);
             },
-            Ok(()) => {},
             Err(err) => {
                 eprintln!("chaos {label}: final commit error: {err}");
                 self.verifier.record(WorkloadEvent::ConsumerError {

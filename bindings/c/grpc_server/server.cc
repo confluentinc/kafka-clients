@@ -28,6 +28,10 @@
 // User callbacks (delivery / offset-commit / rebalance listener) are covered by
 // the callback-log section below: the harness sets a per-request flag, this
 // server registers real C callbacks, and GetCallbackLog reports what they saw.
+//
+// The chaos harness (tests/chaos/) instead hands whole produce / consume loops
+// to ChaosWorkloadService (chaos_service.proto), which runs them against the C
+// FFI and streams their events back; see the chaos workload section below.
 
 #include <grpcpp/grpcpp.h>
 
@@ -36,12 +40,18 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -56,6 +66,8 @@ extern "C" {
 #include "consumer_service.pb.h"
 #include "admin_service.grpc.pb.h"
 #include "admin_service.pb.h"
+#include "chaos_service.grpc.pb.h"
+#include "chaos_service.pb.h"
 
 using confluent::kafka::test::CloseRequest;
 using confluent::kafka::test::CloseTimeoutRequest;
@@ -287,6 +299,26 @@ using confluent::kafka::test::ProducerCallbackLogRequest;
 using confluent::kafka::test::StringList;
 using confluent::kafka::test::TopicPartition;
 using confluent::kafka::test::TopicPartitionInfoEntry;
+
+// Chaos workload service. The event payload messages (Sent, Committed, ...) are
+// reached through WorkloadEvent's mutable_*() accessors rather than named, so
+// their short names cannot collide with the RPC methods above (Committed).
+using confluent::kafka::test::ChaosWorkloadService;
+using confluent::kafka::test::COMMIT_MODE_SYNC;
+using confluent::kafka::test::CONSUMER_OP_COMMIT;
+using confluent::kafka::test::CONSUMER_OP_POLL;
+using confluent::kafka::test::CONSUMER_OP_READ_COMMITTED;
+using confluent::kafka::test::CONSUMER_OP_REVOKE_COMMIT;
+using confluent::kafka::test::ConsumerOp;
+using confluent::kafka::test::REBALANCE_KIND_ASSIGNED;
+using confluent::kafka::test::REBALANCE_KIND_LOST;
+using confluent::kafka::test::REBALANCE_KIND_REVOKED;
+using confluent::kafka::test::RebalanceKind;
+using confluent::kafka::test::RunConsumerRequest;
+using confluent::kafka::test::RunProducerRequest;
+using confluent::kafka::test::StopWorkloadRequest;
+using confluent::kafka::test::WorkloadEvent;
+using confluent::kafka::test::WorkloadEventBatch;
 
 namespace {
 
@@ -4860,6 +4892,955 @@ class AdminServiceImpl final : public AdminService::Service {
   std::atomic<uint64_t> next_id_{1};
 };
 
+// ---------------------------------------------------------------------------
+// Chaos workload service
+//
+// ChaosWorkloadService (multilanguage-test-server/proto/chaos_service.proto)
+// runs a whole chaos-harness workload inside this server, against the C FFI,
+// and streams its events back. The loops below follow the synchronous flavour
+// of bindings/python/grpc_chaos.py (`_run_producer_sync`, `_run_consumer_sync`,
+// `_ChaosRebalanceListener`, `ChaosWorkloadService`) step for step, which in
+// turn mirrors the Rust in-process `ProducerWorkload` / `ConsumerWorkload` /
+// `ChaosRebalanceListener` (tests/chaos/workload.rs). So a run with a C
+// workload exercises the same client behaviour as a run with a Rust or Python
+// one: the producer pipelines through delivery callbacks, the consumer commits
+// through a ConsumerHandle from inside on_partitions_revoked, and both drain
+// the same way on stop.
+//
+// Threading. Each workload runs on its own std::thread and owns its client
+// exclusively: the client pointer never enters a service-wide map, so nothing
+// else can reach it, and the use-after-free the id-map services above are
+// exposed to (a raw client pointer used after the map lock is released while a
+// concurrent Close destroys it) cannot happen here. The workload thread and the
+// FFI callbacks -- which run on the client's dispatcher thread -- push events
+// into one ChaosEventQueue per workload; the RPC's gRPC worker thread drains it
+// into stream messages and always joins the workload thread before returning.
+//
+// Callback state lifetime. The `user_data` of every FFI callback registered
+// here (ChaosProducerState, ChaosListenerState) is retained by the service for
+// the whole session -- the rule LogState follows, for the same reason: neither
+// `kafka_producer_Producer_destroy` nor `kafka_consumer_Consumer_destroy` joins
+// the dispatcher thread, so a callback job queued before destroy may still run,
+// and dereference its user_data, after destroy returns. On the normal path no
+// such job exists (see chaos_close_producer and the dispatch_and_wait note on
+// the listener), but an error path must not turn into a use-after-free. Each
+// retained state is small; its event queue is closed and emptied when the RPC
+// returns.
+// ---------------------------------------------------------------------------
+
+// Upper bound on events per stream message. The RPC flushes whatever is queued
+// each time it writes; this only caps one message when the harness falls behind
+// a very fast workload (grpc_chaos.py `_MAX_BATCH`).
+constexpr int kChaosMaxBatch = 4096;
+
+// Pause after a failed poll before polling again, so a persistent error does not
+// spin at full CPU (tests/chaos/workload.rs POLL_ERROR_BACKOFF).
+constexpr std::chrono::milliseconds kChaosPollErrorBackoff{100};
+
+// A send schedule more than this far behind (a long send block while the client
+// waits out a fault) resumes from now rather than replaying the backlog as a
+// burst (grpc_chaos.py `_MAX_SCHEDULE_LAG_S`).
+constexpr std::chrono::seconds kChaosMaxScheduleLag{1};
+
+// How long the streaming RPC waits for an event before re-checking whether the
+// call was cancelled. The sync API has no cancellation wake-up, so an idle
+// consumer stream would otherwise notice a vanished harness only at its next
+// event.
+constexpr std::chrono::milliseconds kChaosCancelCheck{100};
+
+using ChaosClock = std::chrono::steady_clock;
+
+// A workload's stop request: threading.Event in grpc_chaos.py. Shared (by
+// shared_ptr) between the registry, the RPC thread and the workload thread, so
+// a StopWorkload that found it in the registry can still set it while the RPC
+// is tearing down.
+class ChaosStopSignal {
+ public:
+  void set() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      set_.store(true);
+    }
+    cv_.notify_all();
+  }
+
+  bool is_set() const { return set_.load(); }
+
+  // Sleeps up to `timeout`, returning early once the signal is set.
+  template <typename Duration>
+  void wait_for(Duration timeout) {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait_for(lock, timeout, [this] { return set_.load(); });
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::atomic<bool> set_{false};
+};
+
+// Thread-safe FIFO of one workload's events. Pushed from the workload thread
+// and from the client's dispatcher thread (delivery and rebalance callbacks);
+// drained by the RPC thread. One queue for both keeps each workload's events in
+// the order they happened, which is all the verifier needs.
+class ChaosEventQueue {
+ public:
+  void push(WorkloadEvent event) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_) return;
+    events_.push_back(std::move(event));
+    cv_.notify_one();
+  }
+
+  // Waits up to `wait` for a first event, then moves everything queued (up to
+  // kChaosMaxBatch) into `batch`. Returns false if nothing arrived in time.
+  bool pop_batch(WorkloadEventBatch* batch, std::chrono::milliseconds wait) {
+    std::unique_lock<std::mutex> lock(mu_);
+    if (!cv_.wait_for(lock, wait, [this] { return !events_.empty(); })) return false;
+    while (!events_.empty() && batch->events_size() < kChaosMaxBatch) {
+      *batch->add_events() = std::move(events_.front());
+      events_.pop_front();
+    }
+    return true;
+  }
+
+  // Called once the RPC is done with the queue: drops whatever is left (a
+  // cancelled stream stops draining while its workload still winds down) and
+  // any late push, since the queue itself outlives the RPC in the retained
+  // callback state.
+  void close() {
+    std::lock_guard<std::mutex> lock(mu_);
+    closed_ = true;
+    events_.clear();
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<WorkloadEvent> events_;
+  bool closed_ = false;
+};
+
+// Converts (and destroys) an FFI error handle; see fill_proto_error.
+KafkaError chaos_error(kafka_common_Error_t* err) {
+  KafkaError out;
+  fill_proto_error(&out, err);
+  return out;
+}
+
+// ── Event builders (grpc_chaos.py's `_sent`, `_outcome`, ...) ──
+
+WorkloadEvent chaos_sent(uint64_t index) {
+  WorkloadEvent event;
+  event.mutable_sent()->set_index(index);
+  return event;
+}
+
+WorkloadEvent chaos_delivered(uint64_t index, int32_t partition, int64_t offset) {
+  WorkloadEvent event;
+  auto* delivered = event.mutable_delivered();
+  delivered->set_index(index);
+  delivered->set_partition(partition);
+  delivered->set_offset(offset);
+  return event;
+}
+
+WorkloadEvent chaos_send_failed(uint64_t index, KafkaError error) {
+  WorkloadEvent event;
+  auto* failed = event.mutable_send_failed();
+  failed->set_index(index);
+  *failed->mutable_error() = std::move(error);
+  return event;
+}
+
+WorkloadEvent chaos_producer_stats(uint64_t sent, double elapsed_seconds) {
+  WorkloadEvent event;
+  auto* stats = event.mutable_producer_stats();
+  stats->set_sent(sent);
+  stats->set_elapsed_seconds(elapsed_seconds);
+  return event;
+}
+
+WorkloadEvent chaos_consumed(uint64_t index, std::string topic, int32_t partition,
+                             int64_t offset) {
+  WorkloadEvent event;
+  auto* consumed = event.mutable_consumed();
+  consumed->set_index(index);
+  consumed->set_topic(std::move(topic));
+  consumed->set_partition(partition);
+  consumed->set_offset(offset);
+  return event;
+}
+
+// A listener callback's partitions, sorted by (topic, partition) as every
+// backend reports them.
+using ChaosPartitions = std::vector<std::pair<std::string, int32_t>>;
+
+WorkloadEvent chaos_rebalance(RebalanceKind kind, const ChaosPartitions& partitions) {
+  WorkloadEvent event;
+  auto* rebalance = event.mutable_rebalance();
+  rebalance->set_kind(kind);
+  for (const auto& tp : partitions) {
+    auto* ref = rebalance->add_partitions();
+    ref->set_topic(tp.first);
+    ref->set_partition(tp.second);
+  }
+  return event;
+}
+
+WorkloadEvent chaos_committed(std::string topic, int32_t partition, int64_t offset) {
+  WorkloadEvent event;
+  auto* committed = event.mutable_committed();
+  committed->set_topic(std::move(topic));
+  committed->set_partition(partition);
+  committed->set_offset(offset);
+  return event;
+}
+
+WorkloadEvent chaos_consumer_error(ConsumerOp op, KafkaError error) {
+  WorkloadEvent event;
+  auto* consumer_error = event.mutable_consumer_error();
+  consumer_error->set_op(op);
+  *consumer_error->mutable_error() = std::move(error);
+  return event;
+}
+
+WorkloadEvent chaos_consumer_closing() {
+  WorkloadEvent event;
+  event.mutable_consumer_closing();
+  return event;
+}
+
+WorkloadEvent chaos_consumer_closed() {
+  WorkloadEvent event;
+  event.mutable_consumer_closed();
+  return event;
+}
+
+WorkloadEvent chaos_finished() {
+  WorkloadEvent event;
+  event.mutable_finished();
+  return event;
+}
+
+WorkloadEvent chaos_failed(KafkaError error) {
+  WorkloadEvent event;
+  *event.mutable_failed()->mutable_error() = std::move(error);
+  return event;
+}
+
+bool chaos_is_terminal(const WorkloadEvent& event) {
+  return event.event_case() == WorkloadEvent::kFinished ||
+         event.event_case() == WorkloadEvent::kFailed;
+}
+
+// ── Record encoding (grpc_chaos.py `_key` / `_value`) ──
+
+// A record's key: its 8-byte big-endian logical index.
+void chaos_encode_index(uint64_t index, uint8_t out[8]) {
+  for (int i = 0; i < 8; i++) {
+    out[i] = static_cast<uint8_t>(index >> (56 - 8 * i));
+  }
+}
+
+uint64_t chaos_decode_index(const uint8_t* bytes) {
+  uint64_t index = 0;
+  for (int i = 0; i < 8; i++) index = (index << 8) | bytes[i];
+  return index;
+}
+
+// ── Producer ──
+
+struct ChaosProducerState;
+
+// user_data of one record's delivery callback.
+//
+// Stored as the value of ChaosProducerState::inflight, which is node-based, so
+// the address handed to the FFI stays valid while other records are inserted
+// and erased. `state` and `index` are written before the send and never again,
+// so the callback may read them before taking the state's mutex; `settled` is
+// only touched under it.
+struct ChaosSendCtx {
+  ChaosProducerState* state;
+  uint64_t index;
+  // The send call failed synchronously and that failure was reported; the
+  // entry is kept only because the callback may still fire (see
+  // chaos_settle_send_failure).
+  bool settled;
+};
+
+// Callback state of one producer workload: user_data of the delivery callbacks
+// (through ChaosSendCtx) and of the close callback. Retained for the session;
+// see the section comment.
+struct ChaosProducerState {
+  explicit ChaosProducerState(std::shared_ptr<ChaosEventQueue> queue)
+      : events(std::move(queue)) {}
+
+  std::shared_ptr<ChaosEventQueue> events;
+
+  // Records handed to (or being handed to) the client and not yet settled by
+  // their delivery callback.
+  std::mutex mu;
+  std::unordered_map<uint64_t, ChaosSendCtx> inflight;
+
+  // kafka_producer_Producer_close_async's completion.
+  std::mutex close_mu;
+  std::condition_variable close_cv;
+  bool close_done = false;
+  kafka_common_Error_t* close_error = nullptr;
+};
+
+// The delivery callback, on the producer's dispatcher thread: settles the
+// record with Delivered or SendFailed (grpc_chaos.py `_outcome`).
+//
+// The callee owns every non-null handle, and both can be set at once: a record
+// the client rejected before or inside the accumulator comes with placeholder
+// metadata (partition / offset -1) next to the error. The error wins.
+extern "C" void chaos_on_delivery(kafka_producer_RecordMetadata_t* metadata,
+                                  kafka_common_Error_t* error, void* user_data) {
+  auto* ctx = static_cast<ChaosSendCtx*>(user_data);
+  ChaosProducerState* state = ctx->state;
+  const uint64_t index = ctx->index;
+
+  WorkloadEvent event;
+  if (error != nullptr) {
+    event = chaos_send_failed(index, chaos_error(error));
+  } else if (metadata != nullptr) {
+    event = chaos_delivered(index, kafka_producer_RecordMetadata_partition(metadata),
+                            kafka_producer_RecordMetadata_offset(metadata));
+  } else {
+    event = chaos_send_failed(
+        index, make_synthetic_error("delivery callback fired with neither metadata nor error"));
+  }
+  if (metadata != nullptr) kafka_producer_RecordMetadata_destroy(metadata);
+
+  bool report = false;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inflight.find(index);
+    if (it != state->inflight.end()) {
+      report = !it->second.settled;
+      state->inflight.erase(it);  // frees *ctx; not touched below
+    }
+  }
+  if (report) state->events->push(std::move(event));
+}
+
+// Settles record `index` after kafka_producer_Producer_send_with_callback
+// returned null, unless its callback already did.
+//
+// That null return is ambiguous (src/ffi/producer.rs `make_record_callback`):
+// on the send's early-guard paths (closed producer, a non-API metadata error)
+// the callback is dropped unfired, but on its post-append path the record is
+// already in a batch whose completion still fires the callback later. The C API
+// cannot tell the two apart, so this reports the synchronous failure itself --
+// as grpc_chaos.py and tests/chaos/workload.rs do for a failed send -- and
+// leaves the entry in place marked `settled`: if the callback does fire later,
+// it still has valid user_data, finds the record settled, and only erases it.
+// Whichever of the two gets the mutex first reports, so each record is settled
+// exactly once. (A synchronous failure whose callback never fires leaves its
+// small entry behind in the retained state; these are rare.)
+void chaos_settle_send_failure(ChaosProducerState* state, uint64_t index,
+                               kafka_common_Error_t* send_err) {
+  KafkaError error = chaos_error(send_err);
+  bool report = false;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inflight.find(index);
+    if (it != state->inflight.end() && !it->second.settled) {
+      it->second.settled = true;
+      report = true;
+    }
+  }
+  if (report) state->events->push(chaos_send_failed(index, std::move(error)));
+}
+
+extern "C" void chaos_on_producer_closed(kafka_common_Error_t* error, void* user_data) {
+  auto* state = static_cast<ChaosProducerState*>(user_data);
+  std::lock_guard<std::mutex> lock(state->close_mu);
+  state->close_error = error;
+  state->close_done = true;
+  state->close_cv.notify_all();
+}
+
+// Closes the producer and waits until every delivery callback has run. Returns
+// close's error handle (owned by the caller), or null.
+//
+// kafka_producer_Producer_close flushes, so when it returns every record's
+// *Rust* callback has fired, but that only enqueued its C callback on the
+// dispatcher thread (see the Close RPC above). close_async delivers its own
+// completion through that same single-threaded FIFO dispatcher, behind every
+// delivery job the flush enqueued, so once this returns each record's
+// Delivered / SendFailed is already in the event queue -- which is what lets
+// the caller end the stream with Finished without losing a late outcome.
+// (grpc_chaos.py's producer.close() is the same close_async + wait.)
+kafka_common_Error_t* chaos_close_producer(kafka_producer_Producer_t* producer,
+                                           ChaosProducerState* state) {
+  kafka_producer_Producer_close_async(producer, chaos_on_producer_closed, state);
+  std::unique_lock<std::mutex> lock(state->close_mu);
+  state->close_cv.wait(lock, [state] { return state->close_done; });
+  return state->close_error;
+}
+
+// ── Consumer ──
+
+// Callback state of one consumer workload: the rebalance listener's user_data
+// (grpc_chaos.py `_ChaosRebalanceListener`, tests/chaos/workload.rs
+// `ChaosRebalanceListener`). Retained for the session; see the section
+// comment.
+struct ChaosListenerState {
+  ChaosListenerState(std::shared_ptr<ChaosEventQueue> queue,
+                     kafka_consumer_ConsumerHandle_t* consumer_handle, bool check)
+      : events(std::move(queue)), check_commits(check), handle(consumer_handle) {}
+
+  std::shared_ptr<ChaosEventQueue> events;
+  // Read committed offsets back after the revoke-time commit
+  // (commit_check_interval_ms > 0).
+  const bool check_commits;
+  // Set right before close(): the close-time on_partitions_revoked still
+  // commits but must not read back -- once closing, the client only drains
+  // commits, so an offset fetch queued from the callback would wait out the
+  // API timeout, and the workload's own read-back after its final commit
+  // already covers that state.
+  std::atomic<bool> closing{false};
+
+  // The reentrancy handle the listener commits through. Guarded so that
+  // chaos_close_consumer can release it knowing no callback is using it: the
+  // close-time revoke callback still needs it *during* close, while the FFI
+  // requires it destroyed *before* the consumer (src/ffi/consumer_handle.rs).
+  // Null once released.
+  std::mutex handle_mu;
+  kafka_consumer_ConsumerHandle_t* handle;
+};
+
+// Copies a listener callback's partitions out, sorted, and destroys the list
+// (the callee owns it).
+ChaosPartitions chaos_take_partitions(kafka_consumer_TopicPartitionList_t* list) {
+  ChaosPartitions out;
+  if (list == nullptr) return out;
+  const int32_t n = kafka_consumer_TopicPartitionList_count(list);
+  out.reserve(n);
+  for (int32_t i = 0; i < n; i++) {
+    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_TopicPartitionList_get(list, i);
+    const char* topic = kafka_consumer_TopicPartition_topic(tp);
+    out.emplace_back(topic ? topic : "", kafka_consumer_TopicPartition_partition(tp));
+  }
+  kafka_consumer_TopicPartitionList_destroy(list);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// One Committed per entry of a committed() read-back; destroys the map.
+void chaos_push_committed(ChaosEventQueue& events, kafka_consumer_OffsetMap_t* map) {
+  if (map == nullptr) return;
+  const int32_t n = kafka_consumer_OffsetMap_count(map);
+  for (int32_t i = 0; i < n; i++) {
+    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(map, i);
+    const kafka_consumer_OffsetAndMetadata_t* oam = kafka_consumer_OffsetMap_get_value(map, i);
+    if (tp == nullptr || oam == nullptr) continue;
+    const char* topic = kafka_consumer_TopicPartition_topic(tp);
+    events.push(chaos_committed(topic ? topic : "", kafka_consumer_TopicPartition_partition(tp),
+                                kafka_consumer_OffsetAndMetadata_offset(oam)));
+  }
+  kafka_consumer_OffsetMap_destroy(map);
+}
+
+// The listener callbacks run on the consumer's dispatcher thread while the
+// workload thread is inside poll / close, which waits for them
+// (dispatch_and_wait in src/ffi/consumer.rs): their events therefore land in
+// the queue before that poll's Consumed events, and none is still running once
+// close returns. Returning null means the listener succeeded -- like the Rust
+// and Python listeners, a failed commit is reported, not raised.
+
+extern "C" kafka_common_Error_t* chaos_partitions_assigned(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  auto* state = static_cast<ChaosListenerState*>(user_data);
+  state->events->push(chaos_rebalance(REBALANCE_KIND_ASSIGNED, chaos_take_partitions(partitions)));
+  return nullptr;
+}
+
+// Flushes offsets before the partitions move -- the canonical listener
+// pattern -- through the ConsumerHandle, the reentrant path a listener has back
+// into its consumer (the consumer itself is held by the poll that invoked us),
+// then reads the commit back unless closing.
+extern "C" kafka_common_Error_t* chaos_partitions_revoked(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  auto* state = static_cast<ChaosListenerState*>(user_data);
+  const ChaosPartitions tps = chaos_take_partitions(partitions);
+  state->events->push(chaos_rebalance(REBALANCE_KIND_REVOKED, tps));
+
+  std::lock_guard<std::mutex> lock(state->handle_mu);
+  if (state->handle == nullptr) {
+    // Only reachable if the client ran this callback after close returned,
+    // which the dispatch_and_wait contract rules out; report it rather than
+    // touch a destroyed handle.
+    state->events->push(chaos_consumer_error(
+        CONSUMER_OP_REVOKE_COMMIT,
+        make_synthetic_error("on_partitions_revoked fired after the consumer handle was released")));
+    return nullptr;
+  }
+  kafka_common_Error_t* err = kafka_consumer_ConsumerHandle_commit_sync(state->handle);
+  if (err != nullptr) {
+    state->events->push(chaos_consumer_error(CONSUMER_OP_REVOKE_COMMIT, chaos_error(err)));
+    return nullptr;
+  }
+  if (state->check_commits && !state->closing.load()) {
+    std::vector<const char*> topics;
+    std::vector<int32_t> parts;
+    topics.reserve(tps.size());
+    parts.reserve(tps.size());
+    for (const auto& tp : tps) {
+      topics.push_back(tp.first.c_str());
+      parts.push_back(tp.second);
+    }
+    kafka_consumer_OffsetMap_t* map = nullptr;
+    err = kafka_consumer_ConsumerHandle_committed(state->handle, topics.data(), parts.data(),
+                                                  static_cast<int32_t>(topics.size()), &map);
+    if (err != nullptr) {
+      state->events->push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
+    } else {
+      chaos_push_committed(*state->events, map);
+    }
+  }
+  return nullptr;
+}
+
+// Registered explicitly rather than left NULL (which reproduces Java's
+// "delegate to onPartitionsRevoked" default), so a fenced member's callback is
+// reported as lost -- and does not commit.
+extern "C" kafka_common_Error_t* chaos_partitions_lost(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  auto* state = static_cast<ChaosListenerState*>(user_data);
+  state->events->push(chaos_rebalance(REBALANCE_KIND_LOST, chaos_take_partitions(partitions)));
+  return nullptr;
+}
+
+// committed() of the current assignment, as Committed events (grpc_chaos.py
+// `read_back`). Callers invoke it only right after a successful sync commit
+// with no poll in between.
+void chaos_read_back(const kafka_consumer_Consumer_t* consumer, ChaosEventQueue& events) {
+  kafka_consumer_TopicPartitionList_t* assigned = kafka_consumer_Consumer_assignment(consumer);
+  if (assigned == nullptr) {
+    // The single-owner guard rejected the call. The workload thread is the
+    // consumer's only caller, so this should not happen.
+    events.push(chaos_consumer_error(
+        CONSUMER_OP_READ_COMMITTED, make_synthetic_error("assignment() rejected the call")));
+    return;
+  }
+  // The topic pointers borrow from `assigned`, which stays alive until after
+  // the synchronous committed() call has copied them.
+  const int32_t n = kafka_consumer_TopicPartitionList_count(assigned);
+  std::vector<const char*> topics;
+  std::vector<int32_t> parts;
+  topics.reserve(n);
+  parts.reserve(n);
+  for (int32_t i = 0; i < n; i++) {
+    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_TopicPartitionList_get(assigned, i);
+    const char* topic = kafka_consumer_TopicPartition_topic(tp);
+    topics.push_back(topic ? topic : "");
+    parts.push_back(kafka_consumer_TopicPartition_partition(tp));
+  }
+  kafka_consumer_OffsetMap_t* map = nullptr;
+  kafka_common_Error_t* err =
+      kafka_consumer_Consumer_committed(consumer, topics.data(), parts.data(), n, &map);
+  kafka_consumer_TopicPartitionList_destroy(assigned);
+  if (err != nullptr) {
+    events.push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
+    return;
+  }
+  chaos_push_committed(events, map);
+}
+
+// Closes the consumer, releases the listener's handle, destroys the consumer
+// (grpc_chaos.py `_close_consumer_sync`). Returns close's error handle (owned
+// by the caller), or null; the consumer is destroyed either way.
+//
+// The order is forced from both sides: the close-time on_partitions_revoked
+// still commits through the handle, so it must outlive close; and the FFI
+// requires every handle destroyed before the consumer (src/ffi/consumer_handle.rs).
+kafka_common_Error_t* chaos_close_consumer(kafka_consumer_Consumer_t* consumer,
+                                           ChaosListenerState* state) {
+  kafka_common_Error_t* err = kafka_consumer_Consumer_close(consumer);
+  kafka_consumer_ConsumerHandle_t* handle = nullptr;
+  {
+    // Waits out a callback still inside a handle call; later ones see null.
+    std::lock_guard<std::mutex> lock(state->handle_mu);
+    handle = state->handle;
+    state->handle = nullptr;
+  }
+  kafka_consumer_ConsumerHandle_destroy(handle);
+  kafka_consumer_Consumer_destroy(consumer);
+  return err;
+}
+
+// ── Service ──
+
+class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
+ public:
+  grpc::Status RunProducer(grpc::ServerContext* context, const RunProducerRequest* req,
+                           grpc::ServerWriter<WorkloadEventBatch>* writer) override {
+    // Copied so the workload thread depends on nothing gRPC owns (it is joined
+    // before this returns anyway).
+    RunProducerRequest request = *req;
+    return run(context, req->workload_id(), writer,
+               [this, request](const std::shared_ptr<ChaosEventQueue>& events,
+                               ChaosStopSignal& stop) { run_producer(request, events, stop); });
+  }
+
+  grpc::Status RunConsumer(grpc::ServerContext* context, const RunConsumerRequest* req,
+                           grpc::ServerWriter<WorkloadEventBatch>* writer) override {
+    RunConsumerRequest request = *req;
+    return run(context, req->workload_id(), writer,
+               [this, request](const std::shared_ptr<ChaosEventQueue>& events,
+                               ChaosStopSignal& stop) { run_consumer(request, events, stop); });
+  }
+
+  // Returns at once; the workload's stream ends when its drain is done. An
+  // unknown or already finished id succeeds (the harness may race the stream
+  // end).
+  grpc::Status StopWorkload(grpc::ServerContext*, const StopWorkloadRequest* req,
+                            StatusResponse*) override {
+    std::shared_ptr<ChaosStopSignal> stop;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = workloads_.find(req->workload_id());
+      if (it != workloads_.end()) stop = it->second;
+    }
+    if (stop) stop->set();
+    return grpc::Status::OK;
+  }
+
+ private:
+  using WorkloadBody =
+      std::function<void(const std::shared_ptr<ChaosEventQueue>&, ChaosStopSignal&)>;
+
+  // The streaming half shared by RunProducer / RunConsumer (grpc_chaos.py
+  // `ChaosWorkloadService._run`).
+  grpc::Status run(grpc::ServerContext* context, const std::string& workload_id,
+                   grpc::ServerWriter<WorkloadEventBatch>* writer, const WorkloadBody& body) {
+    auto stop = std::make_shared<ChaosStopSignal>();
+    bool added = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      added = workloads_.emplace(workload_id, stop).second;
+    }
+    if (!added) {
+      WorkloadEventBatch batch;
+      *batch.add_events() = chaos_failed(make_synthetic_error(
+          "workload_id '" + workload_id + "' is already running",
+          kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT));
+      writer->Write(batch);
+      return grpc::Status::OK;
+    }
+
+    auto events = std::make_shared<ChaosEventQueue>();
+    std::thread worker;
+    try {
+      worker = std::thread([&body, &workload_id, events, stop] {
+        run_guarded(workload_id, body, events, *stop);
+      });
+    } catch (const std::exception& e) {
+      forget(workload_id);
+      return grpc::Status(grpc::StatusCode::INTERNAL,
+                          std::string("c server: cannot start workload thread: ") + e.what());
+    }
+    std::cerr << "c server: chaos workload " << workload_id << " started" << std::endl;
+
+    // Stream until a batch carries Finished / Failed. A cancelled call or a
+    // failed Write means the harness went away: stop the workload, which then
+    // drains and closes its client on its own thread.
+    bool gone = false;
+    bool terminal = false;
+    while (!terminal) {
+      if (context->IsCancelled()) {
+        gone = true;
+        break;
+      }
+      WorkloadEventBatch batch;
+      if (!events->pop_batch(&batch, kChaosCancelCheck)) continue;
+      for (const auto& event : batch.events()) {
+        if (chaos_is_terminal(event)) terminal = true;
+      }
+      if (!writer->Write(batch)) {
+        gone = true;
+        break;
+      }
+    }
+
+    // Normal end or not, wait for the workload: it owns a live client until its
+    // loop returns, and nothing else would ever close it.
+    stop->set();
+    worker.join();
+    events->close();
+    forget(workload_id);
+    std::cerr << "c server: chaos workload " << workload_id
+              << (gone ? " abandoned by the harness" : " finished") << std::endl;
+    if (gone) return grpc::Status(grpc::StatusCode::CANCELLED, "c server: stream abandoned");
+    return grpc::Status::OK;
+  }
+
+  // Never leave the stream open: anything escaping the loop still ends it with
+  // Failed (grpc_chaos.py `_guarded`).
+  static void run_guarded(const std::string& workload_id, const WorkloadBody& body,
+                          const std::shared_ptr<ChaosEventQueue>& events, ChaosStopSignal& stop) {
+    try {
+      body(events, stop);
+    } catch (const std::exception& e) {
+      std::cerr << "c server: chaos workload " << workload_id << " died: " << e.what() << std::endl;
+      events->push(chaos_failed(make_synthetic_error(std::string("workload died: ") + e.what())));
+    } catch (...) {
+      std::cerr << "c server: chaos workload " << workload_id << " died" << std::endl;
+      events->push(chaos_failed(make_synthetic_error("workload died")));
+    }
+  }
+
+  // grpc_chaos.py `_run_producer_sync`.
+  void run_producer(const RunProducerRequest& req, const std::shared_ptr<ChaosEventQueue>& events,
+                    ChaosStopSignal& stop) {
+    // Built from `config` the way CreateProducer builds a real producer, minus
+    // the empty-config mock: a chaos workload always runs a real client.
+    kafka_producer_ProducerProperties_t* props = kafka_producer_ProducerProperties_new();
+    for (const auto& kv : req.config()) {
+      kafka_producer_ProducerProperties_put(props, kv.first.c_str(), kv.second.c_str());
+    }
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_t* producer = kafka_producer_KafkaProducer_new(props, &err);
+    kafka_producer_ProducerProperties_destroy(props);
+    if (producer == nullptr) {
+      std::cerr << "c server: chaos producer " << req.workload_id() << ": construction failed"
+                << std::endl;
+      events->push(chaos_failed(chaos_error(err)));
+      return;
+    }
+
+    auto state = std::make_shared<ChaosProducerState>(events);
+    retain(state);
+
+    const std::string& topic = req.topic();
+    const uint32_t msg_size = req.msg_size();
+    // The value is the index's 8 bytes zero-padded to msg_size, or their first
+    // msg_size bytes when smaller: rewriting the first 8 bytes of one zeroed
+    // buffer and passing msg_size as the length yields both. At least 8 bytes,
+    // so even msg_size 0 passes a non-null pointer (an empty value, not a null
+    // one, as grpc_chaos.py's b'' is).
+    std::vector<uint8_t> value(std::max<size_t>(msg_size, 8), 0);
+    uint8_t key[8];
+
+    // Absolute schedule: each record is due `interval` after the previous one,
+    // so an overshoot is caught up by the next records and the average rate
+    // stays at the target (tests/chaos/workload.rs explains why not a sleep of
+    // `interval` per record).
+    const ChaosClock::duration interval =
+        req.target_rps() > 0
+            ? std::chrono::duration_cast<ChaosClock::duration>(
+                  std::chrono::duration<double>(1.0 / req.target_rps()))
+            : ChaosClock::duration::zero();
+    const ChaosClock::time_point started = ChaosClock::now();
+    ChaosClock::time_point next_due = started;
+    uint64_t index = 0;
+    try {
+      while (!stop.is_set()) {
+        chaos_encode_index(index, key);
+        std::memcpy(value.data(), key, sizeof(key));
+
+        ChaosSendCtx* ctx = nullptr;
+        {
+          std::lock_guard<std::mutex> lock(state->mu);
+          ctx = &state->inflight.emplace(index, ChaosSendCtx{state.get(), index, false})
+                     .first->second;
+        }
+        // Open the record's in-flight window before handing it over, so its
+        // Sent is queued ahead of anything its callback reports; the verifier
+        // pairs them to bound what was in flight at any moment.
+        events->push(chaos_sent(index));
+
+        // send_with_callback, not send_async: like the Rust and Python sync
+        // loops' send(record, callback) it blocks only while the record is
+        // enqueued (metadata wait, buffer.memory exhausted -- the client's own
+        // backpressure), and key/value need only live for the call. The
+        // returned future is dropped unawaited -- the outcome arrives through
+        // chaos_on_delivery -- which is what lets the client batch and pipeline
+        // instead of carrying one record per round trip.
+        kafka_common_Error_t* send_err = nullptr;
+        kafka_producer_FutureRecordMetadata_t* future = kafka_producer_Producer_send_with_callback(
+            producer, topic.c_str(), /*partition=*/-1, /*timestamp=*/-1, key,
+            static_cast<int32_t>(sizeof(key)), value.data(), static_cast<int32_t>(msg_size),
+            chaos_on_delivery, ctx, &send_err);
+        if (future != nullptr) {
+          kafka_producer_FutureRecordMetadata_destroy(future);
+        } else {
+          chaos_settle_send_failure(state.get(), index, send_err);
+        }
+        index++;
+
+        if (interval > ChaosClock::duration::zero()) {
+          next_due += interval;
+          const ChaosClock::time_point now = ChaosClock::now();
+          if (next_due > now) {
+            stop.wait_for(next_due - now);
+          } else if (now - next_due > kChaosMaxScheduleLag) {
+            next_due = now;
+          }
+        }
+      }
+      const double elapsed = std::chrono::duration<double>(ChaosClock::now() - started).count();
+      events->push(chaos_producer_stats(index, std::max(elapsed, 1e-9)));
+    } catch (const std::exception& e) {
+      // The loop died: still close the client before reporting it.
+      std::cerr << "c server: chaos producer " << req.workload_id() << ": send loop died: "
+                << e.what() << std::endl;
+      kafka_common_Error_t* close_err = chaos_close_producer(producer, state.get());
+      if (close_err != nullptr) kafka_common_Error_destroy(close_err);
+      kafka_producer_Producer_destroy(producer);
+      events->push(chaos_failed(make_synthetic_error(std::string("send loop died: ") + e.what())));
+      return;
+    }
+
+    // Every buffered record settles before the close completes; see
+    // chaos_close_producer for why every outcome is then already queued.
+    kafka_common_Error_t* close_err = chaos_close_producer(producer, state.get());
+    kafka_producer_Producer_destroy(producer);
+    if (close_err != nullptr) {
+      events->push(chaos_failed(chaos_error(close_err)));
+      return;
+    }
+    events->push(chaos_finished());
+  }
+
+  // grpc_chaos.py `_run_consumer_sync`.
+  void run_consumer(const RunConsumerRequest& req, const std::shared_ptr<ChaosEventQueue>& events,
+                    ChaosStopSignal& stop) {
+    // Built from `config` the way CreateConsumer builds a real consumer.
+    kafka_consumer_ConsumerProperties_t* props = kafka_consumer_ConsumerProperties_new();
+    for (const auto& kv : req.config()) {
+      kafka_consumer_ConsumerProperties_put(props, kv.first.c_str(), kv.second.c_str());
+    }
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_Consumer_t* consumer = kafka_consumer_KafkaConsumer_new(props, &err);
+    kafka_consumer_ConsumerProperties_destroy(props);
+    if (consumer == nullptr) {
+      std::cerr << "c server: chaos consumer " << req.workload_id() << ": construction failed"
+                << std::endl;
+      events->push(chaos_failed(chaos_error(err)));
+      return;
+    }
+
+    // Read-backs after the revoke-time and final commits (both synchronous, so
+    // in either commit mode); the periodic poll-loop read-back additionally
+    // needs COMMIT_MODE_SYNC.
+    const bool check_commits = req.commit_check_interval_ms() > 0;
+    auto state = std::make_shared<ChaosListenerState>(
+        events, kafka_consumer_Consumer_handle(consumer), check_commits);
+    retain(state);
+
+    // user_data_destroy is NULL: the state is retained by the service, not
+    // owned by this registration. subscribe_with_listener consumes the listener
+    // handle even when it fails.
+    kafka_consumer_ConsumerRebalanceListener_t* listener =
+        kafka_consumer_ConsumerRebalanceListener_new(chaos_partitions_revoked,
+                                                     chaos_partitions_assigned,
+                                                     chaos_partitions_lost, state.get(),
+                                                     /*user_data_destroy=*/nullptr);
+    std::vector<const char*> topics;
+    topics.reserve(req.topics_size());
+    for (const auto& t : req.topics()) topics.push_back(t.c_str());
+    err = kafka_consumer_Consumer_subscribe_with_listener(
+        consumer, topics.data(), static_cast<int32_t>(topics.size()), listener);
+    if (err != nullptr) {
+      KafkaError subscribe_error = chaos_error(err);
+      kafka_common_Error_t* close_err = chaos_close_consumer(consumer, state.get());
+      if (close_err != nullptr) kafka_common_Error_destroy(close_err);
+      events->push(chaos_failed(std::move(subscribe_error)));
+      return;
+    }
+
+    const int64_t poll_timeout_ms = req.poll_timeout_ms();
+    const std::chrono::milliseconds check_interval(req.commit_check_interval_ms());
+    const bool sync_commit = req.commit_mode() == COMMIT_MODE_SYNC;
+    ChaosClock::time_point last_check = ChaosClock::now();
+
+    while (!stop.is_set()) {
+      kafka_common_Error_t* poll_err = nullptr;
+      kafka_consumer_ConsumerRecords_t* records =
+          kafka_consumer_Consumer_poll(consumer, poll_timeout_ms, &poll_err);
+      if (records == nullptr) {
+        events->push(chaos_consumer_error(CONSUMER_OP_POLL, chaos_error(poll_err)));
+        stop.wait_for(kChaosPollErrorBackoff);
+        continue;
+      }
+      const int32_t n = kafka_consumer_ConsumerRecords_count(records);
+      // One Consumed per harness record: those with an 8-byte key.
+      for (int32_t i = 0; i < n; i++) {
+        const kafka_consumer_ConsumerRecord_t* rec = kafka_consumer_ConsumerRecords_get(records, i);
+        int32_t key_len = 0;
+        const uint8_t* rec_key = kafka_consumer_ConsumerRecord_key(rec, &key_len);
+        if (rec_key == nullptr || key_len != 8) continue;
+        int32_t topic_len = 0;
+        const char* rec_topic = kafka_consumer_ConsumerRecord_topic(rec, &topic_len);
+        events->push(chaos_consumed(
+            chaos_decode_index(rec_key),
+            rec_topic ? std::string(rec_topic, topic_len) : std::string(),
+            kafka_consumer_ConsumerRecord_partition(rec), kafka_consumer_ConsumerRecord_offset(rec)));
+      }
+      kafka_consumer_ConsumerRecords_destroy(records);
+      if (n == 0) continue;
+
+      kafka_common_Error_t* commit_err = sync_commit ? kafka_consumer_Consumer_commit_sync(consumer)
+                                                     : kafka_consumer_Consumer_commit_async(consumer);
+      if (commit_err != nullptr) {
+        events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_error(commit_err)));
+        continue;
+      }
+      // Read back only after a sync commit: an async one may not have reached
+      // the broker yet.
+      if (sync_commit && check_commits && ChaosClock::now() - last_check >= check_interval) {
+        last_check = ChaosClock::now();
+        chaos_read_back(consumer, *events);
+      }
+    }
+
+    // Final commit; with no poll after it, every assigned partition's committed
+    // offset must be this consumer's last consumed offset + 1.
+    kafka_common_Error_t* commit_err = kafka_consumer_Consumer_commit_sync(consumer);
+    if (commit_err != nullptr) {
+      events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_error(commit_err)));
+    } else if (check_commits) {
+      chaos_read_back(consumer, *events);
+    }
+    state->closing.store(true);
+    // Partitions close releases from here on may not have been announced as
+    // assigned; the verifier learns that from this event.
+    events->push(chaos_consumer_closing());
+    kafka_common_Error_t* close_err = chaos_close_consumer(consumer, state.get());
+    if (close_err != nullptr) {
+      events->push(chaos_failed(chaos_error(close_err)));
+      return;
+    }
+    events->push(chaos_consumer_closed());
+    events->push(chaos_finished());
+  }
+
+  // Keeps a workload's callback state alive for the session; see the section
+  // comment.
+  void retain(std::shared_ptr<void> callback_state) {
+    std::lock_guard<std::mutex> lock(retained_mu_);
+    retained_.push_back(std::move(callback_state));
+  }
+
+  void forget(const std::string& workload_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    workloads_.erase(workload_id);
+  }
+
+  // workload_id -> stop signal of a running workload, shared by the Run* and
+  // StopWorkload RPCs.
+  std::mutex mu_;
+  std::unordered_map<std::string, std::shared_ptr<ChaosStopSignal>> workloads_;
+  // Session-lifetime callback states (never erased; see the section comment).
+  std::mutex retained_mu_;
+  std::vector<std::shared_ptr<void>> retained_;
+};
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -4891,9 +5872,19 @@ int main(int /*argc*/, char** /*argv*/) {
   ProducerServiceImpl producer_service;
   ConsumerServiceImpl consumer_service;
   AdminServiceImpl admin_service;
+  ChaosWorkloadServiceImpl chaos_service;
   builder.RegisterService(&producer_service);
   builder.RegisterService(&consumer_service);
   builder.RegisterService(&admin_service);
+  builder.RegisterService(&chaos_service);
+  // Thread budget: a synchronous gRPC server runs every call on a thread of its
+  // own for the call's whole duration, so each chaos RunProducer / RunConsumer
+  // stream pins one for the length of a run, while StopWorkload and the other
+  // unary calls need threads alongside them. No ResourceQuota is set on
+  // purpose: the sync server's thread manager spawns a new worker whenever its
+  // pollers are all busy, bounded only by the quota's max-thread count, which
+  // is unlimited by default. Setting SetMaxThreads here would introduce exactly
+  // the cap that could starve a StopWorkload behind open streams.
 
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   // selected_port stays 0 if the address could not be bound.

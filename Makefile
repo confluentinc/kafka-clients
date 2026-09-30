@@ -325,7 +325,7 @@ test-integration-c-sasl-ssl:
 GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
 GRPC_PROTO_DIR = $(RUST_PROJECT_ROOT)/multilanguage-test-server/proto
 GRPC_PROTOS = $(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
-	$(GRPC_PROTO_DIR)/admin_service.proto
+	$(GRPC_PROTO_DIR)/admin_service.proto $(GRPC_PROTO_DIR)/chaos_service.proto
 
 # Builds the Python extension (build-python), installs the gRPC packages into the
 # venv, and generates the gRPC stubs. The versions are pinned in

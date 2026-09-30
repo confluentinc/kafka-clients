@@ -55,6 +55,9 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
+import chaos_service_pb2_grpc as chpb_grpc  # noqa: E402  (generated)
+# ChaosWorkloadService: chaos-harness workloads run inside this server.
+from grpc_chaos import AsyncChaosWorkloadService  # noqa: E402
 # Error codes generated from kafka_common_ErrorCode_t
 # (cargo xtask generate-error-codes). Private plumbing: the servicers stamp the
 # real code on errors of their own making, so the Rust client can tell those
@@ -1477,6 +1480,7 @@ async def serve():
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
+    chpb_grpc.add_ChaosWorkloadServiceServicer_to_server(AsyncChaosWorkloadService(), server)
     bound_port = server.add_insecure_port(f"{host}:{port}")
     await server.start()
     # The Rust BackendPool waits for "listening" on stderr and parses the bound
