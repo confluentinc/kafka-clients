@@ -337,12 +337,25 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
 
 /// Format generated Rust source with the repository's `rustfmt.toml`, so the
 /// generated file also passes `cargo xtask format-check`.
+///
+/// `cargo fmt` passes the crate's edition to rustfmt, overriding the
+/// `edition = "2021"` of `rustfmt.toml`; so must we. The 2024 style edition
+/// sorts imports differently (`Error` before `errors::*`), and without it the
+/// output `format-check` accepts would never match the generator's.
 fn rustfmt(source: &str) -> anyhow::Result<String> {
     use std::io::Write as _;
     use std::process::Stdio;
 
+    let edition = crate_edition()?;
     let mut child = Command::new("rustfmt")
-        .args(["--emit", "stdout", "--config-path", "rustfmt.toml"])
+        .args([
+            "--emit",
+            "stdout",
+            "--config-path",
+            "rustfmt.toml",
+            "--edition",
+            &edition,
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -352,6 +365,21 @@ fn rustfmt(source: &str) -> anyhow::Result<String> {
         anyhow::bail!("rustfmt failed on the generated error-code table");
     }
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// The `edition` of the root crate's `[package]`, as `cargo fmt` reads it.
+fn crate_edition() -> anyhow::Result<String> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    manifest
+        .lines()
+        .skip_while(|l| l.trim() != "[package]")
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            (key.trim() == "edition").then(|| value.trim().trim_matches('"').to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no `edition` in the `[package]` of Cargo.toml"))
 }
 
 const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
