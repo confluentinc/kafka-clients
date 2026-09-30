@@ -3401,10 +3401,9 @@ internal static partial class NativeMethods
     /// <para>
     /// ⚠ Read <b>independently</b> of <see cref="DeleteAclsResultGetResultError"/>: a matched
     /// ACL whose delete failed carries both, as Java's entries do
-    /// (<c>KafkaAdminClient.java:2705-2708</c>; M15/P13.2 G4-1). The header's "null when that
-    /// entry carries an exception instead" and "complementary" wording
-    /// (header, <c>kafka_admin_DeleteAclsResult_get_binding</c>) is a known inaccuracy the reader
-    /// does not rely on (PLAN D3) — see <c>DeleteAclsResultMarshal</c>.
+    /// (<c>KafkaAdminClient.java:2705-2708</c>; M15/P13.2 G4-1). The header says the same
+    /// (<c>kafka_admin_DeleteAclsResult_get_binding</c>: the binding and the result error are
+    /// not exclusive, as in Java's <c>FilterResult</c>) — see <c>DeleteAclsResultMarshal</c>.
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
@@ -3418,10 +3417,10 @@ internal static partial class NativeMethods
     /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>VALUE</b> channel: it
     /// is stored inside a successfully completed <c>FilterResults</c> and is independent of
     /// <see cref="DeleteAclsResultGetError"/> (header,
-    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). It is <b>not</b> complementary to
-    /// <see cref="DeleteAclsResultGetBinding"/>, whatever the header's <c>get_binding</c> text
-    /// says: an entry whose delete failed carries this error <b>and</b> its binding
-    /// (M15/P13.2 G4-1, PLAN D3).
+    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). Nor is it exclusive with
+    /// <see cref="DeleteAclsResultGetBinding"/>: an entry whose delete failed carries this error
+    /// <b>and</b> its binding, and the two are read independently (header,
+    /// <c>kafka_admin_DeleteAclsResult_get_binding</c>; M15/P13.2 G4-1).
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_error", CallingConvention = CallingConvention.Cdecl)]

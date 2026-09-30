@@ -140,9 +140,9 @@ internal static class DeleteAclsResultMarshal
     /// <c>new FilterResult(aclBinding, aclError.exception(...))</c>
     /// (<c>KafkaAdminClient.java:2705-2708</c>) and the core stores both the same way, so
     /// skipping the binding once an error is seen would drop the ACL the failure is about
-    /// (M15/P13.2 G4-1). The header's <c>get_binding</c> docs call the two "complementary";
-    /// that sentence is a known inaccuracy this reader deliberately does not rely on
-    /// (PLAN D3).
+    /// (M15/P13.2 G4-1). The header says the same
+    /// (<c>kafka_admin_DeleteAclsResult_get_binding</c>: the binding and the result error are
+    /// not exclusive, as in Java's <c>FilterResult</c>).
     /// </para>
     /// <para>
     /// An entry with <b>neither</b> is a malformed row and is rejected with the same text
