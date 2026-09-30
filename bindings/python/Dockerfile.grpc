@@ -55,8 +55,10 @@ RUN cd /workspace/bindings/python && \
     python setup.py build_ext --inplace
 
 # Generate proto stubs for both services (consumer imports producer, so
-# both are generated under the same -Iproto path).
-RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
+# both are generated under the same -Iproto path). The gRPC pins are shared
+# with the native build (make build-grpc-native-python).
+COPY bindings/python/requirements-grpc.txt bindings/python/requirements-grpc-tools.txt /workspace/bindings/python/
+RUN pip install --no-cache-dir -r /workspace/bindings/python/requirements-grpc-tools.txt && \
     cd /workspace && \
     python -m grpc_tools.protoc \
         -Iproto \
@@ -70,8 +72,9 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
 FROM python:3.11-slim AS runtime
 
 # protobuf is needed by the generated stubs at runtime; grpcio doesn't
-# pull it in transitively.
-RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
+# pull it in transitively. Both are pinned in requirements-grpc.txt.
+COPY bindings/python/requirements-grpc.txt /tmp/requirements-grpc.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-grpc.txt
 
 WORKDIR /app
 
@@ -99,6 +102,9 @@ COPY bindings/python/grpc_server.py /app/grpc_server.py
 # The Python extension was linked with rpath pointing at the original
 # CONFLUENT_KAFKA_LIB_DIR; setting LD_LIBRARY_PATH guarantees /app wins.
 ENV LD_LIBRARY_PATH=/app
+# The server defaults to 127.0.0.1; bind all interfaces so it is reachable
+# through the container's published port.
+ENV GRPC_HOST=0.0.0.0
 
 EXPOSE 50051
 
