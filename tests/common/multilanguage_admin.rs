@@ -38,17 +38,16 @@ use confluent_kafka::admin::{
     DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
     DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
-    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
-    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
-    UserScramCredentialsDescription,
+    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions,
+    DescribeUserScramCredentialsResult, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
+    FenceProducersOptions, FilterResult, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramMechanism,
+    SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -66,10 +65,16 @@ use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
-    ClassicGroupState, ElectionType, Error, GroupState, GroupType, Node, TopicPartition, TopicPartitionInfo,
-    TopicPartitionReplica, Uuid,
+    ClassicGroupState, ElectionType, Error, GroupState, GroupType, KafkaFuture, Node, TopicPartition,
+    TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
 use confluent_kafka::consumer::OffsetAndMetadata;
+// Wire response-data types used to reconstruct the core
+// `DescribeUserScramCredentialsResult` from the harness's raw per-user rows.
+use confluent_kafka::DescribeUserScramCredentialsResponseData;
+use confluent_kafka::describe_user_scram_credentials_response_data::{
+    CredentialInfo as ScramWireCredentialInfo, DescribeUserScramCredentialsResult as ScramWireUserResult,
+};
 use multilanguage_test_server::proto::admin_service_client::AdminServiceClient;
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
@@ -404,18 +409,6 @@ impl MultilanguageAdmin {
         Ok(rebuilt)
     }
 
-    /// Rebuilds a [`UserScramCredentialsDescription`].
-    fn scram_description(
-        &self,
-        description: proto::UserScramCredentialsDescription,
-    ) -> Result<UserScramCredentialsDescription, Error> {
-        let mut infos = Vec::with_capacity(description.credential_infos.len());
-        for info in description.credential_infos {
-            infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
-        }
-        Ok(UserScramCredentialsDescription::new(description.name, infos))
-    }
-
     /// Rebuilds a [`FeatureMetadataView`].
     ///
     /// `finalized_features_epoch` stays an `Option`: an absent epoch is Java's
@@ -487,8 +480,8 @@ impl MultilanguageAdmin {
         Ok(ConfigResource::new(ConfigResourceType::for_id(id), resource.name))
     }
 
-    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
-    /// the two `OptionalLong` volume sizes.
+    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error, the
+    /// two `OptionalLong` volume sizes and the `isCordoned()` flag (KIP-1066).
     fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, Error> {
         let mut replica_infos = HashMap::with_capacity(description.replica_infos.len());
         for replica in description.replica_infos {
@@ -500,21 +493,30 @@ impl MultilanguageAdmin {
                 ReplicaInfo::new(replica.size, replica.offset_lag, replica.is_future),
             );
         }
-        // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `with_total_bytes_usable_bytes` is the
-        // four-argument one. Java has no constructor for one present and the
-        // other absent, and no broker sends that, so the mixed case is a
-        // protocol error rather than a guess.
+        // Java's `isCordoned()` is a plain bool; an absent proto field (a server
+        // that predates the flag) is false, matching the Java default.
+        let is_cordoned = description.is_cordoned.unwrap_or(false);
+        // The five-argument constructor is the KIP-1066 one; passing
+        // `UNKNOWN_VOLUME_BYTES` (-1) for a volume size records it as absent,
+        // exactly as the two-argument Java constructor does. Java has no
+        // constructor for one volume size present and the other absent, and no
+        // broker sends that, so the mixed case is a protocol error rather than a
+        // guess.
+        const UNKNOWN: i64 = confluent_kafka::common::requests::DescribeLogDirsResponse::UNKNOWN_VOLUME_BYTES;
         match (description.total_bytes, description.usable_bytes) {
-            (None, None) => Ok(LogDirDescription::new(
+            (None, None) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
+                UNKNOWN,
+                UNKNOWN,
+                is_cordoned,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
                 usable,
+                is_cordoned,
             )),
             (total, usable) => Err(self.protocol_error(format!(
                 "LogDirDescription reported totalBytes={} and usableBytes={}; Java has no constructor for one \
@@ -1004,7 +1006,15 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
+        // The proto map cannot carry Java's null config value, and no
+        // multilanguage test sends one.
+        configs: topic
+            .configs()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, value)| (name, value.expect("a null config value cannot cross the gRPC harness")))
+            .collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {
@@ -2247,7 +2257,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
+    ) -> Result<DescribeUserScramCredentialsResult, Error> {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
@@ -2256,15 +2266,36 @@ impl AdminBackend for MultilanguageAdmin {
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
             .await?;
-        keyed(response.error, response.entries, |entry| {
-            let key = self.name_key(entry.key, "describeUserScramCredentials")?;
-            let outcome = match entry.outcome {
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Value(v)) => Ok(self.scram_description(v)?),
-                None => return Err(self.protocol_error("DescribeUserScramCredentialsEntry with no outcome")),
-            };
-            Ok((key, outcome))
-        })
+        // A whole-response (data-future) failure faults every view — mirrors
+        // Java's top-level `whenComplete` throwable.
+        if let Some(error) = response.error {
+            return Err(kafka_error_from_proto(error));
+        }
+        // Rebuild the raw response data from the per-user rows and hand it to the
+        // crate's own `DescribeUserScramCredentialsResult`, so the harness answers
+        // all()/users()/description() with the exact same logic the native backend
+        // does (`src/admin/describe_user_scram_credentials_result.rs`).
+        let mut results = Vec::with_capacity(response.entries.len());
+        for entry in response.entries {
+            let mut result = ScramWireUserResult::new();
+            result.set_user(entry.user).set_error_code(entry.error_code as i16);
+            if let Some(message) = entry.error_message {
+                result.set_error_message(Some(message));
+            }
+            let mut infos = Vec::with_capacity(entry.credential_infos.len());
+            for info in entry.credential_infos {
+                // Reuse the mechanism-indicator validation the other SCRAM paths use.
+                self.scram_mechanism(info.mechanism)?;
+                let mut credential = ScramWireCredentialInfo::new();
+                credential.set_mechanism(info.mechanism as i8).set_iterations(info.iterations);
+                infos.push(credential);
+            }
+            result.set_credential_infos(infos);
+            results.push(result);
+        }
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_results(results);
+        Ok(DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data))))
     }
 
     async fn alter_user_scram_credentials(

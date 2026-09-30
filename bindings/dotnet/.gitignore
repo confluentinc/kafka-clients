@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+
+# Rider / Visual Studio user-specific files
+*.user
+*.suo
+.vs/
+.idea/
+
+# macOS
+.DS_Store
+
+# Test / coverage artifacts
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
