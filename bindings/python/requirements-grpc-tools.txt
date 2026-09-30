@@ -1,0 +1,5 @@
+# Build-time dependencies for generating the Python gRPC stubs from
+# multilanguage-test-server/proto. Includes the runtime pins so that the
+# generator and runtime versions match.
+-r requirements-grpc.txt
+grpcio-tools==1.76.*

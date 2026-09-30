@@ -1325,10 +1325,11 @@ where
     /// `commit_sync` and `close` can wait for in-flight async commits to
     /// complete before continuing (mirrors Java's
     /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`). The wrapped
-    /// receiver resolves to `()` once the async commit (success OR
-    /// failure) has finished — the actual commit result is delivered via
-    /// the registered [`crate::consumer::OffsetCommitCallback`], not via
-    /// this receiver.
+    /// receiver resolves to `()` only after the interceptor / callback
+    /// invocations of this commit (success OR failure) and of every earlier
+    /// async commit have been enqueued — the actual commit result is
+    /// delivered via the registered [`crate::consumer::OffsetCommitCallback`],
+    /// not via this receiver.
     last_pending_async_commit: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
@@ -4648,16 +4649,51 @@ where
             )
             .await?;
 
+        // Empty explicit offsets: Java's `commit()` returns an already-completed
+        // future (`AsyncKafkaConsumer.java:1042-1044`), so `whenComplete` runs
+        // inline on the calling thread and the result replaces
+        // `lastPendingAsyncCommit` (`:1019`). Enqueue the callbacks here and
+        // store an already-completed pending commit, without chaining behind
+        // earlier in-flight commits: a later `commitSync` / `close` does not
+        // wait for them, and they still enqueue their own callbacks when they
+        // complete.
+        if offsets.as_ref().is_some_and(HashMap::is_empty) {
+            self.offset_commit_callback_invoker
+                .enqueue_interceptor_invocation(HashMap::new());
+            if let Some(cb) = callback {
+                self.offset_commit_callback_invoker
+                    .enqueue_user_callback_invocation(cb, HashMap::new(), None);
+            }
+            let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = pending_tx.send(());
+            self.last_pending_async_commit = Some(pending_rx);
+            return Ok(());
+        }
+
         // Java: `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
         // — the resulting future is stored on the consumer so a later
         // `commitSync` / `close` can wait for it to complete. The Rust
         // analog uses a oneshot bridge: we spawn the continuation, the
-        // continuation invokes the callback chain, and signals
-        // `last_pending_completion_tx` when finished.
+        // continuation invokes the callback chain, and signals `pending_tx`
+        // when finished.
+        //
+        // Each continuation is a separate task that the runtime may schedule
+        // in any order, so it awaits its predecessor before enqueueing. Hence
+        // callbacks are enqueued in commit order, as the `commitAsync` javadoc
+        // requires (`KafkaConsumer.java:1122-1123`), and `pending_rx`
+        // resolving implies every earlier callback is enqueued, which is why
+        // `commit_sync` and `close` await only the most recent commit.
         let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
+        let previous_pending = self.last_pending_async_commit.take();
         let invoker = Arc::clone(&self.offset_commit_callback_invoker);
         tokio::spawn(async move {
             let result = receiver.await;
+            if let Some(previous) = previous_pending {
+                // `Ok(())`: the predecessor has enqueued its callbacks.
+                // `Err(RecvError)`: its task was dropped without sending.
+                // Proceed in either case.
+                let _ = previous.await;
+            }
             match result {
                 Ok(Ok(committed)) => {
                     // Java: `if (throwable == null)
@@ -9365,9 +9401,6 @@ mod tests {
     // `// SKIP: covered by <existing_test>` rationale.
     //
     // SKIPs (commit 9 batch):
-    //   - testCommitSyncAwaitsCommitAsyncCompletionWithEmptyOffsets and
-    //     testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets —
-    //     covered by inline `commit_sync_drains_pending_async_commit`.
     //   - testWakeupCommitted — covered by inline
     //     `issue_11_committed_observes_wakeup_during_wait`.
     //   - testEnsureCommitSyncExecutedCommitAsyncCallbacks — callback-fire
@@ -9767,6 +9800,263 @@ mod tests {
         let saw_msg = saw_error.lock().unwrap().clone().expect("callback observed error");
         let injected_msg = format!("{injected}");
         assert!(saw_msg == injected_msg, "callback error mismatch: {saw_msg} != {injected_msg}");
+    }
+
+    /// Verifies ordering when two async commits complete in reverse order.
+    /// The last pending commit must not resolve until the earlier commit's
+    /// callback has been enqueued, and callbacks must be invoked in commit
+    /// order. `close()` and `commit_sync()` depend on this invariant because
+    /// they await only the most recent pending async commit (Java's
+    /// `lastPendingAsyncCommit`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_async_last_pending_waits_for_earlier_callbacks() {
+        struct OrderCallback {
+            order: Arc<std::sync::Mutex<Vec<i64>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for OrderCallback {
+            async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+                assert!(error.is_none(), "unexpected commit error: {error:?}");
+                let offset = offsets.values().next().expect("committed offsets").offset();
+                self.order.lock().unwrap().push(offset);
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("my-topic".to_string(), 0);
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Complete the second commit immediately and defer the first until the
+        // test releases it, reversing the submission order.
+        let completer = tokio::spawn(async move {
+            let mut first = None;
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, offsets, .. } = env.event {
+                    offsets_ready.complete(());
+                    let offsets = offsets.expect("explicit offsets");
+                    match first.take() {
+                        None => first = Some((handle, offsets)),
+                        Some((first_handle, first_offsets)) => {
+                            handle.complete(offsets);
+                            let _ = release_first_rx.await;
+                            first_handle.complete(first_offsets);
+                            return true;
+                        },
+                    }
+                }
+            }
+            false
+        });
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb: Arc<dyn crate::consumer::OffsetCommitCallback> = Arc::new(OrderCallback { order: Arc::clone(&order) });
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 1), Arc::clone(&cb))
+            .await
+            .expect("commit 1");
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp, 2), cb)
+            .await
+            .expect("commit 2");
+
+        let mut last = consumer.last_pending_async_commit.take().expect("pending async commit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut last).await.is_err(),
+            "last pending commit must not resolve while an earlier commit is outstanding"
+        );
+
+        release_first_tx.send(()).expect("completer alive");
+        let _ = last.await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+
+        assert!(completer.await.expect("task ok"));
+        assert_eq!(*order.lock().unwrap(), vec![1, 2], "callbacks must fire in commit order");
+    }
+
+    /// Consumer with an in-flight async commit, built by
+    /// [`set_up_consumer_with_incomplete_async_commit`].
+    struct IncompleteAsyncCommit {
+        consumer: AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+        /// Handle of the pending `CommitAsync` event (Java's
+        /// `asyncCommitFuture`).
+        async_commit:
+            crate::consumer::internals::events::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        /// Keeps the background-event channel open for the test's duration.
+        _bg_event_tx: mpsc::UnboundedSender<BackgroundEventEnvelope>,
+    }
+
+    /// Java: `setUpConsumerWithIncompleteAsyncCommit` (Java line 626-641).
+    /// Assigns `tp`, seeks it to 20 and issues a `commit_async` whose
+    /// offsets are marked ready but whose commit is left incomplete. The
+    /// spawned task stands in for the background task: it completes
+    /// assignment / seek events and every `CommitSync` successfully (Java's
+    /// `completeCommitSyncApplicationEventSuccessfully`). The translated Java
+    /// tests pass `callback = None`; the Rust-specific test passes one to
+    /// observe callback order.
+    async fn set_up_consumer_with_incomplete_async_commit(
+        tp: &TopicPartition,
+        callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
+    ) -> IncompleteAsyncCommit {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let (async_commit_tx, async_commit_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut async_commit_tx = Some(async_commit_tx);
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::AssignmentChange { handle, .. }
+                    | ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        // Java: `markOffsetsReadyForCommitEvent()`.
+                        offsets_ready.complete(());
+                        if let Some(tx) = async_commit_tx.take() {
+                            let _ = tx.send(handle);
+                        }
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, offsets } => {
+                        offsets_ready.complete(());
+                        handle.complete(offsets.unwrap_or_default());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        consumer.assign(vec![tp.clone()]).await.expect("assign");
+        consumer.seek_with_offset(tp.clone(), 20).await.expect("seek");
+        match callback {
+            Some(cb) => consumer.commit_async_with_callback(cb).await.expect("commit_async"),
+            None => consumer.commit_async().await.expect("commit_async"),
+        }
+        let async_commit = async_commit_rx.await.expect("CommitAsync event enqueued");
+        IncompleteAsyncCommit { consumer, async_commit, _bg_event_tx: bg_event_tx }
+    }
+
+    fn assert_pending_async_commit_timeout(err: &Error) {
+        assert!(matches!(err, Error::Timeout(_)), "expected Timeout, got {err:?}");
+        assert_eq!(err.message(), "Timed out waiting for last pending async commit to complete");
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncCompletionWithEmptyOffsets`
+    /// (Java line 555-568).
+    #[tokio::test]
+    async fn commit_sync_awaits_commit_async_completion_with_empty_offsets() {
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit(&tp, None).await;
+
+        // Commit async is not completed yet, so commit sync should wait for it
+        // to complete (time out).
+        let err = consumer
+            .commit_sync_with_offsets_timeout(HashMap::new(), Duration::from_millis(100))
+            .await
+            .expect_err("commit sync must time out");
+        assert_pending_async_commit_timeout(&err);
+
+        // Complete the async commit with an error.
+        async_commit.complete_with_error(Error::kafka_message("Test error"));
+
+        // Commit async is completed, so commit sync completes immediately
+        // (since offsets are empty).
+        consumer
+            .commit_sync_with_offsets_timeout(HashMap::new(), Duration::from_millis(100))
+            .await
+            .expect("commit sync must succeed");
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets`
+    /// (Java line 570-586).
+    #[tokio::test]
+    async fn commit_sync_awaits_commit_async_completion_with_non_empty_offsets() {
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit(&tp, None).await;
+
+        // Commit async is not completed yet, so commit sync should wait for it
+        // to complete (time out).
+        let err = consumer
+            .commit_sync_with_offsets_timeout(singleton_offsets(tp.clone(), 20), Duration::from_millis(100))
+            .await
+            .expect_err("commit sync must time out");
+        assert_pending_async_commit_timeout(&err);
+
+        // Complete the async commit.
+        async_commit.complete(HashMap::new());
+
+        // Commit async is completed, so commit sync does not need to wait
+        // before committing its offsets.
+        consumer
+            .commit_sync_with_offsets_timeout(singleton_offsets(tp, 20), Duration::from_millis(100))
+            .await
+            .expect("commit sync must succeed");
+    }
+
+    /// Rust-specific companion to the two tests above, covering an empty-offsets
+    /// `commit_async` issued while an earlier async commit is in flight. As in
+    /// Java (`AsyncKafkaConsumer.java:1019, 1042-1044`), the empty commit
+    /// completes immediately and replaces `lastPendingAsyncCommit`, so it is
+    /// not chained behind the earlier commit: its callback is enqueued before
+    /// `commit_async` returns, the next `commit_sync` does not wait for the
+    /// earlier commit, and the empty commit's callback runs first.
+    #[tokio::test]
+    async fn commit_sync_does_not_await_commit_async_before_later_empty_offsets_commit_async() {
+        struct LabelCallback {
+            label: &'static str,
+            order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for LabelCallback {
+            async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, _error: Option<&Error>) {
+                self.order.lock().unwrap().push(self.label);
+            }
+        }
+
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first = Arc::new(LabelCallback { label: "first", order: Arc::clone(&order) });
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit(&tp, Some(first)).await;
+
+        let second = Arc::new(LabelCallback { label: "second", order: Arc::clone(&order) });
+        consumer
+            .commit_async_with_offsets_callback(HashMap::new(), second)
+            .await
+            .expect("empty commit_async");
+
+        // As in Java, the empty commit's callback is enqueued before
+        // `commit_async` returns, so it runs on the next callback invocation.
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["second"],
+            "the empty commit's callback must be enqueued before commit_async returns"
+        );
+
+        // The last pending async commit is the already-completed empty one, so
+        // commit sync does not wait for the earlier, still incomplete commit.
+        consumer
+            .commit_sync_with_timeout(Duration::from_millis(100))
+            .await
+            .expect("commit sync must not wait for the earlier async commit");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["second"],
+            "the earlier commit's callback must not run before it completes"
+        );
+
+        // The earlier commit still enqueues its callback once it completes.
+        async_commit.complete(singleton_offsets(tp, 20));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while order.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+                consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+            }
+        })
+        .await
+        .expect("the earlier commit's callback must run after it completes");
+        assert_eq!(*order.lock().unwrap(), vec!["second", "first"]);
     }
 
     // ─── Close / lifecycle tests (commit 7/N) ───

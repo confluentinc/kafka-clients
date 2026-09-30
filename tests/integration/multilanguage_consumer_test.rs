@@ -47,7 +47,7 @@ fn b(s: &str) -> Vec<u8> {
 }
 
 /// Consumer config for the backend under test. `bootstrap` must be reachable
-/// from the backend (container listener for python/c, host loopback for rust).
+/// from the backend (container listener for Python/C, host loopback for Rust).
 fn consumer_config(bootstrap: &str, group_id: &str) -> HashMap<String, String> {
     HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
@@ -59,22 +59,41 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> HashMap<String, String> {
     ])
 }
 
+/// [`consumer_config`] for the backend's reachable bootstrap over the run's
+/// selected protocol, with the matching security keys injected. Every backend —
+/// native and gRPC/container alike — connects over the run's protocol; the keys
+/// travel through the gRPC config map to the containerized client.
+fn consumer_config_for<F: ConsumerBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    group_id: &str,
+) -> HashMap<String, String> {
+    let mut config = consumer_config(&bootstrap_for(factory, ctx), group_id);
+    ctx.apply_security(&mut config);
+    config
+}
+
+/// Pick the bootstrap address the backend can reach, over the run's selected
+/// protocol: gRPC backends reach the broker via its CONTAINER-family listener
+/// (PLAINTEXT / SSL / SASL_SSL by container hostname), native Rust via the host
+/// loopback.
 fn bootstrap_for<F: ConsumerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
     if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers().to_string()
+        ctx.container_protocol_bootstrap_servers().to_string()
     } else {
-        ctx.bootstrap_servers().to_string()
+        ctx.protocol_bootstrap_servers().to_string()
     }
 }
 
 /// Produce `records` to `topic` with a native in-process Rust producer on the
-/// host-loopback bootstrap (the producer always runs in this process).
+/// host-loopback bootstrap (the producer always runs in this process), over the
+/// run's selected protocol.
 async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+    let mut props = HashMap::from([
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
+    ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
         KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
@@ -146,7 +165,7 @@ async fn assign_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, fa
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     consumer
@@ -166,7 +185,7 @@ async fn subscribe_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext,
     produce(ctx, &topic, &[("k", "hello")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
@@ -184,7 +203,7 @@ async fn commit_and_committed<F: ConsumerBackendFactory>(ctx: &mut TestContext, 
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -207,7 +226,7 @@ async fn seek_and_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, fact
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -233,7 +252,7 @@ async fn pause_resume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory:
     produce(ctx, &topic, &[("k", "v")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -258,7 +277,7 @@ async fn seek_to_beginning_end<F: ConsumerBackendFactory>(ctx: &mut TestContext,
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -290,7 +309,7 @@ async fn unsubscribe_clears_subscription<F: ConsumerBackendFactory>(ctx: &mut Te
     produce(ctx, &topic, &[("k", "v")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
@@ -307,7 +326,7 @@ async fn partitions_for_metadata<F: ConsumerBackendFactory>(ctx: &mut TestContex
     produce(ctx, &topic, &[("k", "v")]).await; // ensure the topic exists
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let infos = consumer.partitions_for(&topic).await.expect("partitions_for");
@@ -326,7 +345,7 @@ async fn offsets_for_times_lookup<F: ConsumerBackendFactory>(ctx: &mut TestConte
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -345,7 +364,7 @@ async fn list_topics_contains<F: ConsumerBackendFactory>(ctx: &mut TestContext, 
     produce(ctx, &topic, &[("k", "v")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let topics = consumer.list_topics().await.expect("list_topics");
@@ -364,7 +383,7 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -401,7 +420,7 @@ async fn metrics_reports_backend_registry<F: ConsumerBackendFactory>(ctx: &mut T
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let mut consumer = factory
-        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -490,7 +509,7 @@ async fn rebalance_listener_logs_assigned_and_revoked<F: ConsumerBackendFactory>
     produce(ctx, &topic_b, &[("k", "vb")]).await;
 
     let (mut consumer, log) = factory
-        .create_with_callback_log(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic_a}-grp")))
+        .create_with_callback_log(consumer_config_for(factory, ctx, &format!("{topic_a}-grp")))
         .await
         .expect("create consumer with callback log");
 
@@ -540,7 +559,7 @@ async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut
     produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
 
     let (mut consumer, log) = factory
-        .create_with_callback_log(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .create_with_callback_log(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
         .await
         .expect("create consumer with callback log");
     // assign() rather than subscribe() so no rebalance interleaves with the
