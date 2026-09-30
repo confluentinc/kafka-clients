@@ -143,9 +143,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// `auto.offset.reset=earliest` and `enable.auto.commit=false` so the
 /// tests' explicit `seek` / `commit_sync` / `commit_async` calls are the
 /// only offset-state transitions.
-fn make_consumer_config_bytes(bootstrap: &str, group_id: Option<&str>) -> ConsumerConfig {
+fn make_consumer_config_bytes(ctx: &TestContext, group_id: Option<&str>) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -154,6 +154,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: Option<&str>) -> Consum
     if let Some(gid) = group_id {
         props.insert("group.id".to_string(), gid.to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -162,14 +163,15 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: Option<&str>) -> Consum
 /// Build a `ProducerConfig` aligned with the existing producer
 /// integration tests (acks=all so produced records are durable before
 /// the consumer reads them).
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
@@ -184,9 +186,9 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 ///
 /// All records are fired to the producer up front, then `flush()` waits
 /// for the broker acks. The producer is then closed.
-async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -500,7 +502,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let starting_timestamp = current_time_ms();
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -510,7 +512,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     let cb = CountConsumerCommitCallback::new();
@@ -566,7 +568,7 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     let starting_timestamp = current_time_ms();
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -576,7 +578,7 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
@@ -612,7 +614,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     let num_records: usize = 10_000;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -623,7 +625,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
@@ -658,7 +660,7 @@ async fn test_async_assign_and_consume() {
     let num_records: usize = 10;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -669,7 +671,7 @@ async fn test_async_assign_and_consume() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
@@ -695,7 +697,7 @@ async fn test_async_assign_and_consume_skipping_position() {
     let num_records: usize = 10;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -706,7 +708,7 @@ async fn test_async_assign_and_consume_skipping_position() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
     consumer
@@ -750,7 +752,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
 
     {
         let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-            make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+            make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
@@ -760,7 +762,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
         create_topic(consumer.as_mut(), &topic, 1).await;
-        send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+        send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
         consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
         consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
@@ -778,7 +780,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
 
     {
         let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-            make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+            make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
@@ -815,7 +817,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
 
     {
         let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-            make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+            make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
@@ -825,7 +827,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
         create_topic(consumer.as_mut(), &topic, 1).await;
-        send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+        send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
         // Java: `consumer.commitSync(Map.of(tp, new OffsetAndMetadata(offset)))`.
@@ -851,7 +853,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
 
     {
         let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-            make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+            make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
@@ -898,7 +900,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     let starting_timestamp = current_time_ms();
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
+        make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -908,7 +910,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
     create_topic(consumer.as_mut(), &topic, 1).await;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");

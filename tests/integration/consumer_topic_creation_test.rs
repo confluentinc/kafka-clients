@@ -82,9 +82,9 @@ fn cluster_config_auto_create(broker_allows: bool) -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
-fn make_consumer(bootstrap: &str, group_id: &str, allow_auto_create: bool) -> Box<BytesConsumer> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_consumer(ctx: &TestContext, group_id: &str, allow_auto_create: bool) -> Box<BytesConsumer> {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("group.id".to_string(), group_id.to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -94,6 +94,7 @@ fn make_consumer(bootstrap: &str, group_id: &str, allow_auto_create: bool) -> Bo
             if allow_auto_create { "true" } else { "false" }.to_string(),
         ),
     ]);
+    ctx.apply_security(&mut props);
     let config = ConsumerConfig::new(&props).expect("invalid test config");
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
         .expect("KafkaConsumer::new should succeed")
@@ -140,7 +141,7 @@ async fn test_async_consumer_topic_creation_if_consumer_allow_to_create_topic() 
     let topic = "topic"; // Java's fixed `TOPIC = "topic"`.
     let group_id = ctx.group_id("g_topic_create_allow");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, true);
+    let mut consumer = make_consumer(&ctx, &group_id, true);
     subscribe_and_poll(consumer.as_mut(), topic).await;
 
     // Both consumer-allow AND broker-allow are true → topic IS created.
@@ -166,7 +167,7 @@ async fn test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic
     let topic = "topic-disallow";
     let group_id = ctx.group_id("g_topic_create_disallow");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, false);
+    let mut consumer = make_consumer(&ctx, &group_id, false);
     subscribe_and_poll(consumer.as_mut(), topic).await;
 
     // Consumer disallows auto-create → topic NOT created even though the
