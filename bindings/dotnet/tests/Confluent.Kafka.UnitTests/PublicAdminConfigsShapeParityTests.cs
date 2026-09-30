@@ -361,6 +361,45 @@ public sealed class PublicAdminConfigsShapeParityTests
     }
 
     /// <summary>
+    /// An undefined <see cref="AlterConfigOpType"/> is rejected by the constructor (M15/P13.4
+    /// G2-4). Java's <c>OpType</c> is closed (<c>AlterConfigOp.java:46-67</c>) and has no
+    /// <c>UNKNOWN</c> to normalize to, unlike <see cref="ConfigResourceType"/>. <c>99</c> is
+    /// an arbitrary out-of-range code; <c>-1</c> is the value the binding's internal zero-op
+    /// sentinel row uses, which a caller must not be able to smuggle in as an op.
+    /// </summary>
+    /// <param name="code">The undefined numeric op-type code.</param>
+    [Theory]
+    [InlineData(99)]
+    [InlineData(-1)]
+    public void AlterConfigOp_RejectsAnUndefinedOpType(int code)
+    {
+        AlterConfigOpType undefined = (AlterConfigOpType)code;
+
+        ArgumentOutOfRangeException thrown = Assert.Throws<ArgumentOutOfRangeException>(
+            () => new AlterConfigOp(new ConfigEntry("k", "v"), undefined));
+
+        Assert.Equal("opType", thrown.ParamName);
+        Assert.StartsWith("opType must be a defined AlterConfigOpType member.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal(undefined, thrown.ActualValue);
+    }
+
+    /// <summary>
+    /// Every defined <see cref="AlterConfigOpType"/> member still constructs, so the
+    /// undefined-value guard rejects nothing Java accepts.
+    /// </summary>
+    [Fact]
+    public void AlterConfigOp_AcceptsEveryDefinedOpType()
+    {
+        AlterConfigOpType[] members = (AlterConfigOpType[])Enum.GetValues(typeof(AlterConfigOpType));
+        Assert.Equal(4, members.Length);
+
+        foreach (AlterConfigOpType member in members)
+        {
+            Assert.Equal(member, new AlterConfigOp(new ConfigEntry("k", "v"), member).OpType);
+        }
+    }
+
+    /// <summary>
     /// The two new options types match Java's fields and defaults exactly.
     /// </summary>
     [Fact]

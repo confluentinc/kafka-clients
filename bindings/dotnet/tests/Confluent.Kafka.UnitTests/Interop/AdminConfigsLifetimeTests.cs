@@ -43,6 +43,13 @@ public sealed class AdminConfigsLifetimeTests
     /// <summary><c>Errors::UnsupportedVersion</c>'s wire code, which the core's <c>unsupported_version</c> carries.</summary>
     private const int UnsupportedVersionCode = 35;
 
+    /// <summary>
+    /// The core's rejection of an unknown op-type code at row 0 (<c>read_alter_config_ops</c>,
+    /// <c>src/ffi/admin.rs</c>), copied from an actual run rather than composed from the
+    /// format string.
+    /// </summary>
+    private const string UnknownOpTypeMessage = "unknown AlterConfigOp op type id 99 at index 0";
+
     private static readonly ConfigResource s_resource =
         new ConfigResource(ConfigResourceType.Topic, "cfg-lifetime-topic");
 
@@ -128,18 +135,27 @@ public sealed class AdminConfigsLifetimeTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>The REAL inline-callback path, reached by ordinary bad input.</b> An unknown
-    /// <c>AlterConfigOp.OpType</c> code makes the ABI fire the completion <b>synchronously
-    /// on the calling thread, before the entry point returns</b> — this entry point's own
-    /// async doc extends the inline trigger set beyond a NULL handle to exactly this case.
+    /// ⚠⚠ <b>The REAL inline-callback path, reached by an unknown op-type code.</b> An
+    /// unknown <c>AlterConfigOp.OpType</c> code makes the ABI fire the completion
+    /// <b>synchronously on the calling thread, before the entry point returns</b> — this
+    /// entry point's own async doc extends the inline trigger set beyond a NULL handle to
+    /// exactly this case.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>No injected submit here.</b> Every other inline-path test in this phase drives
-    /// the production trampoline by hand; this one goes through the <em>real</em>
-    /// <c>incremental_alter_configs_async</c>, which is the only way to prove the ABI
-    /// really does take that path and that the binding survives it. An integration test
-    /// against a broker would never reach it.
+    /// ⚠ <b>The code is planted at the submit seam, and the submit is still the REAL
+    /// one.</b> Since M15/P13.4 G2-4 the public <see cref="AlterConfigOp"/> constructor
+    /// rejects an undefined <see cref="AlterConfigOpType"/>, so ordinary input can no
+    /// longer produce the code. The test therefore goes through the internal seam
+    /// <c>IncrementalAlterConfigs(configs, options, NativeIncrementalAlterConfigsSubmit)</c>
+    /// with a <em>valid</em> <see cref="AlterConfigOpType.Set"/> in the dictionary, and its
+    /// lambda overwrites row 0's op type with <c>99</c> — not one of Java's four
+    /// <c>OpType</c> ids (0/1/2/3) — and then forwards <b>every</b> argument, unchanged
+    /// otherwise, to the real <c>incremental_alter_configs_async</c>
+    /// (<see cref="NativeMethods.AdminClientIncrementalAlterConfigsAsync"/>). That is still
+    /// the only way to prove the ABI really takes the inline path and that the binding
+    /// survives it: the production trampoline, <c>GCHandle</c> and span-the-op reference are
+    /// all the real ones, and an integration test against a broker would never reach it.
     /// </para>
     /// <para>
     /// Two consequences are asserted together: every key faults (the call failed as a
@@ -147,6 +163,11 @@ public sealed class AdminConfigsLifetimeTests
     /// reference are released exactly once — which is what lets the subsequent
     /// <c>Dispose</c> close the handle. A leak would leave <c>IsClosed</c> false forever; a
     /// double free would abort the run.
+    /// </para>
+    /// <para>
+    /// Vacuity guard, measured: with the lambda forwarding the op type unchanged (a valid
+    /// <c>Set</c>), the "already faulted with no await" assertion fails — the mock answers
+    /// asynchronously, so only the planted code makes the completion inline.
     /// </para>
     /// </remarks>
     [Fact]
@@ -158,10 +179,18 @@ public sealed class AdminConfigsLifetimeTests
         AlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
-                // 99 is not one of Java's four OpType ids (0/1/2/3).
-                [s_resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), (AlterConfigOpType)99) },
+                [s_resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             },
-            options: null);
+            options: null,
+            (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
+                validateOnly, callback, userData) =>
+            {
+                // 99 is not one of Java's four OpType ids (0/1/2/3).
+                opTypes[0] = 99;
+                NativeMethods.AdminClientIncrementalAlterConfigsAsync(
+                    nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
+                    validateOnly, callback, userData);
+            });
 
         // The awaiter is already faulted with NO await and NO sleep, which can only be true
         // if the callback ran to completion inside the entry point.
@@ -169,7 +198,7 @@ public sealed class AdminConfigsLifetimeTests
 
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.Values[s_resource]), s_deadline);
-        Assert.Contains("op type", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(UnknownOpTypeMessage, failure.Message);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.True(

@@ -49,15 +49,42 @@ public sealed class AlterConfigOp
     /// <param name="configEntry">The configuration entry the operation applies to.</param>
     /// <param name="opType">What to do with it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="configEntry"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="opType"/> is not a defined <see cref="AlterConfigOpType"/> member.
+    /// </exception>
     /// <remarks>
+    /// <para>
     /// ⚠ The null check is <b>stricter than Java</b>, which stores the reference without
     /// checking. <see cref="ConfigEntry"/> is a non-nullable reference here, and the submit
     /// path dereferences it to build the row — the same call
     /// <see cref="TopicListing"/> and <see cref="ConfigResource"/> already make.
+    /// </para>
+    /// <para>
+    /// An undefined <paramref name="opType"/> is rejected here rather than at submit. Java
+    /// cannot express one: its <c>OpType</c> is a closed enum of <c>SET</c> 0,
+    /// <c>DELETE</c> 1, <c>APPEND</c> 2 and <c>SUBTRACT</c> 3 (<c>AlterConfigOp.java:46-67</c>),
+    /// and a C# enum parameter accepts any integral value by cast.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Asymmetric with <see cref="ConfigResourceType"/>, deliberately.</b> An undefined
+    /// <see cref="ConfigResourceType"/> is <em>normalized</em> to
+    /// <see cref="ConfigResourceType.Unknown"/> by the <see cref="ConfigResource"/>
+    /// constructor, because Java's <c>ConfigResource.Type</c> has an <c>UNKNOWN</c> member
+    /// that <c>forId</c> maps unrecognized ids to (<c>ConfigResource.java:57-58</c>). Java's
+    /// <c>OpType</c> has no such member (its <c>forId</c>, <c>:83-85</c>, returns null for an
+    /// unknown id), so there is
+    /// nothing to normalize to and the only faithful outcome is to refuse the value.
+    /// </para>
     /// </remarks>
     public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType opType)
     {
         ConfigEntry = configEntry ?? throw new ArgumentNullException(nameof(configEntry));
+        if (!Enum.IsDefined(typeof(AlterConfigOpType), opType))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(opType), opType, "opType must be a defined AlterConfigOpType member.");
+        }
+
         OpType = opType;
     }
 
