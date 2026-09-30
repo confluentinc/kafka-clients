@@ -513,9 +513,10 @@ impl ConsumerConfig {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
-    /// Set `client.id`.
+    /// Set `client.id`, trimmed as [`ConsumerConfig::new`] trims it (Java's
+    /// `ConfigDef.parseType`), so a blank id is generated at construction.
     pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = client_id.into();
+        self.client_id = client_id.into().trim().to_string();
         self
     }
     /// Set `group.id`.
@@ -524,8 +525,11 @@ impl ConsumerConfig {
     /// group id, so after changing the group either set `client.id`
     /// explicitly or clear it with `set_client_id("")`, which the consumer
     /// constructor then regenerates.
+    ///
+    /// Trimmed as [`ConsumerConfig::new`] trims it (Java's
+    /// `ConfigDef.parseType`), so a blank id is rejected at construction.
     pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
-        self.group_id = Some(group_id.into());
+        self.group_id = Some(group_id.into().trim().to_string());
         self
     }
     /// Set `group.protocol`.

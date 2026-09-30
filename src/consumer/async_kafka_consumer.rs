@@ -6811,6 +6811,57 @@ mod tests {
         consumer.close().await.expect("close should succeed");
     }
 
+    /// The setters trim like the `ConsumerConfig::new` parse arms, so a padded
+    /// `group.id` and a blank `client.id` on the setter path give the same
+    /// generated id as the property-map path, and a blank `group.id` gets the
+    /// same `InvalidGroupId` rejection as `""`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setter_built_config_is_trimmed_like_parsed_config() {
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+        let bootstrap = || vec!["127.0.0.1:1".to_string()];
+
+        let config = ConsumerConfig::default()
+            .set_bootstrap_servers(bootstrap())
+            .set_group_id(" g ")
+            .set_client_id(" ");
+        assert_eq!(config.group_id(), Some("g"));
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+        let client_id = consumer.client_id().to_string();
+        let n = client_id
+            .strip_prefix("consumer-g-")
+            .unwrap_or_else(|| panic!("unexpected generated id {client_id:?}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
+        consumer.close().await.expect("close should succeed");
+
+        let config = ConsumerConfig::default().set_bootstrap_servers(bootstrap()).set_group_id(" ");
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("a blank group.id must fail construction");
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err.source().expect("the InvalidGroupId is the cause");
+        assert_eq!(cause.error(), crate::common::Errors::InvalidGroupId);
+        assert_eq!(
+            "The configured group.id should not be an empty string or whitespace.",
+            cause.message()
+        );
+    }
+
     /// Java validates `group.instance.id` again in the constructor
     /// (`GroupRebalanceConfig.java:68-72`), independently of `client.id`, so an
     /// id that `ConsumerConfig` accepted (explicit `client.id`) still fails
