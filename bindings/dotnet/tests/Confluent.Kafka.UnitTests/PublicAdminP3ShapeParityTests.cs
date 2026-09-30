@@ -337,7 +337,8 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.True(new ConfigResource(ConfigResourceType.Broker, string.Empty).IsDefault);
         Assert.False(topic.IsDefault);
 
-        Assert.Equal("ConfigResource(type=Topic, name='t')", topic.ToString());
+        // Java's constant name, not the .NET member name (M15/P13.4 G2-8, ConfigResource.java:120-122).
+        Assert.Equal("ConfigResource(type=TOPIC, name='t')", topic.ToString());
         Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.Topic, null!));
     }
 
@@ -390,7 +391,8 @@ public sealed class PublicAdminP3ShapeParityTests
     /// <summary>
     /// ⚠ An undefined type and <see cref="ConfigResourceType.Unknown"/> name the <b>same</b>
     /// resource — equal, with equal hashes, so one dictionary key — and render as
-    /// <c>Unknown</c>, since the stored type is what <c>ToString</c> prints.
+    /// <c>UNKNOWN</c> (Java's constant name), since the stored type is what <c>ToString</c>
+    /// prints.
     /// </summary>
     [Fact]
     public void ConfigResource_AnUndefinedType_EqualsAndRendersAsUnknown()
@@ -400,7 +402,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         Assert.Equal(unknown, undefined);
         Assert.Equal(unknown.GetHashCode(), undefined.GetHashCode());
-        Assert.Equal("ConfigResource(type=Unknown, name='x')", undefined.ToString());
+        Assert.Equal("ConfigResource(type=UNKNOWN, name='x')", undefined.ToString());
 
         Dictionary<ConfigResource, int> byResource = new Dictionary<ConfigResource, int>
         {

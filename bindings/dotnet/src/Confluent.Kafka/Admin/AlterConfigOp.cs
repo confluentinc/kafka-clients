@@ -114,9 +114,28 @@ public sealed class AlterConfigOp
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:118</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c>
+    /// (<c>AlterConfigOp.java:119-124</c>), with the operation type printed as <b>Java's
+    /// constant name</b> — <c>AlterConfigOp{opType=SET, configEntry=ConfigEntry(...)}</c> —
+    /// and the entry rendered by <see cref="ConfigEntry.ToString"/>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
-            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", OpType, ConfigEntry);
+            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", JavaName(OpType), ConfigEntry);
+
+    /// <summary>
+    /// Java's <c>OpType</c> constant name for each member (<c>AlterConfigOp.java:46-67</c>).
+    /// The constructor rejects an undefined op type, so the numeric fallback only keeps the
+    /// switch total.
+    /// </summary>
+    private static string JavaName(AlterConfigOpType opType) => opType switch
+    {
+        AlterConfigOpType.Set => "SET",
+        AlterConfigOpType.Delete => "DELETE",
+        AlterConfigOpType.Append => "APPEND",
+        AlterConfigOpType.Subtract => "SUBTRACT",
+        _ => ((int)opType).ToString(CultureInfo.InvariantCulture),
+    };
 }

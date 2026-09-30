@@ -303,7 +303,7 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.NotEqual(new AlterConfigOp(entry, AlterConfigOpType.Delete), op);
         Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), AlterConfigOpType.Set), op);
 
-        Assert.StartsWith("AlterConfigOp{opType=Set, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith("AlterConfigOp{opType=SET, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
 
         // ⚠ Java renders both booleans LOWERCASE (ConfigEntry.java:183-194); C#'s
         // bool.ToString() would give "True"/"False". The literal text is asserted rather
@@ -541,6 +541,216 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(NullabilityState.Nullable, new NullabilityInfoContext().Create(name).ReadState);
 #endif
     }
+
+    /// <summary>
+    /// Java's <c>ConfigResource.Type</c> constant names (<c>ConfigResource.java:36-41</c>),
+    /// written out by hand — not derived from the .NET member names — so a mapping that
+    /// merely upper-cases PascalCase cannot pass (<c>BrokerLogger</c> must become
+    /// <c>BROKER_LOGGER</c>).
+    /// </summary>
+    private static readonly Dictionary<ConfigResourceType, string> s_javaResourceTypes =
+        new Dictionary<ConfigResourceType, string>
+        {
+            [ConfigResourceType.Unknown] = "UNKNOWN",
+            [ConfigResourceType.Topic] = "TOPIC",
+            [ConfigResourceType.Broker] = "BROKER",
+            [ConfigResourceType.BrokerLogger] = "BROKER_LOGGER",
+            [ConfigResourceType.ClientMetrics] = "CLIENT_METRICS",
+            [ConfigResourceType.Group] = "GROUP",
+        };
+
+    /// <summary>Java's <c>AlterConfigOp.OpType</c> constant names (<c>AlterConfigOp.java:46-67</c>), by hand.</summary>
+    private static readonly Dictionary<AlterConfigOpType, string> s_javaOpTypes =
+        new Dictionary<AlterConfigOpType, string>
+        {
+            [AlterConfigOpType.Set] = "SET",
+            [AlterConfigOpType.Delete] = "DELETE",
+            [AlterConfigOpType.Append] = "APPEND",
+            [AlterConfigOpType.Subtract] = "SUBTRACT",
+        };
+
+    /// <summary>Java's <c>ConfigEntry.ConfigSource</c> constant names (<c>ConfigEntry.java:215-225</c>), by hand.</summary>
+    private static readonly Dictionary<ConfigEntry.ConfigSource, string> s_javaSources =
+        new Dictionary<ConfigEntry.ConfigSource, string>
+        {
+            [ConfigEntry.ConfigSource.DynamicTopicConfig] = "DYNAMIC_TOPIC_CONFIG",
+            [ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig] = "DYNAMIC_BROKER_LOGGER_CONFIG",
+            [ConfigEntry.ConfigSource.DynamicBrokerConfig] = "DYNAMIC_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig] = "DYNAMIC_DEFAULT_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DynamicClientMetricsConfig] = "DYNAMIC_CLIENT_METRICS_CONFIG",
+            [ConfigEntry.ConfigSource.DynamicGroupConfig] = "DYNAMIC_GROUP_CONFIG",
+            [ConfigEntry.ConfigSource.StaticBrokerConfig] = "STATIC_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DefaultConfig] = "DEFAULT_CONFIG",
+            [ConfigEntry.ConfigSource.Unknown] = "UNKNOWN",
+        };
+
+    /// <summary>Java's <c>ConfigEntry.ConfigType</c> constant names (<c>ConfigEntry.java:199-210</c>), by hand.</summary>
+    private static readonly Dictionary<ConfigEntry.ConfigType, string> s_javaConfigTypes =
+        new Dictionary<ConfigEntry.ConfigType, string>
+        {
+            [ConfigEntry.ConfigType.Unknown] = "UNKNOWN",
+            [ConfigEntry.ConfigType.Boolean] = "BOOLEAN",
+            [ConfigEntry.ConfigType.String] = "STRING",
+            [ConfigEntry.ConfigType.Int] = "INT",
+            [ConfigEntry.ConfigType.Short] = "SHORT",
+            [ConfigEntry.ConfigType.Long] = "LONG",
+            [ConfigEntry.ConfigType.Double] = "DOUBLE",
+            [ConfigEntry.ConfigType.List] = "LIST",
+            [ConfigEntry.ConfigType.Class] = "CLASS",
+            [ConfigEntry.ConfigType.Password] = "PASSWORD",
+        };
+
+    /// <summary>
+    /// <see cref="ConfigResource.ToString"/> prints Java's constant name for every
+    /// <see cref="ConfigResourceType"/> member (M15/P13.4 G2-8, D5 = a;
+    /// <c>ConfigResource.java:120-122</c>). The loop runs over <c>Enum.GetValues</c>, so a
+    /// member added without a Java name fails here.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_ToString_PrintsJavasTypeConstantName_ForEveryMember()
+    {
+        ConfigResourceType[] members = (ConfigResourceType[])Enum.GetValues(typeof(ConfigResourceType));
+        Assert.Equal(s_javaResourceTypes.Count, members.Length);
+
+        foreach (ConfigResourceType member in members)
+        {
+            Assert.True(s_javaResourceTypes.TryGetValue(member, out string? java), member.ToString());
+            Assert.Equal("ConfigResource(type=" + java + ", name='r')", new ConfigResource(member, "r").ToString());
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AlterConfigOp.ToString"/> prints Java's constant name for every
+    /// <see cref="AlterConfigOpType"/> member (<c>AlterConfigOp.java:119-124</c>), with the
+    /// entry rendered by <see cref="ConfigEntry.ToString"/>.
+    /// </summary>
+    [Fact]
+    public void AlterConfigOp_ToString_PrintsJavasOpTypeConstantName_ForEveryMember()
+    {
+        AlterConfigOpType[] members = (AlterConfigOpType[])Enum.GetValues(typeof(AlterConfigOpType));
+        Assert.Equal(s_javaOpTypes.Count, members.Length);
+
+        foreach (AlterConfigOpType member in members)
+        {
+            Assert.True(s_javaOpTypes.TryGetValue(member, out string? java), member.ToString());
+            Assert.Equal(
+                "AlterConfigOp{opType=" + java + ", configEntry=ConfigEntry(name=k, value=v, source=UNKNOWN, "
+                    + "isSensitive=false, isReadOnly=false, synonyms=[], type=UNKNOWN, documentation=null)}",
+                new AlterConfigOp(new ConfigEntry("k", "v"), member).ToString());
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ConfigEntry.ToString"/> prints Java's constant names for every
+    /// <see cref="ConfigEntry.ConfigSource"/> and <see cref="ConfigEntry.ConfigType"/>
+    /// member (<c>ConfigEntry.java:183-194</c>), and
+    /// <see cref="ConfigEntry.ConfigSynonym.ToString"/> for every source
+    /// (<c>:285-290</c>). Each loop runs over <c>Enum.GetValues</c>.
+    /// </summary>
+    [Fact]
+    public void ConfigEntry_AndSynonym_ToString_PrintJavasConstantNames_ForEveryMember()
+    {
+        ConfigEntry.ConfigSource[] sources = (ConfigEntry.ConfigSource[])Enum.GetValues(typeof(ConfigEntry.ConfigSource));
+        Assert.Equal(s_javaSources.Count, sources.Length);
+        foreach (ConfigEntry.ConfigSource source in sources)
+        {
+            Assert.True(s_javaSources.TryGetValue(source, out string? java), source.ToString());
+            Assert.Equal(
+                "ConfigEntry(name=k, value=v, source=" + java + ", isSensitive=false, isReadOnly=false, "
+                    + "synonyms=[], type=UNKNOWN, documentation=doc)",
+                Entry(source, ConfigEntry.ConfigType.Unknown, "v", "doc").ToString());
+            Assert.Equal(
+                "ConfigSynonym(name=a, value=1, source=" + java + ")",
+                new ConfigEntry.ConfigSynonym("a", "1", source).ToString());
+        }
+
+        ConfigEntry.ConfigType[] types = (ConfigEntry.ConfigType[])Enum.GetValues(typeof(ConfigEntry.ConfigType));
+        Assert.Equal(s_javaConfigTypes.Count, types.Length);
+        foreach (ConfigEntry.ConfigType type in types)
+        {
+            Assert.True(s_javaConfigTypes.TryGetValue(type, out string? java), type.ToString());
+            Assert.Equal(
+                "ConfigEntry(name=k, value=v, source=UNKNOWN, isSensitive=false, isReadOnly=false, "
+                    + "synonyms=[], type=" + java + ", documentation=doc)",
+                Entry(ConfigEntry.ConfigSource.Unknown, type, "v", "doc").ToString());
+        }
+    }
+
+    /// <summary>
+    /// A <see langword="null"/> value or documentation renders as <c>null</c>, as Java's
+    /// string concatenation does — in the entry, in a synonym, and inside a
+    /// <see cref="Config"/>'s rendering.
+    /// </summary>
+    [Fact]
+    public void ConfigRenderings_PrintANullAsNull()
+    {
+        Assert.Equal(
+            "ConfigEntry(name=k, value=null, source=UNKNOWN, isSensitive=false, isReadOnly=false, "
+                + "synonyms=[], type=UNKNOWN, documentation=null)",
+            new ConfigEntry("k", null).ToString());
+        Assert.Equal(
+            "ConfigSynonym(name=a, value=null, source=DEFAULT_CONFIG)",
+            new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DefaultConfig).ToString());
+        Assert.Equal(
+            "Config(entries=[ConfigEntry(name=a, value=1, source=UNKNOWN, isSensitive=false, isReadOnly=false, "
+                + "synonyms=[], type=UNKNOWN, documentation=null)])",
+            new Config(new[] { new ConfigEntry("a", "1") }).ToString());
+    }
+
+    /// <summary>
+    /// A source or type that is not a defined member — the public eight-argument
+    /// <see cref="ConfigEntry"/> constructor stores what it is given — has no Java name,
+    /// and prints as its numeric value (the documented fallback).
+    /// </summary>
+    [Fact]
+    public void ConfigEntry_AnUndefinedSourceOrType_PrintsItsNumericValue()
+    {
+        Assert.Equal(
+            "ConfigEntry(name=k, value=v, source=99, isSensitive=false, isReadOnly=false, "
+                + "synonyms=[], type=77, documentation=doc)",
+            Entry((ConfigEntry.ConfigSource)99, (ConfigEntry.ConfigType)77, "v", "doc").ToString());
+        Assert.Equal(
+            "ConfigSynonym(name=a, value=1, source=-5)",
+            new ConfigEntry.ConfigSynonym("a", "1", (ConfigEntry.ConfigSource)(-5)).ToString());
+    }
+
+    /// <summary>
+    /// A sensitive value still renders as <c>Redacted</c> — whether it is set or
+    /// <see langword="null"/> — as Java's <c>isSensitive ? "Redacted" : value</c> does.
+    /// </summary>
+    [Fact]
+    public void ConfigEntry_ASensitiveValue_StillRendersRedacted()
+    {
+        foreach (string? value in new[] { "secret", null })
+        {
+            ConfigEntry sensitive = new ConfigEntry(
+                "k",
+                value,
+                ConfigEntry.ConfigSource.DynamicBrokerConfig,
+                isSensitive: true,
+                isReadOnly: false,
+                synonyms: Array.Empty<ConfigEntry.ConfigSynonym>(),
+                type: ConfigEntry.ConfigType.Password,
+                documentation: null);
+
+            Assert.Equal(
+                "ConfigEntry(name=k, value=Redacted, source=DYNAMIC_BROKER_CONFIG, isSensitive=true, isReadOnly=false, "
+                    + "synonyms=[], type=PASSWORD, documentation=null)",
+                sensitive.ToString());
+        }
+    }
+
+    private static ConfigEntry Entry(
+        ConfigEntry.ConfigSource source, ConfigEntry.ConfigType type, string? value, string? documentation) =>
+        new ConfigEntry(
+            "k",
+            value,
+            source,
+            isSensitive: false,
+            isReadOnly: false,
+            synonyms: Array.Empty<ConfigEntry.ConfigSynonym>(),
+            type: type,
+            documentation: documentation);
 
     /// <summary>
     /// The two new options types match Java's fields and defaults exactly.

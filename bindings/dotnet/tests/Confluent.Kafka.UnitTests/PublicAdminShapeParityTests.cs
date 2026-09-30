@@ -252,8 +252,8 @@ public sealed class PublicAdminShapeParityTests
         Assert.Equal(twin, entry);
         Assert.Equal(hash, entry.GetHashCode());
         Assert.Equal(
-            "ConfigEntry(name=k, value=v, source=DefaultConfig, isSensitive=false, isReadOnly=false, "
-                + "synonyms=[ConfigSynonym(name=a, value=1, source=StaticBrokerConfig)], type=String, "
+            "ConfigEntry(name=k, value=v, source=DEFAULT_CONFIG, isSensitive=false, isReadOnly=false, "
+                + "synonyms=[ConfigSynonym(name=a, value=1, source=STATIC_BROKER_CONFIG)], type=STRING, "
                 + "documentation=doc)",
             entry.ToString());
     }

@@ -139,10 +139,14 @@ public sealed class ConfigResource
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:120</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c>
+    /// (<c>ConfigResource.java:120-122</c>), with the type printed as <b>Java's constant
+    /// name</b> — <c>ConfigResource(type=TOPIC, name='t')</c>, not the .NET member name.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", Type, Name);
+        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", JavaName(Type), Name);
 
     /// <summary>
     /// Java's <c>Type.forId</c> fallback applied to an enum value: a defined member is
@@ -151,4 +155,21 @@ public sealed class ConfigResource
     /// </summary>
     private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
         Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.Unknown;
+
+    /// <summary>
+    /// Java's <c>ConfigResource.Type</c> constant name for each member
+    /// (<c>ConfigResource.java:36-41</c>). The constructor normalizes an undefined type to
+    /// <see cref="ConfigResourceType.Unknown"/>, so the numeric fallback only keeps the
+    /// switch total.
+    /// </summary>
+    private static string JavaName(ConfigResourceType type) => type switch
+    {
+        ConfigResourceType.Unknown => "UNKNOWN",
+        ConfigResourceType.Topic => "TOPIC",
+        ConfigResourceType.Broker => "BROKER",
+        ConfigResourceType.BrokerLogger => "BROKER_LOGGER",
+        ConfigResourceType.ClientMetrics => "CLIENT_METRICS",
+        ConfigResourceType.Group => "GROUP",
+        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
+    };
 }

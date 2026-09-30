@@ -258,10 +258,19 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:182</c>), which
-    /// <b>redacts a sensitive value</b> rather than printing it.
+    /// A diagnostic rendering matching Java's <c>toString()</c>
+    /// (<c>ConfigEntry.java:183-194</c>), which <b>redacts a sensitive value</b> rather than
+    /// printing it.
     /// </summary>
     /// <returns>The rendering.</returns>
+    /// <remarks>
+    /// The rendering follows Java's string concatenation: <see cref="Source"/> and
+    /// <see cref="Type"/> print as <b>Java's constant names</b> (<c>DEFAULT_CONFIG</c>,
+    /// <c>STRING</c>), the two booleans lowercase, and a <see langword="null"/> value or
+    /// documentation as <c>null</c>. A source or type that is not a defined member — the
+    /// public constructor stores what it is given — has no Java name and prints as its
+    /// numeric value.
+    /// </remarks>
     public override string ToString()
     {
         StringBuilder synonyms = new StringBuilder("[");
@@ -282,15 +291,52 @@ public sealed class ConfigEntry
             "ConfigEntry(name={0}, value={1}, source={2}, isSensitive={3}, isReadOnly={4}, synonyms={5}, "
                 + "type={6}, documentation={7})",
             Name,
-            IsSensitive ? "Redacted" : Value,
-            Source,
+            IsSensitive ? "Redacted" : (Value ?? "null"),
+            JavaName(Source),
             // Java renders a boolean lowercase; bool.ToString() would give True/False.
             IsSensitive ? "true" : "false",
             IsReadOnly ? "true" : "false",
             synonyms,
-            Type,
-            Documentation);
+            JavaName(Type),
+            Documentation ?? "null");
     }
+
+    /// <summary>
+    /// Java's <c>ConfigEntry.ConfigSource</c> constant name for each member
+    /// (<c>ConfigEntry.java:215-225</c>); an undefined value prints as its number.
+    /// </summary>
+    private static string JavaName(ConfigSource source) => source switch
+    {
+        ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
+        ConfigSource.DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigSource.DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
+        ConfigSource.DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigSource.DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigSource.DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
+        ConfigSource.StaticBrokerConfig => "STATIC_BROKER_CONFIG",
+        ConfigSource.DefaultConfig => "DEFAULT_CONFIG",
+        ConfigSource.Unknown => "UNKNOWN",
+        _ => ((int)source).ToString(CultureInfo.InvariantCulture),
+    };
+
+    /// <summary>
+    /// Java's <c>ConfigEntry.ConfigType</c> constant name for each member
+    /// (<c>ConfigEntry.java:199-210</c>); an undefined value prints as its number.
+    /// </summary>
+    private static string JavaName(ConfigType type) => type switch
+    {
+        ConfigType.Unknown => "UNKNOWN",
+        ConfigType.Boolean => "BOOLEAN",
+        ConfigType.String => "STRING",
+        ConfigType.Int => "INT",
+        ConfigType.Short => "SHORT",
+        ConfigType.Long => "LONG",
+        ConfigType.Double => "DOUBLE",
+        ConfigType.List => "LIST",
+        ConfigType.Class => "CLASS",
+        ConfigType.Password => "PASSWORD",
+        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
+    };
 
     /// <summary>
     /// Validates and copies the constructor's <c>synonyms</c> — see the 8-argument
@@ -497,10 +543,20 @@ public sealed class ConfigEntry
             }
         }
 
-        /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:284</c>).</summary>
+        /// <summary>
+        /// A diagnostic rendering matching Java's <c>toString()</c>
+        /// (<c>ConfigEntry.java:285-290</c>): the source prints as Java's constant name
+        /// (<c>STATIC_BROKER_CONFIG</c>) and a <see langword="null"/> value as <c>null</c>,
+        /// as <see cref="ConfigEntry.ToString"/> does; an undefined source prints as its
+        /// number.
+        /// </summary>
         /// <returns>The rendering.</returns>
         public override string ToString() =>
             string.Format(
-                CultureInfo.InvariantCulture, "ConfigSynonym(name={0}, value={1}, source={2})", Name, Value, Source);
+                CultureInfo.InvariantCulture,
+                "ConfigSynonym(name={0}, value={1}, source={2})",
+                Name,
+                Value ?? "null",
+                JavaName(Source));
     }
 }

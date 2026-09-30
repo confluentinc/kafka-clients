@@ -306,7 +306,7 @@ public sealed class AdminConfigsMarshalTests
         Assert.Equal("a", withValue.Name);
         Assert.Equal("1", withValue.Value);
         Assert.Equal(ConfigEntry.ConfigSource.StaticBrokerConfig, withValue.Source);
-        Assert.Equal("ConfigSynonym(name=a, value=1, source=StaticBrokerConfig)", withValue.ToString());
+        Assert.Equal("ConfigSynonym(name=a, value=1, source=STATIC_BROKER_CONFIG)", withValue.ToString());
 
         ConfigEntry.ConfigSynonym withNull =
             new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DefaultConfig);
