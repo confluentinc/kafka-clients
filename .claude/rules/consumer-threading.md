@@ -123,17 +123,24 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         fn client_id(&self) -> &str;
     }
 
-    pub fn new_consumer<K, V>(config: ConsumerConfig)
-        -> Result<Box<dyn Consumer<K, V>>, Error>
-    where K: Send + Sync + 'static, V: Send + Sync + 'static
-    {
-        match config.group_protocol() {
-            GroupProtocol::Consumer =>
-                Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(config)?)),
-            GroupProtocol::Classic => Err(Error::unsupported_version(
-                "Classic group protocol is not yet supported in this client; \
-                 set group.protocol=consumer (KIP-848).",
-            )),
+    impl KafkaConsumer {
+        // Java's constructor returns the delegate `ConsumerDelegateCreator`
+        // chose; Rust returns it boxed rather than wrapping it again.
+        pub fn new<K, V>(
+            config: ConsumerConfig,
+            key_deserializer: Box<dyn Deserializer<K>>,
+            value_deserializer: Box<dyn Deserializer<V>>,
+        ) -> Result<Box<dyn Consumer<K, V>>, Error>
+        where K: Send + Sync + 'static, V: Send + Sync + 'static
+        {
+            match GroupProtocol::of(config.group_protocol())? {
+                GroupProtocol::Consumer => Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(
+                    config, key_deserializer, value_deserializer)?)),
+                GroupProtocol::Classic => Err(Error::unsupported_version(
+                    "Classic group protocol is not yet supported in this client; \
+                     set group.protocol=consumer (KIP-848).",
+                )),
+            }
         }
     }
 
@@ -141,7 +148,7 @@ Implementations in Milestone 8:
 
   - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
     `consumer.internals`, so it is `pub(crate)`: users reach it only through
-    `KafkaConsumer::new` / `new_consumer` as a `Box<dyn Consumer<K, V>>`.
+    `KafkaConsumer::new` as a `Box<dyn Consumer<K, V>>`.
     `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
     with no Java class; it stays public through an entry in
     `xtask/public-audience-allowlist.txt`, because listeners need it for
@@ -154,7 +161,7 @@ Implementations in Milestone 8:
     expected.
 
 A `ClassicKafkaConsumer<K, V>` impl may be added later without breaking
-changes; `new_consumer` just gains a new arm.
+changes; `KafkaConsumer::new` just gains a new arm.
 
 **Why `#[async_trait]` despite CLAUDE.md §13:**
 
@@ -186,7 +193,7 @@ Benefits over an enum-dispatch alternative:
   - Define `Consumer<K, V>` as one `#[async_trait]` trait in
     `src/consumer/mod.rs`. Public method surface mirrors
     `Consumer.java` (Apache Kafka 4.2).
-  - Expose `Box<dyn Consumer<K, V>>` from the `new_consumer` factory.
+  - Expose `Box<dyn Consumer<K, V>>` from the `KafkaConsumer::new` factory.
   - `AsyncKafkaConsumer` and `MockConsumer` both `impl Consumer<K, V> for ...`.
   - Tests construct `MockConsumer` directly and pass it as `&mut dyn
     Consumer<K, V>` to code-under-test. No enum match, no `as_mock_mut`
@@ -451,7 +458,7 @@ Match Java behavior. Specifically:
 
 When classic-protocol support is added later, all of the above out-of-scope
 files become a new module/phase. The current public API does not change;
-`new_consumer` gains a new arm in its match.
+`KafkaConsumer::new` gains a new arm in its match.
 
 ## 27. Receive-path zero-copy contract
 

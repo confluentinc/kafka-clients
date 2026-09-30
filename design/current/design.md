@@ -333,14 +333,14 @@ processing the responses `poll()` returns, with per-batch outcomes
 ### Consumer (`src/consumer/`)
 
 `Consumer<K, V>` is a single `#[async_trait]` trait (`src/consumer/mod.rs:151`)
-with 46 methods; `new_consumer(...)` returns `Box<dyn Consumer<K, V>>`
-(`mod.rs:488`). 37 of the 46 are `async` — the ones that block in Java; the
+with 46 methods; `KafkaConsumer::new(...)` returns `Box<dyn Consumer<K, V>>`
+(`kafka_consumer.rs`). 37 of the 46 are `async` — the ones that block in Java; the
 nine sync ones are `assignment`, `subscription`, `paused`, `group_metadata`,
 `client_id`, `current_lag`, `metrics`, `wakeup` and `handle`. Implementations:
 `AsyncKafkaConsumer<K, V>` and `MockConsumer<K, V>`. A compile-time guard on
 this shape lives at `tests/consumer/trait_surface_check.rs`.
 
-Only the KIP-848 group protocol is translated. `new_consumer` rejects
+Only the KIP-848 group protocol is translated. `KafkaConsumer::new` rejects
 `group.protocol=classic` with an `unsupported_version` error rather than
 silently degrading, and the client-side assignors (`RangeAssignor`,
 `StickyAssignor`, …) have no Rust counterpart because KIP-848 assigns
@@ -442,9 +442,9 @@ the options-taking `<rpc>_options` forms an implementor writes. The other 52 are
 **trait default methods** translating Java's `default xxx(args)` bodies that
 forward to `xxx(args, new XxxOptions())`; per CLAUDE.md §2 the no-options form
 owns the plain name, so `create_topics(&[NewTopic])` forwards to
-`create_topics_options(&[NewTopic], CreateTopicsOptions::default())`. Likewise
-`close()` is the default forwarding to the required `close_timeout(Duration)`.
-`new_admin_client(config)` (`mod.rs:1121`) returns `Box<dyn Admin>`;
+`create_topics_with_options(&[NewTopic], CreateTopicsOptions::default())`. Likewise
+`close()` is the default forwarding to the required `close_with_timeout(Duration)`.
+`AdminClient::create(config)` (`admin_client.rs`) returns `Box<dyn Admin>`;
 `KafkaAdminClient` and `MockAdminClient` implement it.
 
 **Why sync methods, when the consumer's are async.** The distinguishing signal

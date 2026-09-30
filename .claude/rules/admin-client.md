@@ -212,7 +212,8 @@ surface; callers rely on per-key granularity.
 
 ```
 src/admin/
-  mod.rs                     # Admin trait, new_admin_client() factory -> Box<dyn Admin>
+  mod.rs                     # Admin trait
+  admin_client.rs            # AdminClient::create(config) factory -> Box<dyn Admin>
   admin_client_config.rs     # AdminClientConfig (plain struct + from_properties, no AbstractConfig)
   kafka_admin_client.rs      # KafkaAdminClient: owns NetworkClient + bg task handle
   mock_admin_client.rs       # MockAdminClient: in-memory fake, immediately-ready futures

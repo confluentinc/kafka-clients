@@ -87,8 +87,8 @@ In practice:
   `pub(crate)`. Tests that need them live inside the crate: the message and
   protocol tests sit under `src/common/`, and the raw-socket integration suites
   under `src/integration_tests/`.
-- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer` /
-  `new_consumer` construct it.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
+  constructs it.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
   callers use `kafka_common_ErrorCode_t`.
@@ -180,7 +180,7 @@ network work happens on the `Sender` task.*
 
 ```
 src/consumer/               # 19 files + 48 internals + 9 events
-├── mod.rs                  # Consumer<K, V> trait + new_consumer() factory
+├── mod.rs                  # Consumer<K, V> trait
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> + ConsumerHandle
 ├── mock_consumer.rs        # MockConsumer<K, V>
 ├── consumer_config.rs, consumer_record.rs, consumer_records.rs,
@@ -360,7 +360,7 @@ The 46 RPCs, in `Admin` trait declaration order:
 ```
 src/admin/
 ├── mod.rs                    # Admin trait (46 sync fn + async close)
-│                             # + new_admin_client() factory
+├── admin_client.rs           # AdminClient::create() factory -> Box<dyn Admin>
 ├── admin_client_config.rs    # AdminClientConfig (no security settings)
 ├── kafka_admin_client.rs     # KafkaAdminClient (owns NetworkClient + bg task)
 ├── mock_admin_client.rs      # MockAdminClient (in-memory fake)

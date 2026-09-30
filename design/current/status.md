@@ -301,7 +301,8 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 Translated `org.apache.kafka.clients.admin` foundation and the four topic-CRUD
 RPCs, Rust core + unit tests + real-broker integration tests, all green.
 
-- **`Admin` trait + `new_admin_client()` factory** (`src/admin/mod.rs`): per-RPC
+- **`Admin` trait + `AdminClient::create()` factory** (`src/admin/mod.rs`,
+  `src/admin/admin_client.rs`): per-RPC
   methods are plain sync `fn` returning a `*Result` holding one `KafkaFuture<T>`
   per key; only `close()` is `async fn` (the sole blocking-in-Java method). No
   `#[async_trait]` bleed into per-RPC methods or internal types. Design rules
