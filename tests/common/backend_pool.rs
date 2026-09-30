@@ -164,6 +164,13 @@ impl BackendKind {
     /// (`MULTILANG_PYTHON` overrides it); the generated gRPC stubs live under
     /// `target/grpc-native/python` and are put on `PYTHONPATH`. C runs the
     /// server binary built by CMake (`MULTILANG_C_GRPC_SERVER` overrides it).
+    /// .NET runs the server assembly with the `dotnet` host resolved through
+    /// `PATH` (`MULTILANG_DOTNET` overrides it); the assembly is the net10.0
+    /// build under `target/grpc-native/dotnet`, with the native library beside
+    /// it (`MULTILANG_DOTNET_GRPC_SERVER` overrides it). Both .NET kinds run the
+    /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
+    /// or async servicers, so a value inherited from the test process cannot
+    /// change the flavor.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -197,10 +204,22 @@ impl BackendKind {
                 require_native_artifact(self, &server, "build-grpc-native-c");
                 (Command::new(server), "build-grpc-native-c")
             },
-            BackendKind::Dotnet | BackendKind::DotnetAsync => panic!(
-                "{} native gRPC backend is not available yet; run with MULTILANG_BACKEND_MODE=container",
-                self.label()
-            ),
+            BackendKind::Dotnet | BackendKind::DotnetAsync => {
+                let dotnet = std::env::var_os("MULTILANG_DOTNET")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("dotnet"));
+                let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
+                require_native_artifact(self, &server, "build-grpc-native-dotnet");
+                let flavor = match self {
+                    BackendKind::DotnetAsync => "async",
+                    _ => "sync",
+                };
+                let mut command = Command::new(dotnet);
+                command.arg(server).env("CONSUMER_FLAVOR", flavor);
+                (command, "build-grpc-native-dotnet")
+            },
         }
     }
 }
