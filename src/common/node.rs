@@ -121,11 +121,18 @@ impl std::hash::Hash for Node {
 }
 
 impl fmt::Display for Node {
+    /// Java's `Node.toString()`:
+    /// `host + ":" + port + " (id: " + idString + " rack: " + rack + " isFenced: " + isFenced + ")"`,
+    /// where a null rack concatenates as `null`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}:{} (id: {} rack: {:?} isFenced: {})",
-            self.host, self.port, self.id_string, self.rack, self.is_fenced
+            "{}:{} (id: {} rack: {} isFenced: {})",
+            self.host,
+            self.port,
+            self.id_string,
+            self.rack.as_deref().unwrap_or("null"),
+            self.is_fenced
         )
     }
 }
@@ -151,6 +158,20 @@ mod tests {
         let node = Node::with_rack(1, "localhost".to_string(), 9092, Some("rack1".to_string()));
         assert!(node.has_rack());
         assert_eq!(node.rack(), Some("rack1"));
+    }
+
+    /// `Node.toString()` prints the rack as Java's string concatenation does:
+    /// `null` when absent, the bare rack otherwise.
+    #[test]
+    fn test_display_matches_java_to_string() {
+        assert_eq!(
+            Node::new(1, "localhost".to_string(), 9092).to_string(),
+            "localhost:9092 (id: 1 rack: null isFenced: false)"
+        );
+        assert_eq!(
+            Node::with_rack_is_fenced(2, "h".to_string(), 1, Some("r1".to_string()), true).to_string(),
+            "h:1 (id: 2 rack: r1 isFenced: true)"
+        );
     }
 
     #[test]

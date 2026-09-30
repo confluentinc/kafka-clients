@@ -185,7 +185,10 @@ pub struct ConfigEntry {
     is_sensitive: bool,
     is_read_only: bool,
     synonyms: Vec<ConfigSynonym>,
-    config_type: ConfigType,
+    /// `None` is Java's null `type`, which `KafkaAdminClient.createTopics`
+    /// passes for every entry of a `CreateTopicsResponse` (the response carries
+    /// no type).
+    config_type: Option<ConfigType>,
     documentation: Option<String>,
 }
 
@@ -224,9 +227,9 @@ pub struct ConfigEntryOptions {
     /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
     /// as in `:44` (`Collections.emptyList()`).
     pub synonyms: Vec<ConfigSynonym>,
-    /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
-    /// as in `:44`.
-    pub config_type: ConfigType,
+    /// The config data type, or `None` for Java's null. Java's `type`; starts
+    /// as `Some(`[`ConfigType::Unknown`]`)`, as in `:44`.
+    pub config_type: Option<ConfigType>,
     /// The config documentation. Java's `documentation`; starts as `None`, as in
     /// `:44`.
     pub documentation: Option<String>,
@@ -245,7 +248,7 @@ pub struct ConfigEntryOptionsBuilder {
     is_sensitive: bool,
     is_read_only: bool,
     synonyms: Vec<ConfigSynonym>,
-    config_type: ConfigType,
+    config_type: Option<ConfigType>,
     documentation: Option<String>,
 }
 
@@ -266,7 +269,7 @@ impl ConfigEntryOptionsBuilder {
             is_sensitive: false,
             is_read_only: false,
             synonyms: Vec::new(),
-            config_type: ConfigType::Unknown,
+            config_type: Some(ConfigType::Unknown),
             documentation: None,
         }
     }
@@ -303,8 +306,8 @@ impl ConfigEntryOptionsBuilder {
         self.synonyms = synonyms;
         self
     }
-    /// Sets [`ConfigEntryOptions::config_type`].
-    pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
+    /// Sets [`ConfigEntryOptions::config_type`]; `None` is Java's null `type`.
+    pub fn set_config_type(mut self, config_type: Option<ConfigType>) -> Self {
         self.config_type = config_type;
         self
     }
@@ -441,8 +444,9 @@ impl ConfigEntry {
         &self.synonyms
     }
 
-    /// Return the config data type.
-    pub fn config_type(&self) -> ConfigType {
+    /// Return the config data type, or `None` where Java's `type()` is null —
+    /// the entries `createTopics` returns, whose response carries no type.
+    pub fn config_type(&self) -> Option<ConfigType> {
         self.config_type
     }
 
@@ -463,14 +467,14 @@ impl std::fmt::Display for ConfigEntry {
         write!(
             f,
             "ConfigEntry(name={}, value={}, source={:?}, isSensitive={}, isReadOnly={}, \
-             synonyms={:?}, type={:?}, documentation={})",
+             synonyms={:?}, type={}, documentation={})",
             self.name,
             value,
             self.source,
             self.is_sensitive,
             self.is_read_only,
             self.synonyms,
-            self.config_type,
+            self.config_type.map_or_else(|| "null".to_string(), |t| format!("{t:?}")),
             self.documentation.as_deref().unwrap_or("null")
         )
     }
@@ -489,8 +493,27 @@ mod tests {
         assert!(!entry.is_sensitive());
         assert!(!entry.is_read_only());
         assert!(entry.synonyms().is_empty());
-        assert_eq!(entry.config_type(), ConfigType::Unknown);
+        assert_eq!(entry.config_type(), Some(ConfigType::Unknown));
         assert_eq!(entry.documentation(), None);
+    }
+
+    /// Java's widest constructor stores whatever `type` it is given, null
+    /// included (`KafkaAdminClient.createTopics` passes null), and `type()`
+    /// returns it unchanged; only the `(name, value)` constructor defaults it to
+    /// `UNKNOWN`.
+    #[test]
+    fn config_type_can_be_null() {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("k".to_string())
+                .set_value(Some("v".to_string()))
+                .set_config_type(None)
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(entry.config_type(), None);
+        assert!(entry.to_string().contains("type=null"), "{entry}");
+        assert_ne!(entry, ConfigEntry::new("k".to_string(), Some("v".to_string())));
     }
 
     #[test]
@@ -500,7 +523,7 @@ mod tests {
                 .set_name("k".to_string())
                 .set_value(None)
                 .set_source(ConfigSource::DefaultConfig)
-                .set_config_type(ConfigType::String)
+                .set_config_type(Some(ConfigType::String))
                 .build()
                 .unwrap(),
         );
@@ -515,7 +538,7 @@ mod tests {
                 .set_name("password".to_string())
                 .set_value(Some("secret".to_string()))
                 .set_is_sensitive(true)
-                .set_config_type(ConfigType::Password)
+                .set_config_type(Some(ConfigType::Password))
                 .build()
                 .unwrap(),
         );

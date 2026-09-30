@@ -65,6 +65,17 @@ impl Utils {
         result
     }
 
+    /// Returns whether `str` is `None`, empty, or only characters Java's
+    /// `String.trim()` strips (every code point up to and including U+0020).
+    ///
+    /// Translated from `org.apache.kafka.common.utils.Utils.isBlank`
+    /// (`str == null || str.trim().isEmpty()`). `str::trim` is not used: it
+    /// strips Unicode `White_Space`, a different set (it keeps U+0001..U+0008
+    /// and strips U+00A0), where Java's `trim` strips exactly `<= ' '`.
+    pub fn is_blank(str: Option<&str>) -> bool {
+        str.is_none_or(|s| s.chars().all(|c| c <= ' '))
+    }
+
     /// Generates a 32-bit murmur2 hash from a byte slice.
     ///
     /// This is a Kafka-specific implementation that must produce identical output
@@ -118,6 +129,19 @@ impl Utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Utils.isBlank`: null, empty and all-`<= ' '` strings are blank; any
+    /// character above U+0020 (including U+00A0, which Rust's `trim` strips)
+    /// makes the string non-blank.
+    #[test]
+    fn is_blank_matches_java_trim() {
+        assert!(Utils::is_blank(None));
+        assert!(Utils::is_blank(Some("")));
+        assert!(Utils::is_blank(Some("   ")));
+        assert!(Utils::is_blank(Some(" \t\n\r\u{1} ")));
+        assert!(!Utils::is_blank(Some(" a ")));
+        assert!(!Utils::is_blank(Some("\u{a0}")));
+    }
 
     #[test]
     fn test_to_positive() {

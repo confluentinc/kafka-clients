@@ -669,10 +669,10 @@ void test_error_payload_group_authorization(void) {
 
     const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization(err);
     TEST_ASSERT_NOT_NULL(handle);
-    char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
-    TEST_ASSERT_NOT_NULL(group_id);
-    TEST_ASSERT_EQUAL_STRING("", group_id);
-    kafka_consumer_string_destroy(group_id);
+    /* Built from the bare error code, as Java's Errors builder builds it with
+     * GroupAuthorizationException(message): Java's groupId() is null, so NULL,
+     * not "". */
+    TEST_ASSERT_NULL(kafka_common_GroupAuthorizationError_group_id(handle));
 
     TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
 

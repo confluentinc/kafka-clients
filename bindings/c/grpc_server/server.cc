@@ -3639,32 +3639,50 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
 
-    const int32_t count = kafka_admin_DescribeUserScramCredentialsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    // Emit RAW per-user rows so the client can rebuild Java's three views (all()
+    // / users() / description(user)). Enumerate present users from the all() view
+    // (which includes RESOURCE_NOT_FOUND users) plus the users() view (non-RNF);
+    // read each user's own outcome via description(user), which faults on RNF.
+    std::vector<std::string> candidates;
+    auto add_candidate = [&](const char* name) {
+      std::string s = cstr(name);
+      if (std::find(candidates.begin(), candidates.end(), s) == candidates.end()) {
+        candidates.push_back(std::move(s));
+      }
+    };
+    const int32_t all_count = kafka_admin_DescribeUserScramCredentialsResult_all_count(result);
+    for (int32_t i = 0; i < all_count; i++) {
+      add_candidate(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, i));
+    }
+    const int32_t users_count = kafka_admin_DescribeUserScramCredentialsResult_users_count(result);
+    for (int32_t i = 0; i < users_count; i++) {
+      add_candidate(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, i));
+    }
+
+    for (const std::string& user : candidates) {
       DescribeUserScramCredentialsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeUserScramCredentialsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      entry->set_user(user);
+      kafka_admin_UserScramCredentialsDescription_t* desc = nullptr;
+      kafka_common_Error_t* user_err =
+          kafka_admin_DescribeUserScramCredentialsResult_description(result, user.c_str(), &desc);
+      if (user_err != nullptr) {
+        // RESOURCE_NOT_FOUND for a no-credential/absent user, or a hard error.
+        entry->set_error_code(kafka_common_Error_code(user_err));
+        const char* msg = kafka_common_Error_message(user_err);
+        if (msg != nullptr) entry->set_error_message(msg);
+        kafka_common_Error_destroy(user_err);
         continue;
       }
-      // A user with zero credentials is a *successful* description ("the broker
-      // reports none"), not an error — Java's `all()` treats RESOURCE_NOT_FOUND
-      // that way. The salted password and salt are never returned, so there is
-      // nothing else to carry.
-      UserScramCredentialsDescription* value = entry->mutable_value();
-      value->set_name(cstr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i)));
-      const int32_t infos =
-          kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, i);
+      // Successful description (NONE); the salted password and salt are never
+      // returned, so only the mechanism/iteration pairs are carried.
+      entry->set_error_code(0);
+      const int32_t infos = kafka_admin_UserScramCredentialsDescription_credential_count(desc);
       for (int32_t j = 0; j < infos; j++) {
-        ScramCredentialInfo* info = value->add_credential_infos();
-        info->set_mechanism(
-            kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, i, j));
-        info->set_iterations(
-            kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, i, j));
+        ScramCredentialInfo* info = entry->add_credential_infos();
+        info->set_mechanism(kafka_admin_UserScramCredentialsDescription_credential_mechanism(desc, j));
+        info->set_iterations(kafka_admin_UserScramCredentialsDescription_credential_iterations(desc, j));
       }
+      kafka_admin_UserScramCredentialsDescription_destroy(desc);
     }
     kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
     return grpc::Status::OK;
@@ -4620,6 +4638,9 @@ class AdminServiceImpl final : public AdminService::Service {
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
     if (usable >= 0) dst->set_usable_bytes(usable);
+    // Java's isCordoned() (KIP-1066): a plain bool, always sent (no -1 sentinel
+    // like the volume sizes above).
+    dst->set_is_cordoned(kafka_admin_LogDirDescription_is_cordoned(description));
     const int32_t replicas = kafka_admin_LogDirDescription_replica_count(description);
     for (int32_t i = 0; i < replicas; i++) {
       ReplicaInfoEntry* replica = dst->add_replica_infos();

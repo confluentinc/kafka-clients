@@ -74,9 +74,11 @@
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterUserScramCredentialsOptions, DescribeUserScramCredentialsOptions, ScramCredentialInfo, ScramMechanism,
-    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
+    AlterUserScramCredentialsOptions, DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult,
+    ScramCredentialInfo, ScramMechanism, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion,
 };
+use confluent_kafka::common::Errors;
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -101,12 +103,8 @@ async fn alter<B: AdminBackend>(admin: &B, user: &str, alteration: UserScramCred
     all_of_exactly(admin, &altered, std::slice::from_ref(&user.to_string()), what);
 }
 
-/// Describes exactly one user, returning that user's outcome (or `None` when the
-/// response carried no entry for them at all).
-async fn describe_one<B: AdminBackend>(
-    admin: &B,
-    user: &str,
-) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::Error>> {
+/// Describes exactly one user, returning the full three-view result.
+async fn describe_result<B: AdminBackend>(admin: &B, user: &str) -> DescribeUserScramCredentialsResult {
     admin
         .describe_user_scram_credentials(
             std::slice::from_ref(&user.to_string()),
@@ -114,8 +112,83 @@ async fn describe_one<B: AdminBackend>(
         )
         .await
         .unwrap_or_else(|e| panic!("{} backend: describe SCRAM credentials: {e}", admin.name()))
-        .get(user)
-        .cloned()
+}
+
+/// Describes exactly one user through the **`all()`** view, returning that user's
+/// outcome (or `None` when the response carried no entry for them). Routed
+/// through `all()` so a RESOURCE_NOT_FOUND user reads as `Ok` with an empty
+/// credential list — Java-faithful, and what keeps the "described with no
+/// credentials after the delete" assertion valid. `description()`'s
+/// fault-on-RNF is exercised separately below.
+async fn describe_one<B: AdminBackend>(
+    admin: &B,
+    user: &str,
+) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::Error>> {
+    let result = describe_result(admin, user).await;
+    match result.all().get().await {
+        Ok(map) => map.get(user).cloned().map(Ok),
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// Exercises the `users()` and `description()` views for a user that HAS a
+/// credential: `users()` includes them and `description()` returns the
+/// description.
+async fn assert_present_via_users_and_description<B: AdminBackend>(admin: &B, user: &str) {
+    let backend = admin.name();
+    let result = describe_result(admin, user).await;
+    let users = result
+        .users()
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: users(): {e}"));
+    assert!(
+        users.iter().any(|u| u == user),
+        "{backend} backend: users() should include {user} while it has a credential, got {users:?}"
+    );
+    let description = result
+        .description(user)
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: description({user}) should succeed: {e}"));
+    assert_eq!(
+        description.name(),
+        user,
+        "{backend} backend: description() should name the requested user"
+    );
+    assert!(
+        !description.credential_infos().is_empty(),
+        "{backend} backend: description({user}) should carry the credential"
+    );
+}
+
+/// Exercises the `users()` and `description()` views for a user with **no**
+/// credential (the broker reports RESOURCE_NOT_FOUND): `users()` EXCLUDES them
+/// and `description()` FAULTS with RESOURCE_NOT_FOUND. This is the capability the
+/// old flattened per-user result could not express — it reported such a user as a
+/// successful empty-credential row, so `description()`'s fault was unreachable.
+async fn assert_absent_via_users_and_description<B: AdminBackend>(admin: &B, user: &str) {
+    let backend = admin.name();
+    let result = describe_result(admin, user).await;
+    let users = result
+        .users()
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: users(): {e}"));
+    assert!(
+        !users.iter().any(|u| u == user),
+        "{backend} backend: users() should exclude the deleted (RESOURCE_NOT_FOUND) user {user}, got {users:?}"
+    );
+    let error = result
+        .description(user)
+        .get()
+        .await
+        .expect_err("description() must fault on a RESOURCE_NOT_FOUND user after the delete");
+    assert_eq!(
+        error.code(),
+        Errors::ResourceNotFound.code(),
+        "{backend} backend: description({user}) should fault with RESOURCE_NOT_FOUND, got {error:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +264,10 @@ async fn upsert_describe_delete_scram_credential_round_trips<F: AdminBackendFact
         info.iterations()
     );
 
+    // While the credential exists, the other two views agree: users() includes
+    // the user and description() returns its description.
+    assert_present_via_users_and_description(&admin, &user).await;
+
     // 3. Delete the credential.
     let deletion: UserScramCredentialAlteration = UserScramCredentialDeletion::new(&user, mechanism).into();
     alter(&admin, &user, deletion, "alterUserScramCredentials deleting the credential").await;
@@ -211,6 +288,12 @@ async fn upsert_describe_delete_scram_credential_round_trips<F: AdminBackendFact
         SCRAM_PROPAGATION_PAUSE_MS,
     )
     .await;
+
+    // The state has settled to RESOURCE_NOT_FOUND. Now the NEW capability: while
+    // all() reports the user as an empty-credential success (asserted just above),
+    // users() EXCLUDES them and description() FAULTS with RESOURCE_NOT_FOUND — the
+    // fault the old flattened result could never surface.
+    assert_absent_via_users_and_description(&admin, &user).await;
 
     admin
         .close(Some(Duration::from_secs(5)))

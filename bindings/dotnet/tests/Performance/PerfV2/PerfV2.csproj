@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    v2 perf executable (M13/P1, Slice 2) — the head-to-head baseline run over confluent-kafka-dotnet
+    (ckd / librdkafka). References the shared client-agnostic PerformanceCommon engine + the ckd
+    Confluent.Kafka NuGet, and adapts ckd's Produce/ProduceAsync + Consume to the same backend
+    interfaces PerfV3 implements, so v2 and v3 feed the SAME measured-loop engine and are directly
+    comparable. MODE={producer,consumer} selects the benchmark (D8 — the client dimension is the exe
+    boundary, so producer/consumer collapse to a MODE env inside one exe).
+
+    ⚠ Same-assembly collision (PLAN §1.1.1): our binding AND ckd are BOTH the `Confluent.Kafka`
+    assembly + namespace, and two DLLs with the same simple name cannot coexist in one project. This
+    exe references ONLY ckd's Confluent.Kafka (never our binding); PerfV3 references ONLY ours. The two
+    exes MUST NEVER share a project/sln — separate exes with separate output dirs is what keeps the two
+    Confluent.Kafka assemblies from colliding. PerformanceCommon is client-free, so both can reference it.
+
+    Unlike PerfV3, this exe needs NO native cdylib and NO two-stage Rust build — ckd carries its own
+    bundled librdkafka native as runtimes/{rid}/native assets from the NuGet package.
+
+    Confluent.Kafka 2.15.0 (D9 — the latest stable ckd 2.x at implementation time) ships net10.0 AND
+    net8.0 assets directly, so this exe keeps the suite's net8.0;net10.0 matrix (no net8.0-only drop).
+
+    Directory.Build.props (at bindings/dotnet/) auto-applies (#nullable enable, dotnet/runtime code
+    style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4), and never
+    in any sln alongside PerfV3.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Performance.V2</RootNamespace>
+    <AssemblyName>PerfV2</AssemblyName>
+    <!-- Perf executable — never packed, no XML doc file (so no CS1591). -->
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      Scoped NoWarn for this exe only (§4 — the ckd-interop project may need a slightly wider set than
+      PerfV3, since ckd's public API is outside our style/analyzer control), each justified:
+        CA1031 — the mode entry points catch System.Exception broadly on purpose (a faithful port of the
+                 Python perf tests' try/except Exception around close/verify, which logs and continues);
+                 same relaxation as PerfV3 / PerformanceCommon.
+        CA1849 — inside the sync (serial-blocking) producer backend we intentionally block a delivery
+                 TaskCompletionSource on the caller thread (the ckd sync path has no blocking produce;
+                 CompatibleProducer's future is awaited synchronously to present the sync backend shape).
+                 The analyzer would prefer an async call, but the sync backend is sync by contract (D5).
+    -->
+    <NoWarn>$(NoWarn);CA1031;CA1849</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PerformanceCommon/PerformanceCommon.csproj" />
+    <!-- ckd (v2 baseline). Pinned to the latest stable Confluent.Kafka 2.x (D9). Confined to PerfV2 —
+         NEVER added to the shipped src/Confluent.Kafka binding (STANDING CONSTRAINT 2). -->
+    <PackageReference Include="Confluent.Kafka" Version="2.15.0" />
+  </ItemGroup>
+
+</Project>

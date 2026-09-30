@@ -38,21 +38,33 @@
 //!
 //! - a **bare (synchronous)** entry point that submits the RPC and blocks until
 //!   every per-key future has resolved, writing one flattened result handle; and
-//! - an **`_async`** entry point that submits the RPC, returns immediately, and
-//!   delivers the same flattened result handle through a C callback (see
-//!   *Callback thread* below).
+//! - an **`_async`** entry point that submits the RPC and returns immediately.
 //!
 //! In both cases the RPC method itself is invoked on the **calling** thread, so
 //! the request is enqueued as promptly as in Java; only the awaiting of the
 //! per-key futures moves to the tokio runtime.
 //!
+//! For most RPCs, the `_async` entry point delivers one flattened result handle
+//! through a single C callback once every key has resolved (see *Callback
+//! thread* below) — the same shape as the synchronous path, just non-blocking.
+//! For the topic-family RPCs (`create_topics`, `delete_topics` [by name and by
+//! id], `describe_topics` [by name and by id], `create_partitions`,
+//! `delete_records`), the `_async` entry point instead fires its callback
+//! **once per key, independently, as that key's own future resolves** —
+//! matching Java's per-key `KafkaFuture` semantics exactly, so a fast or
+//! already-resolved key is not held up by a slow or failing one. See each
+//! entry point's own doc comment and its per-key callback typedef for the
+//! exact shape; `admin_async_per_key_op` is the shared mechanism.
+//!
 //! # Callback thread
 //!
-//! Every `_async` entry point fires its callback **exactly once**, but not
-//! always on the same thread:
+//! Every `_async` entry point fires its callback **exactly once per distinct
+//! key** (for the per-key RPCs above; a key named twice in one request is one
+//! key, as in Java's result maps) **or exactly once for the whole batch** (every
+//! other RPC), but not always on the same thread:
 //!
-//! - Normally, on the handle's **dispatcher thread**, after the RPC's futures
-//!   have resolved.
+//! - Normally, on the handle's **dispatcher thread**, after the relevant
+//!   future(s) have resolved.
 //! - **Synchronously, on the calling thread, before the entry point returns**,
 //!   when the operation fails before it can be submitted: `admin` is NULL, or
 //!   argument marshaling fails (an unparseable base64 topic id passed to
@@ -60,7 +72,10 @@
 //!   `_describe_topics_by_ids_async`, or an unknown `AlterConfigOp.OpType` code
 //!   passed to `kafka_admin_AdminClient_incremental_alter_configs_async`). This
 //!   is plain bad input, not only a programming error, so a caller must not
-//!   assume the entry point has returned by the time the callback runs.
+//!   assume the entry point has returned by the time the callback runs. For a
+//!   per-key RPC this fan-out fires the callback once per distinct requested
+//!   key, all with the same error — the caller already created one `Future`/`Promise`
+//!   per key and expects every one of them to resolve.
 //! - On a **tokio worker thread**, if the dispatcher's completion queue can no
 //!   longer be reached when the result arrives. Handle destruction does not
 //!   cause this: each async operation clones the sender before spawning and
@@ -81,7 +96,14 @@
 //! A flattened `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
 //! `_get_value(i)` / `_get_error(i)` / `_destroy`, so per-key data *and* per-key
 //! errors survive the boundary; only independent per-key *timing* is lost (which
-//! C cannot express without a `KafkaFuture` type).
+//! C cannot express without a `KafkaFuture` type). This still describes every
+//! **synchronous** entry point, and the `_async` entry points for every RPC
+//! outside the topic family above. For the topic family's `_async` entry
+//! points, per-key timing is *not* lost — that is the point of the per-key
+//! callback shape — so there is no flattened result handle on that path at
+//! all; each key's value (if any) arrives as its own small owned handle
+//! (`kafka_admin_TopicMetadataAndConfig_t` / `kafka_admin_TopicDescription_t` /
+//! `kafka_admin_DeletedRecords_t`), freed independently of any `*Result_t`.
 //!
 //! # Counts are never negative; absence is a separate predicate
 //!
@@ -128,27 +150,29 @@
 use crate::common::requests::DescribeClientQuotasRequest;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::admin::config_entry::{ConfigSource, ConfigType};
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
-    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
-    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
+    ClassicGroupDescription, Config, ConfigEntry, ConsumerGroupDescription, CreateAclsOptions,
+    CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
     DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
     DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
     DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureMetadata,
-    FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, ListTransactionsResult, LogDirDescription, MemberAssignment, MemberDescription,
+    MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
+    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
     ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
     TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
     UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
@@ -179,10 +203,11 @@ use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{
-    ElectionType, Error, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection, TopicPartition,
-    TopicPartitionInfo, TopicPartitionReplica, Uuid,
+    ElectionType, Error, Errors, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection,
+    TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
 use crate::consumer::OffsetAndMetadata;
+use crate::leave_group_request_data::MemberIdentity;
 
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -852,6 +877,180 @@ where
     unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
 }
 
+/// Async dispatch for a multi-key admin RPC that delivers **one callback per
+/// key, independently, as that key's own future resolves** — the reverse of
+/// [`admin_async_value_op`], which joins every key into one flattened result
+/// via `KafkaFuture::join_map_results` before firing a single callback for the
+/// whole batch. This is the Java-faithful shape: `Admin` RPCs hand back one
+/// `KafkaFuture<T>` per key (`admin-client.md` §5), and a caller may observe a
+/// fast or already-resolved key without waiting on a slow or failed one.
+///
+/// Thin wrapper over [`admin_async_per_key_outcome_op`] for the RPCs whose
+/// result has a future for every requested key: a key the RPC's result omits
+/// cannot happen in Java there, so if the core ever omits one it gets an
+/// explicit `LOCAL_ILLEGAL_STATE` error ("the requested key was not present in
+/// the admin RPC's response") rather than a callback that never fires
+/// (CLAUDE.md §5: an explicit error beats a hang).
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_async_per_key_op<K, T, S, C>(
+    admin: *const kafka_admin_AdminClient_t,
+    user_data: *mut c_void,
+    keys: Vec<K>,
+    submit: S,
+    complete: C,
+) where
+    K: PartialEq + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
+    C: Fn(K, Result<T, Error>, *mut c_void) + Send + Sync + 'static,
+{
+    unsafe {
+        admin_async_per_key_outcome_op(admin, user_data, keys, submit, move |key, outcome, ud| {
+            let outcome = outcome.unwrap_or_else(|| {
+                Err(Error::local_illegal_state(
+                    "the requested key was not present in the admin RPC's response",
+                ))
+            });
+            complete(key, outcome, ud)
+        })
+    };
+}
+
+/// The general form of [`admin_async_per_key_op`]: `complete` receives
+/// `Some(outcome)` for a key the RPC's result holds a future for, and `None`
+/// for a requested key the result **omits** — which Java callers see as the key
+/// simply absent from the result map (`values().get(key) == null`). Only an RPC
+/// whose Java result can omit a requested key uses this form directly:
+/// `MockAdminClient.describeReplicaLogDirs` skips a replica of an unknown topic
+/// (`continue` before creating its future). Every other per-key RPC goes
+/// through [`admin_async_per_key_op`].
+///
+/// `submit` runs on the **calling** thread (inside the runtime context,
+/// exactly as Java's `Admin.createTopics(...)` enqueues its request on the
+/// caller's thread and returns immediately) and returns the RPC's per-key
+/// futures paired with the same key representation exposed to C — already
+/// stringified topic ids, etc. A `Vec` rather than a `HashMap`: entry order
+/// carries no meaning here (each key is delivered independently), a `Vec`
+/// just avoids requiring `K: Hash + Eq`.
+///
+/// **Keys are de-duplicated, first occurrence wins.** Java's per-key results
+/// are maps keyed by the request's key, so a key named twice in one request
+/// has one entry and one future (for `createTopics` the first spec wins, as
+/// `KafkaAdminClient.createTopics` skips a topic already in its `futures` map;
+/// for `alterClientQuotas` the map simply collapses). So `complete` runs
+/// **once per distinct key** in `keys`, never once per occurrence — a repeated
+/// key no longer gets a second, synthetic callback. `entries` is de-duplicated
+/// the same way, so one key never gets two registrations. Some callers already
+/// pass distinct keys; de-duplicating again is a no-op for them. A binding that
+/// counts callbacks (e.g. to balance reference counts) must count distinct
+/// keys.
+///
+/// On success, each entry's future gets its own [`KafkaFuture::when_complete`]
+/// registration — no join, no aggregate future, no waiting on other keys.
+/// `complete` runs once per key, **as that key resolves**, routed through the
+/// completion-dispatch queue exactly like every other async op (never invoked
+/// directly from inside `when_complete`'s own eager callback, which can run on
+/// the admin background task while admin-internal locks are held).
+///
+/// If `admin` is null or `submit` fails outright (the whole RPC could not be
+/// submitted — e.g. an unparseable base64 topic id), `complete` fires once
+/// **per distinct key in `keys`**, synchronously on the calling thread, all
+/// with the same error. This keeps the "exactly one callback per key" contract
+/// total: the binding already created one `Future`/`Promise` per key, from its
+/// own input, before making this call, and expects every one of them to
+/// resolve exactly once — a submission failure must not leave any of them
+/// pending forever.
+///
+/// A distinct key present in `keys` but absent from `entries` gets
+/// `complete(key, None, ..)`, synchronously on the calling thread before the
+/// real entries are registered, so its `Future`/`Promise` still resolves
+/// exactly once instead of staying pending forever.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_async_per_key_outcome_op<K, T, S, C>(
+    admin: *const kafka_admin_AdminClient_t,
+    user_data: *mut c_void,
+    keys: Vec<K>,
+    submit: S,
+    complete: C,
+) where
+    K: PartialEq + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
+    C: Fn(K, Option<Result<T, Error>>, *mut c_void) + Send + Sync + 'static,
+{
+    let keys = distinct_by(keys, |k| k);
+    if admin.is_null() {
+        let err = Error::local_illegal_argument("admin handle must not be null");
+        for key in keys {
+            complete(key, Some(Err(err.clone())), user_data);
+        }
+        return;
+    }
+    let h = unsafe { handle_ref(admin) };
+    // Kept alive across the `when_complete` registrations below, not just
+    // `submit`: `register_completion`'s default (combinator futures, never
+    // actually reached here — see the doc comment above) spawns a task and
+    // needs a runtime context to do so; `Completable`'s eager override (what
+    // every admin per-key future actually is) does not need one, but there is
+    // no reason to make that distinction load-bearing here.
+    let _guard = h.runtime.enter();
+    let entries = match submit(h.admin()) {
+        Ok(entries) => distinct_by(entries, |(k, _)| k),
+        Err(e) => {
+            // The whole RPC could not be submitted: every requested key fails
+            // with the same error, inline on the calling thread — mirroring
+            // `admin_async_future_op`'s single-callback failure path, just
+            // fanned out over every key instead of firing once.
+            for key in keys {
+                complete(key, Some(Err(e.clone())), user_data);
+            }
+            return;
+        },
+    };
+    // Both sides are distinct now, so a key is either matched by exactly one
+    // entry or absent from `entries` altogether.
+    for key in keys {
+        if !entries.iter().any(|(k, _)| *k == key) {
+            complete(key, None, user_data);
+        }
+    }
+    let complete = Arc::new(complete);
+    // `SendUserData` wraps a raw pointer, not an owned resource: cloning the
+    // pointer value once per key mirrors how a multi-shot C callback is meant
+    // to reuse the same `user_data` across every invocation.
+    let ud_ptr = SendUserData(user_data).into_ptr();
+    for (key, future) in entries {
+        let tx = h.completion_tx.clone();
+        let complete = Arc::clone(&complete);
+        let ud = SendUserData(ud_ptr);
+        future.when_complete(move |result| {
+            let result = result.clone();
+            let ud = ud;
+            let job: CompletionJob = Box::new(move || complete(key, Some(result), ud.into_ptr()));
+            enqueue_or_run_inline(&tx, job);
+        });
+    }
+}
+
+/// Keeps the first occurrence of each distinct key (by `key_of`), preserving
+/// order. Admin requests are small, so the quadratic scan is cheaper than
+/// demanding `Hash` from every key type.
+fn distinct_by<E, K: PartialEq>(items: Vec<E>, key_of: impl Fn(&E) -> &K) -> Vec<E> {
+    let mut distinct: Vec<E> = Vec::with_capacity(items.len());
+    for item in items {
+        if !distinct.iter().any(|kept| key_of(kept) == key_of(&item)) {
+            distinct.push(item);
+        }
+    }
+    distinct
+}
+
 // ---------------------------------------------------------------------------
 // Shared marshaling helpers
 // ---------------------------------------------------------------------------
@@ -1019,7 +1218,8 @@ struct NewTopicBuilder {
     num_partitions: Option<i32>,
     replication_factor: Option<i16>,
     replicas_assignments: BTreeMap<i32, Vec<i32>>,
-    configs: BTreeMap<String, String>,
+    /// `None` is Java's null config value.
+    configs: BTreeMap<String, Option<String>>,
 }
 
 impl NewTopicBuilder {
@@ -1101,23 +1301,30 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 }
 
 /// Sets a topic-level configuration entry (Java's `NewTopic.configs(Map)`,
-/// applied one key at a time). No-op if any parameter is null.
+/// applied one key at a time; a repeated key replaces the earlier value, as
+/// `Map.put` does). No-op if `topic` or `key` is null.
+///
+/// A NULL `value` is Java's null map value: the entry is kept and sent to the
+/// broker with a null value (`NewTopic.convertToCreatableTopic` copies it into
+/// `CreatableTopicConfig.value`, which is nullable), which is distinct from the
+/// empty string `""`.
 ///
 /// # Safety
 ///
-/// `topic` must be a valid handle; `key` and `value` valid C strings.
+/// `topic` must be a valid handle; `key` a valid C string; `value` NULL or a
+/// valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     topic: *mut kafka_admin_NewTopic_t,
     key: *const c_char,
     value: *const c_char,
 ) {
-    if topic.is_null() || key.is_null() || value.is_null() {
+    if topic.is_null() || key.is_null() {
         return;
     }
     let builder = unsafe { new_topic_mut(topic) };
     let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
-    let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
+    let v = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string());
     builder.configs.insert(k, v);
 }
 
@@ -1465,12 +1672,12 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
 
 /// A `ConfigEntry` flattened for C.
 ///
-/// Every field Java's `ConfigEntry` exposes is carried. `createTopics` only
-/// populates the first five (the broker's `CreateTopicsResponse` carries no
-/// source, type, documentation or synonyms), which is why
-/// [`kafka_admin_TopicMetadataAndConfig_t`] keeps its own flat `_config_*`
-/// accessors for them; `describeConfigs` populates all of them and hands out a
-/// [`kafka_admin_ConfigEntry_t`] instead.
+/// Every field Java's `ConfigEntry` exposes is carried. `createTopics` entries
+/// carry what Java's `configEntry(CreatableTopicConfigs)` sets — name, value,
+/// source, sensitivity and read-only — with no synonyms and a null type and
+/// documentation; `describeConfigs` populates every field. Both are reachable
+/// as [`kafka_admin_ConfigEntry_t`] (for `createTopics` through
+/// [`kafka_admin_TopicMetadataAndConfig_config`]).
 struct ConfigEntryC {
     name_c: CString,
     /// `None` for a null config value (Java's `ConfigEntry.value()` is nullable).
@@ -1479,7 +1686,9 @@ struct ConfigEntryC {
     is_sensitive: bool,
     is_read_only: bool,
     source_c: CString,
-    config_type_c: CString,
+    /// `None` for a null type (Java's `ConfigEntry.type()`; `createTopics`
+    /// entries have none).
+    config_type_c: Option<CString>,
     /// `None` for null documentation (Java's `ConfigEntry.documentation()`).
     documentation_c: Option<CString>,
     synonyms: Vec<ConfigSynonymC>,
@@ -1496,7 +1705,7 @@ impl ConfigEntryC {
             is_sensitive: entry.is_sensitive(),
             is_read_only: entry.is_read_only(),
             source_c: to_cstring(config_source_name(entry.source())),
-            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            config_type_c: entry.config_type().map(|t| to_cstring(config_type_name(t))),
             documentation_c: entry.documentation().map(to_cstring),
             synonyms: entry
                 .synonyms()
@@ -1617,6 +1826,27 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
     }
 }
 
+/// Destroys a `Config` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_configs_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeConfigsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeConfigsResult_t`] and is freed by
+/// [`kafka_admin_DescribeConfigsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `config` must be null or an owned handle from the `describe_configs`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Config_destroy(config: *mut kafka_admin_Config_t) {
+    if !config.is_null() {
+        unsafe { drop(Box::from_raw(config as *mut ConfigInner)) };
+    }
+}
+
 /// Returns the entry name (borrowed).
 ///
 /// # Safety
@@ -1686,17 +1916,22 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 }
 
 /// Returns the config type as Java's enum constant name (borrowed), e.g.
-/// `"STRING"` or `"UNKNOWN"`.
+/// `"STRING"` or `"UNKNOWN"`, or null where Java's `type()` is null.
 ///
 /// `ConfigEntry.ConfigType` has no numeric id in Java, so the name is the
-/// contract.
+/// contract. A `describeConfigs` entry always has a type (`"UNKNOWN"` when the
+/// broker did not report one); a `createTopics` entry never has one, because
+/// Java builds it with a null type (`KafkaAdminClient.java:1884-1893`).
 ///
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
-    unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
+    match &unsafe { config_entry_ref(entry) }.config_type_c {
+        Some(config_type) => config_type.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the entry documentation (borrowed), or null when the broker did not
@@ -1802,7 +2037,10 @@ struct TopicMetadataAndConfigInner {
     topic_id_c: CString,
     num_partitions: i32,
     replication_factor: i32,
-    configs: Vec<ConfigEntryC>,
+    /// The topic's config, handed out whole by
+    /// [`kafka_admin_TopicMetadataAndConfig_config`] and entry by entry by the
+    /// flat `_config_*` accessors. Empty when the metadata is unavailable.
+    config: ConfigInner,
 }
 
 impl TopicMetadataAndConfigInner {
@@ -1817,7 +2055,9 @@ impl TopicMetadataAndConfigInner {
                 // same `ensure_success` gate, which just returned `Ok`.
                 num_partitions: value.num_partitions().unwrap_or(-1),
                 replication_factor: value.replication_factor().unwrap_or(-1),
-                configs: value.config().map(|c| ConfigEntryC::from_config(&c)).unwrap_or_default(),
+                config: ConfigInner {
+                    entries: value.config().map(|c| ConfigEntryC::from_config(&c)).unwrap_or_default(),
+                },
             },
             Err(e) => Self {
                 error: Some(error_inner(e)),
@@ -1825,7 +2065,7 @@ impl TopicMetadataAndConfigInner {
                 // Matches `create_topics_result::UNKNOWN`.
                 num_partitions: -1,
                 replication_factor: -1,
-                configs: Vec::new(),
+                config: ConfigInner { entries: Vec::new() },
             },
         }
     }
@@ -1897,6 +2137,35 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
     unsafe { metadata_ref(mc) }.replication_factor
 }
 
+/// Returns the topic's config (borrowed) — Java's
+/// `TopicMetadataAndConfig.config()` — or null if the metadata is unavailable
+/// (Java's `config()` throws the error [`kafka_admin_TopicMetadataAndConfig_error`]
+/// returns).
+///
+/// Read it with the `kafka_admin_Config_*` accessors; each entry is a full
+/// [`kafka_admin_ConfigEntry_t`], so `kafka_admin_ConfigEntry_source` is
+/// reachable. As in Java, a `createTopics` entry has no synonyms and a null type
+/// and documentation (`kafka_admin_ConfigEntry_type` returns null). Entries are
+/// sorted by name, in the same order as the flat `_config_*` accessors. It is
+/// borrowed from `mc`: valid until `mc` is freed — by
+/// [`kafka_admin_TopicMetadataAndConfig_destroy`] for a per-key async value, or
+/// by [`kafka_admin_CreateTopicsResult_destroy`] for one borrowed from a
+/// synchronous result. Do not destroy it.
+///
+/// # Safety
+///
+/// `mc` must be a valid `TopicMetadataAndConfig` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config(
+    mc: *const kafka_admin_TopicMetadataAndConfig_t,
+) -> *const kafka_admin_Config_t {
+    let inner = unsafe { metadata_ref(mc) };
+    if inner.error.is_some() {
+        return std::ptr::null();
+    }
+    &inner.config as *const ConfigInner as *const kafka_admin_Config_t
+}
+
 /// Returns the number of topic config entries (0 if the metadata is
 /// unavailable).
 ///
@@ -1907,7 +2176,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
-    unsafe { metadata_ref(mc) }.configs.len() as i32
+    unsafe { metadata_ref(mc) }.config.entries.len() as i32
 }
 
 /// Returns the name of the config entry at `index` (borrowed), or null if out of
@@ -1992,7 +2261,28 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
     if index < 0 {
         return None;
     }
-    inner.configs.get(index as usize)
+    inner.config.entries.get(index as usize)
+}
+
+/// Destroys a `TopicMetadataAndConfig` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_create_topics_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_CreateTopicsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_CreateTopicsResult_t`] and is freed by
+/// [`kafka_admin_CreateTopicsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `mc` must be null or an owned handle from the `create_topics` per-key async
+/// callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_destroy(mc: *mut kafka_admin_TopicMetadataAndConfig_t) {
+    if !mc.is_null() {
+        unsafe { drop(Box::from_raw(mc as *mut TopicMetadataAndConfigInner)) };
+    }
 }
 
 /// Opaque handle to a `TopicPartitionInfo`.
@@ -2373,6 +2663,29 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
     index: i32,
 ) -> i32 {
     authorized_operation_at(unsafe { description_ref(description) }.authorized_operations.as_deref(), index)
+}
+
+/// Destroys a `TopicDescription` handle delivered **individually** by the
+/// `describe_topics` per-key async callbacks
+/// ([`kafka_admin_AdminClient_describe_topics_async`] /
+/// [`kafka_admin_AdminClient_describe_topics_by_ids_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeTopicsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeTopicsResult_t`] and is freed by
+/// [`kafka_admin_DescribeTopicsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `description` must be null or an owned handle from a `describe_topics`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicDescription_destroy(description: *mut kafka_admin_TopicDescription_t) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut TopicDescriptionInner)) };
+    }
 }
 
 /// Opaque handle to a `TopicListing`.
@@ -3017,6 +3330,61 @@ pub struct kafka_admin_DeleteRecordsResult_t {
 /// for an out-of-range index. Real low watermarks are never negative.
 const UNKNOWN_LOW_WATERMARK: i64 = -1;
 
+/// Opaque handle to a `DeletedRecords`, delivered **individually** by
+/// [`kafka_admin_AdminClient_delete_records_async`]'s per-key callback.
+///
+/// The flattened, synchronous [`kafka_admin_DeleteRecordsResult_t`] path
+/// (above) inlines Java's `DeletedRecords` — whose only field is the low
+/// watermark — directly into its `_get_low_watermark(i)` accessor rather than
+/// minting a handle for a one-field type. The per-key async callback has no
+/// containing result handle to inline into, so it gets this minimal owned
+/// handle instead; both read the same underlying value.
+#[repr(C)]
+pub struct kafka_admin_DeletedRecords_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeletedRecords_t`].
+struct DeletedRecordsInner {
+    low_watermark: i64,
+}
+
+/// Casts a `*const kafka_admin_DeletedRecords_t` to a reference.
+///
+/// # Safety
+///
+/// `dr` must be a non-null pointer from the `delete_records` per-key async
+/// callback.
+unsafe fn deleted_records_ref(dr: *const kafka_admin_DeletedRecords_t) -> &'static DeletedRecordsInner {
+    unsafe { &*(dr as *const DeletedRecordsInner) }
+}
+
+/// Returns the partition's low watermark after the deletion (Java's
+/// `DeletedRecords.lowWatermark()`).
+///
+/// # Safety
+///
+/// `dr` must be a valid pointer from the `delete_records` per-key async
+/// callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeletedRecords_low_watermark(dr: *const kafka_admin_DeletedRecords_t) -> i64 {
+    unsafe { deleted_records_ref(dr) }.low_watermark
+}
+
+/// Destroys a `DeletedRecords` handle delivered by the `delete_records`
+/// per-key async callback. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `dr` must be null or an owned handle from the `delete_records` per-key
+/// async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeletedRecords_destroy(dr: *mut kafka_admin_DeletedRecords_t) {
+    if !dr.is_null() {
+        unsafe { drop(Box::from_raw(dr as *mut DeletedRecordsInner)) };
+    }
+}
+
 /// Backing state for [`kafka_admin_DeleteRecordsResult_t`].
 ///
 /// The key is a `TopicPartition`, which C reads as a topic name plus a partition
@@ -3293,6 +3661,102 @@ fn submit_describe_topics_by_ids(
     Ok(KafkaFuture::join_map_results(entries))
 }
 
+// ---------------------------------------------------------------------------
+// RPC submission helpers — per-key (unjoined) variants
+//
+// Same `Admin` calls as above, but returning the per-key futures unjoined
+// (`Vec<(key, KafkaFuture<T>)>` instead of one `join_map_results`-aggregated
+// `KafkaFuture`), for `admin_async_per_key_op`'s independent-per-key delivery.
+// The synchronous/flattened path keeps using the `join_map_results` variants
+// above unchanged.
+// ---------------------------------------------------------------------------
+
+/// Submits `createTopics`, unjoined.
+fn submit_create_topics_entries(
+    admin: &dyn Admin,
+    new_topics: &[NewTopic],
+    options: CreateTopicsOptions,
+) -> Vec<(String, KafkaFuture<TopicMetadataAndConfig>)> {
+    let result = admin.create_topics_with_options(new_topics, options);
+    result.futures().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
+}
+
+/// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+fn submit_delete_topics_by_names_entries(
+    admin: &dyn Admin,
+    names: Vec<String>,
+    options: DeleteTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.delete_topics_with_options(TopicCollection::of_topic_names(names), options);
+    let values = result
+        .topic_name_values()
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
+    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
+}
+
+/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys are
+/// re-stringified (Java's `Uuid.toString()`) so the callback's key parameter
+/// is the same base64 string representation the caller passed in, matching
+/// the by-name variant's `String` key.
+fn submit_delete_topics_by_ids_entries(
+    admin: &dyn Admin,
+    ids: Vec<Uuid>,
+    options: DeleteTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.delete_topics_with_options(TopicCollection::of_topic_ids(ids), options);
+    let values = result
+        .topic_id_values()
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
+    Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
+}
+
+/// Submits `describeTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+fn submit_describe_topics_by_names_entries(
+    admin: &dyn Admin,
+    names: Vec<String>,
+    options: DescribeTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<TopicDescription>)>, Error> {
+    let result = admin.describe_topics_with_topics_options(TopicCollection::of_topic_names(names), options);
+    let values = result
+        .topic_name_values()
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
+    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
+}
+
+/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys
+/// are re-stringified, as for `submit_delete_topics_by_ids_entries`.
+fn submit_describe_topics_by_ids_entries(
+    admin: &dyn Admin,
+    ids: Vec<Uuid>,
+    options: DescribeTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<TopicDescription>)>, Error> {
+    let result = admin.describe_topics_with_topics_options(TopicCollection::of_topic_ids(ids), options);
+    let values = result
+        .topic_id_values()
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
+    Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
+}
+
+/// Submits `createPartitions`, unjoined.
+fn submit_create_partitions_entries(
+    admin: &dyn Admin,
+    new_partitions: &HashMap<String, NewPartitions>,
+    options: CreatePartitionsOptions,
+) -> Vec<(String, KafkaFuture<()>)> {
+    let result = admin.create_partitions_with_options(new_partitions, options);
+    result.values().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
+}
+
+/// Submits `deleteRecords`, unjoined.
+fn submit_delete_records_entries(
+    admin: &dyn Admin,
+    records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+    options: DeleteRecordsOptions,
+) -> Vec<(TopicPartition, KafkaFuture<DeletedRecords>)> {
+    let result = admin.delete_records_with_options(records_to_delete, options);
+    result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect()
+}
+
 /// Writes a boxed result handle to `out_result` and returns null, or returns the
 /// boxed error and leaves `*out_result` untouched — the ownership contract every
 /// sync FFI entry point in this crate follows.
@@ -3377,30 +3841,46 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     unsafe { finish_sync(outcome, out_result, box_create_topics_result) }
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_topics_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_topics_async`], fired **once per topic, as
+/// that topic's own future resolves** — independently of every other topic in
+/// the same call, matching Java's `Map<String, KafkaFuture<TopicMetadataAndConfig>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreateTopicsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_create_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `key` is the topic name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. Exactly one of `value` / `error`
+/// is non-null; `value` is owned by the callback and must be freed with
+/// [`kafka_admin_TopicMetadataAndConfig_destroy`] (**not**
+/// [`kafka_admin_CreateTopicsResult_destroy`], which is for the synchronous /
+/// flattened result only), and `error` with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_create_topics_callback_t = unsafe extern "C" fn(
+    *const c_char,
+    *mut kafka_admin_TopicMetadataAndConfig_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch — a fast or
+/// already-resolved topic is not held up by a slow or failing one. It is
+/// called once per distinct requested topic name (NULL entries in `topics` are
+/// skipped; a name given twice is one key, and — as in Java's `createTopics` —
+/// its first spec wins), but not always on the same thread. Per key, it normally runs
+/// on the handle's dispatcher thread. It runs **synchronously on the calling
+/// thread, before this function returns, for every key**, when the RPC cannot
+/// be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be
+/// reached when a given topic's result arrives. Destroying the handle does not
+/// cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys (or the same call's failure fan-out) are not guaranteed to
+/// be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
 ///
 /// # Safety
 ///
@@ -3417,18 +3897,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
     user_data: *mut c_void,
 ) {
     let new_topics = unsafe { read_new_topics(topics, count) };
+    let keys: Vec<String> = new_topics.iter().map(|t| t.name().to_string()).collect();
     let options = create_topics_options(timeout_ms, validate_only, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_topics(a, &new_topics, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_topics_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_create_topics_entries(a, &new_topics, options)),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(metadata) => (
+                        Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&metadata)))
+                            as *mut kafka_admin_TopicMetadataAndConfig_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3445,13 +3932,20 @@ fn delete_topics_options(timeout_ms: i32, retry_on_quota_violation: bool) -> Del
         .set_retry_on_quota_violation(retry_on_quota_violation)
 }
 
-/// Completion callback for the `delete_topics` async entry points.
+/// Per-key completion callback for the `delete_topics` async entry points,
+/// fired **once per topic, as that topic's own future resolves** —
+/// independently of every other topic in the same call. Shared by the
+/// by-names and by-ids variants (they are one Java method,
+/// `deleteTopics(TopicCollection)`, and produce the same result shape:
+/// `KafkaFuture<Void>` per key, so there is no value parameter — a null
+/// `error` *is* the success value, as for `create_partitions`).
 ///
-/// Shared by the by-names and by-ids variants (they are one Java method,
-/// `deleteTopics(TopicCollection)`, and produce the same result shape). Exactly
-/// one of `result` / `error` is non-null and the callback owns it.
+/// `key` is the topic name (by-names) or the base64 topic id (by-ids),
+/// borrowed and valid only for the duration of this call — copy it if you
+/// need to retain it. `error` is owned by the callback and must be freed with
+/// `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_delete_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous).
@@ -3489,16 +3983,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// Deletes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// once per distinct name in `names` (NULL entries are skipped; a repeated name
+/// is one key, as in Java's result map), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3517,18 +4015,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
     user_data: *mut c_void,
 ) {
     let topic_names = unsafe { read_strings(names, count) };
+    let keys = topic_names.clone();
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_delete_topics_by_names(a, topic_names, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_topics_result(outcomes, String::clone), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| submit_delete_topics_by_names_entries(a, topic_names, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -3567,17 +4065,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// Deletes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. If any
+/// `topic_ids` entry is NULL or fails to parse as a base64 `Uuid`, the whole
+/// call fails and every key — the raw strings as passed in, not the parsed
+/// ids — gets that same error (mirroring Java's `Uuid.fromString`, which would
+/// throw before any `KafkaFuture` could be created). Otherwise it is called
+/// once per distinct id (a repeated id is one key, as in Java's result map),
+/// but not always on the same thread. Per key, it
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
-/// base64 topic id). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// the calling thread, before this function returns, for every key**, when the
+/// RPC cannot be submitted at all (a NULL `admin` handle, or the parse failure
+/// above). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given topic's result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3595,19 +4100,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
     callback: kafka_admin_AdminClient_delete_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // The raw strings, used as the fan-out key set if parsing fails below —
+    // Python's futures dict is keyed by these, not by the parsed `Uuid`s.
+    let keys = unsafe { read_strings(topic_ids, count) };
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_delete_topics_by_ids(a, parsed?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_topics_result(outcomes, Uuid::to_string), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| submit_delete_topics_by_ids_entries(a, parsed?, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -3722,13 +4229,21 @@ fn describe_topics_options(
     }
 }
 
-/// Completion callback for the `describe_topics_with_topics` async entry points.
+/// Per-key completion callback for the `describe_topics` async entry points,
+/// fired **once per topic, as that topic's own future resolves** —
+/// independently of every other topic in the same call. Shared by the
+/// by-names and by-ids variants (one Java method,
+/// `describeTopics(TopicCollection)`).
 ///
-/// Shared by the by-names and by-ids variants (one Java method,
-/// `describeTopics(TopicCollection)`). Exactly one of `result` / `error` is
-/// non-null and the callback owns it.
+/// `key` is the topic name (by-names) or the base64 topic id (by-ids),
+/// borrowed and valid only for the duration of this call — copy it if you
+/// need to retain it. Exactly one of `value` / `error` is non-null; `value` is
+/// owned by the callback and must be freed with
+/// [`kafka_admin_TopicDescription_destroy`] (**not**
+/// [`kafka_admin_DescribeTopicsResult_destroy`], which is for the synchronous
+/// / flattened result only), and `error` with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_admin_TopicDescription_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous). This is
@@ -3763,16 +4278,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// Describes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// once per distinct name in `names` (NULL entries are skipped; a repeated name
+/// is one key, as in Java's result map), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3792,18 +4311,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
     user_data: *mut c_void,
 ) {
     let topic_names = unsafe { read_strings(names, count) };
+    let keys = topic_names.clone();
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_topics_by_names(a, topic_names, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_topics_result(outcomes, String::clone), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_topics_by_names_entries(a, topic_names, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(TopicDescriptionInner::new(&description)))
+                            as *mut kafka_admin_TopicDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3843,17 +4369,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// Describes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
-/// base64 topic id). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. If any
+/// `topic_ids` entry is NULL or fails to parse as a base64 `Uuid`, the whole
+/// call fails and every key — the raw strings as passed in, not the parsed
+/// ids — gets that same error. Otherwise it is called once per distinct id (a
+/// repeated id is one key, as in Java's result map), but not always on the
+/// same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or the parse failure above). And
+/// it runs on a **tokio worker thread** if the dispatcher's completion queue
+/// can no longer be reached when a given topic's result arrives. Destroying
+/// the handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier callback.
+/// So callbacks for different keys are not guaranteed to be serialised on one
+/// thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3872,19 +4404,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
     callback: kafka_admin_AdminClient_describe_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    let keys = unsafe { read_strings(topic_ids, count) };
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_topics_by_ids(a, parsed?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_topics_result(outcomes, Uuid::to_string), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_topics_by_ids_entries(a, parsed?, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(TopicDescriptionInner::new(&description)))
+                            as *mut kafka_admin_TopicDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3907,14 +4446,18 @@ fn create_partitions_options(
         .set_retry_on_quota_violation(retry_on_quota_violation)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_partitions_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_partitions_async`], fired **once per
+/// topic, as that topic's own future resolves** — independently of every
+/// other topic in the same call. Java's per-topic future is
+/// `KafkaFuture<Void>`, so there is no value parameter — a null `error` *is*
+/// the success value, as for `delete_topics`.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreatePartitionsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
-/// `result`, not as `error`.
+/// `key` is the topic name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. `error` is owned by the callback
+/// and must be freed with `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_create_partitions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreatePartitionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Increases the partition count of the given topics, blocking until every
 /// per-topic future has resolved (synchronous).
@@ -3965,16 +4508,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 /// Increases the partition count of the given topics asynchronously. See
 /// [`kafka_admin_AdminClient_create_partitions`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// once per distinct topic in `topics` (skipping NULL-paired entries), but not
+/// always on the same thread. Per key, it normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns, for every key**, when the RPC cannot be submitted at
+/// all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3996,18 +4542,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
     user_data: *mut c_void,
 ) {
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
+    let keys: Vec<String> = specs.keys().cloned().collect();
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_partitions(a, &specs, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_partitions_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_create_partitions_entries(a, &specs, options)),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -4017,14 +4563,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
 // deleteRecords
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_delete_records_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_delete_records_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<DeletedRecords>>`. The key is a
+/// `TopicPartition`, delivered as a topic name plus a partition id — like the
+/// synchronous result's `_get_topic(i)` / `_get_partition(i)` pair — rather
+/// than through a single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteRecordsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_DeletedRecords_destroy`], and `error` with
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_delete_records_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteRecordsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, *mut kafka_admin_DeletedRecords_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes the records before the given offset of each partition, blocking until
 /// every per-partition future has resolved (synchronous).
@@ -4072,16 +4626,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 /// Deletes records asynchronously. See
 /// [`kafka_admin_AdminClient_delete_records`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch. It is called once per distinct `(topic, partition)` pair in the
+/// input (skipping NULL-topic entries), but not always on the same thread. Per
+/// key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given partition's result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -4102,18 +4660,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     user_data: *mut c_void,
 ) {
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
+    let keys: Vec<TopicPartition> = records.keys().cloned().collect();
     let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_delete_records(a, &records, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_records_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_delete_records_entries(a, &records, options)),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let (value, error) = match outcome {
+                    Ok(deleted) => (
+                        Box::into_raw(Box::new(DeletedRecordsInner { low_watermark: deleted.low_watermark() }))
+                            as *mut kafka_admin_DeletedRecords_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), tp.partition(), value, error, ud);
             },
         )
     };
@@ -4211,9 +4776,17 @@ unsafe fn read_replicas(
 /// row `i` applies `(config_names[i] -> config_values[i], op_types[i])` to the
 /// resource `(resource_type_codes[i], resource_names[i])`. Rows for the same
 /// resource are grouped, keeping their relative order (Java applies a
-/// resource's ops in iteration order). A row with a NULL resource name or a NULL
-/// config name is skipped; a NULL *value* is meaningful and becomes Java's null
-/// value (which is what `DELETE` sends).
+/// resource's ops in iteration order). A row with a NULL resource name is
+/// skipped entirely. A row with a non-NULL resource name but a NULL config
+/// name registers that resource in the output map with **no** op contributed —
+/// this is how a resource whose Java `Collection<AlterConfigOp>` is empty
+/// still reaches `Admin::incremental_alter_configs` (which, like Java's
+/// `configs.keySet()`, iterates every map key regardless of whether its op
+/// list is empty) instead of silently vanishing from the request the way a
+/// zero-row resource otherwise would. `.or_default()` is idempotent, so this
+/// row may appear anywhere relative to the resource's real op rows without
+/// changing the result. A NULL *value* on a real op row is meaningful and
+/// becomes Java's null value (which is what `DELETE` sends).
 ///
 /// # Errors
 ///
@@ -4238,8 +4811,17 @@ unsafe fn read_alter_config_ops(
     }
     for i in 0..n {
         let resource_name_ptr = unsafe { *resource_names.add(i) };
+        if resource_name_ptr.is_null() {
+            continue;
+        }
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name_ptr = unsafe { *config_names.add(i) };
-        if resource_name_ptr.is_null() || config_name_ptr.is_null() {
+        if config_name_ptr.is_null() {
+            // Explicit "no-op" row: registers the resource (possibly with an
+            // already-populated entry from an earlier real op row) without
+            // contributing an AlterConfigOp. See the doc comment above.
+            out.entry(ConfigResource::new(resource_type, resource_name)).or_default();
             continue;
         }
         let op_code = unsafe { *op_type_codes.add(i) };
@@ -4249,8 +4831,6 @@ unsafe fn read_alter_config_ops(
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
-        let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
             None
@@ -4267,6 +4847,47 @@ unsafe fn read_alter_config_ops(
             .push(AlterConfigOp::new(ConfigEntry::new(config_name, value), op_type));
     }
     Ok(out)
+}
+
+/// Extracts the distinct config resources named across the flat
+/// `incrementalAlterConfigs` rows, preserving first-occurrence order.
+///
+/// Java's per-resource future (`admin-client.md` §5) is one `KafkaFuture<Void>`
+/// per resource, not per operation, but the C rows are one per *operation*
+/// (`read_alter_config_ops`), so a resource with several ops must be
+/// de-duplicated down to a single key before it can drive
+/// [`admin_async_per_key_op`]'s fan-out. This runs independently of
+/// `read_alter_config_ops`'s parse (which can fail on an unknown op-type code),
+/// so an async submission failure still fans out over every resource the
+/// caller named rather than none of them.
+///
+/// # Safety
+///
+/// `resource_type_codes` and `resource_names` must be null or have `count`
+/// readable entries each, every name NULL or a valid C string.
+unsafe fn distinct_config_resources(
+    resource_type_codes: *const i32,
+    resource_names: *const *const c_char,
+    count: i32,
+) -> Vec<ConfigResource> {
+    let n = count.max(0) as usize;
+    let mut out: Vec<ConfigResource> = Vec::new();
+    if resource_type_codes.is_null() || resource_names.is_null() {
+        return out;
+    }
+    for i in 0..n {
+        let name_ptr = unsafe { *resource_names.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource = ConfigResource::new(resource_type, name);
+        if !out.contains(&resource) {
+            out.push(resource);
+        }
+    }
+    out
 }
 
 /// Sorts a per-`ConfigResource` outcome map by `(type id, name)`.
@@ -4332,6 +4953,8 @@ struct LogDirDescriptionInner {
     error: Option<ErrorInner>,
     total_bytes: i64,
     usable_bytes: i64,
+    /// Java's `LogDirDescription.isCordoned()` (KIP-1066).
+    is_cordoned: bool,
     replicas: Vec<ReplicaInfoC>,
 }
 
@@ -4354,6 +4977,7 @@ impl LogDirDescriptionInner {
             error: description.error().cloned().map(error_inner),
             total_bytes: description.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
             usable_bytes: description.usable_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+            is_cordoned: description.is_cordoned(),
             replicas,
         }
     }
@@ -4409,6 +5033,22 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
     unsafe { log_dir_ref(description) }.usable_bytes
+}
+
+/// Returns whether this log directory is cordoned.
+///
+/// This is Java's `LogDirDescription.isCordoned()` (KIP-1066). A cordoned
+/// directory is one an operator has marked so the broker stops placing new
+/// partitions on it, typically ahead of decommissioning the volume.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> bool {
+    unsafe { log_dir_ref(description) }.is_cordoned
 }
 
 /// Returns the number of replicas hosted in this log dir.
@@ -4597,6 +5237,27 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
     }
 }
 
+/// Destroys a `LogDirDescriptionMap` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_log_dirs_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeLogDirsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeLogDirsResult_t`] and is freed by
+/// [`kafka_admin_DescribeLogDirsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `map` must be null or an owned handle from the `describe_log_dirs` per-key
+/// async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_destroy(map: *mut kafka_admin_LogDirDescriptionMap_t) {
+    if !map.is_null() {
+        unsafe { drop(Box::from_raw(map as *mut LogDirDescriptionMapInner)) };
+    }
+}
+
 /// Opaque handle to a `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
 #[repr(C)]
 pub struct kafka_admin_ReplicaLogDirInfo_t {
@@ -4691,6 +5352,27 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag
     unsafe { replica_log_dir_info_ref(info) }.future_offset_lag
 }
 
+/// Destroys a `ReplicaLogDirInfo` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`]'s per-key
+/// callback. Safe with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeReplicaLogDirsResult_t`] and is freed by
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `info` must be null or an owned handle from the `describe_replica_log_dirs`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_destroy(info: *mut kafka_admin_ReplicaLogDirInfo_t) {
+    if !info.is_null() {
+        unsafe { drop(Box::from_raw(info as *mut ReplicaLogDirInfoInner)) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // describeCluster
 // ---------------------------------------------------------------------------
@@ -4700,7 +5382,9 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag
 struct DescribeClusterOutcome {
     nodes: Vec<Node>,
     controller: Option<Node>,
-    cluster_id: String,
+    /// `None` is Java's null cluster id (the `Metadata` fallback's nullable
+    /// `ClusterId`).
+    cluster_id: Option<String>,
     /// `None` when the operations were not requested or the broker omitted them
     /// (Java returns null).
     authorized_operations: Option<BTreeSet<AclOperation>>,
@@ -4718,7 +5402,7 @@ pub struct kafka_admin_DescribeClusterResult_t {
 /// four attributes of one cluster, not a map, so the handle exposes them
 /// directly and any failure is a whole-call failure.
 struct DescribeClusterResultInner {
-    cluster_id_c: CString,
+    cluster_id_c: Option<CString>,
     nodes: Vec<Node>,
     controller: Option<Node>,
     /// `None` is Java's null (the broker did not report the operations), which
@@ -4731,7 +5415,7 @@ struct DescribeClusterResultInner {
 /// Flattens the cluster description into the C handle.
 fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_admin_DescribeClusterResult_t {
     let inner = DescribeClusterResultInner {
-        cluster_id_c: to_cstring(&outcome.cluster_id),
+        cluster_id_c: outcome.cluster_id.as_deref().map(to_cstring),
         nodes: outcome.nodes,
         controller: outcome.controller,
         authorized_operations: outcome
@@ -4752,7 +5436,9 @@ unsafe fn describe_cluster_result_ref(
     unsafe { &*(result as *const DescribeClusterResultInner) }
 }
 
-/// Returns the cluster id (borrowed).
+/// Returns the cluster id (borrowed), or null where Java's `clusterId()` is
+/// null: a broker too old for `DescribeCluster` is answered through the
+/// `Metadata` fallback, whose `ClusterId` is nullable.
 ///
 /// # Safety
 ///
@@ -4761,7 +5447,10 @@ unsafe fn describe_cluster_result_ref(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const c_char {
-    unsafe { describe_cluster_result_ref(result) }.cluster_id_c.as_ptr()
+    match &unsafe { describe_cluster_result_ref(result) }.cluster_id_c {
+        Some(cluster_id) => cluster_id.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the number of nodes in the cluster.
@@ -5170,6 +5859,18 @@ fn submit_describe_configs(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `describeConfigs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_describe_configs`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+fn submit_describe_configs_entries(
+    admin: &dyn Admin,
+    resources: &[ConfigResource],
+    options: DescribeConfigsOptions,
+) -> Vec<(ConfigResource, KafkaFuture<Config>)> {
+    let result = admin.describe_configs_with_options(resources, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
 /// Builds `DescribeConfigsOptions` from the flat C option parameters.
 fn describe_configs_options(
     timeout_ms: i32,
@@ -5182,14 +5883,22 @@ fn describe_configs_options(
         .set_include_documentation(include_documentation)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_describe_configs_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_configs_async`], fired **once per
+/// resource, as that resource's own future resolves** — independently of every
+/// other resource in the same call, matching Java's
+/// `Map<ConfigResource, KafkaFuture<Config>>` (`admin-client.md` §5), rather
+/// than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeConfigsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
-/// `result`, not as `error`.
+/// `resource_type` is the resource's `ConfigResource.Type.id()` and
+/// `resource_name` its name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. Exactly one of `value` / `error`
+/// is non-null; `value` is owned by the callback and must be freed with
+/// [`kafka_admin_Config_destroy`] (**not**
+/// [`kafka_admin_DescribeConfigsResult_destroy`], which is for the synchronous
+/// / flattened result only), and `error` with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(i32, *const c_char, *mut kafka_admin_Config_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the configuration of the given resources, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5235,16 +5944,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
 /// Describes resource configurations asynchronously. See
 /// [`kafka_admin_AdminClient_describe_configs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per
+/// resource, as that resource's future resolves**, not once for the whole
+/// batch — a fast or already-resolved resource is not held up by a slow or
+/// failing one. It is called exactly once per **distinct** requested resource
+/// (entries skipped for a NULL name, and duplicate `(type, name)` resources
+/// collapsed to one — Java keys the result on `ConfigResource`), but not always
+/// on the same thread. Per key, it normally runs on the handle's dispatcher thread.
+/// It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// resource's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -5266,18 +5981,37 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     user_data: *mut c_void,
 ) {
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
+    // Distinct resources (first-occurrence order): Java's `describeConfigs`
+    // result map is keyed by `ConfigResource`, so a repeated resource is one
+    // key. `admin_async_per_key_op` de-duplicates as well; doing it here keeps
+    // the key list in step with the C incref count
+    // (`count_distinct_config_resources`, shared with the Configs alter family).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        resources
+            .iter()
+            .filter(|r| seen.insert((*r).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_configs(a, &resources, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_configs_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_describe_configs_entries(a, &resources, options)),
+            move |resource, outcome, ud| {
+                let name_c = to_cstring(resource.name());
+                let resource_type = i32::from(resource.resource_type().id());
+                let (value, error) = match outcome {
+                    Ok(config) => (
+                        Box::into_raw(Box::new(ConfigInner::new(&config))) as *mut kafka_admin_Config_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(resource_type, name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -5427,15 +6161,32 @@ fn submit_incremental_alter_configs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_incremental_alter_configs_async`].
+/// Submits `incrementalAlterConfigs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_incremental_alter_configs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_incremental_alter_configs_entries(
+    admin: &dyn Admin,
+    configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+    options: AlterConfigsOptions,
+) -> Vec<(ConfigResource, KafkaFuture<()>)> {
+    let result = admin.incremental_alter_configs_with_options(configs, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_incremental_alter_configs_async`], fired **once
+/// per resource, as that resource's own future resolves** — independently of
+/// every other resource in the same call. There is no value parameter: Java's
+/// per-resource future is `KafkaFuture<Void>` (as for `create_partitions`), so
+/// a null `error` *is* the success value.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterConfigsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
-/// `result`, not as `error`.
+/// `resource_type` is the resource's `ConfigResource.Type.id()` and
+/// `resource_name` its name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. `error` is owned by the callback
+/// and must be freed with `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(i32, *const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Incrementally alters resource configurations, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5446,9 +6197,14 @@ pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
 /// `(resource_types[i], resource_names[i])`. Rows naming the same resource are
 /// grouped in order. `resource_types` hold `ConfigResource.Type.id()` codes and
 /// `op_types` hold `AlterConfigOp.OpType.id()` codes (0 = SET, 1 = DELETE,
-/// 2 = APPEND, 3 = SUBTRACT). A row with a NULL resource name or config name is
-/// skipped; a NULL `config_values` entry is the null value DELETE uses. An
-/// unknown op-type code fails the whole call with an illegal-argument error.
+/// 2 = APPEND, 3 = SUBTRACT). A row with a NULL resource name is skipped
+/// entirely; a row with a non-NULL resource name but a NULL config name
+/// registers that resource with **no** op from this row — the way to include a
+/// resource whose Java `Collection<AlterConfigOp>` is empty, since Java itself
+/// creates a future for every map key regardless of whether its op list is
+/// empty. A NULL `config_values` entry (on a row that does carry a config
+/// name) is the null value DELETE uses. An unknown op-type code fails the
+/// whole call with an illegal-argument error.
 ///
 /// On success writes a [`kafka_admin_AlterConfigsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_AlterConfigsResult_destroy`]) and returns null.
@@ -5495,17 +6251,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
 /// Incrementally alters resource configurations asynchronously. See
 /// [`kafka_admin_AdminClient_incremental_alter_configs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unknown `AlterConfigOp.OpType`
-/// code). And it runs on a **tokio worker
+/// Unlike the synchronous entry point, the callback fires **once per
+/// resource, as that resource's future resolves**, not once for the whole
+/// batch — a fast or already-resolved resource is not held up by a slow or
+/// failing one. It is called once per **distinct** resource named across the
+/// input rows (several rows may target the same resource; Java's future is
+/// one per resource, not per operation), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, or an unknown `AlterConfigOp.OpType` code — the latter still fans
+/// out over every named resource, since the resource set is computed
+/// independently of the op-type parse). And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// a given resource's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -5528,22 +6292,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
     callback: kafka_admin_AdminClient_incremental_alter_configs_callback_t,
     user_data: *mut c_void,
 ) {
+    let keys = unsafe { distinct_config_resources(resource_types, resource_names, count) };
     let parsed =
         unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
     let options = AlterConfigsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_validate_only(validate_only);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_incremental_alter_configs(a, &parsed?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_configs_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_incremental_alter_configs_entries(a, &parsed?, options)),
+            move |resource, outcome, ud| {
+                let name_c = to_cstring(resource.name());
+                let resource_type = i32::from(resource.resource_type().id());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(resource_type, name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -6080,14 +6845,38 @@ fn submit_describe_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_describe_log_dirs_async`].
+/// Submits `describeLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_describe_log_dirs`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+fn submit_describe_log_dirs_entries(
+    admin: &dyn Admin,
+    brokers: &[i32],
+    options: DescribeLogDirsOptions,
+) -> Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> {
+    let result = admin.describe_log_dirs_with_options(brokers, options);
+    result.descriptions().iter().map(|(b, f)| (*b, f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_log_dirs_async`], fired **once per
+/// broker, as that broker's own future resolves** — independently of every
+/// other broker in the same call, matching Java's
+/// `Map<Integer, KafkaFuture<Map<String, LogDirDescription>>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeLogDirsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// Exactly one of `value` / `error` is non-null; `value` is owned by the
+/// callback and must be freed with [`kafka_admin_LogDirDescriptionMap_destroy`]
+/// (**not** [`kafka_admin_DescribeLogDirsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`. A per-log-dir error (as opposed to a
+/// per-broker failure) still arrives inside `value` — see
+/// [`kafka_admin_LogDirDescription_error`].
+pub type kafka_admin_AdminClient_describe_log_dirs_callback_t = unsafe extern "C" fn(
+    i32, /* broker id */
+    *mut kafka_admin_LogDirDescriptionMap_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Queries the log directories of the given brokers, blocking until every
 /// per-broker future has resolved (synchronous).
@@ -6125,16 +6914,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
 /// Queries broker log directories asynchronously. See
 /// [`kafka_admin_AdminClient_describe_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per broker,
+/// as that broker's future resolves**, not once for the whole batch — a fast
+/// or already-resolved broker is not held up by a slow or failing one. It is
+/// called once per distinct requested broker id (a repeated id is one key, as
+/// in Java's result map), but not always on the same thread. Per key, it
+/// normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when a given broker's result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -6152,18 +6945,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let broker_ids = unsafe { read_i32s(brokers, count) };
+    // Distinct broker ids (first-occurrence order): Java's `describeLogDirs`
+    // result map is keyed by broker id, so a repeated id is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_i32s`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        broker_ids.iter().copied().filter(|b| seen.insert(*b)).collect::<Vec<_>>()
+    };
     let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_log_dirs_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_describe_log_dirs_entries(a, &broker_ids, options)),
+            move |broker_id, outcome, ud| {
+                let (value, error) = match outcome {
+                    Ok(map) => (
+                        Box::into_raw(Box::new(LogDirDescriptionMapInner::new(&map)))
+                            as *mut kafka_admin_LogDirDescriptionMap_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(broker_id, value, error, ud);
             },
         )
     };
@@ -6379,15 +7185,36 @@ fn submit_alter_replica_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_replica_log_dirs_async`].
+/// Submits `alterReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_alter_replica_log_dirs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_alter_replica_log_dirs_entries(
+    admin: &dyn Admin,
+    replica_assignment: &HashMap<TopicPartitionReplica, String>,
+    options: AlterReplicaLogDirsOptions,
+) -> Vec<(TopicPartitionReplica, KafkaFuture<()>)> {
+    let result = admin.alter_replica_log_dirs_with_options(replica_assignment, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_replica_log_dirs_async`], fired **once per
+/// replica, as that replica's own future resolves** — independently of every
+/// other replica in the same call, matching Java's
+/// `Map<TopicPartitionReplica, KafkaFuture<Void>>` (`admin-client.md` §5),
+/// rather than waiting for the whole batch. The key is a
+/// `TopicPartitionReplica`, delivered as a topic name, a partition id and a
+/// broker id — like the synchronous result's `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_broker_id(i)` triple — rather than through a
+/// single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
-/// `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-replica
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value.
+/// A non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, i32, *mut kafka_common_Error_t, *mut c_void);
 
 /// Moves the given replicas to new log directories, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -6428,16 +7255,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
 /// Moves replicas to new log directories asynchronously. See
 /// [`kafka_admin_AdminClient_alter_replica_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per replica,
+/// as that replica's future resolves**, not once for the whole batch — a fast
+/// or already-resolved replica is not held up by a slow or failing one. It is
+/// called once per distinct `(topic, partition, broker id)` triple in the
+/// input (skipping entries with a NULL topic or NULL log dir), but not always
+/// on the same thread. Per key, it normally runs on the handle's dispatcher
+/// thread. It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// replica's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -6459,18 +7291,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
+    let keys: Vec<TopicPartitionReplica> = assignment.keys().cloned().collect();
     let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_replica_log_dirs_entries(a, &assignment, options)),
+            move |replica, outcome, ud| {
+                let topic_c = to_cstring(replica.topic());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(topic_c.as_ptr(), replica.partition(), replica.broker_id(), error, ud);
             },
         )
     };
@@ -6699,15 +7531,52 @@ fn submit_describe_replica_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`].
+/// Submits `describeReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_replica_log_dirs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_describe_replica_log_dirs_entries(
+    admin: &dyn Admin,
+    replicas: &[TopicPartitionReplica],
+    options: DescribeReplicaLogDirsOptions,
+) -> Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> {
+    let result = admin.describe_replica_log_dirs_with_options(replicas, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`], fired **once
+/// per replica, as that replica's own future resolves** — independently of
+/// every other replica in the same call, matching Java's
+/// `Map<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch. The key is
+/// a `TopicPartitionReplica`, delivered as a topic name, a partition id and a
+/// broker id — like the synchronous result's `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_broker_id(i)` triple — rather than through a
+/// single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. At most one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ReplicaLogDirInfo_destroy`] (**not**
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`.
+///
+/// **Both null means the replica is absent from the result** — Java's
+/// `values().get(replica) == null`. Only Java's `MockAdminClient` produces
+/// that: it skips a replica of a topic it does not know (`if (topicMetadata !=
+/// null)` guards the future's creation), whereas `KafkaAdminClient` completes
+/// a future for every requested replica. The callback still fires exactly
+/// once for such a replica, so nothing waits on it forever.
+pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t = unsafe extern "C" fn(
+    *const c_char,
+    i32,
+    i32,
+    *mut kafka_admin_ReplicaLogDirInfo_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Queries the log directories of the given replicas, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -6748,16 +7617,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
 /// Queries replica log directories asynchronously. See
 /// [`kafka_admin_AdminClient_describe_replica_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per replica,
+/// as that replica's future resolves**, not once for the whole batch — a fast
+/// or already-resolved replica is not held up by a slow or failing one. It is
+/// called once per distinct requested replica (skipping entries with a NULL
+/// topic; a replica the result omits is delivered with both `value` and `error`
+/// null, see [`kafka_admin_AdminClient_describe_replica_log_dirs_callback_t`]),
+/// but not always on the same thread. Per key, it normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns, for every key**, when the RPC cannot be submitted
+/// at all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// replica's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -6778,18 +7653,41 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     user_data: *mut c_void,
 ) {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
+    // Distinct replicas (first-occurrence order): Java's `describeReplicaLogDirs`
+    // result map is keyed by `TopicPartitionReplica`, so a repeated replica is
+    // one key. `admin_async_per_key_outcome_op` de-duplicates as well; doing it
+    // here keeps the key list in step with the C incref count
+    // (`count_distinct_replicas`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        replicas
+            .iter()
+            .filter(|r| seen.insert((*r).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // The outcome form: a replica the result omits (the mock's unknown-topic
+    // skip) arrives as `None` and is delivered as Java's absent key — both
+    // `value` and `error` null — rather than as an invented error.
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_outcome_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+            keys,
+            move |a| Ok(submit_describe_replica_log_dirs_entries(a, &replicas, options)),
+            move |replica, outcome, ud| {
+                let topic_c = to_cstring(replica.topic());
+                let (value, error) = match outcome {
+                    Some(Ok(info)) => (
+                        Box::into_raw(Box::new(ReplicaLogDirInfoInner::new(&info)))
+                            as *mut kafka_admin_ReplicaLogDirInfo_t,
+                        std::ptr::null_mut(),
+                    ),
+                    Some(Err(e)) => (std::ptr::null_mut(), box_error(e)),
+                    None => (std::ptr::null_mut(), std::ptr::null_mut()),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), replica.partition(), replica.broker_id(), value, error, ud);
             },
         )
     };
@@ -6933,8 +7831,13 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
 /// Opaque handle to a `ListOffsetsResultInfo` (Java's
 /// `ListOffsetsResult.ListOffsetsResultInfo`).
 ///
-/// Borrowed from the owning `listOffsets` result handle; valid until that handle
-/// is destroyed. Do not free it.
+/// Two provenances, like `kafka_common_Error_t` (see `_get_error(i)` vs. an
+/// owned callback error): from [`kafka_admin_ListOffsetsResult_get_value`]
+/// (the synchronous / flattened result path) it is **borrowed**, valid until
+/// the owning [`kafka_admin_ListOffsetsResult_t`] is destroyed — do not free
+/// it. From [`kafka_admin_AdminClient_list_offsets_async`]'s per-key callback
+/// it is **owned** and must be freed with
+/// [`kafka_admin_ListOffsetsResultInfo_destroy`] instead.
 #[repr(C)]
 pub struct kafka_admin_ListOffsetsResultInfo_t {
     _private: [u8; 0],
@@ -7007,6 +7910,26 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
             true
         },
         None => false,
+    }
+}
+
+/// Destroys a `ListOffsetsResultInfo` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_list_offsets_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_ListOffsetsResult_get_value`] — that one is borrowed from its
+/// owning [`kafka_admin_ListOffsetsResult_t`] and is freed by
+/// [`kafka_admin_ListOffsetsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `info` must be null or an owned handle from the `list_offsets` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_destroy(info: *mut kafka_admin_ListOffsetsResultInfo_t) {
+    if !info.is_null() {
+        unsafe { drop(Box::from_raw(info as *mut ListOffsetsResultInfoInner)) };
     }
 }
 
@@ -7863,6 +8786,19 @@ fn submit_alter_partition_reassignments(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `alterPartitionReassignments`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
+/// as [`submit_alter_partition_reassignments`]; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_alter_partition_reassignments_entries(
+    admin: &dyn Admin,
+    reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+    options: AlterPartitionReassignmentsOptions,
+) -> Vec<(TopicPartition, KafkaFuture<()>)> {
+    let result = admin.alter_partition_reassignments_with_options(reassignments, options);
+    result.values().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect()
+}
+
 /// Submits `listPartitionReassignments` and returns its single `reassignments()`
 /// future.
 fn submit_list_partition_reassignments(
@@ -7895,6 +8831,38 @@ fn submit_list_offsets(
         entries.push((tp.clone(), result.partition_result(tp)?));
     }
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `listOffsets`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_list_offsets`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+///
+/// `listOffsets` is the first RPC in this file whose real (non-mock) `Admin`
+/// implementation resolves its per-key futures through the
+/// `AdminApiDriver`/`PartitionLeaderStrategy` machinery (`admin-client.md`
+/// §2) rather than a single `Call`: partitions that share a leader are
+/// fetched by one wire request and so tend to resolve together in practice.
+/// That does not change this function's contract — `Admin::list_offsets`
+/// still returns one `KafkaFuture` per partition (`ListOffsetsResult`'s own
+/// doc comment), and [`admin_async_per_key_op`] still registers one
+/// independent `when_complete` per entry — it only means a genuinely
+/// independent completion *timing* between two partitions of this RPC is
+/// harder to observe end-to-end than for a simple `Call`-based RPC. The
+/// direct `admin_async_per_key_op`-level test below is unaffected by this,
+/// since it drives the two futures by hand rather than through a real
+/// leader-lookup round trip.
+fn submit_list_offsets_entries(
+    admin: &dyn Admin,
+    topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+    options: ListOffsetsOptions,
+) -> Result<Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)>, Error> {
+    let result = admin.list_offsets_with_options(topic_partition_offsets, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
+        Vec::with_capacity(topic_partition_offsets.len());
+    for tp in topic_partition_offsets.keys() {
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -8038,15 +9006,22 @@ fn read_election_type(election_type: i32) -> Result<ElectionType, Error> {
 // alterPartitionReassignments
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_partition_reassignments_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_partition_reassignments_async`], fired
+/// **once per partition, as that partition's own future resolves** —
+/// independently of every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<Void>>` (`admin-client.md` §5), rather
+/// than waiting for the whole batch. The key is a `TopicPartition`, delivered
+/// as a topic name and a partition id — like the synchronous result's
+/// `_get_topic(i)` / `_get_partition(i)` pair — rather than through a single
+/// opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterPartitionReassignmentsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-partition failure
-/// arrives inside `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-partition
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
+/// non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterPartitionReassignmentsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, *mut kafka_common_Error_t, *mut c_void);
 
 /// Changes the reassignments of one or more partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -8117,19 +9092,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
 /// Changes partition reassignments asynchronously. See
 /// [`kafka_admin_AdminClient_alter_partition_reassignments`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or a non-cancelled entry with no
-/// target replicas). And it runs on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding operation
-/// holds its own sender, so it cannot disconnect the queue; what remains is a
-/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch — a fast or already-resolved partition is not held up by a slow or
+/// failing one. It is called once per distinct `(topic, partition)` pair in
+/// the input (skipping entries with a NULL topic), but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, or a non-cancelled entry with no target replicas). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given partition's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -8150,20 +9130,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_a
     callback: kafka_admin_AdminClient_alter_partition_reassignments_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_reassignments`'s fallible per-entry
+    // parse (an empty replica list on a non-cancelled entry is an error), so
+    // every requested key still gets its own callback via
+    // `admin_async_per_key_op`'s fan-out even when the parse below fails.
+    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     let reassignments =
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_partition_reassignments(a, &reassignments?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_partition_reassignments_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_partition_reassignments_entries(a, &reassignments?, options)),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(topic_c.as_ptr(), tp.partition(), error, ud);
             },
         )
     };
@@ -8287,14 +9271,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_as
 // listOffsets
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_list_offsets_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_list_offsets_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch. The key
+/// is a `TopicPartition`, delivered as a topic name and a partition id —
+/// like the synchronous result's `_get_topic(i)` / `_get_partition(i)` pair —
+/// rather than through a single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListOffsetsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_list_offsets_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ListOffsetsResultInfo_destroy`] (**not**
+/// [`kafka_admin_ListOffsetsResult_destroy`], which is for the synchronous /
+/// flattened result only), and `error` with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_list_offsets_callback_t = unsafe extern "C" fn(
+    *const c_char, /* topic */
+    i32,           /* partition */
+    *mut kafka_admin_ListOffsetsResultInfo_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Lists the offsets of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -8357,20 +9356,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
 
 /// Lists offsets asynchronously. See [`kafka_admin_AdminClient_list_offsets`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, an unknown `isolation_level`, or a
-/// `spec_timestamps` entry that is neither flagged as a timestamp nor a
-/// recognised sentinel). And it runs on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding operation
-/// holds its own sender, so it cannot disconnect the queue; what remains is a
-/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch — a fast or already-resolved partition is not held up by a slow or
+/// failing one. It is called once per distinct `(topic, partition)` pair in
+/// the input (skipping entries with a NULL topic), but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, an unknown `isolation_level`, or a `spec_timestamps` entry that is
+/// neither flagged as a timestamp nor a recognised sentinel). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given partition's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -8389,18 +9393,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
     callback: kafka_admin_AdminClient_list_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_offset_specs`'s fallible per-entry
+    // sentinel parse and of `list_offsets_options`'s fallible isolation-level
+    // parse, so every requested key still gets its own callback via
+    // `admin_async_per_key_op`'s fan-out even when either parse below fails.
+    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_list_offsets_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_list_offsets_entries(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let (value, error) = match outcome {
+                    Ok(info) => (
+                        Box::into_raw(Box::new(ListOffsetsResultInfoInner { info }))
+                            as *mut kafka_admin_ListOffsetsResultInfo_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), tp.partition(), value, error, ud);
             },
         )
     };
@@ -8977,8 +9992,14 @@ fn optional_node_ptr(node: Option<&Node>) -> *const kafka_common_Node_t {
 /// Opaque handle to a `ConsumerGroupDescription` (Java's
 /// `org.apache.kafka.clients.admin.ConsumerGroupDescription`).
 ///
-/// Borrowed from the owning `describe_consumer_groups` result handle; valid
-/// until that handle is destroyed. Do not free it.
+/// Two provenances, like `kafka_admin_ListOffsetsResultInfo_t` (see
+/// `_get_value(i)` vs. an owned callback value): from
+/// [`kafka_admin_DescribeConsumerGroupsResult_get_value`] (the synchronous /
+/// flattened result path) it is **borrowed**, valid until the owning
+/// [`kafka_admin_DescribeConsumerGroupsResult_t`] is destroyed — do not free
+/// it. From [`kafka_admin_AdminClient_describe_consumer_groups_async`]'s
+/// per-key callback it is **owned** and must be freed with
+/// [`kafka_admin_ConsumerGroupDescription_destroy`] instead.
 #[repr(C)]
 pub struct kafka_admin_ConsumerGroupDescription_t {
     _private: [u8; 0],
@@ -9239,11 +10260,39 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_
     unsafe { write_optional(consumer_group_description_ref(description).target_assignment_epoch, out_epoch) }
 }
 
+/// Destroys a `ConsumerGroupDescription` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_describe_consumer_groups_async`]). Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_DescribeConsumerGroupsResult_get_value`] — that one is
+/// borrowed from its owning [`kafka_admin_DescribeConsumerGroupsResult_t`] and
+/// is freed by [`kafka_admin_DescribeConsumerGroupsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `description` must be null or an owned handle from the
+/// `describe_consumer_groups` per-key async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_destroy(
+    description: *mut kafka_admin_ConsumerGroupDescription_t,
+) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut ConsumerGroupDescriptionInner)) };
+    }
+}
+
 /// Opaque handle to a `ClassicGroupDescription` (Java's
 /// `org.apache.kafka.clients.admin.ClassicGroupDescription`).
 ///
-/// Borrowed from the owning `describe_classic_groups` result handle; valid
-/// until that handle is destroyed. Do not free it.
+/// Two provenances, like `kafka_admin_ListOffsetsResultInfo_t` (see
+/// `_get_value(i)` vs. an owned callback value): from
+/// [`kafka_admin_DescribeClassicGroupsResult_get_value`] (the synchronous /
+/// flattened result path) it is **borrowed**, valid until the owning
+/// [`kafka_admin_DescribeClassicGroupsResult_t`] is destroyed — do not free
+/// it. From [`kafka_admin_AdminClient_describe_classic_groups_async`]'s
+/// per-key callback it is **owned** and must be freed with
+/// [`kafka_admin_ClassicGroupDescription_destroy`] instead.
 #[repr(C)]
 pub struct kafka_admin_ClassicGroupDescription_t {
     _private: [u8; 0],
@@ -9447,6 +10496,28 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
     )
 }
 
+/// Destroys a `ClassicGroupDescription` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_describe_classic_groups_async`]). Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_DescribeClassicGroupsResult_get_value`] — that one is
+/// borrowed from its owning [`kafka_admin_DescribeClassicGroupsResult_t`] and
+/// is freed by [`kafka_admin_DescribeClassicGroupsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `description` must be null or an owned handle from the
+/// `describe_classic_groups` per-key async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_destroy(
+    description: *mut kafka_admin_ClassicGroupDescription_t,
+) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut ClassicGroupDescriptionInner)) };
+    }
+}
+
 /// Opaque handle to one group's committed offsets: Java's
 /// `Map<TopicPartition, OffsetAndMetadata>`, the value of a
 /// `listConsumerGroupOffsets` per-group future.
@@ -9459,8 +10530,14 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 /// accessors on this map handle, exactly as B2 flattened
 /// `LogDirDescription.ReplicaInfo` onto [`kafka_admin_LogDirDescription_t`].
 ///
-/// Borrowed from the owning `list_consumer_group_offsets_with_group_specs` result handle; valid
-/// until that handle is destroyed. Do not free it.
+/// Two provenances, like `kafka_admin_ListOffsetsResultInfo_t` (see
+/// `_get_value(i)` vs. an owned callback value): from
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`] (the synchronous /
+/// flattened result path) it is **borrowed**, valid until the owning
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_t`] is destroyed — do not free
+/// it. From [`kafka_admin_AdminClient_list_consumer_group_offsets_async`]'s
+/// per-key callback it is **owned** and must be freed with
+/// [`kafka_admin_OffsetAndMetadataMap_destroy`] instead.
 #[repr(C)]
 pub struct kafka_admin_OffsetAndMetadataMap_t {
     _private: [u8; 0],
@@ -9643,6 +10720,27 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_leader_epoch(
         .and_then(|entry| entry.offset.as_ref())
         .and_then(OffsetAndMetadata::leader_epoch);
     unsafe { write_optional(epoch, out_epoch) }
+}
+
+/// Destroys an `OffsetAndMetadataMap` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_list_consumer_group_offsets_async`]).
+/// Safe with null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`] — that one is
+/// borrowed from its owning [`kafka_admin_ListConsumerGroupOffsetsResult_t`]
+/// and is freed by [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`]
+/// instead.
+///
+/// # Safety
+///
+/// `map` must be null or an owned handle from the
+/// `list_consumer_group_offsets` per-key async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_destroy(map: *mut kafka_admin_OffsetAndMetadataMap_t) {
+    if !map.is_null() {
+        unsafe { drop(Box::from_raw(map as *mut OffsetAndMetadataMapInner)) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -10108,6 +11206,19 @@ fn submit_describe_consumer_groups(
     KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
 }
 
+/// Submits `describeConsumerGroups`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
+/// as [`submit_describe_consumer_groups`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_describe_consumer_groups_entries(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DescribeConsumerGroupsOptions,
+) -> Vec<(String, KafkaFuture<ConsumerGroupDescription>)> {
+    let result = admin.describe_consumer_groups_with_options(group_ids, options);
+    result.described_groups().into_iter().collect()
+}
+
 /// Submits `describeClassicGroups` and returns the collect-all future over its
 /// per-group futures.
 fn submit_describe_classic_groups(
@@ -10117,6 +11228,19 @@ fn submit_describe_classic_groups(
 ) -> KafkaFuture<DescribeClassicGroupsOutcomes> {
     let result = admin.describe_classic_groups_with_options(group_ids, options);
     KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
+}
+
+/// Submits `describeClassicGroups`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
+/// as [`submit_describe_classic_groups`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_describe_classic_groups_entries(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DescribeClassicGroupsOptions,
+) -> Vec<(String, KafkaFuture<ClassicGroupDescription>)> {
+    let result = admin.describe_classic_groups_with_options(group_ids, options);
+    result.described_groups().into_iter().collect()
 }
 
 /// Submits `listConsumerGroupOffsets` and returns the collect-all future over
@@ -10139,61 +11263,81 @@ fn submit_list_consumer_group_offsets(
     Ok(KafkaFuture::join_map_results(entries))
 }
 
-/// Turns a single whole-call future into an empty per-key outcome map.
-///
-/// Three of the group RPCs back every per-key future with **one** source
-/// future. When the request selected no keys there is no per-key slot for a
-/// failure to occupy, so the source future is awaited directly and its error
-/// becomes the call's error — which mirrors Java, where `all()` is then the
-/// only observable outcome.
-fn empty_outcomes<K, V>(all: KafkaFuture<()>) -> KafkaFuture<HashMap<K, V>>
-where
-    K: Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-{
-    all.then_apply(|()| HashMap::new())
+/// Submits `listConsumerGroupOffsets`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
+/// as [`submit_list_consumer_group_offsets`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_list_consumer_group_offsets_entries(
+    admin: &dyn Admin,
+    group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+    options: ListConsumerGroupOffsetsOptions,
+) -> Result<Vec<(String, KafkaFuture<GroupOffsets>)>, Error> {
+    let result = admin.list_consumer_group_offsets_with_group_specs_options(group_specs, options);
+    let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
+    for group_id in group_specs.keys() {
+        entries.push((group_id.clone(), result.partitions_to_offset_and_metadata_for_group(group_id)?));
+    }
+    Ok(entries)
 }
 
-/// Submits `alterConsumerGroupOffsets` and returns the collect-all future over
-/// its per-partition futures.
+/// The outcome of the single future behind `alterConsumerGroupOffsets` and
+/// `deleteConsumerGroupOffsets`: Java's
+/// `KafkaFuture<Map<TopicPartition, Errors>>`.
+type PartitionErrorsOutcome = Result<HashMap<TopicPartition, Errors>, Error>;
+/// The outcome of the single future behind `removeMembersFromConsumerGroup`:
+/// Java's `KafkaFuture<Map<MemberIdentity, Errors>>`.
+type MemberErrorsOutcome = Result<HashMap<MemberIdentity, Errors>, Error>;
+/// A submitted `alterConsumerGroupOffsets`, its requested partitions and the
+/// outcome of its single future — what its result handle is built from.
+type AlterConsumerGroupOffsetsResolved = (AlterConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
+/// A submitted `deleteConsumerGroupOffsets`, its requested partitions and the
+/// outcome of its single future — what its result handle is built from.
+type DeleteConsumerGroupOffsetsResolved =
+    (DeleteConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
+/// A submitted `removeMembersFromConsumerGroup`, its requested members (empty
+/// in `removeAll` mode) and the outcome of its single future — what its result
+/// handle is built from.
+type RemoveMembersFromConsumerGroupResolved =
+    (RemoveMembersFromConsumerGroupResult, Vec<MemberToRemove>, MemberErrorsOutcome);
+
+/// Submits `alterConsumerGroupOffsets` and returns a future that awaits the
+/// result's **single** underlying future — Java's
+/// `KafkaFuture<Map<TopicPartition, Errors>>`, from which `partitionResult` and
+/// `all()` are both derived — once.
+///
+/// No per-partition future is built: the handle evaluates Java's accessors
+/// against the resolved outcome through the core result's `resolved_*`
+/// methods, so the derivation lives in one place.
 fn submit_alter_consumer_group_offsets(
     admin: &dyn Admin,
     group_id: &str,
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
     options: AlterConsumerGroupOffsetsOptions,
-) -> KafkaFuture<PartitionVoidOutcomes> {
+) -> impl std::future::Future<Output = AlterConsumerGroupOffsetsResolved> + Send + use<> {
     let result = admin.alter_consumer_group_offsets_with_options(group_id, offsets, options);
-    if offsets.is_empty() {
-        return empty_outcomes(result.all());
+    let requested: Vec<TopicPartition> = offsets.keys().cloned().collect();
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
-        offsets.keys().map(|tp| (tp.clone(), result.partition_result(tp))).collect();
-    KafkaFuture::join_map_results(entries)
 }
 
-/// Submits `deleteConsumerGroupOffsets` and returns the collect-all future over
-/// its per-partition futures.
-///
-/// `partitionResult(tp)` throws for a partition that was not requested, which
-/// cannot happen here since the requested set drives the join; the error is
-/// propagated rather than dropped.
+/// Submits `deleteConsumerGroupOffsets` and returns a future that awaits the
+/// result's single underlying future once. Same shape as
+/// [`submit_alter_consumer_group_offsets`].
 fn submit_delete_consumer_group_offsets(
     admin: &dyn Admin,
     group_id: &str,
     partitions: &HashSet<TopicPartition>,
     options: DeleteConsumerGroupOffsetsOptions,
-) -> Result<KafkaFuture<PartitionVoidOutcomes>, Error> {
+) -> impl std::future::Future<Output = DeleteConsumerGroupOffsetsResolved> + Send + use<> {
     let result = admin.delete_consumer_group_offsets_with_options(group_id, partitions, options);
-    if partitions.is_empty() {
-        return Ok(empty_outcomes(result.all()));
+    let requested: Vec<TopicPartition> = partitions.iter().cloned().collect();
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let mut entries: Vec<(TopicPartition, KafkaFuture<()>)> = Vec::with_capacity(partitions.len());
-    for tp in partitions {
-        entries.push((tp.clone(), result.partition_result(tp)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
 }
-
 /// Submits `deleteConsumerGroups` and returns the collect-all future over its
 /// per-group futures.
 fn submit_delete_consumer_groups(
@@ -10205,26 +11349,38 @@ fn submit_delete_consumer_groups(
     KafkaFuture::join_map_results(result.deleted_groups().into_iter().collect())
 }
 
-/// Submits `removeMembersFromConsumerGroup` and returns the collect-all future
-/// over its per-member futures, keyed by group instance id.
+/// Submits `deleteConsumerGroups`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_delete_consumer_groups`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_delete_consumer_groups_entries(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DeleteConsumerGroupsOptions,
+) -> Vec<(String, KafkaFuture<()>)> {
+    let result = admin.delete_consumer_groups_with_options(group_ids, options);
+    result.deleted_groups().into_iter().collect()
+}
+
+/// Submits `removeMembersFromConsumerGroup` and returns a future that awaits
+/// the result's single underlying future — Java's
+/// `KafkaFuture<Map<MemberIdentity, Errors>>`, from which `memberResult` and
+/// `all()` are both derived — once. Same shape as
+/// [`submit_alter_consumer_group_offsets`].
 ///
-/// In `removeAll` mode Java's `memberResult` is not applicable at all, so the
-/// single `all()` future is the outcome and the C result carries no keys.
+/// The requested members are empty in `removeAll` mode, where Java's
+/// `memberResult` is not applicable at all.
 fn submit_remove_members_from_consumer_group(
     admin: &dyn Admin,
     group_id: &str,
     options: RemoveMembersFromConsumerGroupOptions,
-) -> Result<KafkaFuture<GroupVoidOutcomes>, Error> {
-    let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
+) -> impl std::future::Future<Output = RemoveMembersFromConsumerGroupResolved> + Send + use<> {
+    let requested: Vec<MemberToRemove> = options.members().iter().cloned().collect();
     let result = admin.remove_members_from_consumer_group_with_options(group_id, options);
-    if members.is_empty() {
-        return Ok(empty_outcomes(result.all()));
+    async move {
+        let outcome = result.future().get().await;
+        (result, requested, outcome)
     }
-    let mut entries: Vec<(String, KafkaFuture<()>)> = Vec::with_capacity(members.len());
-    for member in &members {
-        entries.push((member.group_instance_id().to_string(), result.member_result(member)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
 }
 
 // ---------------------------------------------------------------------------
@@ -10236,10 +11392,16 @@ fn submit_remove_members_from_consumer_group(
 //   - `Map<K, KafkaFuture<V>>`      -> `_get_value(i)` and `_get_error(i)`
 //     (`describeConsumerGroups`, `describeClassicGroups`,
 //      `listConsumerGroupOffsets`)
-//   - `Map<K, KafkaFuture<Void>>` / one future over `Map<K, Errors>`
-//                                   -> `_get_error(i)` only
-//     (`deleteConsumerGroups`, `alterConsumerGroupOffsets`,
-//      `deleteConsumerGroupOffsets`, `removeMembersFromConsumerGroup`)
+//   - `Map<K, KafkaFuture<Void>>`   -> `_get_error(i)` only
+//     (`deleteConsumerGroups`)
+//   - one `KafkaFuture<Map<K, Errors>>` with accessors derived from it
+//                                   -> Java's accessors (`_partition_result` /
+//                                      `_member_result` and `_all`), evaluated
+//                                      by the core result against the resolved
+//                                      outcome, plus `_get_error(i)` over the
+//                                      requested keys
+//     (`alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`,
+//      `removeMembersFromConsumerGroup`)
 //   - one future split into `valid()` + `errors()`
 //                                   -> two independent lists, no key at all
 //     (`listGroups`, `listConsumerGroups`)
@@ -10899,8 +12061,21 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `AlterConsumerGroupOffsetsResult`, keyed by
-/// topic partition.
+/// Opaque handle to an `AlterConsumerGroupOffsetsResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>`.
+/// This handle holds that future's resolved outcome and answers Java's two
+/// accessors against it:
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]
+/// (`partitionResult(TopicPartition)`) and
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`] (`all()`). It also lists
+/// the requested partitions, sorted by topic name then partition id, each with
+/// its `partitionResult` outcome (`_count` / `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_error(i)`).
+///
+/// Built by both [`kafka_admin_AdminClient_alter_consumer_group_offsets`] and
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`]; every
+/// function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -10908,22 +12083,42 @@ pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
 
 /// Backing state for [`kafka_admin_AlterConsumerGroupOffsetsResult_t`].
 ///
+/// `result` and `outcome` back Java's accessors: the core result evaluates
+/// them against the resolved outcome (`resolved_partition_result` /
+/// `resolved_all`), so the Java derivation is not duplicated here. The three
+/// vectors are the requested partitions, flattened for the index getters.
 /// Java's `partitionResult(tp)` is a `KafkaFuture<Void>`, so there is no
 /// per-key value: a null `_get_error(i)` is the success signal.
 struct AlterConsumerGroupOffsetsResultInner {
+    result: AlterConsumerGroupOffsetsResult,
+    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-partition `alterConsumerGroupOffsets` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `alterConsumerGroupOffsets`,
+/// deriving each requested partition's outcome through the core result's
+/// `partitionResult`.
+fn alter_consumer_group_offsets_result_inner(
+    (result, requested, outcome): AlterConsumerGroupOffsetsResolved,
+) -> AlterConsumerGroupOffsetsResultInner {
+    let per_partition: PartitionVoidOutcomes = requested
+        .into_iter()
+        .map(|tp| {
+            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
+            (tp, partition_outcome)
+        })
+        .collect();
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
+    AlterConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_alter_consumer_group_offsets_result(
-    outcomes: PartitionVoidOutcomes,
+    inner: AlterConsumerGroupOffsetsResultInner,
 ) -> *mut kafka_admin_AlterConsumerGroupOffsetsResult_t {
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
-    Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
 }
 
 /// Casts a `*const kafka_admin_AlterConsumerGroupOffsetsResult_t` to a
@@ -10939,7 +12134,84 @@ unsafe fn alter_consumer_group_offsets_result_ref(
     unsafe { &*(result as *const AlterConsumerGroupOffsetsResultInner) }
 }
 
-/// Returns the number of partitions whose offsets were altered.
+/// Converts a resolved `KafkaFuture<Void>` outcome into the C convention: null
+/// for success, otherwise an owned error the caller frees with
+/// `kafka_common_Error_destroy`.
+fn void_outcome_to_error(outcome: Result<(), Error>) -> *mut kafka_common_Error_t {
+    match outcome {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Reads a borrowed C string parameter that the contract requires to be
+/// non-null (CLAUDE.md FFI §3: such preconditions are not checked).
+///
+/// # Safety
+///
+/// `text` must be a valid, NUL-terminated C string.
+unsafe fn read_str(text: *const c_char) -> String {
+    unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+}
+
+/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
+/// `partitionResult(tp).get()` reports it.
+///
+/// Returns null when the partition's offset was committed. Otherwise returns
+/// an **owned** error — free it with `kafka_common_Error_destroy`:
+///
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Alter offset for partition "<topic>-<partition>"
+///   was not attempted` for a partition absent from the response (Java's
+///   `IllegalArgumentException`) — including one that was never requested;
+/// - otherwise the partition's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle;
+/// `topic` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    topic: *const c_char,
+    partition: i32,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
+    let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+}
+
+/// Java's `all()`: null if every partition's offset was committed.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`: the whole request's error if the request
+/// failed, or else the error of a failed partition (which one is unspecified,
+/// as in Java) with the message `Failed altering group offsets for the
+/// following partitions: [<topic>-<partition>, ...]`, listing every failed
+/// partition sorted by topic name then partition id.
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback (see
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_all(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of partitions in the request.
 ///
 /// # Safety
 ///
@@ -10978,9 +12250,11 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
     partition_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the
-/// partition's offset was altered successfully or `index` is out of range. Do
-/// not destroy it.
+/// Returns the entry at `index`'s `partitionResult` outcome (borrowed), or null
+/// if the partition's offset was altered successfully or `index` is out of
+/// range. Do not destroy it. It carries the same error
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] returns (as
+/// an owned copy) for that partition.
 ///
 /// # Safety
 ///
@@ -11009,29 +12283,58 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `DeleteConsumerGroupOffsetsResult`, keyed by
-/// topic partition.
+/// Opaque handle to a `DeleteConsumerGroupOffsetsResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>` plus
+/// the set of requested partitions. This handle holds that future's resolved
+/// outcome and answers Java's two accessors against it:
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`]
+/// (`partitionResult(TopicPartition)`) and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`] (`all()`). It also
+/// lists the requested partitions, sorted by topic name then partition id, each
+/// with its `partitionResult` outcome (`_count` / `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_error(i)`).
+///
+/// Built by both [`kafka_admin_AdminClient_delete_consumer_group_offsets`] and
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`]; every
+/// function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
 }
 
 /// Backing state for [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`]. Same
-/// per-key-error-only shape as [`AlterConsumerGroupOffsetsResultInner`].
+/// shape as [`AlterConsumerGroupOffsetsResultInner`].
 struct DeleteConsumerGroupOffsetsResultInner {
+    result: DeleteConsumerGroupOffsetsResult,
+    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-partition `deleteConsumerGroupOffsets` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `deleteConsumerGroupOffsets`,
+/// deriving each requested partition's outcome through the core result's
+/// `partitionResult`.
+fn delete_consumer_group_offsets_result_inner(
+    (result, requested, outcome): DeleteConsumerGroupOffsetsResolved,
+) -> DeleteConsumerGroupOffsetsResultInner {
+    let per_partition: PartitionVoidOutcomes = requested
+        .into_iter()
+        .map(|tp| {
+            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
+            (tp, partition_outcome)
+        })
+        .collect();
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
+    DeleteConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_delete_consumer_group_offsets_result(
-    outcomes: PartitionVoidOutcomes,
+    inner: DeleteConsumerGroupOffsetsResultInner,
 ) -> *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t {
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
-    Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
 }
 
 /// Casts a `*const kafka_admin_DeleteConsumerGroupOffsetsResult_t` to a
@@ -11047,7 +12350,67 @@ unsafe fn delete_consumer_group_offsets_result_ref(
     unsafe { &*(result as *const DeleteConsumerGroupOffsetsResultInner) }
 }
 
-/// Returns the number of partitions whose offsets were deleted.
+/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
+/// `partitionResult(tp).get()` reports it.
+///
+/// Returns null when the partition's offsets were deleted. Otherwise returns
+/// an **owned** error — free it with `kafka_common_Error_destroy`:
+///
+/// - an illegal-argument error `Partition <topic>-<partition> was not included
+///   in the original request` for a partition that was not requested. This is
+///   checked first, whatever the outcome, because Java throws it synchronously
+///   from `partitionResult` before looking at the future;
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Offset deletion result for partition
+///   "<topic>-<partition>" was not included in the response` for a requested
+///   partition absent from the response (Java's `getSubLevelError`);
+/// - otherwise the partition's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle;
+/// `topic` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    topic: *const c_char,
+    partition: i32,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
+    let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+}
+
+/// Java's `all()`: null if every requested partition's offsets were deleted.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`: the whole request's error if the request
+/// failed, or else the outcome
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] gives for
+/// the first failing requested partition, in topic-name-then-partition-id order
+/// (Java iterates the requested set in unspecified order).
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of partitions in the request.
 ///
 /// # Safety
 ///
@@ -11086,9 +12449,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
     partition_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the
-/// partition's offset was deleted successfully or `index` is out of range. Do
-/// not destroy it.
+/// Returns the entry at `index`'s `partitionResult` outcome (borrowed), or null
+/// if the partition's offsets were deleted successfully or `index` is out of
+/// range. Do not destroy it. It carries the same error
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] returns
+/// (as an owned copy) for that partition.
 ///
 /// # Safety
 ///
@@ -11204,8 +12569,22 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
     }
 }
 
-/// Opaque handle to a flattened `RemoveMembersFromConsumerGroupResult`, keyed
-/// by group instance id.
+/// Opaque handle to a `RemoveMembersFromConsumerGroupResult`.
+///
+/// Java's result wraps **one** `KafkaFuture<Map<MemberIdentity, Errors>>` plus
+/// the set of requested members (empty in `removeAll` mode). This handle holds
+/// that future's resolved outcome and answers Java's two accessors against it:
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`]
+/// (`memberResult(MemberToRemove)`) and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`] (`all()`). It also
+/// lists the requested members by group instance id, sorted, each with its
+/// `memberResult` outcome (`_count` / `_get_group_instance_id(i)` /
+/// `_get_error(i)`); that list is empty in `removeAll` mode, where Java refuses
+/// `memberResult` altogether.
+///
+/// Built by both [`kafka_admin_AdminClient_remove_members_from_consumer_group`]
+/// and [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`];
+/// every function below works on a handle from either.
 #[repr(C)]
 pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
     _private: [u8; 0],
@@ -11213,26 +12592,41 @@ pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
 
 /// Backing state for [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`].
 ///
-/// Java's `memberResult(MemberToRemove)` is a `KafkaFuture<Void>`, so there is
-/// no per-key value. In `removeAll` mode Java *refuses* `memberResult` entirely
-/// ("The method: memberResult is not applicable in 'removeAll' mode") and
-/// `all()` is the only observable, so the C handle is then empty and the
-/// outcome is the call's error.
+/// `result` and `outcome` back Java's accessors through the core result's
+/// `resolved_member_result` / `resolved_all`, so the Java derivation is not
+/// duplicated here. The two vectors are the requested members, flattened for
+/// the index getters. Java's `memberResult(MemberToRemove)` is a
+/// `KafkaFuture<Void>`, so there is no per-key value: a null `_get_error(i)` is
+/// the success signal.
 struct RemoveMembersFromConsumerGroupResultInner {
+    result: RemoveMembersFromConsumerGroupResult,
+    outcome: MemberErrorsOutcome,
     group_instance_ids: Vec<CString>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-member `removeMembersFromConsumerGroup` outcomes into the C
-/// handle.
+/// Builds the backing state from a resolved `removeMembersFromConsumerGroup`,
+/// deriving each requested member's outcome through the core result's
+/// `memberResult`.
+fn remove_members_from_consumer_group_result_inner(
+    (result, requested, outcome): RemoveMembersFromConsumerGroupResolved,
+) -> RemoveMembersFromConsumerGroupResultInner {
+    let per_member: GroupVoidOutcomes = requested
+        .iter()
+        .map(|member| {
+            let member_outcome = result.resolved_member_result(&outcome, member);
+            (member.group_instance_id().to_string(), member_outcome)
+        })
+        .collect();
+    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(per_member);
+    RemoveMembersFromConsumerGroupResultInner { result, outcome, group_instance_ids, errors }
+}
+
+/// Moves the backing state into the C handle.
 fn box_remove_members_from_consumer_group_result(
-    outcomes: GroupVoidOutcomes,
+    inner: RemoveMembersFromConsumerGroupResultInner,
 ) -> *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t {
-    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(outcomes);
-    Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner {
-        group_instance_ids,
-        errors,
-    })) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
 }
 
 /// Casts a `*const kafka_admin_RemoveMembersFromConsumerGroupResult_t` to a
@@ -11248,8 +12642,91 @@ unsafe fn remove_members_result_ref(
     unsafe { &*(result as *const RemoveMembersFromConsumerGroupResultInner) }
 }
 
-/// Returns the number of members a removal was attempted for. This is 0 in
-/// `remove_all` mode, where Java exposes no per-member outcome.
+/// Java's `memberResult(MemberToRemove)` for the member whose
+/// `group.instance.id` is `group_instance_id`: the outcome for that member, as
+/// `memberResult(member).get()` reports it.
+///
+/// Returns null when the member was removed. Otherwise returns an **owned**
+/// error — free it with `kafka_common_Error_destroy`:
+///
+/// - an illegal-argument error `The method: memberResult is not applicable in
+///   'removeAll' mode` on a `remove_all` result, whatever the outcome;
+/// - an illegal-argument error `Member <group_instance_id> was not included in
+///   the original request` for a member that was not requested. (Java renders
+///   the `MemberToRemove` object itself, which has no `toString()` of its own;
+///   the group instance id is its identity, hence the rendering here.)
+///
+///   Both checks come first, whatever the outcome, because Java throws them
+///   synchronously from `memberResult` before looking at the future;
+/// - the whole request's error, if the request failed (only possible on a
+///   handle from the synchronous entry point: the async callback delivers a
+///   whole-request failure as its `error` argument instead of a handle);
+/// - an illegal-argument error `Member "MemberIdentity(memberId='',
+///   groupInstanceId='<id>', reason=null)" was not included in the removal
+///   response` for a requested member absent from the response (Java's
+///   `getSubLevelError`);
+/// - otherwise the member's own error.
+///
+/// The handle holds the already-resolved outcome, so this never blocks, needs
+/// no runtime and may be called from any thread — including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle;
+/// `group_instance_id` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    group_instance_id: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { remove_members_result_ref(result) };
+    let member = MemberToRemove::new(unsafe { read_str(group_instance_id) });
+    void_outcome_to_error(inner.result.resolved_member_result(&inner.outcome, &member))
+}
+
+/// Java's `all()`: null if the request was 100% successful — no top-level and
+/// no member-level error.
+///
+/// Otherwise returns an **owned** error — free it with
+/// `kafka_common_Error_destroy`:
+///
+/// - the whole request's error, if the request failed;
+/// - on a `remove_all` result, for the first member the broker reports as
+///   failed: a plain Kafka error (code `UNKNOWN_SERVER_ERROR`, not an API
+///   error) with the message `Encounter error when trying to remove:
+///   MemberIdentity(memberId='<id>', groupInstanceId=<'id' or null>,
+///   reason=<'reason' or null>)`. This is Java's
+///   `new KafkaException("Encounter exception when trying to remove: " +
+///   identity, memberException)`, with "exception" spelled "error". The
+///   member's own error (for example `UNKNOWN_MEMBER_ID`) is the cause of the
+///   returned error, as in Java — but **this C API cannot read an error's
+///   cause**: `kafka_common_Error_code` / `kafka_common_Error_message` and
+///   the predicates describe only the outer error. So from C (and from the
+///   Python and gRPC layers built on it) a `removeAll` partial failure
+///   surfaces as a bare Kafka error with code -1 (`UNKNOWN_SERVER_ERROR`) and
+///   Java's message, and the member's own error code is not observable;
+/// - otherwise the outcome
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] gives
+///   for the first failing requested member, in group-instance-id order (Java
+///   iterates the requested set in unspecified order).
+///
+/// Never blocks and may be called from any thread, including from inside the
+/// completion callback.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { remove_members_result_ref(result) };
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+}
+
+/// Returns the number of members in the request. This is 0 in `remove_all`
+/// mode, where Java exposes no per-member outcome.
 ///
 /// # Safety
 ///
@@ -11275,8 +12752,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
     cstring_at(&unsafe { remove_members_result_ref(result) }.group_instance_ids, index)
 }
 
-/// Returns the error for the entry at `index` (borrowed), or null if the member
-/// was removed successfully or `index` is out of range. Do not destroy it.
+/// Returns the entry at `index`'s `memberResult` outcome (borrowed), or null if
+/// the member was removed successfully or `index` is out of range. Do not
+/// destroy it. It carries the same error
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] returns
+/// (as an owned copy) for that member.
 ///
 /// # Safety
 ///
@@ -11549,15 +13029,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups_async(
 // describeConsumerGroups
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_consumer_groups_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_consumer_groups_async`], fired **once
+/// per group, as that group's own future resolves** — independently of every
+/// other group in the same call, matching Java's
+/// `Map<String, KafkaFuture<ConsumerGroupDescription>>` (`admin-client.md`
+/// §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeConsumerGroupsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-group failure arrives
-/// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `group_id` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ConsumerGroupDescription_destroy`] (**not**
+/// [`kafka_admin_DescribeConsumerGroupsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t = unsafe extern "C" fn(
+    *const c_char, /* group_id */
+    *mut kafka_admin_ConsumerGroupDescription_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes consumer groups, blocking until every per-group future has
 /// resolved (synchronous).
@@ -11608,17 +13099,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
 /// Describes consumer groups asynchronously. See
 /// [`kafka_admin_AdminClient_describe_consumer_groups`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
+/// Unlike the synchronous entry point, the callback fires **once per group, as
+/// that group's future resolves**, not once for the whole batch — a fast or
+/// already-resolved group is not held up by a slow or failing one. It is
+/// called once per distinct group id in the input (skipping NULL entries),
+/// but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
+/// thread** if the dispatcher's completion queue can no longer be reached
+/// when a given group's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in
+/// the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
 /// # Safety
@@ -11638,16 +13134,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_consumer_groups(a, &ids, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_consumer_groups_result(outcomes), std::ptr::null_mut()),
+            ids.clone(),
+            move |a| Ok(submit_describe_consumer_groups_entries(a, &ids, options)),
+            move |group_id, outcome, ud| {
+                let group_id_c = to_cstring(&group_id);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(ConsumerGroupDescriptionInner::new(&description)))
+                            as *mut kafka_admin_ConsumerGroupDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(group_id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -11657,15 +13159,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
 // describeClassicGroups
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_classic_groups_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_classic_groups_async`], fired **once per
+/// group, as that group's own future resolves** — independently of every
+/// other group in the same call, matching Java's
+/// `Map<String, KafkaFuture<ClassicGroupDescription>>` (`admin-client.md`
+/// §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeClassicGroupsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-group failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_classic_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeClassicGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `group_id` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ClassicGroupDescription_destroy`] (**not**
+/// [`kafka_admin_DescribeClassicGroupsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_classic_groups_callback_t = unsafe extern "C" fn(
+    *const c_char, /* group_id */
+    *mut kafka_admin_ClassicGroupDescription_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes classic groups, blocking until every per-group future has resolved
 /// (synchronous).
@@ -11712,17 +13225,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
 /// Describes classic groups asynchronously. See
 /// [`kafka_admin_AdminClient_describe_classic_groups`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
+/// Unlike the synchronous entry point, the callback fires **once per group, as
+/// that group's future resolves**, not once for the whole batch — a fast or
+/// already-resolved group is not held up by a slow or failing one. It is
+/// called once per distinct group id in the input (skipping NULL entries),
+/// but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
+/// thread** if the dispatcher's completion queue can no longer be reached
+/// when a given group's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in
+/// the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
 /// # Safety
@@ -11742,16 +13260,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_classic_groups(a, &ids, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_classic_groups_result(outcomes), std::ptr::null_mut()),
+            ids.clone(),
+            move |a| Ok(submit_describe_classic_groups_entries(a, &ids, options)),
+            move |group_id, outcome, ud| {
+                let group_id_c = to_cstring(&group_id);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(ClassicGroupDescriptionInner::new(&description)))
+                            as *mut kafka_admin_ClassicGroupDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(group_id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -11761,15 +13285,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
 // listConsumerGroupOffsets
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_list_consumer_group_offsets_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_list_consumer_group_offsets_async`], fired **once
+/// per group, as that group's own future resolves** — independently of every
+/// other group in the same call, matching Java's
+/// `Map<String, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-group failure arrives
-/// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `group_id` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_OffsetAndMetadataMap_destroy`] (**not**
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe extern "C" fn(
+    *const c_char, /* group_id */
+    *mut kafka_admin_OffsetAndMetadataMap_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Lists committed offsets for one or more consumer groups, blocking until
 /// every per-group future has resolved (synchronous).
@@ -11839,19 +13374,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
 /// Lists consumer group offsets asynchronously. See
 /// [`kafka_admin_AdminClient_list_consumer_group_offsets`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL group id, or the same group
-/// id twice). And it runs on a **tokio worker thread** if the dispatcher's
-/// completion queue can no longer be reached when the result arrives.
-/// Destroying the handle does not cause that — an outstanding operation holds
-/// its own sender, so it cannot disconnect the queue; what remains is a
-/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
+/// Unlike the synchronous entry point, the callback fires **once per group, as
+/// that group's future resolves**, not once for the whole batch — a fast or
+/// already-resolved group is not held up by a slow or failing one. It is
+/// called once per distinct group id in the input (skipping NULL entries),
+/// but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL group id, or the same
+/// group id twice). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// group's result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are
+/// not guaranteed to be serialised on one thread, nor in request order. Do
 /// not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
 ///
 /// # Safety
 ///
@@ -11872,21 +13412,33 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
     callback: kafka_admin_AdminClient_list_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_group_offsets_specs`'s fallible
+    // NULL/duplicate-group-id parse, so every requested key still gets its own
+    // callback via `admin_async_per_key_op`'s fan-out even when that parse
+    // fails (a duplicate key then correctly gets the submission error fired
+    // for both of its occurrences).
+    let keys = unsafe { read_strings(group_ids, group_count) };
     let specs = unsafe {
         read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
     };
     let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_list_consumer_group_offsets(a, &specs?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_list_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_list_consumer_group_offsets_entries(a, &specs?, options),
+            move |group_id, outcome, ud| {
+                let group_id_c = to_cstring(&group_id);
+                let (value, error) = match outcome {
+                    Ok(group_offsets) => (
+                        Box::into_raw(Box::new(OffsetAndMetadataMapInner::new(group_offsets)))
+                            as *mut kafka_admin_OffsetAndMetadataMap_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(group_id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -11899,15 +13451,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
 /// Completion callback for
 /// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`].
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-partition failure
-/// arrives inside `result`, not as `error`.
+/// Java's `AlterConsumerGroupOffsetsResult` wraps **one**
+/// `KafkaFuture<Map<TopicPartition, Errors>>`; `partitionResult(tp)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — also when no partition was requested — and exactly one of
+/// `result` / `error` is non-null. The callback owns it:
+///
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] and
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_all`], or walk the requested
+///   partitions with `_count` / `_get_topic(i)` / `_get_partition(i)` /
+///   `_get_error(i)`; free it with
+///   [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]. A per-partition
+///   failure arrives inside `result`, not as `error`.
+/// - `error`: the future failed, so the whole request failed and every Java
+///   accessor would report this same error; or the request could not be
+///   submitted at all. Free it with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_AlterConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Commits offsets on behalf of a consumer group, blocking until every
-/// per-partition future has resolved (synchronous).
+/// Commits offsets on behalf of a consumer group, blocking until the result's
+/// single future has resolved (synchronous).
 ///
 /// This is
 /// `alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
@@ -11915,12 +13480,16 @@ pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
 /// On success writes a [`kafka_admin_AlterConsumerGroupOffsetsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all — or that
-/// `count` was 0, in which case there is no per-key slot for the outcome and
-/// the whole-request error is returned instead, mirroring Java, where `all()`
-/// is then the only observable.
+/// The handle answers Java's accessors,
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] and
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`]. **A per-partition
+/// failure is not a call failure**: it is reported by those accessors and by
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key —
+/// and so is a failure of the whole request, which every requested partition
+/// then reports. A non-null return means the request could not be submitted at
+/// all — or that `count` was 0 and `all()` failed, in which case there is no
+/// per-key slot for the outcome and the whole-request error is returned
+/// instead.
 ///
 /// # Parameters
 ///
@@ -11963,8 +13532,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     };
     let options = alter_consumer_group_offsets_options(timeout_ms);
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options))
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_alter_consumer_group_offsets(a, &group?, &parsed?, options);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // No per-key slot: `all()` is the only observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(alter_consumer_group_offsets_result_inner((result, requested, outcome)))
+            })
         })
     };
     unsafe { finish_sync(outcome, out_result, box_alter_consumer_group_offsets_result) }
@@ -11973,17 +13550,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
 /// Commits consumer group offsets asynchronously. See
 /// [`kafka_admin_AdminClient_alter_consumer_group_offsets`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL `group_id`, a NULL topic
-/// entry, or a negative offset). And it runs on a **tokio worker thread** if the dispatcher's
+/// Java's result is one future, so the callback fires **exactly once** —
+/// also when `count` is 0 — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t`]. It is
+/// not always called on the same thread. It normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle, a NULL `group_id`, a NULL topic entry, or a negative
+/// offset). And it runs on a **tokio worker thread** if the dispatcher's
 /// completion queue can no longer be reached when the result arrives.
 /// Destroying the handle does not cause that — an outstanding operation holds
 /// its own sender, so it cannot disconnect the queue; what remains is a
 /// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
-/// not hold a lock across this call and re-acquire it in the callback, and
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
@@ -12012,13 +13593,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
     };
     let options = alter_consumer_group_offsets_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_future_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options)),
+            move |a| {
+                let resolved = submit_alter_consumer_group_offsets(a, &group?, &parsed?, options);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(alter_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                })
+            },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+                    Ok(inner) => (box_alter_consumer_group_offsets_result(inner), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -12034,15 +13623,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
 /// Completion callback for
 /// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`].
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-partition failure
-/// arrives inside `result`, not as `error`.
+/// Java's `DeleteConsumerGroupOffsetsResult` wraps **one**
+/// `KafkaFuture<Map<TopicPartition, Errors>>`; `partitionResult(tp)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — also when no partition was requested — and exactly one of
+/// `result` / `error` is non-null. The callback owns it:
+///
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] and
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`], or walk the
+///   requested partitions with `_count` / `_get_topic(i)` /
+///   `_get_partition(i)` / `_get_error(i)`; free it with
+///   [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]. A per-partition
+///   failure arrives inside `result`, not as `error`.
+/// - `error`: the future failed, so the whole request failed and every Java
+///   accessor on a requested partition would report this same error; or the
+///   request could not be submitted at all. Free it with
+///   `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes committed offsets for a set of partitions in a consumer group,
-/// blocking until every per-partition future has resolved (synchronous).
+/// blocking until the result's single future has resolved (synchronous).
 ///
 /// This is
 /// `deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
@@ -12050,11 +13653,16 @@ pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
 /// On success writes a [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all — or that
-/// `count` was 0, in which case there is no per-key slot for the outcome and
-/// the whole-request error is returned instead.
+/// The handle answers Java's accessors,
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`]. **A per-partition
+/// failure is not a call failure**: it is reported by those accessors and by
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key —
+/// and so is a failure of the whole request, which every requested partition
+/// then reports. A non-null return means the request could not be submitted at
+/// all — or that `count` was 0 and `all()` failed, in which case there is no
+/// per-key slot for the outcome and the whole-request error is returned
+/// instead.
 ///
 /// # Parameters
 ///
@@ -12085,8 +13693,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
         .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            submit_delete_consumer_group_offsets(a, &group?, &selection, options)
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_delete_consumer_group_offsets(a, &group?, &selection, options);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // No per-key slot: `all()` is the only observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(delete_consumer_group_offsets_result_inner((result, requested, outcome)))
+            })
         })
     };
     unsafe { finish_sync(outcome, out_result, box_delete_consumer_group_offsets_result) }
@@ -12095,18 +13711,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
 /// Deletes consumer group offsets asynchronously. See
 /// [`kafka_admin_AdminClient_delete_consumer_group_offsets`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// Java's result is one future, so the callback fires **exactly once** —
+/// also when `count` is 0 — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t`]. It is
+/// not always called on the same thread. It normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle or a NULL `group_id`). And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached when
 /// the result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
 /// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// serialised on one thread. Do not hold a lock across this call and
+/// re-acquire it in the callback, and publish everything the callback needs
+/// (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -12129,13 +13749,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
         .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_future_op(
             admin,
             user_data,
-            move |a| submit_delete_consumer_group_offsets(a, &group?, &selection, options),
+            move |a| {
+                let resolved = submit_delete_consumer_group_offsets(a, &group?, &selection, options);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(delete_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                })
+            },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+                    Ok(inner) => (box_delete_consumer_group_offsets_result(inner), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -12148,15 +13776,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
 // deleteConsumerGroups
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_delete_consumer_groups_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_delete_consumer_groups_async`], fired **once per
+/// group, as that group's own future resolves** — independently of every
+/// other group in the same call, matching Java's
+/// `Map<String, KafkaFuture<Void>>` (`admin-client.md` §5), rather than
+/// waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteConsumerGroupsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-group failure arrives inside
-/// `result`, not as `error`.
+/// `group_id` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. There is no value parameter: Java's per-group
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
+/// non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes consumer groups, blocking until every per-group future has resolved
 /// (synchronous).
@@ -12199,17 +13831,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
 /// Deletes consumer groups asynchronously. See
 /// [`kafka_admin_AdminClient_delete_consumer_groups`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
+/// Unlike the synchronous entry point, the callback fires **once per group, as
+/// that group's future resolves**, not once for the whole batch — a fast or
+/// already-resolved group is not held up by a slow or failing one. It is
+/// called once per distinct group id in the input (skipping NULL entries),
+/// but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
+/// thread** if the dispatcher's completion queue can no longer be reached
+/// when a given group's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in
+/// the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
 /// # Safety
@@ -12228,16 +13865,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
     let ids = unsafe { read_strings(group_ids, count) };
     let options = delete_consumer_groups_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_delete_consumer_groups(a, &ids, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_consumer_groups_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            ids.clone(),
+            move |a| Ok(submit_delete_consumer_groups_entries(a, &ids, options)),
+            move |group_id, outcome, ud| {
+                let group_id_c = to_cstring(&group_id);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(group_id_c.as_ptr(), error, ud);
             },
         )
     };
@@ -12250,17 +13886,36 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
 /// Completion callback for
 /// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`].
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]
-/// or `error` with `kafka_common_Error_destroy`. A per-member failure
-/// arrives inside `result`, not as `error`.
+/// Java's `RemoveMembersFromConsumerGroupResult` wraps **one**
+/// `KafkaFuture<Map<MemberIdentity, Errors>>`; `memberResult(member)` and
+/// `all()` are both derived from it, so they all resolve at the same moment.
+/// This callback therefore fires **exactly once**, when that single future
+/// completes — in `removeAll` mode too — and exactly one of `result` / `error`
+/// is non-null. The callback owns it:
+///
+/// - `result`: the future completed. Query it with Java's accessors,
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] and
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`], or walk the
+///   requested members with `_count` / `_get_group_instance_id(i)` /
+///   `_get_error(i)`; free it with
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]. A
+///   per-member failure arrives inside `result`, not as `error`. In
+///   `removeAll` mode `all()` is the only applicable accessor, exactly as in
+///   Java, and the member list is empty; a member failure there is reported
+///   as a bare Kafka error (code -1) whose cause — the member's own error —
+///   this C API cannot read (see
+///   [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`]).
+/// - `error`: the future failed, so the whole request failed and `all()` (and
+///   every applicable `memberResult`) would report this same error; or the
+///   request could not be submitted at all. Free it with
+///   `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t = unsafe extern "C" fn(
     *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
     *mut kafka_common_Error_t,
     *mut c_void,
 );
 
-/// Removes members from a consumer group, blocking until every per-member
+/// Removes members from a consumer group, blocking until the result's single
 /// future has resolved (synchronous).
 ///
 /// This is
@@ -12270,12 +13925,16 @@ pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`] to `*out_result`
 /// (free it with
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]) and returns
-/// null. **A per-member failure is not a call failure**: it is reported by
+/// null. The handle answers Java's accessors,
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`]. **A per-member
+/// failure is not a call failure**: it is reported by those accessors and by
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_get_error`] for that
-/// member. A non-null return means the request could not be submitted at all —
-/// or that `remove_all` was true, where Java exposes no per-member outcome at
-/// all and `all()` is the only observable, so the result handle is empty and
-/// any failure is returned here.
+/// member — and so is a failure of the whole request, which every requested
+/// member then reports. A non-null return means the request could not be
+/// submitted at all — or that `remove_all` was true and `all()` failed: Java
+/// exposes no per-member outcome in that mode, so there is no per-key slot and
+/// the error is returned here.
 ///
 /// # Parameters
 ///
@@ -12315,27 +13974,43 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 ) -> *mut kafka_common_Error_t {
     let group = unsafe { read_required_string(group_id, "group_id") };
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
-    let outcome =
-        unsafe { admin_sync_value_op(admin, move |a| submit_remove_members_from_consumer_group(a, &group?, options?)) };
+    let outcome = unsafe {
+        admin_sync_future_op(admin, move |a| {
+            let resolved = submit_remove_members_from_consumer_group(a, &group?, options?);
+            Ok(async move {
+                let (result, requested, outcome) = resolved.await;
+                if requested.is_empty() {
+                    // `removeAll` mode: no per-key slot, `all()` is the only
+                    // observable.
+                    result.resolved_all(&outcome)?;
+                }
+                Ok(remove_members_from_consumer_group_result_inner((result, requested, outcome)))
+            })
+        })
+    };
     unsafe { finish_sync(outcome, out_result, box_remove_members_from_consumer_group_result) }
 }
 
 /// Removes members from a consumer group asynchronously. See
 /// [`kafka_admin_AdminClient_remove_members_from_consumer_group`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL `group_id`, or `remove_all`
-/// false with no group instance id supplied). And it runs on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding
-/// operation holds its own sender, so it cannot disconnect the queue; what
-/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
-/// inside an earlier callback. So callbacks are not guaranteed to be serialised
-/// on one thread. Do not hold a lock across this call and re-acquire it in the
-/// callback, and publish everything the callback needs (including `user_data`)
-/// before calling rather than after.
+/// Java's result is one future, so the callback fires **exactly once** — in
+/// `removeAll` mode too — when that future completes, carrying the result
+/// handle or the whole-request error; see
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t`].
+/// It is not always called on the same thread. It normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns**, when the RPC cannot be submitted at all (a
+/// NULL `admin` handle, a NULL `group_id`, or an empty member list without
+/// `remove_all`). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -12358,13 +14033,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     let group = unsafe { read_required_string(group_id, "group_id") };
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
     unsafe {
-        admin_async_value_op(
+        admin_async_future_op(
             admin,
             user_data,
-            move |a| submit_remove_members_from_consumer_group(a, &group?, options?),
+            move |a| {
+                let resolved = submit_remove_members_from_consumer_group(a, &group?, options?);
+                Ok(async move {
+                    let (result, requested, outcome) = resolved.await;
+                    // A failed future is the whole request's error.
+                    let errors = outcome?;
+                    Ok(remove_members_from_consumer_group_result_inner((result, requested, Ok(errors))))
+                })
+            },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(outcomes) => (box_remove_members_from_consumer_group_result(outcomes), std::ptr::null_mut()),
+                    Ok(inner) => (box_remove_members_from_consumer_group_result(inner), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -12564,6 +14247,27 @@ pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const
     unsafe { acl_binding_ref(binding) }.permission_type
 }
 
+/// Destroys an `AclBinding` handle **owned** by a per-key async callback
+/// ([`kafka_admin_AdminClient_create_acls_async`]). Safe with null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_CreateAclsResult_get_binding`] or
+/// [`kafka_admin_DescribeAclsResult_get_binding`] or
+/// [`kafka_admin_DeleteAclsResult_get_binding`] — those are borrowed from
+/// their owning flattened result handle and are freed when that handle is
+/// destroyed instead.
+///
+/// # Safety
+///
+/// `binding` must be null or an owned handle from the `create_acls` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_destroy(binding: *mut kafka_common_AclBinding_t) {
+    if !binding.is_null() {
+        unsafe { drop(Box::from_raw(binding as *mut AclBindingInner)) };
+    }
+}
+
 /// Opaque handle to an `AclBindingFilter` (Java's
 /// `org.apache.kafka.common.acl.AclBindingFilter`).
 ///
@@ -12737,6 +14441,26 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
     unsafe { acl_binding_filter_ref(filter) }.permission_type
 }
 
+/// Destroys an `AclBindingFilter` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_delete_acls_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_DeleteAclsResult_get_filter`] — that one is borrowed from its
+/// owning [`kafka_admin_DeleteAclsResult_t`] and is freed when that handle is
+/// destroyed instead.
+///
+/// # Safety
+///
+/// `filter` must be null or an owned handle from the `delete_acls` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_destroy(filter: *mut kafka_common_AclBindingFilter_t) {
+    if !filter.is_null() {
+        unsafe { drop(Box::from_raw(filter as *mut AclBindingFilterInner)) };
+    }
+}
+
 /// Opaque handle to a `ClientQuotaEntity` (Java's
 /// `org.apache.kafka.common.quota.ClientQuotaEntity`).
 ///
@@ -12857,6 +14581,26 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
     match unsafe { client_quota_entity_ref(entity) }.entry_names_c.get(index as usize) {
         Some(name) => optional_cstring_ptr(name),
         None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `ClientQuotaEntity` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_alter_client_quotas_async`]). Safe with
+/// null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_AlterClientQuotasResult_get_entity`] — that one is borrowed
+/// from its owning [`kafka_admin_AlterClientQuotasResult_t`] and is freed when
+/// that handle is destroyed instead.
+///
+/// # Safety
+///
+/// `entity` must be null or an owned handle from the `alter_client_quotas`
+/// per-key async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_destroy(entity: *mut kafka_common_ClientQuotaEntity_t) {
+    if !entity.is_null() {
+        unsafe { drop(Box::from_raw(entity as *mut ClientQuotaEntityInner)) };
     }
 }
 
@@ -13010,6 +14754,92 @@ unsafe fn read_acl_bindings(
         });
     }
     Ok(out)
+}
+
+/// `(resource_type, resource_name, pattern_type, principal, host, operation,
+/// permission_type)` tuple: the per-key identity used for `createAcls`'s
+/// [`admin_async_per_key_op`] delivery — built by [`acl_binding_key`] from the
+/// validated bindings, or, when the bindings cannot be built, read raw from the
+/// rows by [`read_acl_binding_keys`] for the submission-failure fan-out.
+///
+/// `AclBinding`'s constructor validates its constituent `ResourcePattern` /
+/// `AccessControlEntry` (rejecting e.g. an ANY resource type — see
+/// [`read_acl_binding_at`]), so a malformed row cannot be represented as a
+/// real `AclBinding`. But every requested row still needs an identity for the
+/// per-key fan-out (its doc comment: every key in `keys` gets exactly one
+/// callback, even when the whole submission fails). This tuple echoes the
+/// row's raw C values without validating them, so it round-trips
+/// byte-for-byte through the delivered key even for a row Java's constructors
+/// would reject — matching what a caller that built its own key from the same
+/// raw values (as the Python binding does) would expect to see. Not a public
+/// type: private to this file's marshaling layer, analogous to the existing
+/// `type Row = (...)` alias below.
+type AclBindingKey = (i32, String, i32, String, String, i32, i32);
+
+/// Converts an already-validated [`AclBinding`] to its [`AclBindingKey`] form
+/// — the key `createAcls`'s per-binding callback is delivered under whenever
+/// the bindings parse. Enum codes are the binding's own `code()`s, so an
+/// undefined input code comes back as UNKNOWN's code, as Java's `fromCode`
+/// maps it.
+fn acl_binding_key(binding: &AclBinding) -> AclBindingKey {
+    let pattern = binding.pattern();
+    let entry = binding.entry();
+    (
+        i32::from(pattern.resource_type().code()),
+        pattern.name().to_string(),
+        i32::from(pattern.pattern_type().code()),
+        entry.principal().to_string(),
+        entry.host().to_string(),
+        i32::from(entry.operation().code()),
+        i32::from(entry.permission_type().code()),
+    )
+}
+
+/// Reads `count` rows of parallel arrays into [`AclBindingKey`]s, tolerant of
+/// a NULL string entry (kept as an empty string) so every requested row still
+/// gets an identity even when [`read_acl_bindings`]'s validated parse fails on
+/// this or another row. See [`AclBindingKey`] for why this must not go through
+/// `AclBinding`'s validating constructors.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries; string entries must be
+/// NULL or valid C strings.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_acl_binding_keys(
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+) -> Vec<AclBindingKey> {
+    let n = count.max(0) as usize;
+    if resource_types.is_null()
+        || resource_names.is_null()
+        || pattern_types.is_null()
+        || principals.is_null()
+        || hosts.is_null()
+        || operations.is_null()
+        || permission_types.is_null()
+    {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|index| {
+            (
+                unsafe { *resource_types.add(index) },
+                unsafe { optional_string_at(resource_names, index) }.unwrap_or_default(),
+                unsafe { *pattern_types.add(index) },
+                unsafe { optional_string_at(principals, index) }.unwrap_or_default(),
+                unsafe { optional_string_at(hosts, index) }.unwrap_or_default(),
+                unsafe { *operations.add(index) },
+                unsafe { *permission_types.add(index) },
+            )
+        })
+        .collect()
 }
 
 /// Builds one [`AclBindingFilter`] from scalar fields.
@@ -13225,25 +15055,15 @@ unsafe fn read_client_quota_entity(
 ///
 /// # Errors
 ///
-/// Propagates the per-row errors of [`read_client_quota_entity`], and rejects a
-/// duplicate entity across rows.
+/// Propagates the per-row errors of [`read_client_quota_entity`].
 ///
-/// **Deviation from Java, deliberate.** Java does *not* reject: it keeps the
-/// `Collection<ClientQuotaAlteration>` intact and hands it verbatim to
+/// A repeated entity **across** rows is kept, exactly as Java keeps it: Java
+/// hands the `Collection<ClientQuotaAlteration>` verbatim to
 /// `new AlterClientQuotasRequest.Builder(entries, ...)`, so both alterations
-/// reach the broker; only the *future* map collapses, because
-/// `futures.put(entry.entity(), ...)` overwrites the earlier entry
-/// (`KafkaAdminClient.java:4301-4313`). `src/admin/kafka_admin_client.rs`
-/// mirrors that. The C layer is stricter because the collapse is not
-/// attributable here: the result crosses as a flat, index-addressed array of
-/// entities built from that map, so a duplicate silently yields fewer rows than
-/// the request had and the caller — who passed parallel arrays, not a map —
-/// has no way to learn which of its two rows the surviving outcome describes.
-/// A Java caller holds the map and can see it shrink. Rejecting at the exact
-/// row index turns unattributable data loss into a named error; the cost is
-/// that a C caller cannot express "send two alterations for one entity and let
-/// the broker apply both in order", which is the only thing Java can do here
-/// that this cannot.
+/// reach the broker, and only the *future* map collapses, because
+/// `futures.put(entry.entity(), ...)` keys it by entity
+/// (`KafkaAdminClient.java:4314-4342`). `src/admin/kafka_admin_client.rs`
+/// mirrors that, and so the result has one entry per distinct entity.
 ///
 /// # Safety
 ///
@@ -13265,7 +15085,6 @@ unsafe fn read_client_quota_alterations(
         return Ok(Vec::new());
     }
     let mut out: Vec<ClientQuotaAlteration> = Vec::with_capacity(n);
-    let mut seen: HashSet<ClientQuotaEntity> = HashSet::with_capacity(n);
     for row in 0..n {
         let types = unsafe { *entity_types.add(row) };
         if types.is_null() {
@@ -13279,11 +15098,6 @@ unsafe fn read_client_quota_alterations(
             unsafe { *entity_names.add(row) }
         };
         let entity = unsafe { read_client_quota_entity(types, names, *entity_counts.add(row), row)? };
-        if !seen.insert(entity.clone()) {
-            return Err(Error::local_illegal_argument(format!(
-                "quota alteration at index {row} repeats an entity already altered by an earlier entry"
-            )));
-        }
 
         let op_count = if op_counts.is_null() {
             0
@@ -13323,6 +15137,73 @@ unsafe fn read_client_quota_alterations(
     Ok(out)
 }
 
+/// Reads one ragged row of `(entity type, entity name)` pairs into a
+/// [`ClientQuotaEntity`], tolerant of a NULL type (skipped) or a repeated type
+/// within the row (last one wins) — unlike [`read_client_quota_entity`], this
+/// never fails, so it can supply an identity for
+/// [`admin_async_per_key_op`]'s per-key fan-out even for a row that
+/// [`read_client_quota_alterations`]'s validated parse rejects. `ClientQuotaEntity::new`
+/// itself does not validate (see its doc comment), so this needs no bypass —
+/// unlike [`AclBindingKey`], which exists because `AclBinding`'s constituents
+/// do validate.
+///
+/// # Safety
+///
+/// `types` must be non-null with `count` entries; `names` must be null or have
+/// `count` entries.
+unsafe fn read_client_quota_entity_infallible(
+    types: *const *const c_char,
+    names: *const *const c_char,
+    count: i32,
+) -> ClientQuotaEntity {
+    let n = count.max(0) as usize;
+    let mut entries: HashMap<String, Option<String>> = HashMap::with_capacity(n);
+    for index in 0..n {
+        if let Some(entity_type) = unsafe { optional_string_at(types, index) } {
+            let name = unsafe { optional_string_at(names, index) };
+            entries.insert(entity_type, name);
+        }
+    }
+    ClientQuotaEntity::new(entries)
+}
+
+/// Reads `count` ragged entity rows into [`ClientQuotaEntity`] keys, computed
+/// independently of [`read_client_quota_alterations`]'s validated (and
+/// duplicate-rejecting) parse — mirrors
+/// `alter_partition_reassignments_async`'s `read_topic_partitions`-as-keys
+/// pattern — so every requested row still gets a callback via
+/// [`admin_async_per_key_op`]'s fan-out even when that parse fails.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries, each of which is null or
+/// has the matching per-row count of entries.
+unsafe fn read_client_quota_entity_keys(
+    entity_types: *const *const *const c_char,
+    entity_names: *const *const *const c_char,
+    entity_counts: *const i32,
+    count: i32,
+) -> Vec<ClientQuotaEntity> {
+    let n = count.max(0) as usize;
+    if entity_types.is_null() || entity_counts.is_null() {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|row| {
+            let types = unsafe { *entity_types.add(row) };
+            if types.is_null() {
+                return ClientQuotaEntity::new(HashMap::new());
+            }
+            let names = if entity_names.is_null() {
+                std::ptr::null()
+            } else {
+                unsafe { *entity_names.add(row) }
+            };
+            unsafe { read_client_quota_entity_infallible(types, names, *entity_counts.add(row)) }
+        })
+        .collect()
+}
+
 /// Submits `createAcls` and returns the collect-all future over its per-binding
 /// futures.
 fn submit_create_acls(
@@ -13336,6 +15217,20 @@ fn submit_create_acls(
     let entries: Vec<(AclBinding, KafkaFuture<()>)> =
         result.values().iter().map(|(b, f)| (b.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `createAcls`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_create_acls`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Keyed by [`AclBindingKey`] rather than `AclBinding` directly, converted via
+/// [`acl_binding_key`], so it matches [`read_acl_binding_keys`]'s output type.
+fn submit_create_acls_entries(
+    admin: &dyn Admin,
+    acls: &[AclBinding],
+    options: CreateAclsOptions,
+) -> Vec<(AclBindingKey, KafkaFuture<()>)> {
+    let result = admin.create_acls_with_options(acls, options);
+    result.values().iter().map(|(b, f)| (acl_binding_key(b), f.clone())).collect()
 }
 
 /// Submits `describeAcls` and returns its single listing future.
@@ -13360,6 +15255,22 @@ fn submit_delete_acls(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `deleteAcls`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_delete_acls`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Unlike `createAcls`'s key, `AclBindingFilter` is infallible to construct
+/// (see [`build_acl_binding_filter`]), so `filters` itself already serves as
+/// the identity for [`admin_async_per_key_op`]'s fan-out — no raw-tuple key
+/// type is needed here.
+fn submit_delete_acls_entries(
+    admin: &dyn Admin,
+    filters: &[AclBindingFilter],
+    options: DeleteAclsOptions,
+) -> Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> {
+    let result = admin.delete_acls_with_options(filters, options);
+    result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect()
+}
+
 /// Submits `describeClientQuotas` and returns its single whole-map future.
 fn submit_describe_client_quotas(
     admin: &dyn Admin,
@@ -13380,6 +15291,22 @@ fn submit_alter_client_quotas(
     let futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)> =
         result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(futures)
+}
+
+/// Submits `alterClientQuotas`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_alter_client_quotas`]; see the "RPC submission helpers — per-key
+/// (unjoined) variants" note above. `ClientQuotaEntity::new` does not
+/// validate, so `entries`' own entities (via [`read_client_quota_entity_keys`]
+/// for the `keys` argument) already serve as a real identity — no raw-tuple
+/// key type is needed here, unlike `createAcls`'s [`AclBindingKey`].
+fn submit_alter_client_quotas_entries(
+    admin: &dyn Admin,
+    entries: &[ClientQuotaAlteration],
+    options: AlterClientQuotasOptions,
+) -> Vec<(ClientQuotaEntity, KafkaFuture<()>)> {
+    let result = admin.alter_client_quotas_with_options(entries, options);
+    result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -13586,7 +15513,12 @@ pub struct kafka_admin_DeleteAclsResult_t {
     _private: [u8; 0],
 }
 
-/// One `DeleteAclsResult.FilterResult`: exactly one of the two is present.
+/// One `DeleteAclsResult.FilterResult`. Java builds it as
+/// `new FilterResult(aclBinding, aclError.exception(message))`
+/// (`KafkaAdminClient.java:2705-2708`): the matched binding is always there and
+/// the exception is non-null when deleting it failed, so **both** can be
+/// present (`binding` is absent only if the response's binding cannot be
+/// decoded).
 struct DeleteAclsFilterResultInner {
     binding: Option<AclBindingInner>,
     error: Option<ErrorInner>,
@@ -13721,13 +15653,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     }
 }
 
-/// Returns the ACL binding deleted by the filter at `index`, entry
-/// `result_index` (borrowed), or null when that entry carries an exception
-/// instead, or when either index is out of range. Do not free it.
+/// Returns the ACL binding the filter at `index` matched, entry `result_index`
+/// (borrowed), or null when either index is out of range (or the broker's
+/// binding could not be decoded). Do not free it.
 ///
-/// Java's `FilterResult` holds exactly one of a binding or an exception, so
-/// this and [`kafka_admin_DeleteAclsResult_get_result_error`] are
-/// complementary: for an in-range entry, precisely one of them is non-null.
+/// As in Java's `FilterResult`, the binding and
+/// [`kafka_admin_DeleteAclsResult_get_result_error`] are **not** exclusive:
+/// Java builds each entry with the matched binding and, when deleting it
+/// failed, the exception too, so a failed entry has both.
 ///
 /// # Safety
 ///
@@ -13748,8 +15681,8 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 }
 
 /// Returns the exception for the filter at `index`, entry `result_index`
-/// (borrowed), or null when that entry carries a deleted binding instead, or
-/// when either index is out of range. Do not destroy it.
+/// (borrowed), or null when deleting that entry's binding succeeded, or when
+/// either index is out of range. Do not destroy it.
 ///
 /// This is Java's `FilterResult.error()`: the filter matched this ACL but
 /// deleting it failed. It is independent of
@@ -13800,6 +15733,137 @@ unsafe fn delete_acls_filter_result_at(
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka_admin_DeleteAclsResult_t) {
     if !result.is_null() {
         unsafe { drop(Box::from_raw(result as *mut DeleteAclsResultInner)) };
+    }
+}
+
+/// Opaque handle to one filter's `DeleteAclsResult.FilterResults` — the
+/// **value** [`kafka_admin_AdminClient_delete_acls_async`]'s per-key callback
+/// delivers for a filter that matched zero or more ACLs.
+///
+/// `deleteAcls`'s per-filter future carries a *collection* (Java's
+/// `FilterResults.values(): List<FilterResult>`), so per `admin-client.md` §7
+/// it gets its own handle rather than flattening onto the callback's
+/// parameter list, mirroring the synchronous result's nested
+/// `results[i][j]` index level
+/// ([`kafka_admin_DeleteAclsResult_get_result_count`] /
+/// `_get_binding` / `_get_result_error`). Always **owned**: free it with
+/// [`kafka_admin_DeleteAclsFilterResults_destroy`].
+#[repr(C)]
+pub struct kafka_admin_DeleteAclsFilterResults_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeleteAclsFilterResults_t`]: reuses
+/// [`DeleteAclsFilterResultInner`] — the same per-entry type the synchronous
+/// flattened result's `results: Vec<Vec<DeleteAclsFilterResultInner>>` field
+/// already holds — for one filter's row.
+struct DeleteAclsFilterResultsInner {
+    entries: Vec<DeleteAclsFilterResultInner>,
+}
+
+/// Boxes one filter's `FilterResults` as an owned
+/// [`kafka_admin_DeleteAclsFilterResults_t`], for
+/// [`kafka_admin_AdminClient_delete_acls_async`]'s per-key callback.
+fn box_delete_acls_filter_results(results: FilterResults) -> *mut kafka_admin_DeleteAclsFilterResults_t {
+    let entries = results
+        .values()
+        .iter()
+        .map(|r| DeleteAclsFilterResultInner {
+            binding: r.binding().map(AclBindingInner::new),
+            error: r.error().cloned().map(error_inner),
+        })
+        .collect();
+    Box::into_raw(Box::new(DeleteAclsFilterResultsInner { entries })) as *mut kafka_admin_DeleteAclsFilterResults_t
+}
+
+/// Casts a `*const kafka_admin_DeleteAclsFilterResults_t` to a reference.
+///
+/// # Safety
+///
+/// `results` must be a non-null owned handle from the `delete_acls` per-key
+/// async callback.
+unsafe fn delete_acls_filter_results_ref(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+) -> &'static DeleteAclsFilterResultsInner {
+    unsafe { &*(results as *const DeleteAclsFilterResultsInner) }
+}
+
+/// Returns how many ACLs this filter matched (the size of Java's
+/// `FilterResults.values()`).
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_count(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+) -> i32 {
+    unsafe { delete_acls_filter_results_ref(results) }.entries.len() as i32
+}
+
+/// Returns the ACL binding at `index` (borrowed, valid until this handle is
+/// destroyed), or null when `index` is out of range (or the broker's binding
+/// could not be decoded). Do not free it directly.
+///
+/// As in Java's `FilterResult`, this and
+/// [`kafka_admin_DeleteAclsFilterResults_get_error`] are **not** exclusive: a
+/// failed deletion has both the matched binding and the exception.
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_get_binding(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+    index: i32,
+) -> *const kafka_common_AclBinding_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_acls_filter_results_ref(results) }.entries.get(index as usize) {
+        Some(entry) => match &entry.binding {
+            Some(binding) => binding.as_ptr(),
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the exception for the entry at `index` (borrowed), or null when
+/// deleting that entry's binding succeeded, or `index` is out of range. Do not
+/// destroy it directly.
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_get_error(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+    index: i32,
+) -> *const kafka_common_Error_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_acls_filter_results_ref(results) }.entries.get(index as usize) {
+        Some(entry) => error_ptr(entry.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `delete_acls` per-key filter-results handle, invalidating every
+/// borrowed sub-handle obtained from it (its bindings). Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `results` must be null or a valid `delete_acls` per-key filter-results
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_destroy(
+    results: *mut kafka_admin_DeleteAclsFilterResults_t,
+) {
+    if !results.is_null() {
+        unsafe { drop(Box::from_raw(results as *mut DeleteAclsFilterResultsInner)) };
     }
 }
 
@@ -14099,14 +16163,25 @@ fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
     CreateAclsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_acls_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_acls_async`], fired **once per binding, as
+/// that binding's own future resolves** — independently of every other
+/// binding in the same call, matching Java's `Map<AclBinding,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch. The key is delivered as an owned
+/// [`kafka_common_AclBinding_t`] handle — the same opaque type
+/// [`kafka_admin_CreateAclsResult_get_binding`] returns borrowed from the
+/// synchronous result — which the callback must free with
+/// [`kafka_common_AclBinding_destroy`]. It is Java's `AclBinding` as built from
+/// the request row, so an enum code Java does not define reads back as that
+/// enum's UNKNOWN code, as Java's `fromCode` maps it; only when the whole
+/// submission fails does the key echo the row's raw values.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreateAclsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-binding failure arrives inside
-/// `result`, not as `error`.
+/// There is no value parameter: Java's per-binding future is
+/// `KafkaFuture<Void>`, so a null `error` *is* the success value. A non-null
+/// `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_create_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_AclBinding_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Creates ACL bindings, blocking until every per-binding future has resolved
 /// (synchronous).
@@ -14139,8 +16214,17 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 ///   rejected.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
-/// An unrecognised enum code becomes UNKNOWN, exactly as Java's `fromCode`
-/// does, and UNKNOWN is accepted by the constructors — the broker rejects it.
+/// An unrecognised enum code marshals to UNKNOWN, exactly as Java's `fromCode`
+/// does, and UNKNOWN passes the marshaling. It is **not** sent to the broker,
+/// though: `createAcls` then rejects any binding whose filter has an indefinite
+/// field — ANY, UNKNOWN, or NULL (`ResourcePatternFilter.findIndefiniteField` /
+/// `AccessControlEntryData.findIndefiniteField`) — **locally, per binding**,
+/// completing that binding's future with an `INVALID_REQUEST` error
+/// `"Invalid ACL creation: <field>"` and never issuing a request for it. This
+/// mirrors `KafkaAdminClient.createAcls` (`acl.toFilter().findIndefiniteField()`,
+/// `KafkaAdminClient.java:2615-2622`). The up-front constructor rejections above
+/// (ANY resource-type, ANY / MATCH pattern-type, ANY operation, ANY
+/// permission-type) are separate and happen before submission.
 ///
 /// # Safety
 ///
@@ -14182,19 +16266,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 /// Creates ACL bindings asynchronously. See
 /// [`kafka_admin_AdminClient_create_acls`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL resource name, principal or
-/// host entry, or an enum code Java's `ResourcePattern` /
+/// As there, an unrecognised enum code marshals to UNKNOWN but is not sent to
+/// the broker: a binding whose filter has an indefinite field (ANY, UNKNOWN, or
+/// NULL) is rejected **locally, per binding**, with an `INVALID_REQUEST`
+/// `"Invalid ACL creation: <field>"` error delivered through that binding's own
+/// callback — mirroring `KafkaAdminClient.createAcls`.
+///
+/// Unlike the synchronous entry point, the callback fires **once per binding,
+/// as that binding's future resolves**, not once for the whole batch — a fast
+/// or already-resolved binding is not held up by a slow or failing one. It is
+/// called once per distinct binding (a repeated binding is one key, as in
+/// Java's result map), but not always on the same thread. Per key,
+/// it normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle, a NULL resource
+/// name, principal or host entry, or an enum code Java's `ResourcePattern` /
 /// `AccessControlEntry` constructor rejects). And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
+/// a given binding's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in the
+/// callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
 /// # Safety
@@ -14229,18 +16324,52 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
             count,
         )
     };
+    // The keys are the validated bindings' own `acl_binding_key`s — the form
+    // the result's entries are keyed by, with each enum code normalised the
+    // way Java's `fromCode` normalises it (an undefined code becomes
+    // UNKNOWN) — so a code Java does not define cannot mis-key: its binding
+    // is matched by its own entry, not reported missing with a second,
+    // foreign-keyed callback beside it. Only when the parse fails, and no
+    // binding exists, are the raw rows the identities for the fan-out (see
+    // `AclBindingKey`). A repeated binding is one key
+    // (`admin_async_per_key_op` de-duplicates), matching the C incref count
+    // (`count_distinct_acls`).
+    let keys = match &acls {
+        Ok(bindings) => bindings.iter().map(acl_binding_key).collect(),
+        Err(_) => unsafe {
+            read_acl_binding_keys(
+                resource_types,
+                resource_names,
+                pattern_types,
+                principals,
+                hosts,
+                operations,
+                permission_types,
+                count,
+            )
+        },
+    };
     let options = create_acls_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_acls(a, &acls?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_acls_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+            keys,
+            move |a| Ok(submit_create_acls_entries(a, &acls?, options)),
+            move |key, outcome, ud| {
+                let (rt, name, pt, principal, host, op, perm) = key;
+                let handle = AclBindingInner {
+                    resource_type: rt,
+                    resource_name_c: to_cstring(&name),
+                    pattern_type: pt,
+                    principal_c: to_cstring(&principal),
+                    host_c: to_cstring(&host),
+                    operation: op,
+                    permission_type: perm,
                 };
-                callback(result, error, ud);
+                let key_ptr = Box::into_raw(Box::new(handle)) as *mut kafka_common_AclBinding_t;
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(key_ptr, error, ud);
             },
         )
     };
@@ -14398,14 +16527,32 @@ fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
     DeleteAclsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_delete_acls_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_delete_acls_async`], fired **once per filter, as
+/// that filter's own future resolves** — independently of every other filter
+/// in the same call, matching Java's `Map<AclBindingFilter,
+/// KafkaFuture<FilterResults>>` (`admin-client.md` §5), rather than waiting
+/// for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteAclsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-filter failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_delete_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// The key is delivered as an owned [`kafka_common_AclBindingFilter_t`]
+/// handle — the same opaque type [`kafka_admin_DeleteAclsResult_get_filter`]
+/// returns borrowed from the synchronous result — which the callback must
+/// free with [`kafka_common_AclBindingFilter_destroy`]. Exactly one of
+/// `value` / `error` is non-null: a non-null `error` is the filter's own future
+/// failing (nothing was deleted for it), mapping to
+/// [`kafka_admin_DeleteAclsResult_get_error`]'s condition, while a non-null
+/// `value` is an owned [`kafka_admin_DeleteAclsFilterResults_t`] — the per-ACL
+/// results this filter matched, mirroring
+/// [`kafka_admin_DeleteAclsResult_get_result_count`] /
+/// `_get_binding` / `_get_result_error`'s nested index level — which must be
+/// freed with [`kafka_admin_DeleteAclsFilterResults_destroy`]. `error` must be
+/// freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_delete_acls_callback_t = unsafe extern "C" fn(
+    *mut kafka_common_AclBindingFilter_t,
+    *mut kafka_admin_DeleteAclsFilterResults_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Deletes the ACL bindings matching each filter, blocking until every
 /// per-filter future has resolved (synchronous).
@@ -14463,18 +16610,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 /// Deletes ACL bindings asynchronously. See
 /// [`kafka_admin_AdminClient_delete_acls`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per filter,
+/// as that filter's future resolves**, not once for the whole batch — a fast
+/// or already-resolved filter is not held up by a slow or failing one. It is
+/// called once per distinct filter (a repeated filter is one key, as in Java's
+/// result map), but not always on the same thread. Per key,
+/// it normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given filter's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -14496,6 +16648,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     callback: kafka_admin_AdminClient_delete_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // `AclBindingFilter` is infallible to construct (see
+    // `build_acl_binding_filter`), so the same `filters` vec doubles as the
+    // `keys` argument — no separate raw-key extraction needed here, unlike
+    // `create_acls_async`.
     let filters = unsafe {
         read_acl_binding_filters(
             resource_types,
@@ -14508,18 +16664,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
             count,
         )
     };
+    // Distinct filters (first-occurrence order): the Rust core's `delete_acls`
+    // dedups its result map via `Entry::Vacant` (Java keys `deleteAcls` on the
+    // `AclBindingFilter`), so a repeated filter is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_acls`).
+    // `AclBindingFilter` compares NULL (match-any) distinct from an empty string.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        filters
+            .iter()
+            .filter(|f| seen.insert((*f).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = delete_acls_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_delete_acls(a, &filters, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_acls_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_delete_acls_entries(a, &filters, options)),
+            move |filter, outcome, ud| {
+                let key_ptr = Box::into_raw(Box::new(AclBindingFilterInner::new(&filter)))
+                    as *mut kafka_common_AclBindingFilter_t;
+                let (value, error) = match outcome {
+                    Ok(results) => (box_delete_acls_filter_results(results), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(key_ptr, value, error, ud);
             },
         )
     };
@@ -14659,15 +16832,24 @@ fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterCli
         .set_validate_only(validate_only)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_client_quotas_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_client_quotas_async`], fired **once per
+/// entity, as that entity's own future resolves** — independently of every
+/// other entity in the same call, matching Java's `Map<ClientQuotaEntity,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterClientQuotasResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-entity failure arrives inside
-/// `result`, not as `error`.
+/// The key is delivered as an owned [`kafka_common_ClientQuotaEntity_t`]
+/// handle — the same opaque type
+/// [`kafka_admin_AlterClientQuotasResult_get_entity`] returns borrowed from
+/// the synchronous result — which the callback must free with
+/// [`kafka_common_ClientQuotaEntity_destroy`].
+///
+/// There is no value parameter: Java's per-entity future is
+/// `KafkaFuture<Void>`, so a null `error` *is* the success value. A non-null
+/// `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterClientQuotasResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_ClientQuotaEntity_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Alters client quotas, blocking until every per-entity future has resolved
 /// (synchronous).
@@ -14700,18 +16882,11 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 ///   without applying.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
-/// A repeated entity type within one alteration, or a repeated entity across
-/// alterations, is rejected: Java keys both by a `Map`, so a duplicate could
-/// only be silently dropped.
-///
-/// This rejection is a deliberate divergence from
-/// [`kafka_admin_AdminClient_alter_user_scram_credentials`], which lets
-/// duplicate users through even though `KafkaAdminClient` collapses their
-/// futures the same way. The difference is whether the caller can re-derive the
-/// key: a quota entity is a compound key **this layer assembles** from
-/// `entity_types[i]` / `entity_names[i]`, so a C caller holding parallel rows
-/// cannot tell which row the one surviving outcome describes; a SCRAM user is a
-/// plain string the caller already holds and can match by name.
+/// A repeated entity type **within** one alteration is rejected: Java's
+/// `ClientQuotaEntity` is a `Map`, so it cannot express one. A repeated entity
+/// **across** alterations is sent as Java sends it — both alterations reach the
+/// broker, in order — and, as Java's per-entity future map collapses it, the
+/// result holds one entry for that entity (`KafkaAdminClient.java:4314-4342`).
 ///
 /// # Safety
 ///
@@ -14755,19 +16930,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// Alters client quotas asynchronously. See
 /// [`kafka_admin_AdminClient_alter_client_quotas`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL entity type or op key, an
-/// alteration with no entity types, or a repeated entity type or entity). And
-/// it runs on a **tokio worker thread** if the dispatcher's completion queue
-/// can no longer be reached when the result arrives. Destroying the handle does
-/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// Unlike the synchronous entry point, the callback fires **once per entity,
+/// as that entity's future resolves**, not once for the whole batch — a fast
+/// or already-resolved entity is not held up by a slow or failing one. It is
+/// called once per distinct entity in the input, but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, a NULL entity type or op key, an alteration with no entity types,
+/// or a repeated entity type within one entity). A repeated entity across
+/// alterations is sent twice, as in Java, and is one key. And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached
+/// when a given entity's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
 /// disconnect the queue; what remains is a dispatcher thread that terminated
-/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
-/// guaranteed to be serialised on one thread. Do not hold a lock across this
-/// call and re-acquire it in the callback, and publish everything the callback
-/// needs (including `user_data`) before calling rather than after.
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in
+/// the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -14791,6 +16972,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     callback: kafka_admin_AdminClient_alter_client_quotas_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_client_quota_alterations`'s validated
+    // parse, so every requested entity still gets its callback via
+    // `admin_async_per_key_op`'s fan-out even when that parse fails.
+    // `ClientQuotaEntity::new` does not validate, so this is a real entity,
+    // not a raw-tuple stand-in; a repeated entity is one key there.
+    let keys = unsafe { read_client_quota_entity_keys(entity_types, entity_names, entity_counts, count) };
     let entries = unsafe {
         read_client_quota_alterations(
             entity_types,
@@ -14805,16 +16992,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     };
     let options = alter_client_quotas_options(timeout_ms, validate_only);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_client_quotas(a, &entries?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_client_quotas_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_client_quotas_entries(a, &entries?, options)),
+            move |entity, outcome, ud| {
+                let key_ptr = Box::into_raw(Box::new(ClientQuotaEntityInner::new(&entity)))
+                    as *mut kafka_common_ClientQuotaEntity_t;
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(key_ptr, error, ud);
             },
         )
     };
@@ -14828,12 +17015,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
 // drivers. They take the same handle and return an error if it does not wrap a
 // mock.
 //
-// A driver is exposed once a landed slice's tests need it. `add_topic` and
-// `mark_topic_for_deletion` additionally need `TopicPartitionInfo` input
-// marshaling and a non-panicking Rust surface (both currently `panic!` on
-// duplicate/missing topics, mirroring Java's `IllegalArgumentException`, which
-// must not cross the FFI boundary — CLAUDE.md §10.1), so they arrive with the
-// slice whose tests need them.
+// The Rust mock returns Java's `IllegalArgumentException`s (a duplicate or
+// missing topic, an unknown broker) as `Err`, never a panic, so every driver
+// reports them through its returned error handle.
 // ---------------------------------------------------------------------------
 
 /// Returns the mock client behind `admin`, or an error if it wraps the
@@ -14852,6 +17036,193 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
         _ => Err(Error::local_illegal_state(
             "this operation is only supported on a MockAdminClient",
         )),
+    }
+}
+
+/// Adds an existing topic to the mock's state — Java's
+/// `MockAdminClient.addTopic(boolean internal, String name,
+/// List<TopicPartitionInfo> partitions, Map<String, String> configs)`.
+///
+/// # Parameters
+///
+/// - `internal`: whether the topic is internal.
+/// - `name`: the topic name.
+/// - `partitions` / `leaders` / `replicas` / `replica_counts` / `isrs` /
+///   `isr_counts` / `partition_count`: the `TopicPartitionInfo` list, as
+///   parallel arrays — partition `i` is `partitions[i]`, led by broker
+///   `leaders[i]` (`-1` is Java's null leader), with replicas
+///   `replicas[i][0..replica_counts[i]]` and ISR `isrs[i][0..isr_counts[i]]`
+///   (a NULL `replicas` / `isrs` array, or NULL row, is an empty list). Broker
+///   ids are resolved against the mock's brokers; an id that is not one of
+///   them stands for a broker the mock does not have, so Java's validation
+///   rejects it ("Leader broker unknown", "Unknown brokers in replica list",
+///   "Unknown brokers in isr list").
+/// - `config_keys` / `config_values` / `config_count`: the topic configs. A
+///   NULL `config_keys` is Java's null map; a NULL `config_values[i]` (or a
+///   NULL `config_values`) is a null value; a NULL key is skipped.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): Java's `IllegalArgumentException` messages
+/// ("Topic <name> was already added.", and the three above), a NULL `name`,
+/// or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `name` must be null or a valid C string; every non-null array must have
+/// `partition_count` (partition arrays) or `config_count` (config arrays)
+/// entries, and each non-null replica / ISR row its matching count.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
+    admin: *const kafka_admin_AdminClient_t,
+    internal: bool,
+    name: *const c_char,
+    partitions: *const i32,
+    leaders: *const i32,
+    replicas: *const *const i32,
+    replica_counts: *const i32,
+    isrs: *const *const i32,
+    isr_counts: *const i32,
+    partition_count: i32,
+    config_keys: *const *const c_char,
+    config_values: *const *const c_char,
+    config_count: i32,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    if name.is_null() {
+        return box_error(Error::local_illegal_argument("topic name must not be null"));
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let brokers = mock.brokers();
+    // A broker id the mock does not have becomes a node that is not in its
+    // broker list, so `add_topic` reports it with Java's message.
+    let node = |id: i32| {
+        brokers
+            .iter()
+            .find(|broker| broker.id() == id)
+            .cloned()
+            .unwrap_or_else(|| Node::new(id, String::new(), -1))
+    };
+    let ids = |rows: *const *const i32, counts: *const i32, index: usize| -> Vec<i32> {
+        if rows.is_null() || counts.is_null() {
+            return Vec::new();
+        }
+        let row = unsafe { *rows.add(index) };
+        unsafe { read_i32s(row, *counts.add(index)) }
+    };
+    let n = partition_count.max(0) as usize;
+    let mut infos = Vec::with_capacity(n);
+    if !partitions.is_null() {
+        for index in 0..n {
+            let leader = if leaders.is_null() {
+                -1
+            } else {
+                unsafe { *leaders.add(index) }
+            };
+            infos.push(TopicPartitionInfo::new(
+                unsafe { *partitions.add(index) },
+                (leader >= 0).then(|| node(leader)),
+                ids(replicas, replica_counts, index).into_iter().map(node).collect(),
+                ids(isrs, isr_counts, index).into_iter().map(node).collect(),
+            ));
+        }
+    }
+    let configs = (!config_keys.is_null()).then(|| {
+        (0..config_count.max(0) as usize)
+            .filter_map(|index| {
+                let key = unsafe { optional_string_at(config_keys, index) }?;
+                let value = if config_values.is_null() {
+                    None
+                } else {
+                    unsafe { optional_string_at(config_values, index) }
+                };
+                Some((key, value))
+            })
+            .collect::<BTreeMap<String, Option<String>>>()
+    });
+    match mock.add_topic(internal, &name, infos, configs) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Marks a topic for deletion, so `describeTopics` and `describeConfigs` treat
+/// it as absent — Java's `MockAdminClient.markTopicForDeletion(String)`.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): Java's `IllegalArgumentException` "Topic
+/// <name> did not exist.", a NULL `name`, or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `name` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
+    admin: *const kafka_admin_AdminClient_t,
+    name: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    if name.is_null() {
+        return box_error(Error::local_illegal_argument("topic name must not be null"));
+    }
+    match mock.mark_topic_for_deletion(&unsafe { CStr::from_ptr(name) }.to_string_lossy()) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Replaces one broker's log directories — Java's
+/// `MockAdminClient.Builder.brokerLogDirs`, which installs every broker's list
+/// at construction time; the Rust mock sets one broker's list at a time.
+/// `describeLogDirs`, `alterReplicaLogDirs` and `describeReplicaLogDirs` read
+/// them, and a topic added afterwards starts on its leader's first log dir.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle (free it with
+/// `kafka_common_Error_destroy`): "Broker <id> does not exist." for an id the
+/// mock does not have, a NULL `log_dirs` entry, or `admin` not wrapping a mock.
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `log_dirs` must be null or have `count` entries, each NULL or a valid C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
+    admin: *const kafka_admin_AdminClient_t,
+    broker_id: i32,
+    log_dirs: *const *const c_char,
+    count: i32,
+) -> *mut kafka_common_Error_t {
+    let mock = match unsafe { mock_ref(admin) } {
+        Ok(mock) => mock,
+        Err(e) => return box_error(e),
+    };
+    let mut dirs = Vec::with_capacity(count.max(0) as usize);
+    if !log_dirs.is_null() {
+        for index in 0..count.max(0) as usize {
+            match unsafe { required_string_at(log_dirs, index, "log dir") } {
+                Ok(dir) => dirs.push(dir),
+                Err(e) => return box_error(e),
+            }
+        }
+    }
+    match mock.set_broker_log_dirs(broker_id, dirs) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
     }
 }
 
@@ -15523,10 +17894,6 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
 //     generating constructor.)
 // ---------------------------------------------------------------------------
 
-/// Per-user outcomes of `describeUserScramCredentials`, in Java's own
-/// `description(user)` shape.
-type ScramDescriptionOutcomes = Vec<(String, Result<UserScramCredentialsDescription, Error>)>;
-
 /// Per-user outcomes of `alterUserScramCredentials`.
 type AlterScramOutcomes = HashMap<String, Result<(), Error>>;
 
@@ -15720,49 +18087,37 @@ unsafe fn read_feature_updates(
     Ok(out)
 }
 
-/// Submits `describeUserScramCredentials` and returns a future over its
-/// per-user outcomes.
+/// Submits `describeUserScramCredentials` and returns the core result once its
+/// shared data future has resolved.
 ///
-/// Java exposes three views over one response future — `all()`, `users()` and
-/// `description(user)` — and C has room for one result handle, so this
-/// composes them into the per-user shape that subsumes all three:
+/// Java's `DescribeUserScramCredentialsResult` exposes three distinct views over
+/// one response future — `all()`
+/// (`DescribeUserScramCredentialsResult.java:54-80`), `users()` (`:92-104`) and
+/// `description(user)` (`:114-138`), each with different RESOURCE_NOT_FOUND
+/// semantics. The C handle backs all three faithfully (see
+/// [`DescribeUserScramCredentialsResultInner`]), so this keeps the whole core
+/// result object rather than flattening it into one lossy per-user shape.
 ///
-///   - `all()` succeeds only when every user's error code is NONE or
-///     RESOURCE_NOT_FOUND, so when it does, its keys are the complete user set
-///     and no row carries an error;
-///   - when it fails, `users()` still lists every user whose error is not
-///     RESOURCE_NOT_FOUND — which necessarily includes the one that failed
-///     `all()` — and `description(user)` yields that user's own error. Users
-///     omitted at that point are exactly the ones Java's `all()` also declines
-///     to report, so nothing Java can reach is lost.
-///
-/// If the response future itself failed, all three fail with the same error and
-/// it becomes the call's error. If the composition somehow yields no rows at
-/// all, the `all()` error is returned rather than dropped — the empty-key-set
-/// trap B4 hit with `removeMembersFromConsumerGroup`.
+/// A top-level failure of the data future (auth/timeout) surfaces here and
+/// becomes the call's error: awaiting `users()` both drives the shared future to
+/// completion and propagates such a failure. `users()`
+/// (`DescribeUserScramCredentialsResult.java:92-104`) completes exceptionally
+/// **only** when the data future itself did (its `whenComplete`'s
+/// `throwable != null` branch) — a user-level RESOURCE_NOT_FOUND never faults it —
+/// so an error awaiting it is exactly Java's top-level-failure case, and every
+/// view (built from a now-resolved future) is ready on the first poll thereafter.
 fn submit_describe_user_scram_credentials(
     admin: &dyn Admin,
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
-) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<DescribeUserScramCredentialsResult, Error>> + Send + use<> {
     let result = admin.describe_user_scram_credentials_with_users_options(users, options);
     async move {
-        let all_error = match result.all().get().await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get().await?;
-        let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
-        for user in listed {
-            let outcome = result.description(&user).get().await;
-            rows.push((user, outcome));
-        }
-        if rows.is_empty() {
-            return Err(all_error);
-        }
-        Ok(rows)
+        // Drive the shared data future to completion and surface a top-level
+        // failure as the call's error, mirroring Java's `whenComplete` completing
+        // every view exceptionally when `throwable != null`.
+        result.users().get().await?;
+        Ok(result)
     }
 }
 
@@ -15779,6 +18134,37 @@ fn submit_alter_user_scram_credentials(
     let entries: Vec<(String, KafkaFuture<()>)> =
         result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
+}
+
+/// Reads `count` scram alteration user names, tolerant of a NULL entry (kept
+/// as an empty string) so every requested row still gets an identity for
+/// [`admin_async_per_key_op`]'s fan-out even when [`read_scram_alterations`]'s
+/// validated parse fails on a NULL user in an earlier or later row.
+///
+/// # Safety
+///
+/// `users` must be null, or have `count` entries.
+unsafe fn read_scram_user_keys(users: *const *const c_char, count: i32) -> Vec<String> {
+    let n = count.max(0) as usize;
+    if users.is_null() {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| unsafe { optional_string_at(users, i) }.unwrap_or_default())
+        .collect()
+}
+
+/// Submits `alterUserScramCredentials`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin`
+/// call as [`submit_alter_user_scram_credentials`]; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_alter_user_scram_credentials_entries(
+    admin: &dyn Admin,
+    alterations: &[UserScramCredentialAlteration],
+    options: AlterUserScramCredentialsOptions,
+) -> Vec<(String, KafkaFuture<()>)> {
+    let result = admin.alter_user_scram_credentials_with_options(alterations, options);
+    result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect()
 }
 
 /// Submits `createDelegationToken` and returns its single token future.
@@ -15841,8 +18227,8 @@ fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions)
 /// `IllegalArgumentException` for an empty update map or a blank feature name
 /// (`KafkaAdminClient.java`), and the Rust core returns that as an `Err`
 /// (`src/admin/mod.rs`). It is propagated here rather than being turned into a
-/// failed future, so a C caller sees it on the sync return value and, on the
-/// async path, in an inline callback. Java's `MockAdminClient` does not
+/// failed future, so a C caller sees it on the return value of both the sync
+/// and the async entry point. Java's `MockAdminClient` does not
 /// validate (`MockAdminClient.java:1285-1300`), and neither does the Rust
 /// mock, so this arm is unreachable through a mock handle.
 fn submit_update_features(
@@ -15857,6 +18243,23 @@ fn submit_update_features(
         .map(|(feature, f)| (feature.clone(), f.clone()))
         .collect();
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `updateFeatures`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_update_features`],
+/// including its client-side-validation `Err` path; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_update_features_entries(
+    admin: &dyn Admin,
+    feature_updates: &HashMap<String, FeatureUpdate>,
+    options: UpdateFeaturesOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.update_features_with_options(feature_updates, options)?;
+    Ok(result
+        .values()
+        .iter()
+        .map(|(feature, f)| (feature.clone(), f.clone()))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -15874,8 +18277,10 @@ fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScram
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
-/// inside `result`, not as `error`.
+/// `error` with `kafka_common_Error_destroy`. `error` is non-null **only** when
+/// the underlying data future itself failed (auth/timeout — Java's top-level
+/// `whenComplete` throwable); a user-level failure is not a call failure and is
+/// reported through the result's `description(user)` view, not as `error`.
 pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
@@ -15888,10 +18293,15 @@ pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
 /// On success writes a
 /// [`kafka_admin_DescribeUserScramCredentialsResult_t`] to `*out_result` (free
 /// it with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`]) and
-/// returns null. **A per-user failure is not a call failure**: it is reported by
-/// [`kafka_admin_DescribeUserScramCredentialsResult_get_error`] for that user. A
-/// non-null return means the request could not be submitted or the whole
-/// response failed, and `*out_result` is left untouched.
+/// returns null. The handle backs Java's three views:
+/// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] /
+/// `..._all_count` / `..._all_get_user` / `..._all_get_description`,
+/// `..._users_count` / `..._users_get`, and
+/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. **A user-level
+/// failure is not a call failure**: it is reported through the `description(user)`
+/// view (which faults on RESOURCE_NOT_FOUND, Java-faithfully). A non-null return
+/// means the request could not be submitted or the whole response failed
+/// (auth/timeout), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -15956,7 +18366,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
             move |a| Ok(submit_describe_user_scram_credentials(a, &users, options)),
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(rows) => (box_describe_user_scram_credentials_result(rows), std::ptr::null_mut()),
+                    Ok(core) => (box_describe_user_scram_credentials_result(core), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -15974,15 +18384,19 @@ fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCreden
     AlterUserScramCredentialsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_user_scram_credentials_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_user_scram_credentials_async`], fired
+/// **once per user, as that user's own future resolves** — independently of
+/// every other user in the same call, matching Java's `Map<String,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
-/// inside `result`, not as `error`.
+/// `user` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-user
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
+/// non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Upserts and deletes SASL/SCRAM credentials, blocking until every per-user
 /// future has resolved (synchronous).
@@ -16090,19 +18504,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// Alters SASL/SCRAM credentials asynchronously. See
 /// [`kafka_admin_AdminClient_alter_user_scram_credentials`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle or a NULL user entry). And it runs
-/// on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding
-/// operation holds its own sender, so it cannot disconnect the queue; what
-/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
-/// inside an earlier callback. So callbacks are not guaranteed to be serialised
-/// on one thread. Do not hold a lock across this call and re-acquire it in the
-/// callback, and publish everything the callback needs (including `user_data`)
-/// before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per user, as
+/// that user's future resolves**, not once for the whole batch — a fast or
+/// already-resolved user is not held up by a slow or failing one. It is
+/// called once per distinct user in the input, but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle or a NULL user entry). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// user's result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally,
+/// i.e. a panic inside an earlier callback. So callbacks for different keys
+/// are not guaranteed to be serialised on one thread, nor in request order.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
 ///
 /// # Safety
 ///
@@ -16127,6 +18545,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     callback: kafka_admin_AdminClient_alter_user_scram_credentials_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_scram_alterations`'s validated parse
+    // (which fails the whole array on a NULL user), so every requested user
+    // still gets its own callback via `admin_async_per_key_op`'s fan-out even
+    // when that parse fails.
+    //
+    // Distinct users (first-occurrence order): Java's `alterUserScramCredentials`
+    // result map is keyed by user (`KafkaAdminClient.java`'s per-user
+    // `futures.put(user, ..)`), so a repeated user is one key.
+    // `admin_async_per_key_op` de-duplicates as well; doing it here keeps the
+    // key list in step with the C incref count (`count_distinct_scram_users`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        unsafe { read_scram_user_keys(users, count) }
+            .into_iter()
+            .filter(|user| seen.insert(user.clone()))
+            .collect::<Vec<_>>()
+    };
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -16143,16 +18578,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     };
     let options = alter_user_scram_credentials_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_user_scram_credentials(a, &alterations?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_user_scram_credentials_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_user_scram_credentials_entries(a, &alterations?, options)),
+            move |user, outcome, ud| {
+                let user_c = to_cstring(&user);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(user_c.as_ptr(), error, ud);
             },
         )
     };
@@ -16791,14 +19225,20 @@ fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeatur
         .set_timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_update_features_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_update_features_async`], fired **once per
+/// feature, as that feature's own future resolves** — independently of every
+/// other feature in the same call, matching Java's `Map<String,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_UpdateFeaturesResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-feature failure arrives inside
-/// `result`, not as `error`.
+/// `feature` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. There is no value parameter: Java's
+/// per-feature future is `KafkaFuture<Void>`, so a null `error` *is* the
+/// success value. A non-null `error` must be freed with
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_update_features_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_UpdateFeaturesResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Applies feature updates, blocking until every per-feature future has
 /// resolved (synchronous).
@@ -16863,21 +19303,43 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 /// Applies feature updates asynchronously. See
 /// [`kafka_admin_AdminClient_update_features`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL or repeated feature name, a
-/// `FeatureUpdate` the constructor rejects, or — against a real client, not a
-/// mock — an empty update map, for which `KafkaAdminClient.updateFeatures`
-/// throws `IllegalArgumentException`). And it runs on a
+/// # Submission errors are returned, as Java throws them
+///
+/// Java's `KafkaAdminClient.updateFeatures` validates its argument **before**
+/// it creates any future and throws `IllegalArgumentException` from the call
+/// itself: for an empty update map ("Feature updates can not be null or
+/// empty.") and for a blank feature name ("Provided feature can not be
+/// empty."). `FeatureUpdate`'s constructor throws the same way for an invalid
+/// update, before the call is even made. This entry point therefore reports
+/// every such failure **as its return value** — non-null means nothing was
+/// submitted and `callback` will **never** be invoked; the caller owns the
+/// returned error and frees it with `kafka_common_Error_destroy`. The same
+/// applies to the C-only marshaling failures (a NULL or repeated feature name,
+/// a `FeatureUpdate` the constructor rejects) and to a NULL `admin` handle.
+///
+/// Java's `MockAdminClient.updateFeatures` validates nothing
+/// (`MockAdminClient.java:1285-1300`), so against a mock handle an empty update
+/// map returns null and fires no callback, as Java's mock returns an empty
+/// result.
+///
+/// # Callback
+///
+/// When this returns null, the callback fires **once per feature, as that
+/// feature's future resolves**, not once for the whole batch — a fast or
+/// already-resolved feature is not held up by a slow or failing one. It is
+/// called once per feature in the input, but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread, and on a
 /// **tokio worker thread** if the dispatcher's completion queue can no longer
-/// be reached when the result arrives. Destroying the handle does not cause
-/// that — an outstanding operation holds its own sender, so it cannot
-/// disconnect the queue; what remains is a dispatcher thread that terminated
-/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
-/// guaranteed to be serialised on one thread. Do not hold a lock across this
-/// call and re-acquire it in the callback, and publish everything the callback
-/// needs (including `user_data`) before calling rather than after.
+/// be reached when a given feature's result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it
+/// cannot disconnect the queue; what remains is a dispatcher thread that
+/// terminated abnormally, i.e. a panic inside an earlier callback. So callbacks
+/// for different keys are not guaranteed to be serialised on one thread, nor
+/// in request order. A callback may run before this function returns (a
+/// feature whose future is already complete, as a mock's are). Do not hold a
+/// lock across this call and re-acquire it in the callback, and publish
+/// everything the callback needs (including `user_data`) before calling rather
+/// than after.
 ///
 /// # Safety
 ///
@@ -16895,23 +19357,40 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     validate_only: bool,
     callback: kafka_admin_AdminClient_update_features_callback_t,
     user_data: *mut c_void,
-) {
-    let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
+) -> *mut kafka_common_Error_t {
+    if admin.is_null() {
+        return box_error(Error::local_illegal_argument("admin handle must not be null"));
+    }
+    let updates = match unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) } {
+        Ok(updates) => updates,
+        Err(e) => return box_error(e),
+    };
     let options = update_features_options(timeout_ms, validate_only);
+    let h = unsafe { handle_ref(admin) };
+    // Submitted on the calling thread, as Java's `updateFeatures` is, so its
+    // validation error can be returned before any callback is registered.
+    let entries = {
+        let _guard = h.runtime.enter();
+        match submit_update_features_entries(h.admin(), &updates, options) {
+            Ok(entries) => entries,
+            Err(e) => return box_error(e),
+        }
+    };
+    let keys: Vec<String> = entries.iter().map(|(feature, _)| feature.clone()).collect();
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_update_features(a, &updates?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_update_features_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |_a| Ok(entries),
+            move |feature, outcome, ud| {
+                let feature_c = to_cstring(&feature);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(feature_c.as_ptr(), error, ud);
             },
         )
     };
+    std::ptr::null_mut()
 }
 
 // ---------------------------------------------------------------------------
@@ -16922,9 +19401,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 //
 //   - `Map<K, KafkaFuture<Void>>`             -> `_count` / key / `_get_error(i)`,
 //     no value (`alterUserScramCredentials`, `updateFeatures`)
-//   - a per-key value **and** error, composed from Java's three views
-//     (`describeUserScramCredentials`; see
-//     `submit_describe_user_scram_credentials`)
+//   - a bespoke multi-view result -> a handle backing each Java view with its own
+//     accessors (`describeUserScramCredentials`, whose `all()` / `users()` /
+//     `description(user)` views have different RESOURCE_NOT_FOUND semantics; see
+//     [`DescribeUserScramCredentialsResultInner`])
 //   - one `KafkaFuture<V>` for the whole call -> value accessors and **no**
 //     `_get_error`, because a failure is the call's error
 //     (`createDelegationToken`, `renewDelegationToken`,
@@ -16936,53 +19416,271 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 // 46 RPCs is worth more than saving an allocation on two of them.
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a flattened `DescribeUserScramCredentialsResult`.
+/// Drives an already-resolvable future to completion synchronously, off any
+/// async runtime.
+///
+/// The SCRAM result handle stores the core `DescribeUserScramCredentialsResult`,
+/// whose shared data future is already resolved by the time the handle is built
+/// (`submit_describe_user_scram_credentials` awaited it). Its `all()` / `users()`
+/// / `description()` views are `then_apply` refinements over that resolved
+/// future, so each is ready on the **first** poll; this parks only defensively
+/// and never actually blocks, and needs no Tokio runtime context (a C accessor
+/// may call it from any thread).
+fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = Box::pin(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UserScramCredentialsDescription — an owned description handle
+//
+// Corresponds to
+// `org.apache.kafka.clients.admin.UserScramCredentialsDescription`. Minted as
+// its own handle (unlike the two-scalar leaf types flattened per D2's fifth
+// rule) because `describeUserScramCredentials`'s three views each hand one back:
+// `all()` borrows one per user from the result, and `description(user)` hands
+// out an owned one.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `UserScramCredentialsDescription`.
+#[repr(C)]
+pub struct kafka_admin_UserScramCredentialsDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_UserScramCredentialsDescription_t`].
+///
+/// `ScramCredentialInfo` is two scalars (mechanism type + iteration count), so it
+/// is flattened into parallel indices rather than minted as its own handle
+/// (`PLAN-bindings.md` §7 D2, fifth rule).
+struct UserScramCredentialsDescriptionInner {
+    name_c: CString,
+    mechanisms: Vec<i32>,
+    iterations: Vec<i32>,
+}
+
+impl UserScramCredentialsDescriptionInner {
+    /// Materializes the C-side view of a core `UserScramCredentialsDescription`.
+    fn from_description(description: &UserScramCredentialsDescription) -> Self {
+        let mechanisms = description
+            .credential_infos()
+            .iter()
+            .map(|i| i32::from(i.mechanism().r#type()))
+            .collect();
+        let iterations = description.credential_infos().iter().map(|i| i.iterations()).collect();
+        Self { name_c: to_cstring(description.name()), mechanisms, iterations }
+    }
+
+    /// Heap-allocates an owned handle transferred to the C caller (freed with
+    /// [`kafka_admin_UserScramCredentialsDescription_destroy`]).
+    fn into_owned_handle(self) -> *mut kafka_admin_UserScramCredentialsDescription_t {
+        Box::into_raw(Box::new(self)) as *mut kafka_admin_UserScramCredentialsDescription_t
+    }
+}
+
+/// Casts a `*const kafka_admin_UserScramCredentialsDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `description` must be a non-null handle from a SCRAM describe view.
+unsafe fn user_scram_credentials_description_ref(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> &'static UserScramCredentialsDescriptionInner {
+    unsafe { &*(description as *const UserScramCredentialsDescriptionInner) }
+}
+
+/// Returns the user name (borrowed). Do not free it.
+///
+/// Mirrors `UserScramCredentialsDescription.name()`.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> *const c_char {
+    unsafe { user_scram_credentials_description_ref(description) }.name_c.as_ptr()
+}
+
+/// Returns the number of `ScramCredentialInfo`s. May be 0 (a user the broker
+/// reports as having no credential is described with an empty list, not an
+/// error).
+///
+/// Mirrors `UserScramCredentialsDescription.credentialInfos().size()`.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_count(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> i32 {
+    unsafe { user_scram_credentials_description_ref(description) }.mechanisms.len() as i32
+}
+
+/// Returns `ScramMechanism.type()` for credential `credential_index`: UNKNOWN=0,
+/// SCRAM_SHA_256=1, SCRAM_SHA_512=2. Returns -1 when `credential_index` is out of
+/// range, which is not a legal type indicator.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_mechanism(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        Some(
+            unsafe { user_scram_credentials_description_ref(description) }
+                .mechanisms
+                .as_slice(),
+        ),
+        credential_index,
+    )
+}
+
+/// Returns the iteration count for credential `credential_index`, or -1 when it
+/// is out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_iterations(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        Some(
+            unsafe { user_scram_credentials_description_ref(description) }
+                .iterations
+                .as_slice(),
+        ),
+        credential_index,
+    )
+}
+
+/// Destroys an **owned** `UserScramCredentialsDescription` handle — i.e. one
+/// obtained from
+/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. Safe with null
+/// (no-op).
+///
+/// Do NOT pass a description **borrowed** from the `all()` view
+/// ([`kafka_admin_DescribeUserScramCredentialsResult_all_get_description`]); the
+/// result handle owns those and frees them on its own destroy.
+///
+/// # Safety
+///
+/// `description` must be null or an owned `UserScramCredentialsDescription`
+/// handle, freed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_destroy(
+    description: *mut kafka_admin_UserScramCredentialsDescription_t,
+) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut UserScramCredentialsDescriptionInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DescribeUserScramCredentialsResult — Java's three views over one response
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `DescribeUserScramCredentialsResult`, backing Java's three
+/// views over one response.
 #[repr(C)]
 pub struct kafka_admin_DescribeUserScramCredentialsResult_t {
     _private: [u8; 0],
 }
 
-/// One user's row in [`kafka_admin_DescribeUserScramCredentialsResult_t`].
-///
-/// `ScramCredentialInfo` is two scalars, so it is flattened into a second index
-/// rather than minted as a handle (`PLAN-bindings.md` §7 D2, fifth rule).
-struct ScramUserRow {
+/// One row of the `all()` view: a user and its (owned, borrowed-out) description.
+struct ScramAllRow {
     user_c: CString,
-    mechanisms: Vec<i32>,
-    iterations: Vec<i32>,
-    error: Option<ErrorInner>,
+    description: UserScramCredentialsDescriptionInner,
 }
 
 /// Backing state for [`kafka_admin_DescribeUserScramCredentialsResult_t`].
+///
+/// The three views are computed **once** at handle construction from the
+/// resolved core result (`box_describe_user_scram_credentials_result`), mirroring
+/// `DescribeUserScramCredentialsResult`'s three methods:
+///
+///   - `all_view` — Java `all()`
+///     (`DescribeUserScramCredentialsResult.java:54-80`): `Ok` rows key every
+///     described user (RESOURCE_NOT_FOUND users **included**, with empty
+///     credentials — a successful description); `Err` is the first user-level
+///     error whose code is neither NONE nor RESOURCE_NOT_FOUND, which faults the
+///     whole view.
+///   - `users_view` — Java `users()` (`:92-104`): every response row whose error
+///     is not RESOURCE_NOT_FOUND, as the row's user, in response order and not
+///     de-duplicated (Java filters the rows into a `List`), so RNF users are
+///     **excluded** and users with a credential that could not be described
+///     (another error) are **included**.
+///   - `description(user)` is served on demand from `core` (Java `:114-138`): it
+///     **faults** with RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND
+///     is included here") and for a user not present ("No such user: <user>").
+///     The core's data future is already resolved, so each `description()` view is
+///     ready on the first poll.
 struct DescribeUserScramCredentialsResultInner {
-    users: Vec<ScramUserRow>,
+    all_view: Result<Vec<ScramAllRow>, ErrorInner>,
+    users_view: Vec<CString>,
+    core: DescribeUserScramCredentialsResult,
 }
 
-/// Flattens the per-user `describeUserScramCredentials` outcomes into the C
-/// handle.
+/// Builds the C handle from the resolved core result, precomputing the `all()`
+/// and `users()` views and retaining the core for on-demand `description(user)`.
 fn box_describe_user_scram_credentials_result(
-    outcomes: ScramDescriptionOutcomes,
+    core: DescribeUserScramCredentialsResult,
 ) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
-    let mut users: Vec<ScramUserRow> = outcomes
-        .into_iter()
-        .map(|(user, outcome)| {
-            let (mechanisms, iterations, error) = match outcome {
-                Ok(description) => {
-                    let mechanisms = description
-                        .credential_infos()
-                        .iter()
-                        .map(|i| i32::from(i.mechanism().r#type()))
-                        .collect();
-                    let iterations = description.credential_infos().iter().map(|i| i.iterations()).collect();
-                    (mechanisms, iterations, None)
-                },
-                Err(e) => (Vec::new(), Vec::new(), Some(error_inner(e))),
-            };
-            ScramUserRow { user_c: to_cstring(&user), mechanisms, iterations, error }
-        })
+    // The shared data future is resolved (the submit awaited `users()`), so both
+    // views below are ready on the first poll.
+    let all_view = match block_on_ready(core.all().get()) {
+        Ok(map) => {
+            let mut rows: Vec<ScramAllRow> = map
+                .into_iter()
+                .map(|(user, description)| ScramAllRow {
+                    user_c: to_cstring(&user),
+                    description: UserScramCredentialsDescriptionInner::from_description(&description),
+                })
+                .collect();
+            // `all()` is a Map in Java (unordered); sort for deterministic C-side
+            // indexing.
+            rows.sort_by(|a, b| a.user_c.cmp(&b.user_c));
+            Ok(rows)
+        },
+        Err(e) => Err(error_inner(e)),
+    };
+    // `users()` cannot fault now (the data future resolved); the `unwrap_or_default`
+    // is only for the impossible top-level-error case. Response order is preserved
+    // (Java returns a `List`).
+    let users_view: Vec<CString> = block_on_ready(core.users().get())
+        .unwrap_or_default()
+        .iter()
+        .map(|u| to_cstring(u))
         .collect();
-    users.sort_by(|a, b| a.user_c.cmp(&b.user_c));
-    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { users }))
+    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { all_view, users_view, core }))
         as *mut kafka_admin_DescribeUserScramCredentialsResult_t
 }
 
@@ -16999,118 +19697,159 @@ unsafe fn describe_user_scram_credentials_result_ref(
     unsafe { &*(result as *const DescribeUserScramCredentialsResultInner) }
 }
 
-/// Returns the row at `index`, or `None` when it is out of range.
-fn scram_user_row_at(inner: &DescribeUserScramCredentialsResultInner, index: i32) -> Option<&ScramUserRow> {
-    if index < 0 {
-        return None;
-    }
-    inner.users.get(index as usize)
-}
-
-/// Returns the number of described users. Users are sorted by name.
+/// `all()` view: returns a newly allocated error handle iff `all()` faults
+/// (caller frees it with `kafka_common_Error_destroy`), or null on success.
+///
+/// Mirrors `DescribeUserScramCredentialsResult.all()`
+/// (`DescribeUserScramCredentialsResult.java:54-80`), which completes
+/// exceptionally with the first user-level error whose code is neither NONE nor
+/// RESOURCE_NOT_FOUND.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_error(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> *mut kafka_common_Error_t {
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(_) => std::ptr::null_mut(),
+        Err(inner) => box_error(inner.error.clone()),
+    }
+}
+
+/// `all()` view: number of described users, or 0 when `all()` faults (i.e. when
+/// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] is non-null).
+/// Users are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> i32 {
-    unsafe { describe_user_scram_credentials_result_ref(result) }.users.len() as i32
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.len() as i32,
+        Err(_) => 0,
+    }
 }
 
-/// Returns the user name at `index` (borrowed), or null if out of range. Do not
-/// free it.
+/// `all()` view: the user name at `index` (borrowed), or null if out of range or
+/// `all()` faulted. Do not free it.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_user(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => row.user_c.as_ptr(),
-        None => std::ptr::null(),
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| row.user_c.as_ptr()),
+        Err(_) => std::ptr::null(),
     }
 }
 
-/// Returns the error for the user at `index` (borrowed), or null if the user was
-/// described successfully or `index` is out of range. Do not destroy it.
-///
-/// A user the broker reports as `RESOURCE_NOT_FOUND` is *not* an error here: it
-/// is a successfully described user with zero credentials, which is what Java's
-/// `all()` also does.
+/// `all()` view: the description at `index` (**borrowed** from the result; valid
+/// until the result is destroyed), or null if out of range or `all()` faulted.
+/// Do NOT pass it to
+/// [`kafka_admin_UserScramCredentialsDescription_destroy`] — the result owns it.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_description(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
-) -> *const kafka_common_Error_t {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => error_ptr(row.error.as_ref()),
-        None => std::ptr::null(),
+) -> *const kafka_admin_UserScramCredentialsDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| {
+            &row.description as *const UserScramCredentialsDescriptionInner
+                as *const kafka_admin_UserScramCredentialsDescription_t
+        }),
+        Err(_) => std::ptr::null(),
     }
 }
 
-/// Returns the number of `ScramCredentialInfo`s for the user at `index`, or 0
-/// if out of range or the user failed.
+/// `users()` view: the number of users Java's `users()` lists — every response
+/// row whose error is not RESOURCE_NOT_FOUND, in response order and not
+/// de-duplicated. Users that do not exist or have no credential are excluded;
+/// users that have a credential but could not be described (any other error)
+/// are included, as Java's javadoc states.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_count(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> i32 {
+    unsafe { describe_user_scram_credentials_result_ref(result) }.users_view.len() as i32
+}
+
+/// `users()` view: the user name at `index` (borrowed), or null if out of range.
+/// Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_get(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
-) -> i32 {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => row.mechanisms.len() as i32,
-        None => 0,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view, index)
+}
+
+/// `description(user)` view: on success returns null and writes an **owned**
+/// [`kafka_admin_UserScramCredentialsDescription_t`] to `*out_description` (free
+/// it with [`kafka_admin_UserScramCredentialsDescription_destroy`]); on fault
+/// returns a newly allocated error handle (caller frees it) and leaves
+/// `*out_description` untouched.
+///
+/// Mirrors `DescribeUserScramCredentialsResult.description(String)`
+/// (`DescribeUserScramCredentialsResult.java:114-138`): it **faults** with
+/// RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND is included
+/// here") — carrying the broker's own error message — and for a user absent from
+/// the response ("No such user: <user>"). This is the capability the old
+/// flattened handle could not express: an RNF user was reported there as a
+/// successful empty-credential row.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle;
+/// `user` must be a valid C string; `out_description` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_description(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    user: *const c_char,
+    out_description: *mut *mut kafka_admin_UserScramCredentialsDescription_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { describe_user_scram_credentials_result_ref(result) };
+    let user = unsafe { CStr::from_ptr(user) }.to_string_lossy().to_string();
+    // The core's data future is resolved, so `description(user)` is ready on the
+    // first poll (no runtime needed).
+    match block_on_ready(inner.core.description(&user).get()) {
+        Ok(description) => {
+            if !out_description.is_null() {
+                unsafe {
+                    *out_description =
+                        UserScramCredentialsDescriptionInner::from_description(&description).into_owned_handle();
+                }
+            }
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
     }
-}
-
-/// Returns `ScramMechanism.type()` for credential `credential_index` of the
-/// user at `index`: UNKNOWN=0, SCRAM_SHA_256=1, SCRAM_SHA_512=2. Returns -1 when
-/// either index is out of range, which is not a legal type indicator.
-///
-/// # Safety
-///
-/// `result` must be a valid `describe_user_scram_credentials` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(
-    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
-    index: i32,
-    credential_index: i32,
-) -> i32 {
-    indexed_i32_at(
-        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
-            .map(|row| row.mechanisms.as_slice()),
-        credential_index,
-    )
-}
-
-/// Returns the iteration count for credential `credential_index` of the user at
-/// `index`, or -1 when either index is out of range.
-///
-/// # Safety
-///
-/// `result` must be a valid `describe_user_scram_credentials` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(
-    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
-    index: i32,
-    credential_index: i32,
-) -> i32 {
-    indexed_i32_at(
-        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
-            .map(|row| row.iterations.as_slice()),
-        credential_index,
-    )
 }
 
 /// Destroys a `describe_user_scram_credentials` result handle. Safe with null
@@ -17916,9 +20655,11 @@ fn fence_producers_options(timeout_ms: i32) -> FenceProducersOptions {
 /// `duration_ms` keeps Java's own "negative means no duration filter" contract
 /// (`ListTransactionsOptions.filteredDuration()` defaults to `-1`), so it needs
 /// no separate flag. `transactional_id_pattern` is a nullable string: a null
-/// pointer is Java's null pattern (no pattern filter), which cannot collide with
-/// a pointer to `""` — an empty pattern is a distinct, legal value the broker
-/// evaluates.
+/// pointer is Java's null pattern (no pattern filter). A pointer to `""` is
+/// stored as `Some("")` exactly as Java's `filterOnTransactionalIdPattern("")`
+/// stores it, and — as in Java's `ListTransactionsHandler.buildBatchedRequest`,
+/// which only sets a non-empty pattern — it is dropped from the request, so it
+/// filters nothing either.
 ///
 /// The two filter arrays are passed as `(pointer, count)` tuples rather than as
 /// four flat parameters. The `extern "C"` surface still takes four separate
@@ -17988,6 +20729,29 @@ fn submit_describe_producers(
     Ok(KafkaFuture::join_map_results(entries))
 }
 
+/// Submits `describeProducers`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_producers`]; the requested (distinct) partitions drive the
+/// join, since `DescribeProducersResult` exposes its futures via
+/// `partitionResult(tp)` rather than as a map — the `describeConfigs` shape, but
+/// with a fallible accessor.
+fn submit_describe_producers_entries(
+    admin: &dyn Admin,
+    partitions: &[TopicPartition],
+    options: DescribeProducersOptions,
+) -> Result<Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)>, Error> {
+    let result = admin.describe_producers_with_options(partitions, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)> = Vec::with_capacity(partitions.len());
+    let mut seen: HashSet<&TopicPartition> = HashSet::with_capacity(partitions.len());
+    for tp in partitions {
+        if !seen.insert(tp) {
+            continue;
+        }
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(entries)
+}
+
 /// Submits `describeTransactions` and returns the collect-all future over its
 /// per-transactional-id futures.
 ///
@@ -18008,6 +20772,27 @@ fn submit_describe_transactions(
         entries.push((id.clone(), result.description(id)?));
     }
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `describeTransactions`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_transactions`]; the requested (distinct) ids drive the
+/// join, since the result exposes `description(id)` rather than a map.
+fn submit_describe_transactions_entries(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: DescribeTransactionsOptions,
+) -> Result<Vec<(String, KafkaFuture<TransactionDescription>)>, Error> {
+    let result = admin.describe_transactions_with_options(transactional_ids, options);
+    let mut entries: Vec<(String, KafkaFuture<TransactionDescription>)> = Vec::with_capacity(transactional_ids.len());
+    let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
+    for id in transactional_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        entries.push((id.clone(), result.description(id)?));
+    }
+    Ok(entries)
 }
 
 /// Submits `abortTransaction` and returns its single `all()` future.
@@ -18085,6 +20870,26 @@ fn submit_fence_producers(
         }
         Ok(out)
     })
+}
+
+/// Submits `fenceProducers`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery.
+///
+/// Unlike [`submit_fence_producers`] — which joins two `thenApply` projections
+/// (`producerId`/`epochId`) back into one `ProducerIdAndEpoch` for the flattened
+/// result — this reads the *underlying* per-id future directly (see
+/// [`FenceProducersResult::futures`]), because that future already yields the
+/// whole `ProducerIdAndEpoch` and per-key delivery needs one future per key, not
+/// two scalar projections to zip. The result's future map is keyed by the
+/// distinct transactional ids, matching the deduped `keys` the caller passes to
+/// [`admin_async_per_key_op`].
+fn submit_fence_producers_entries(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: FenceProducersOptions,
+) -> Vec<(String, KafkaFuture<ProducerIdAndEpoch>)> {
+    let result = admin.fence_producers_with_options(transactional_ids, options);
+    result.futures().iter().map(|(id, f)| (id.clone(), f.clone())).collect()
 }
 
 /// Submits `listTransactions` and returns a future over its per-broker
@@ -18935,21 +21740,14 @@ fn box_list_transactions_result(outcomes: ListTransactionsOutcomes) -> *mut kafk
     let brokers: Vec<BrokerTransactionRow> = sorted_entries(outcomes)
         .into_iter()
         .map(|(broker_id, outcome)| match outcome {
-            Ok(mut listings) => {
-                // Sorted so the second index is stable: Java's value is an
-                // unordered `Collection`.
-                listings.sort_by(|a, b| {
-                    a.transactional_id()
-                        .cmp(b.transactional_id())
-                        .then(a.producer_id().cmp(&b.producer_id()))
-                });
-                BrokerTransactionRow {
-                    broker_id,
-                    transactional_ids: listings.iter().map(|l| to_cstring(l.transactional_id())).collect(),
-                    producer_ids: listings.iter().map(|l| l.producer_id()).collect(),
-                    states: listings.iter().map(|l| to_cstring(&l.state().to_string())).collect(),
-                    error: None,
-                }
+            // Listings keep the order the broker's `ListTransactionsResponse`
+            // returned them in, as Java's per-broker `Collection` does.
+            Ok(listings) => BrokerTransactionRow {
+                broker_id,
+                transactional_ids: listings.iter().map(|l| to_cstring(l.transactional_id())).collect(),
+                producer_ids: listings.iter().map(|l| l.producer_id()).collect(),
+                states: listings.iter().map(|l| to_cstring(&l.state().to_string())).collect(),
+                error: None,
             },
             Err(e) => BrokerTransactionRow {
                 broker_id,
@@ -19128,15 +21926,32 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut
 // describeProducers
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_producers_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_producers_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<PartitionProducerState>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeProducersResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// The key crosses as `topic` + `partition`, borrowed and valid only for the
+/// duration of this call — copy it if you need to retain it. Exactly one of
+/// `value` / `error` is non-null; `value` is a
+/// [`kafka_admin_DescribeProducersResult_t`] carrying exactly this one partition
+/// (readable at index 0) and is owned by the callback — free it with
+/// [`kafka_admin_DescribeProducersResult_destroy`]. Unlike `describeConfigs`
+/// (whose per-key value is a dedicated `kafka_admin_Config_t`), the flattened
+/// result handle is reused as the single-key value here, because `describe_producers`
+/// has no standalone value handle in the synchronous path to reuse and
+/// `PartitionProducerState` is a Java nested class with no C handle of its own;
+/// both provenances are owned and freed exactly once by the same `_destroy`.
+/// `error` is freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_producers_callback_t = unsafe extern "C" fn(
+    *const c_char, /* topic */
+    i32,           /* partition */
+    *mut kafka_admin_DescribeProducersResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes the active producers of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -19192,18 +22007,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 /// Describes the active producers of the given partitions asynchronously. See
 /// [`kafka_admin_AdminClient_describe_producers`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per partition,
+/// as that partition's future resolves**, not once for the whole batch — a fast
+/// or already-resolved partition is not held up by a slow or failing one. It is
+/// called exactly once per **distinct** requested partition (entries with a NULL
+/// topic skipped, and duplicate `(topic, partition)` pairs collapsed to one —
+/// Java keys the result on `TopicPartition`), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given partition's result
+/// arrives. Destroying the handle does not cause that — an outstanding operation
+/// holds its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be serialised
+/// on one thread, nor in request order. If the request resolves to zero distinct
+/// partitions (an empty or all-NULL-topic input), the callback is never invoked.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -19223,18 +22046,39 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     user_data: *mut c_void,
 ) {
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
+    // Distinct partitions (first-occurrence order): Java's `describeProducers`
+    // result map is keyed by `TopicPartition`, so a repeated partition is one
+    // key. `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its rows so its C incref count matches.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        requested
+            .iter()
+            .filter(|tp| seen.insert((*tp).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_producers(a, &requested, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_producers_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_producers_entries(a, &requested, options),
+            move |tp: TopicPartition, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let partition = tp.partition();
+                let (value, error) = match outcome {
+                    Ok(state) => {
+                        // Reuse the flattened result handle as the single-key
+                        // value: one entry in, one row out (at index 0).
+                        let mut single: DescribeProducersOutcomes = HashMap::with_capacity(1);
+                        single.insert(tp, Ok(state));
+                        (box_describe_producers_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), partition, value, error, ud);
             },
         )
     };
@@ -19244,15 +22088,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
 // describeTransactions
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_transactions_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_transactions_async`], fired **once per
+/// transactional id, as that id's own future resolves** — independently of
+/// every other id in the same call, matching Java's
+/// `Map<String, KafkaFuture<TransactionDescription>>` (`admin-client.md` §5),
+/// rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeTransactionsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-transactional-id failure
-/// arrives inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `transactional_id` is borrowed and valid only for the duration of this call
+/// — copy it if you need to retain it. Exactly one of `value` / `error` is
+/// non-null; `value` is a [`kafka_admin_DescribeTransactionsResult_t`] carrying
+/// exactly this one id (readable at index 0) and is owned by the callback — free
+/// it with [`kafka_admin_DescribeTransactionsResult_destroy`] (the flattened
+/// result handle reused as the single-key value, since `describe_transactions`
+/// has no standalone value handle and `TransactionDescription` has no C handle
+/// of its own; both provenances are owned and freed once). `error` is freed with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_transactions_callback_t = unsafe extern "C" fn(
+    *const c_char, /* transactional id */
+    *mut kafka_admin_DescribeTransactionsResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes the given transactions, blocking until every per-id future has
 /// resolved (synchronous).
@@ -19297,16 +22154,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
 /// Describes the given transactions asynchronously. See
 /// [`kafka_admin_AdminClient_describe_transactions`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
+/// Unlike the synchronous entry point, the callback fires **once per
+/// transactional id, as that id's future resolves**, not once for the whole
+/// batch — a fast or already-resolved id is not held up by a slow or failing
+/// one. It is called exactly once per **distinct** requested id (NULL entries
+/// skipped, and duplicate ids collapsed to one — Java keys the result on the
+/// transactional id), but not always on the same thread. Per key, it normally
+/// runs on the handle's dispatcher thread. It runs **synchronously on the
+/// calling thread, before this function returns, for every key**, when the RPC
+/// cannot be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be reached
+/// when a given id's result arrives. Destroying the handle does not cause that —
+/// an outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order. If the
+/// request resolves to zero distinct ids (an empty or all-NULL input), the
+/// callback is never invoked. Do not hold a lock across this call and re-acquire
 /// it in the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
@@ -19324,18 +22188,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     user_data: *mut c_void,
 ) {
     let ids = unsafe { read_strings(transactional_ids, count) };
+    // Distinct ids (first-occurrence order): Java's `describeTransactions`
+    // result map is keyed by the transactional id, so a repeated id is one key.
+    // `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its id list so its C incref count matches.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
+    };
     let options = describe_transactions_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_transactions(a, &ids, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_transactions_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_transactions_entries(a, &ids, options),
+            move |id: String, outcome, ud| {
+                let id_c = to_cstring(&id);
+                let (value, error) = match outcome {
+                    Ok(description) => {
+                        let mut single: DescribeTransactionsOutcomes = HashMap::with_capacity(1);
+                        single.insert(id, Ok(description));
+                        (box_describe_transactions_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -19550,14 +22428,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_asy
 // fenceProducers
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_fence_producers_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_fence_producers_async`], fired **once per
+/// transactional id, as that id's own future resolves** — independently of
+/// every other id in the same call, matching Java's per-id `KafkaFuture`
+/// (`admin-client.md` §5; Java's `FenceProducersResult` projects that future
+/// three ways, but there is one future per id), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_FenceProducersResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-transactional-id failure arrives
-/// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_fence_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_FenceProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `transactional_id` is borrowed and valid only for the duration of this call
+/// — copy it if you need to retain it. Exactly one of `value` / `error` is
+/// non-null; `value` is a [`kafka_admin_FenceProducersResult_t`] carrying
+/// exactly this one id (its producer id and epoch, readable at index 0) and is
+/// owned by the callback — free it with
+/// [`kafka_admin_FenceProducersResult_destroy`] (the flattened result handle
+/// reused as the single-key value; both provenances are owned and freed once).
+/// `error` is freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_fence_producers_callback_t = unsafe extern "C" fn(
+    *const c_char, /* transactional id */
+    *mut kafka_admin_FenceProducersResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Fences out every active producer using the given transactional ids, blocking
 /// until every per-id future has resolved (synchronous).
@@ -19600,16 +22492,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
 /// Fences out active producers asynchronously. See
 /// [`kafka_admin_AdminClient_fence_producers`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
+/// Unlike the synchronous entry point, the callback fires **once per
+/// transactional id, as that id's future resolves**, not once for the whole
+/// batch — a fast or already-resolved id is not held up by a slow or failing
+/// one. It is called exactly once per **distinct** requested id (NULL entries
+/// skipped, and duplicate ids collapsed to one — Java keys the result on the
+/// transactional id), but not always on the same thread. Per key, it normally
+/// runs on the handle's dispatcher thread. It runs **synchronously on the
+/// calling thread, before this function returns, for every key**, when the RPC
+/// cannot be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be reached
+/// when a given id's result arrives. Destroying the handle does not cause that —
+/// an outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order. If the
+/// request resolves to zero distinct ids (an empty or all-NULL input), the
+/// callback is never invoked. Do not hold a lock across this call and re-acquire
 /// it in the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
@@ -19627,18 +22526,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     user_data: *mut c_void,
 ) {
     let ids = unsafe { read_strings(transactional_ids, count) };
+    // Distinct ids (first-occurrence order): Java's `fenceProducers` result keys
+    // the per-producer futures by the transactional id, so a repeated id is one
+    // key. `admin_async_per_key_op` de-duplicates as well; the Python binding
+    // pre-dedups its id list so its C incref count matches.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
+    };
     let options = fence_producers_options(timeout_ms);
     unsafe {
-        admin_async_future_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_fence_producers(a, &ids, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_fence_producers_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_fence_producers_entries(a, &ids, options)),
+            move |id: String, outcome, ud| {
+                let id_c = to_cstring(&id);
+                let (value, error) = match outcome {
+                    Ok(producer) => {
+                        let mut single: FenceProducersOutcomes = HashMap::with_capacity(1);
+                        single.insert(id, Ok(producer));
+                        (box_fence_producers_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -19648,14 +22561,46 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
 // listTransactions
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_list_transactions_async`].
+/// Broker-discovery callback for
+/// [`kafka_admin_AdminClient_list_transactions_async`]: the outcome of Java's
+/// `ListTransactionsResult.byBrokerId()` outer future, which completes once the
+/// admin client knows which brokers it is listing from.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListTransactionsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
-/// `result`; only a failure of the broker-discovery step arrives as `error`.
-pub type kafka_admin_AdminClient_list_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// Fired exactly once. On success `broker_ids` holds `broker_count` distinct
+/// broker ids — the keys of Java's `Map<Integer, KafkaFuture<..>>`, sorted
+/// ascending (Java's map order is unspecified) — borrowed and valid only for
+/// the duration of this call, and `error` is null; each listed broker then gets
+/// exactly one [`kafka_admin_AdminClient_list_transactions_callback_t`] call,
+/// always **after** this one returns. On failure (Java: `byBrokerId()`,
+/// `all()` and `allByBrokerId()` all fail) `broker_ids` is null,
+/// `broker_count` is 0, `error` is owned by the callback (free it with
+/// `kafka_common_Error_destroy`), and no per-broker callback follows.
+pub type kafka_admin_ListTransactionsResult_by_broker_id_callback_t =
+    unsafe extern "C" fn(*const i32, i32, *mut kafka_common_Error_t, *mut c_void);
+
+/// Per-broker completion callback for
+/// [`kafka_admin_AdminClient_list_transactions_async`], fired **once per broker
+/// named by the broker-discovery callback, as that broker's own future
+/// resolves** — independently of the other brokers, matching the per-broker
+/// `KafkaFuture<Collection<TransactionListing>>` values of Java's
+/// `byBrokerId()` map.
+///
+/// Exactly one of `value` / `error` is non-null and the callback owns it.
+/// `value` is a [`kafka_admin_ListTransactionsResult_t`] carrying exactly this
+/// one broker (readable at index 0; its row error is null) with the listings
+/// in the broker's response order — free it with
+/// [`kafka_admin_ListTransactionsResult_destroy`]. `error` is that broker's
+/// failure — free it with `kafka_common_Error_destroy`.
+///
+/// Java's `all()` / `allByBrokerId()` are derived from these calls: they
+/// complete when every broker has succeeded and fail on the first broker
+/// error, without waiting for the rest.
+pub type kafka_admin_AdminClient_list_transactions_callback_t = unsafe extern "C" fn(
+    i32, /* broker id */
+    *mut kafka_admin_ListTransactionsResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Lists the cluster's transactions, blocking until every broker's future has
 /// resolved (synchronous).
@@ -19684,8 +22629,9 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 ///   means no duration filter, which is Java's own `-1` default — no separate
 ///   flag is needed.
 /// - `transactional_id_pattern`: list only transactional ids matching this
-///   pattern, or NULL for no pattern filter. NULL and `""` are distinct: an
-///   empty pattern is a legal value the broker evaluates.
+///   pattern, or NULL for no pattern filter. An empty pattern `""` also filters
+///   nothing: as in Java (`ListTransactionsHandler.buildBatchedRequest` only
+///   sets a non-empty pattern), it is dropped from the request.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
 /// # Safety
@@ -19720,21 +22666,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     unsafe { finish_sync(outcome, out_result, box_list_transactions_result) }
 }
 
-/// Lists the cluster's transactions asynchronously. See
-/// [`kafka_admin_AdminClient_list_transactions`].
+/// Lists the cluster's transactions asynchronously, in Java's `byBrokerId()`
+/// shape. See [`kafka_admin_AdminClient_list_transactions`] for the filters.
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Two callbacks share `user_data`:
+///
+/// 1. `by_broker_id_callback` fires **exactly once**, when the brokers are
+///    discovered (Java's `byBrokerId()` outer future): with the broker ids, or
+///    with the error that failed the whole call.
+/// 2. `callback` then fires **exactly once per broker id** from step 1, as that
+///    broker's own listing future resolves — a fast broker is not held up by a
+///    slow or failing one — and never before `by_broker_id_callback` has
+///    returned. It never fires if step 1 reported an error.
+///
+/// So `by_broker_id_callback` + `broker_count` × `callback` invocations in
+/// total. They normally run on the handle's dispatcher thread, but not always
+/// on the same thread. `by_broker_id_callback` runs **synchronously on the
+/// calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And any callback runs on a
+/// **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when its result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in a callback, and publish everything the callbacks
+/// need (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -19753,6 +22710,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     duration_ms: i64,
     transactional_id_pattern: *const c_char,
     timeout_ms: i32,
+    by_broker_id_callback: kafka_admin_ListTransactionsResult_by_broker_id_callback_t,
     callback: kafka_admin_AdminClient_list_transactions_callback_t,
     user_data: *mut c_void,
 ) {
@@ -19765,20 +22723,90 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
             transactional_id_pattern,
         )
     };
-    unsafe {
-        admin_async_future_op(
-            admin,
-            user_data,
-            move |a| Ok(submit_list_transactions(a, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_list_transactions_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
-            },
-        )
+    if admin.is_null() {
+        // Honor the callback obligation even for a null handle.
+        let error = box_error(Error::local_illegal_argument("admin handle must not be null"));
+        unsafe { by_broker_id_callback(std::ptr::null(), 0, error, user_data) };
+        return;
+    }
+    let h = unsafe { handle_ref(admin) };
+    // Submitted on the calling thread, as Java's `listTransactions` is.
+    let result = {
+        let _guard = h.runtime.enter();
+        h.admin().list_transactions_with_options(options)
     };
+    unsafe { deliver_list_transactions_by_broker_id(h, result, by_broker_id_callback, callback, user_data) };
+}
+
+/// Delivers a [`ListTransactionsResult`] through the two
+/// [`kafka_admin_AdminClient_list_transactions_async`] callbacks: once for
+/// `by_broker_id()`'s outer future, then once per broker future.
+///
+/// The per-broker `when_complete` registrations are made only after the
+/// broker-discovery job is enqueued, on the same FIFO completion queue, so a
+/// per-broker callback can never overtake the discovery callback.
+///
+/// # Safety
+///
+/// `h` must be a live admin handle.
+unsafe fn deliver_list_transactions_by_broker_id(
+    h: &AdminHandle,
+    result: ListTransactionsResult,
+    by_broker_id_callback: kafka_admin_ListTransactionsResult_by_broker_id_callback_t,
+    callback: kafka_admin_AdminClient_list_transactions_callback_t,
+    user_data: *mut c_void,
+) {
+    let tx = h.completion_tx.clone();
+    let ud = SendUserData(user_data);
+    let by_broker_id = result.by_broker_id();
+    h.runtime_handle.spawn(async move {
+        let ud = ud;
+        let outcome = by_broker_id.get().await;
+        // No `.await` below this point, so the raw pointer never crosses one.
+        let ud_ptr = ud.into_ptr();
+        let brokers = match outcome {
+            Ok(brokers) => brokers,
+            Err(e) => {
+                let ud = SendUserData(ud_ptr);
+                let job: CompletionJob = Box::new(move || unsafe {
+                    by_broker_id_callback(std::ptr::null(), 0, box_error(e), ud.into_ptr())
+                });
+                enqueue_or_run_inline(&tx, job);
+                return;
+            },
+        };
+        let entries = sorted_entries(brokers);
+        let broker_ids: Vec<i32> = entries.iter().map(|(id, _)| *id).collect();
+        let ud = SendUserData(ud_ptr);
+        let job: CompletionJob = Box::new(move || unsafe {
+            by_broker_id_callback(
+                broker_ids.as_ptr(),
+                broker_ids.len() as i32,
+                std::ptr::null_mut(),
+                ud.into_ptr(),
+            )
+        });
+        enqueue_or_run_inline(&tx, job);
+        for (broker_id, future) in entries {
+            let tx = tx.clone();
+            let ud = SendUserData(ud_ptr);
+            future.when_complete(move |outcome| {
+                let outcome = outcome.clone();
+                let ud = ud;
+                let job: CompletionJob = Box::new(move || {
+                    let (value, error) = match outcome {
+                        Ok(listings) => (
+                            box_list_transactions_result(HashMap::from([(broker_id, Ok(listings))])),
+                            std::ptr::null_mut(),
+                        ),
+                        Err(e) => (std::ptr::null_mut(), box_error(e)),
+                    };
+                    unsafe { callback(broker_id, value, error, ud.into_ptr()) };
+                });
+                enqueue_or_run_inline(&tx, job);
+            });
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -20048,7 +23076,7 @@ mod tests {
                     ),
                     ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
                 ])
-                .set_config_type(ConfigType::Long)
+                .set_config_type(Some(ConfigType::Long))
                 .set_documentation(Some("The retention window.".to_string()))
                 .build()
                 .unwrap(),
@@ -20063,7 +23091,7 @@ mod tests {
         assert!(flat.is_sensitive);
         assert!(!flat.is_read_only);
         assert_eq!(text(&flat.source_c), "DYNAMIC_TOPIC_CONFIG");
-        assert_eq!(text(&flat.config_type_c), "LONG");
+        assert_eq!(opt_text(&flat.config_type_c), Some("LONG"));
         assert_eq!(opt_text(&flat.documentation_c), Some("The retention window."));
 
         assert_eq!(flat.synonyms.len(), 2);
@@ -20075,6 +23103,60 @@ mod tests {
         assert_eq!(text(&flat.synonyms[1].source_c), "STATIC_BROKER_CONFIG");
     }
 
+    /// A `createTopics` entry reaches C as a full `kafka_admin_ConfigEntry_t`
+    /// through `kafka_admin_TopicMetadataAndConfig_config`, so its source is
+    /// readable, and its type is null, as Java's `configEntry(CreatableTopicConfigs)`
+    /// leaves it — not the `"UNKNOWN"` a `describeConfigs` entry reports.
+    #[test]
+    fn topic_metadata_and_config_hands_out_full_config_entries() {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("cleanup.policy".to_string())
+                .set_value(Some("compact".to_string()))
+                .set_source(ConfigSource::DynamicTopicConfig)
+                .set_is_read_only(true)
+                .set_config_type(None)
+                .build()
+                .unwrap(),
+        );
+        let metadata = TopicMetadataAndConfig::new(Uuid::new(1, 2), 3, 1, Config::new([entry]));
+        let mc = Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&metadata)))
+            as *mut kafka_admin_TopicMetadataAndConfig_t;
+        unsafe {
+            let config = kafka_admin_TopicMetadataAndConfig_config(mc);
+            assert!(!config.is_null());
+            assert_eq!(kafka_admin_Config_entry_count(config), 1);
+            let entry = kafka_admin_Config_get_entry(config, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConfigEntry_name(entry)).to_str(),
+                Ok("cleanup.policy")
+            );
+            assert_eq!(CStr::from_ptr(kafka_admin_ConfigEntry_value(entry)).to_str(), Ok("compact"));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConfigEntry_source(entry)).to_str(),
+                Ok("DYNAMIC_TOPIC_CONFIG")
+            );
+            assert!(kafka_admin_ConfigEntry_is_read_only(entry));
+            assert!(kafka_admin_ConfigEntry_type(entry).is_null());
+            assert!(kafka_admin_ConfigEntry_documentation(entry).is_null());
+            assert_eq!(kafka_admin_ConfigEntry_synonym_count(entry), 0);
+            // The flat accessors read the same entries.
+            assert_eq!(kafka_admin_TopicMetadataAndConfig_config_count(mc), 1);
+            assert!(kafka_admin_TopicMetadataAndConfig_config_is_read_only(mc, 0));
+            kafka_admin_TopicMetadataAndConfig_destroy(mc);
+        }
+
+        // Metadata unavailable: Java's `config()` throws, so C gets null.
+        let failed = TopicMetadataAndConfig::with_error(Error::new(Errors::TopicAuthorizationFailed));
+        let mc = Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&failed)))
+            as *mut kafka_admin_TopicMetadataAndConfig_t;
+        unsafe {
+            assert!(kafka_admin_TopicMetadataAndConfig_config(mc).is_null());
+            assert!(!kafka_admin_TopicMetadataAndConfig_error(mc).is_null());
+            kafka_admin_TopicMetadataAndConfig_destroy(mc);
+        }
+    }
+
     #[test]
     fn config_entry_c_preserves_null_value_and_documentation() {
         // Java's `ConfigEntry.value()` and `.documentation()` are both nullable;
@@ -20084,7 +23166,7 @@ mod tests {
         assert_eq!(opt_text(&flat.documentation_c), None);
         assert!(flat.synonyms.is_empty());
         assert_eq!(text(&flat.source_c), "UNKNOWN");
-        assert_eq!(text(&flat.config_type_c), "UNKNOWN");
+        assert_eq!(opt_text(&flat.config_type_c), Some("UNKNOWN"));
     }
 
     #[test]
@@ -20095,7 +23177,7 @@ mod tests {
                 .set_value(Some("v".to_string()))
                 .set_source(ConfigSource::DefaultConfig)
                 .set_is_read_only(true)
-                .set_config_type(ConfigType::String)
+                .set_config_type(Some(ConfigType::String))
                 .build()
                 .unwrap(),
         ));
@@ -20151,6 +23233,25 @@ mod tests {
         assert_eq!(flat.total_bytes, UNKNOWN_VOLUME_BYTES);
         assert_eq!(flat.usable_bytes, UNKNOWN_VOLUME_BYTES);
         assert!(flat.replicas.is_empty());
+    }
+
+    #[test]
+    fn log_dir_description_carries_the_cordoned_flag_through_the_c_accessor() {
+        // KIP-1066: Java's `LogDirDescription.isCordoned()`. The five-argument
+        // constructor seeds the flag; the default constructor leaves it false.
+        let cordoned =
+            LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(None, HashMap::new(), 2_000, 1_000, true);
+        let flat = LogDirDescriptionInner::new(&cordoned);
+        assert!(flat.is_cordoned);
+        // Exercise the exported C ABI accessor over the same handle bytes a
+        // `DescribeLogDirsResult` map getter would hand a C caller.
+        let handle = &flat as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t;
+        assert!(unsafe { kafka_admin_LogDirDescription_is_cordoned(handle) });
+
+        // The default (two-argument) constructor defaults the flag to false.
+        let uncordoned = LogDirDescriptionInner::new(&LogDirDescription::new(None, HashMap::new()));
+        let uncordoned_handle = &uncordoned as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t;
+        assert!(!unsafe { kafka_admin_LogDirDescription_is_cordoned(uncordoned_handle) });
     }
 
     #[test]
@@ -21237,6 +24338,113 @@ mod tests {
         }
     }
 
+    /// `kafka_admin_MockAdminClient_add_topic` builds Java's `addTopic`
+    /// arguments: broker ids resolve to the mock's own broker nodes, `-1` is a
+    /// null leader (which Java's validation rejects), and a NULL config value
+    /// is a null map value.
+    #[test]
+    fn mock_add_topic_resolves_brokers_and_keeps_null_config_values() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        let partitions = [0i32];
+        let leaders = [0i32];
+        let replicas_0 = [0i32];
+        let replicas = [replicas_0.as_ptr()];
+        let counts = [1i32];
+        let (_keys, keys) = c_array(&["retention.ms"]);
+        let values: [*const c_char; 1] = [std::ptr::null()];
+        unsafe {
+            let err = kafka_admin_MockAdminClient_add_topic(
+                admin,
+                true,
+                c"seeded".as_ptr(),
+                partitions.as_ptr(),
+                leaders.as_ptr(),
+                replicas.as_ptr(),
+                counts.as_ptr(),
+                replicas.as_ptr(),
+                counts.as_ptr(),
+                1,
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+            );
+            assert!(err.is_null());
+            let mock = mock_ref(admin).unwrap();
+            let resource = ConfigResource::new(ConfigResourceType::Topic, "seeded".to_string());
+            let config = handle_ref(admin)
+                .runtime
+                .block_on(mock.describe_configs(std::slice::from_ref(&resource)).values()[&resource].get())
+                .unwrap();
+            assert_eq!(config.get("retention.ms").unwrap().value(), None);
+
+            // A null leader is "Leader broker unknown", as `brokers.contains(null)`
+            // is false in Java.
+            let no_leader = [-1i32];
+            let err = kafka_admin_MockAdminClient_add_topic(
+                admin,
+                false,
+                c"leaderless".as_ptr(),
+                partitions.as_ptr(),
+                no_leader.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(
+                CStr::from_ptr(common::kafka_common_Error_message(err)).to_str(),
+                Ok("Leader broker unknown")
+            );
+            common::kafka_common_Error_destroy(err);
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// A NULL `value` is Java's null config value: kept, and distinct from "".
+    #[test]
+    fn new_topic_put_config_keeps_a_null_value() {
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"t".as_ptr(), 1, 1);
+            kafka_admin_NewTopic_put_config(topic, c"retention.ms".as_ptr(), std::ptr::null());
+            kafka_admin_NewTopic_put_config(topic, c"cleanup.policy".as_ptr(), c"".as_ptr());
+            let built = new_topic_ref(topic).build();
+            let configs = built.configs().expect("configs were set");
+            assert_eq!(configs.get("retention.ms"), Some(&None));
+            assert_eq!(configs.get("cleanup.policy"), Some(&Some(String::new())));
+            let creatable = built.convert_to_creatable_topic();
+            let retention = creatable.configs.iter().find(|c| c.name == "retention.ms").unwrap();
+            assert_eq!(retention.value, None);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+    }
+
+    /// Java's `clusterId()` can be null (the `Metadata` fallback); C sees
+    /// null, not `""`.
+    #[test]
+    fn describe_cluster_result_cluster_id_is_null_for_a_null_id() {
+        let outcome = |cluster_id: Option<&str>| DescribeClusterOutcome {
+            nodes: vec![],
+            controller: None,
+            cluster_id: cluster_id.map(str::to_string),
+            authorized_operations: None,
+        };
+        unsafe {
+            let null_id = box_describe_cluster_result(outcome(None));
+            assert!(kafka_admin_DescribeClusterResult_cluster_id(null_id).is_null());
+            kafka_admin_DescribeClusterResult_destroy(null_id);
+            let named = box_describe_cluster_result(outcome(Some("abc")));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeClusterResult_cluster_id(named)).to_str(),
+                Ok("abc")
+            );
+            kafka_admin_DescribeClusterResult_destroy(named);
+        }
+    }
+
     /// Every one of the four `authorized_operations` surfaces uses the same
     /// encoding: a non-negative count plus a `_has_` presence bit. An absent set
     /// and a reported-but-empty one differ only in the bit.
@@ -21280,7 +24488,7 @@ mod tests {
             box_describe_cluster_result(DescribeClusterOutcome {
                 nodes: vec![],
                 controller: None,
-                cluster_id: "c".to_string(),
+                cluster_id: Some("c".to_string()),
                 authorized_operations: ops,
             })
         };
@@ -21587,15 +24795,55 @@ mod tests {
         }
     }
 
+    /// Reads an owned error's message and destroys it; `None` for null.
+    unsafe fn consume_error_message(error: *mut kafka_common_Error_t) -> Option<String> {
+        if error.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { common::kafka_common_Error_destroy(error) };
+        Some(text)
+    }
+
+    /// Reads an owned error's code and destroys it; `None` for null.
+    unsafe fn consume_error_code(error: *mut kafka_common_Error_t) -> Option<i32> {
+        if error.is_null() {
+            return None;
+        }
+        let code = unsafe { common::kafka_common_Error_code(error) } as i32;
+        unsafe { common::kafka_common_Error_destroy(error) };
+        Some(code)
+    }
+
+    /// Builds a `PartitionErrors`-style future already completed with `outcome`.
+    fn resolved_future<T: Clone + Send + Sync + 'static>(outcome: Result<T, Error>) -> KafkaFuture<T> {
+        let handle: crate::common::internals::KafkaFutureImpl<T> = crate::common::internals::KafkaFutureImpl::new();
+        match outcome {
+            Ok(value) => handle.complete(value),
+            Err(error) => handle.complete_with_error(error),
+        };
+        handle.future()
+    }
+
+    /// `alterConsumerGroupOffsets` handle: Java's `partitionResult(tp)` and
+    /// `all()` over one resolved `Map<TopicPartition, Errors>`, with the exact
+    /// Java messages, plus the index getters over the requested partitions.
     #[test]
-    fn partition_keyed_void_results_report_success_as_a_null_error() {
-        let outcomes: PartitionVoidOutcomes = HashMap::from([
-            (TopicPartition::new("t", 0), Ok(())),
-            (TopicPartition::new("t", 1), Err(Error::new(Errors::UnknownMemberId))),
+    fn alter_consumer_group_offsets_result_answers_java_accessors() {
+        let map = HashMap::from([
+            (TopicPartition::new("t", 0), Errors::None),
+            (TopicPartition::new("t", 1), Errors::UnknownMemberId),
         ]);
-        let altered = box_alter_consumer_group_offsets_result(outcomes.clone());
-        let deleted = box_delete_consumer_group_offsets_result(outcomes);
+        let outcome: PartitionErrorsOutcome = Ok(map);
+        let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+        let requested = vec![TopicPartition::new("t", 1), TopicPartition::new("t", 0)];
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            result, requested, outcome,
+        )));
         unsafe {
+            // Index getters: requested partitions, sorted, with each partitionResult.
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 2);
             assert_eq!(
                 CStr::from_ptr(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, 0)).to_str(),
@@ -21611,18 +24859,354 @@ mod tests {
             );
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 2), -1);
             assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, -1).is_null());
+
+            // partitionResult: success, the partition's error, and Java's
+            // "not attempted" IllegalArgumentException for an absent partition.
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(altered, c"t".as_ptr(), 0).is_null());
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"t".as_ptr(),
+                    1
+                )),
+                Some(Errors::UnknownMemberId.code() as i32)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"absent".as_ptr(),
+                    9
+                ))
+                .as_deref(),
+                Some("Alter offset for partition \"absent-9\" was not attempted")
+            );
+
+            // all(): the failed partition's error kind with the aggregated message.
+            let all = kafka_admin_AlterConsumerGroupOffsetsResult_all(altered);
+            assert_eq!(
+                common::kafka_common_Error_code(all) as i32,
+                Errors::UnknownMemberId.code() as i32
+            );
+            assert_eq!(
+                consume_error_message(all).as_deref(),
+                Some("Failed altering group offsets for the following partitions: [t-1]")
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+        }
+
+        // all() succeeds when no partition failed — and with nothing requested.
+        for requested in [vec![TopicPartition::new("t", 0)], Vec::new()] {
+            let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
+            let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+            let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+                result, requested, outcome,
+            )));
+            unsafe {
+                assert!(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered).is_null());
+                kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+            }
+        }
+    }
+
+    /// A whole-request failure on a synchronous-path handle: every accessor
+    /// reports it, as Java's `whenComplete` forwards the `throwable`.
+    #[test]
+    fn consumer_group_offsets_results_report_a_whole_request_failure_through_every_accessor() {
+        let requested = vec![TopicPartition::new("t", 0)];
+        let failed: PartitionErrorsOutcome = Err(Error::group_authorization("g"));
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            AlterConsumerGroupOffsetsResult::new(resolved_future(failed.clone())),
+            requested.clone(),
+            failed.clone(),
+        )));
+        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+            DeleteConsumerGroupOffsetsResult::new(resolved_future(failed.clone()), requested.iter().cloned().collect()),
+            requested,
+            failed,
+        )));
+        let code = Errors::GroupAuthorizationFailed.code() as i32;
+        unsafe {
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 0))
+                    as i32,
+                code
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    altered,
+                    c"t".as_ptr(),
+                    0
+                )),
+                Some(code)
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered)),
+                Some(code)
+            );
             kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
 
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"t".as_ptr(),
+                    0
+                )),
+                Some(code)
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)),
+                Some(code)
+            );
+            // The unrequested-partition guard still wins: Java throws it before
+            // looking at the future.
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"other".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Partition other-0 was not included in the original request")
+            );
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+        }
+    }
+
+    /// `deleteConsumerGroupOffsets` handle: Java's `partitionResult(tp)` (with
+    /// its synchronous unrequested-partition guard and `getSubLevelError`'s
+    /// "not included in the response") and `all()`.
+    #[test]
+    fn delete_consumer_group_offsets_result_answers_java_accessors() {
+        let requested = vec![TopicPartition::new("topic", 0), TopicPartition::new("topic", 1)];
+        let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("topic", 0), Errors::None)]));
+        let result = DeleteConsumerGroupOffsetsResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+            result, requested, outcome,
+        )));
+        let missing = "Offset deletion result for partition \"topic-1\" was not included in the response";
+        unsafe {
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_count(deleted), 2);
             assert!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 0).is_null());
             assert_eq!(
-                common::kafka_common_Error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 1))
-                    as i32,
-                Errors::UnknownMemberId.code() as i32
+                CStr::from_ptr(common::kafka_common_Error_message(
+                    kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 1)
+                ))
+                .to_str(),
+                Ok(missing)
             );
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(deleted, -1), -1);
+
+            assert!(
+                kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(deleted, c"topic".as_ptr(), 0).is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"topic".as_ptr(),
+                    1
+                ))
+                .as_deref(),
+                Some(missing)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"invalid-topic".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Partition invalid-topic-0 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)).as_deref(),
+                Some(missing)
+            );
             kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
         }
+
+        // A partition-level error surfaces as its own kind; all() succeeds when
+        // every requested partition succeeded.
+        let requested = vec![TopicPartition::new("topic", 0)];
+        for (error, expected) in [
+            (Errors::None, None),
+            (Errors::GroupSubscribedToTopic, Some(Errors::GroupSubscribedToTopic)),
+        ] {
+            let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("topic", 0), error)]));
+            let result = DeleteConsumerGroupOffsetsResult::new(
+                resolved_future(outcome.clone()),
+                requested.iter().cloned().collect(),
+            );
+            let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+                result,
+                requested.clone(),
+                outcome,
+            )));
+            unsafe {
+                assert_eq!(
+                    consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)),
+                    expected.map(|e| e.code() as i32)
+                );
+                kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+            }
+        }
+    }
+
+    /// `removeMembersFromConsumerGroup` handle with explicit members: Java's
+    /// `memberResult(member)` and `all()`.
+    #[test]
+    fn remove_members_from_consumer_group_result_answers_java_accessors() {
+        let requested = vec![MemberToRemove::new("instance-2"), MemberToRemove::new("instance-1")];
+        let outcome: MemberErrorsOutcome = Ok(HashMap::from([
+            (MemberToRemove::new("instance-1").to_member_identity(), Errors::None),
+            (MemberToRemove::new("instance-2").to_member_identity(), Errors::FencedInstanceId),
+        ]));
+        let result = RemoveMembersFromConsumerGroupResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
+            result, requested, outcome,
+        )));
+        let fenced = Errors::FencedInstanceId.code() as i32;
+        unsafe {
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(removed), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
+                    removed, 1
+                ))
+                .to_str(),
+                Ok("instance-2")
+            );
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, 0).is_null());
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, 1).is_null());
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(removed, -1).is_null());
+
+            assert!(
+                kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(removed, c"instance-1".as_ptr())
+                    .is_null()
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-2".as_ptr()
+                )),
+                Some(fenced)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"invalid-instance-id".as_ptr()
+                ))
+                .as_deref(),
+                Some("Member invalid-instance-id was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)),
+                Some(fenced)
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+        }
+
+        // A requested member absent from the response: getSubLevelError.
+        let requested = vec![MemberToRemove::new("instance-2")];
+        let outcome: MemberErrorsOutcome = Ok(HashMap::new());
+        let result = RemoveMembersFromConsumerGroupResult::new(
+            resolved_future(outcome.clone()),
+            requested.iter().cloned().collect(),
+        );
+        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
+            result, requested, outcome,
+        )));
+        let missing = "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" was not \
+                       included in the removal response";
+        unsafe {
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-2".as_ptr()
+                ))
+                .as_deref(),
+                Some(missing)
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)).as_deref(),
+                Some(missing)
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+        }
+    }
+
+    /// `removeAll` mode: `memberResult` is refused with Java's exact message,
+    /// and `all()` wraps the first member error in a bare Kafka error (Java's
+    /// `new KafkaException("Encounter exception when trying to remove: ...",
+    /// memberException)`), so it is not an API error and carries no API code.
+    #[test]
+    fn remove_members_from_consumer_group_result_in_remove_all_mode() {
+        let mut identity = MemberIdentity::new();
+        identity.set_member_id("m1".to_string());
+        for (error, fails) in [(Errors::None, false), (Errors::UnknownMemberId, true)] {
+            let outcome: MemberErrorsOutcome = Ok(HashMap::from([(identity.clone(), error)]));
+            let result = RemoveMembersFromConsumerGroupResult::new(resolved_future(outcome.clone()), HashSet::new());
+            let removed = box_remove_members_from_consumer_group_result(
+                remove_members_from_consumer_group_result_inner((result, Vec::new(), outcome)),
+            );
+            unsafe {
+                assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(removed), 0);
+                assert_eq!(
+                    consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                        removed,
+                        c"instance-1".as_ptr()
+                    ))
+                    .as_deref(),
+                    Some("The method: memberResult is not applicable in 'removeAll' mode")
+                );
+                let all = kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed);
+                if fails {
+                    assert!(!common::kafka_common_Error_is_api_error(all));
+                    assert!(common::kafka_common_Error_is_kafka_error(all));
+                    assert_eq!(
+                        common::kafka_common_Error_code(all) as i32,
+                        Errors::UnknownServerError.code() as i32
+                    );
+                    assert_eq!(
+                        consume_error_message(all).as_deref(),
+                        Some(
+                            "Encounter error when trying to remove: MemberIdentity(memberId='m1', \
+                             groupInstanceId=null, reason=null)"
+                        )
+                    );
+                } else {
+                    assert!(all.is_null());
+                }
+                kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+            }
+        }
+    }
+
+    /// The accessors evaluate the handle's already-resolved outcome, so they
+    /// need no Tokio runtime and work from an arbitrary thread.
+    #[test]
+    fn consumer_group_result_accessors_run_off_any_runtime() {
+        let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
+        let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
+        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+            result,
+            vec![TopicPartition::new("t", 0)],
+            outcome,
+        )));
+        let handle = altered as usize;
+        std::thread::spawn(move || unsafe {
+            let altered = handle as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t;
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(altered, c"t".as_ptr(), 0).is_null());
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered).is_null());
+        })
+        .join()
+        .unwrap();
+        unsafe { kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered) };
     }
 
     #[test]
@@ -21631,8 +25215,7 @@ mod tests {
             ("a".to_string(), Ok(())),
             ("b".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
-        let groups = box_delete_consumer_groups_result(outcomes.clone());
-        let members = box_remove_members_from_consumer_group_result(outcomes);
+        let groups = box_delete_consumer_groups_result(outcomes);
         unsafe {
             assert_eq!(kafka_admin_DeleteConsumerGroupsResult_count(groups), 2);
             assert_eq!(
@@ -21646,19 +25229,6 @@ mod tests {
             );
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 2).is_null());
             kafka_admin_DeleteConsumerGroupsResult_destroy(groups);
-
-            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(members), 2);
-            assert_eq!(
-                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
-                    members, 1
-                ))
-                .to_str(),
-                Ok("b")
-            );
-            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 0).is_null());
-            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 1).is_null());
-            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, -1).is_null());
-            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(members);
         }
     }
 
@@ -21989,8 +25559,12 @@ mod tests {
     #[test]
     fn read_acl_bindings_maps_an_unrecognised_code_to_unknown_as_java_does() {
         // Java's `fromCode` returns UNKNOWN rather than throwing, and the
-        // constructors accept UNKNOWN (only ANY is rejected). The broker is
-        // what refuses it.
+        // constructors accept UNKNOWN (only ANY is rejected), so the marshaling
+        // here accepts it. It is NOT the broker that refuses it: `createAcls`
+        // rejects any binding with an indefinite field (ANY / UNKNOWN / NULL)
+        // LOCALLY, per binding, with an INVALID_REQUEST "Invalid ACL creation:
+        // ..." error (`acl.toFilter().findIndefiniteField()`) and never sends
+        // it. This test covers only the marshaling step, which does accept it.
         let (_names, name_ptrs) = c_array(&["t"]);
         let (_principals, principal_ptrs) = c_array(&["User:a"]);
         let (_hosts, host_ptrs) = c_array(&["*"]);
@@ -22340,7 +25914,7 @@ mod tests {
     }
 
     #[test]
-    fn read_client_quota_alterations_rejects_duplicate_entity_types_and_entities() {
+    fn read_client_quota_alterations_rejects_a_repeated_type_but_keeps_a_repeated_entity() {
         let (_dup, dup) = c_array(&["user", "user"]);
         let (_names, names) = c_array_opt(&[Some("alice"), Some("bob")]);
         let entity_types = [dup.as_ptr()];
@@ -22360,14 +25934,13 @@ mod tests {
         .expect_err("rejected");
         assert_eq!(err.message(), "quota alteration at index 0 repeats entity type `user`");
 
-        // The same entity twice across two alterations. Java accepts it and
-        // sends both; this layer rejects because the flat C result could not
-        // attribute the one surviving outcome to either row.
+        // The same entity twice across two alterations: Java sends both, in
+        // order (`KafkaAdminClient.java:4314-4342`), and so does this layer.
         let (_t, t) = c_array(&["user"]);
         let (_n, n) = c_array_opt(&[Some("alice")]);
         let entity_types = [t.as_ptr(), t.as_ptr()];
         let entity_names = [n.as_ptr(), n.as_ptr()];
-        let err = unsafe {
+        let alterations = unsafe {
             read_client_quota_alterations(
                 entity_types.as_ptr(),
                 entity_names.as_ptr(),
@@ -22379,11 +25952,9 @@ mod tests {
                 2,
             )
         }
-        .expect_err("rejected");
-        assert_eq!(
-            err.message(),
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry"
-        );
+        .expect("a repeated entity is sent, as in Java");
+        assert_eq!(alterations.len(), 2);
+        assert_eq!(alterations[0].entity(), alterations[1].entity());
     }
 
     // -- Client-quota result flattening --------------------------------------
@@ -23098,86 +26669,220 @@ mod tests {
         }
     }
 
+    /// One wire fixture row for [`seed_scram_result`]: `(user, wire error code,
+    /// [(mechanism type, iterations)])`.
+    type ScramResultRow<'a> = (&'a str, i16, Vec<(i8, i32)>);
+
+    /// Seeds a core `DescribeUserScramCredentialsResult` from wire per-user rows,
+    /// exactly as the core's own tests do — the C handle is then built from this
+    /// via `box_describe_user_scram_credentials_result`.
+    fn seed_scram_result(rows: Vec<ScramResultRow<'_>>) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
+        use crate::DescribeUserScramCredentialsResponseData;
+        use crate::common::KafkaFuture;
+        use crate::describe_user_scram_credentials_response_data::{
+            CredentialInfo, DescribeUserScramCredentialsResult as WireUserResult,
+        };
+
+        let results: Vec<WireUserResult> = rows
+            .into_iter()
+            .map(|(user, code, infos)| {
+                let mut r = WireUserResult::new();
+                r.set_user(user.to_string()).set_error_code(code);
+                r.set_credential_infos(
+                    infos
+                        .into_iter()
+                        .map(|(mech, it)| {
+                            let mut ci = CredentialInfo::new();
+                            ci.set_mechanism(mech).set_iterations(it);
+                            ci
+                        })
+                        .collect(),
+                );
+                r
+            })
+            .collect();
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_error_code(Errors::None.code()).set_results(results);
+        let core = DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data)));
+        box_describe_user_scram_credentials_result(core)
+    }
+
+    /// Resolves the `description(user)` view of a C handle to an owned handle or
+    /// an error pointer, mirroring how a C caller uses it.
+    unsafe fn describe_scram_user(
+        result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+        user: &str,
+    ) -> (*mut kafka_admin_UserScramCredentialsDescription_t, *mut kafka_common_Error_t) {
+        let user_c = CString::new(user).unwrap();
+        let mut out: *mut kafka_admin_UserScramCredentialsDescription_t = std::ptr::null_mut();
+        let error =
+            unsafe { kafka_admin_DescribeUserScramCredentialsResult_description(result, user_c.as_ptr(), &mut out) };
+        (out, error)
+    }
+
+    // The `all()` view keeps a RESOURCE_NOT_FOUND user as a successful, empty
+    // credential description, `users()` excludes them, and `description()` faults
+    // on them — the three-view interface the flattened dict could not express.
+    // The ragged credential arrays (two for one user, one for the next, distinct
+    // mechanisms and iterations) also catch a transposition of the two arrays.
     #[test]
-    fn describe_user_scram_credentials_result_flattens_credentials_at_a_second_index() {
-        // Ragged on purpose: two credentials for one user, one for the next and
-        // a failure for the third. The mechanisms and iteration counts are all
-        // distinct, so transposing the two arrays is caught.
-        let rows: ScramDescriptionOutcomes = vec![
+    fn describe_user_scram_credentials_backs_all_users_and_description_views() {
+        let sha256 = ScramMechanism::ScramSha256;
+        let sha512 = ScramMechanism::ScramSha512;
+        let result = seed_scram_result(vec![
             (
-                "alice".to_string(),
-                Ok(UserScramCredentialsDescription::new(
-                    "alice",
-                    vec![
-                        ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4_096),
-                        ScramCredentialInfo::new(ScramMechanism::ScramSha512, 8_192),
-                    ],
-                )),
+                "alice",
+                Errors::None.code(),
+                vec![(sha256.r#type(), 4_096), (sha512.r#type(), 8_192)],
             ),
-            (
-                "bob".to_string(),
-                Ok(UserScramCredentialsDescription::new(
-                    "bob",
-                    vec![ScramCredentialInfo::new(ScramMechanism::ScramSha512, 16_384)],
-                )),
-            ),
-            (
-                "carol".to_string(),
-                Err(Error::with_message(Errors::ResourceNotFound, "No such user: carol")),
-            ),
-        ];
-        let result = box_describe_user_scram_credentials_result(rows);
+            ("bob", Errors::None.code(), vec![(sha512.r#type(), 16_384)]),
+            // Requested but absent on the broker: RESOURCE_NOT_FOUND.
+            ("carol", Errors::ResourceNotFound.code(), vec![]),
+        ]);
         unsafe {
-            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_count(result), 3);
-            let user0 = CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 0));
-            assert_eq!(user0.to_str().expect("utf8"), "alice");
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 0).is_null());
+            // -- all() view: every user is present (RNF included, empty creds),
+            //    sorted by name, no error --------------------------------------
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_error(result).is_null());
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 3);
+
+            let alice = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 0);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 0),
-                2
+                CStr::from_ptr(kafka_admin_UserScramCredentialsDescription_name(alice)).to_str(),
+                Ok("alice")
+            );
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(alice), 2);
+            assert_eq!(
+                kafka_admin_UserScramCredentialsDescription_credential_mechanism(alice, 0),
+                i32::from(sha256.r#type())
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 0),
-                i32::from(ScramMechanism::ScramSha256.r#type())
-            );
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 0),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(alice, 0),
                 4_096
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 1),
-                i32::from(ScramMechanism::ScramSha512.r#type())
+                kafka_admin_UserScramCredentialsDescription_credential_mechanism(alice, 1),
+                i32::from(sha512.r#type())
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 1),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(alice, 1),
                 8_192
             );
 
+            let bob = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 1);
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(bob), 1);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 1),
-                1
-            );
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 0),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(bob, 0),
                 16_384
             );
-            // Row 1 has no second credential, even though row 0 does.
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 1),
-                -1
-            );
+            // Bob has no second credential even though alice does.
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_iterations(bob, 1), -1);
 
-            let error = kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 2);
-            assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
-            assert_eq!(message.to_str().expect("utf8"), "No such user: carol");
+            // carol (RNF) IS in all(), with zero credentials — a successful,
+            // empty description, exactly as Java's all() treats it.
+            let carol = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 2);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 2),
-                0
+                CStr::from_ptr(kafka_admin_UserScramCredentialsDescription_name(carol)).to_str(),
+                Ok("carol")
             );
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(carol), 0);
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 3).is_null());
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, 3).is_null());
 
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 3).is_null());
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 3).is_null());
+            // -- users() view: RNF (carol) excluded --------------------------
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 2);
+            let listed: Vec<&str> = (0..2)
+                .map(|i| {
+                    CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, i))
+                        .to_str()
+                        .unwrap()
+                })
+                .collect();
+            assert!(listed.contains(&"alice") && listed.contains(&"bob"), "users(): {listed:?}");
+            assert!(!listed.contains(&"carol"), "users() must exclude the RNF user, got {listed:?}");
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, 2).is_null());
+
+            // -- description() view: real user succeeds -----------------------
+            let (alice_desc, alice_err) = describe_scram_user(result, "alice");
+            assert!(alice_err.is_null());
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(alice_desc), 2);
+            kafka_admin_UserScramCredentialsDescription_destroy(alice_desc);
+
+            // -- description() view: RNF user FAULTS (the new capability) ------
+            let (carol_desc, carol_err) = describe_scram_user(result, "carol");
+            assert!(carol_desc.is_null());
+            assert!(!carol_err.is_null(), "description() must fault on a RESOURCE_NOT_FOUND user");
+            assert_eq!(
+                common::kafka_common_Error_code(carol_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            common::kafka_common_Error_destroy(carol_err);
+
+            // -- description() view: absent user -> "No such user: ..." -------
+            let (absent_desc, absent_err) = describe_scram_user(result, "nobody");
+            assert!(absent_desc.is_null());
+            assert!(!absent_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(absent_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            assert_eq!(
+                CStr::from_ptr(common::kafka_common_Error_message(absent_err)).to_str(),
+                Ok("No such user: nobody")
+            );
+            common::kafka_common_Error_destroy(absent_err);
+
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+    }
+
+    // A hard user-level error (neither NONE nor RESOURCE_NOT_FOUND) faults the
+    // all() view, while users() still lists the non-RNF users (including the
+    // failed one) and description() reports each user's own error.
+    #[test]
+    fn describe_user_scram_credentials_all_view_faults_on_a_hard_user_error() {
+        let sha256 = ScramMechanism::ScramSha256;
+        let result = seed_scram_result(vec![
+            ("goodUser", Errors::None.code(), vec![(sha256.r#type(), 4_096)]),
+            ("failedUser", Errors::DuplicateResource.code(), vec![]),
+            ("unknownUser", Errors::ResourceNotFound.code(), vec![]),
+        ]);
+        unsafe {
+            // all() faults with the hard error; count is 0.
+            let all_error = kafka_admin_DescribeUserScramCredentialsResult_all_error(result);
+            assert!(!all_error.is_null(), "all() must fault on a hard user-level error");
+            assert_eq!(
+                common::kafka_common_Error_code(all_error) as i32,
+                Errors::DuplicateResource.code() as i32
+            );
+            common::kafka_common_Error_destroy(all_error);
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 0);
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, 0).is_null());
+
+            // users(): goodUser + failedUser (RNF excluded, hard-error included).
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 2);
+
+            // description() reports each user's own outcome.
+            let (good_desc, good_err) = describe_scram_user(result, "goodUser");
+            assert!(good_err.is_null());
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(good_desc), 1);
+            kafka_admin_UserScramCredentialsDescription_destroy(good_desc);
+
+            let (_, failed_err) = describe_scram_user(result, "failedUser");
+            assert!(!failed_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(failed_err) as i32,
+                Errors::DuplicateResource.code() as i32
+            );
+            common::kafka_common_Error_destroy(failed_err);
+
+            let (_, unknown_err) = describe_scram_user(result, "unknownUser");
+            assert!(!unknown_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(unknown_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            common::kafka_common_Error_destroy(unknown_err);
+
             kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
         }
     }
@@ -23395,7 +27100,8 @@ mod tests {
         assert_eq!(options.filtered_duration(), -1);
         assert_eq!(options.filtered_transactional_id_pattern(), None);
 
-        // An empty pattern is a distinct, legal value -- not the same as NULL.
+        // An empty pattern is stored as given, as Java's option stores it; the
+        // request handler then drops it (see `list_transactions_handler`).
         let empty = CString::new("").expect("no NUL");
         let options =
             unsafe { list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), 0, empty.as_ptr()) };
@@ -23706,17 +27412,17 @@ mod tests {
             assert!(kafka_admin_ListTransactionsResult_get_error(result, 0).is_null());
             assert_eq!(kafka_admin_ListTransactionsResult_get_listing_count(result, 0), 2);
 
-            // Listings sorted by transactional id, so "txn-a" precedes "txn-z".
+            // Listings keep the broker's response order: "txn-z" stays first.
             let id0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 0));
-            assert_eq!(id0.to_str().expect("utf8"), "txn-a");
-            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 0), 70);
+            assert_eq!(id0.to_str().expect("utf8"), "txn-z");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 0), 71);
             let state0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 0));
-            assert_eq!(state0.to_str().expect("utf8"), "CompleteAbort");
+            assert_eq!(state0.to_str().expect("utf8"), "Ongoing");
             let id1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 1));
-            assert_eq!(id1.to_str().expect("utf8"), "txn-z");
-            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 1), 71);
+            assert_eq!(id1.to_str().expect("utf8"), "txn-a");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 1), 70);
             let state1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 1));
-            assert_eq!(state1.to_str().expect("utf8"), "Ongoing");
+            assert_eq!(state1.to_str().expect("utf8"), "CompleteAbort");
 
             let error = kafka_admin_ListTransactionsResult_get_error(result, 1);
             assert!(!error.is_null());
@@ -23730,6 +27436,174 @@ mod tests {
             assert!(kafka_admin_ListTransactionsResult_get_state(result, 9, 0).is_null());
             kafka_admin_ListTransactionsResult_destroy(result);
         }
+    }
+
+    /// One event observed by the `listTransactions` async callbacks.
+    #[derive(Debug, PartialEq)]
+    enum ListTransactionsEvent {
+        Brokers(Result<Vec<i32>, String>),
+        Broker(i32, Result<Vec<String>, String>),
+    }
+
+    unsafe extern "C" fn record_list_transactions_brokers(
+        broker_ids: *const i32,
+        broker_count: i32,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<ListTransactionsEvent>) };
+        let event = if error.is_null() {
+            let ids = unsafe { std::slice::from_raw_parts(broker_ids, broker_count as usize) };
+            ListTransactionsEvent::Brokers(Ok(ids.to_vec()))
+        } else {
+            assert!(broker_ids.is_null());
+            assert_eq!(broker_count, 0);
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) };
+            let message = message.to_str().expect("utf8").to_string();
+            unsafe { common::kafka_common_Error_destroy(error) };
+            ListTransactionsEvent::Brokers(Err(message))
+        };
+        tx.send(event).unwrap();
+    }
+
+    unsafe extern "C" fn record_list_transactions_broker(
+        broker_id: i32,
+        value: *mut kafka_admin_ListTransactionsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<ListTransactionsEvent>) };
+        assert!(value.is_null() != error.is_null(), "exactly one of value / error");
+        let outcome = unsafe {
+            if error.is_null() {
+                assert_eq!(kafka_admin_ListTransactionsResult_count(value), 1);
+                assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(value, 0), broker_id);
+                assert!(kafka_admin_ListTransactionsResult_get_error(value, 0).is_null());
+                let ids = (0..kafka_admin_ListTransactionsResult_get_listing_count(value, 0))
+                    .map(|j| {
+                        CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(value, 0, j))
+                            .to_str()
+                            .expect("utf8")
+                            .to_string()
+                    })
+                    .collect();
+                kafka_admin_ListTransactionsResult_destroy(value);
+                Ok(ids)
+            } else {
+                let message = CStr::from_ptr(common::kafka_common_Error_message(error))
+                    .to_str()
+                    .expect("utf8");
+                let message = message.to_string();
+                common::kafka_common_Error_destroy(error);
+                Err(message)
+            }
+        };
+        tx.send(ListTransactionsEvent::Broker(broker_id, outcome)).unwrap();
+    }
+
+    /// Java's `byBrokerId()` shape: one discovery callback with the broker ids,
+    /// then one callback per broker as that broker resolves — a resolved broker
+    /// is delivered while another is still pending, listings keep the broker's
+    /// response order (not sorted), and a failed broker does not hold up or
+    /// fail the others.
+    #[test]
+    fn list_transactions_async_delivers_discovery_then_each_broker_independently() {
+        use crate::common::internals::KafkaFutureImpl;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let top: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
+        let slow: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let fast: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let failed: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let (tx, rx) = std::sync::mpsc::channel::<ListTransactionsEvent>();
+        let tx_ptr = &tx as *const std::sync::mpsc::Sender<ListTransactionsEvent> as *mut c_void;
+        unsafe {
+            deliver_list_transactions_by_broker_id(
+                handle_ref(admin),
+                ListTransactionsResult::new(top.future()),
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        let wait = || rx.recv_timeout(Duration::from_secs(5)).expect("callback must fire");
+
+        // Nothing fires before the brokers are discovered.
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        top.complete(HashMap::from([(3, slow.future()), (1, fast.future()), (2, failed.future())]));
+        assert_eq!(wait(), ListTransactionsEvent::Brokers(Ok(vec![1, 2, 3])));
+
+        fast.complete(vec![
+            TransactionListing::new("txn-z", 71, TransactionState::Ongoing),
+            TransactionListing::new("txn-a", 70, TransactionState::CompleteAbort),
+        ]);
+        assert_eq!(
+            wait(),
+            ListTransactionsEvent::Broker(1, Ok(vec!["txn-z".to_string(), "txn-a".to_string()]))
+        );
+        failed.complete_with_error(Error::unsupported_version("broker 2 failed"));
+        assert_eq!(wait(), ListTransactionsEvent::Broker(2, Err("broker 2 failed".to_string())));
+        // Broker 3 is still pending and has not fired.
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        slow.complete(vec![]);
+        assert_eq!(wait(), ListTransactionsEvent::Broker(3, Ok(vec![])));
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(), "one callback per broker");
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// A failed discovery (Java: all three views fail) fires the discovery
+    /// callback once with the error and no per-broker callback — which is what
+    /// the mock's "Not implemented yet" `listTransactions` produces end to end.
+    #[test]
+    fn list_transactions_async_reports_a_discovery_failure_once() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<ListTransactionsEvent>();
+        let tx_ptr = &tx as *const std::sync::mpsc::Sender<ListTransactionsEvent> as *mut c_void;
+        unsafe {
+            kafka_admin_AdminClient_list_transactions_async(
+                admin,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                -1,
+                std::ptr::null(),
+                -1,
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).expect("discovery callback fires"),
+            ListTransactionsEvent::Brokers(Err("Not implemented yet".to_string()))
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        // A NULL handle reports through the discovery callback, inline.
+        unsafe {
+            kafka_admin_AdminClient_list_transactions_async(
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                -1,
+                std::ptr::null(),
+                -1,
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        assert_eq!(
+            rx.try_recv().expect("fired inline"),
+            ListTransactionsEvent::Brokers(Err("admin handle must not be null".to_string()))
+        );
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
     #[test]
@@ -23753,6 +27627,3367 @@ mod tests {
             kafka_admin_DescribeDelegationTokenResult_destroy(std::ptr::null_mut());
             kafka_admin_DescribeFeaturesResult_destroy(std::ptr::null_mut());
             kafka_admin_UpdateFeaturesResult_destroy(std::ptr::null_mut());
+        }
+    }
+
+    // -- admin_async_per_key_op: temporal independence (Phase A) ------------
+    //
+    // `MockAdminClient` resolves every future synchronously, so a test built
+    // on it (the Python `test_create_topics_two_keys_resolve_independently`)
+    // can only prove *structural* independence (a dict of Futures, gettable
+    // in any order) - not that a slow/never-resolving key is genuinely
+    // incapable of blocking a fast one. Proving that requires controlling one
+    // key's completion timing directly, which needs a `KafkaFutureImpl` this
+    // test drives by hand rather than an `Admin` impl (the trait has 47
+    // methods; stubbing all of them just to control two futures would be far
+    // more code than the property being tested). `submit`'s `&dyn Admin`
+    // parameter is unused below - any concrete `Admin` will do to build a
+    // valid handle, so a `MockAdminClient` (already at hand) stands in.
+
+    use crate::common::internals::KafkaFutureImpl;
+
+    #[test]
+    fn admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one() {
+        // "fast" is already complete when submitted; "slow" is deliberately
+        // never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        fast.complete(1);
+        let slow: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["fast".to_string(), "slow".to_string()],
+                move |_a: &dyn Admin| Ok(vec![("fast".to_string(), fast.future()), ("slow".to_string(), slow_future)]),
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two keys before delivering
+        // either (reintroducing `join_map_results`), this would hang until the
+        // test harness's own timeout, since "slow" never completes. A bounded
+        // `recv_timeout` turns that hang into a fast, explicit failure instead.
+        let (key, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved key must be delivered without waiting on the pending one");
+        assert_eq!(key, "fast");
+        assert_eq!(result.unwrap(), 1);
+
+        // "slow" is still pending, so nothing further should arrive promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending key must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view registered
+        // above share one Arc<Completable>; `slow` never completing it is the
+        // whole point of the test, so it is simply left to drop uncompleted here.
+        drop(slow);
+    }
+
+    // Phase B (Configs family): the same temporal-independence property as
+    // above, but exercised through `describeConfigs`' actual key
+    // (`ConfigResource`) and value (`Config`) types rather than the generic
+    // `String`/`i32` stand-ins — so a `ConfigResource`-specific mistake (e.g.
+    // relying on `Hash`/`Eq` where only `Clone` is available, or a `Config`
+    // that isn't `Send + Sync`) would show up here even though it compiles
+    // fine against the generic test above. `MockAdminClient` resolves every
+    // future synchronously (see the comment above), so this — like the
+    // generic test — drives two hand-built `KafkaFutureImpl<Config>`
+    // instances directly rather than going through a real `describe_configs`
+    // call, to prove genuine temporal independence rather than merely
+    // structural (dict-of-Futures) independence.
+    #[test]
+    fn describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one() {
+        let topic_a = ConfigResource::new(ConfigResourceType::Topic, "topic-a".to_string());
+        let topic_b = ConfigResource::new(ConfigResourceType::Topic, "topic-b".to_string());
+
+        // "topic-a" is already complete when submitted; "topic-b" is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+        fast.complete(Config::new(vec![ConfigEntry::new(
+            "retention.ms".to_string(),
+            Some("1000".to_string()),
+        )]));
+        let slow: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(ConfigResource, Result<Config, Error>)>();
+        let entries = vec![(topic_a.clone(), fast.future()), (topic_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![topic_a.clone(), topic_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |resource: ConfigResource, result: Result<Config, Error>, _ud: *mut c_void| {
+                    tx.send((resource, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two resources before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since "topic-b" never
+        // completes. A bounded `recv_timeout` turns that hang into a fast,
+        // explicit failure instead.
+        let (resource, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved resource must be delivered without waiting on the pending one");
+        assert_eq!(resource, topic_a);
+        let config = result.unwrap();
+        assert_eq!(config.entries().count(), 1);
+
+        // "topic-b" is still pending, so nothing further should arrive
+        // promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending resource must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    // COMMENTS.66.md finding 1: a resource mapped to an EMPTY `AlterConfigOp`
+    // list produced zero C rows (`for resource, ops in configs.items() for op
+    // in ops`), so it was invisible to `read_alter_config_ops` and never
+    // reached `admin_async_per_key_op`'s success-path callback loop, even
+    // though its `Future` was still pre-registered in the returned dict -
+    // a permanent hang, not a Java-faithful resolution. Fixed by recognizing
+    // a row with a non-NULL resource name but a NULL config name as an
+    // explicit "register this resource, no op" sentinel, matching Java's
+    // `configs.keySet()` iteration (`KafkaAdminClient.java:2870`), which
+    // creates a future for every key regardless of op-list length.
+
+    /// Direct unit test of the marshaling fix: a sentinel row (non-NULL
+    /// resource name, NULL config name) registers its resource in
+    /// `read_alter_config_ops`'s output map with an empty op list, rather
+    /// than being skipped like a row with a NULL resource name.
+    #[test]
+    fn read_alter_config_ops_registers_a_zero_op_resource_via_the_sentinel_row() {
+        let topic_id = i32::from(ConfigResourceType::Topic.id());
+        let resource_types = [topic_id, topic_id, topic_id];
+        let (_resources_owned, resource_ptrs) = c_array(&["topic-a", "topic-b", "topic-a"]);
+        // Row 0: a real SET op on "topic-a". Row 1: the sentinel for
+        // "topic-b" (no op contributed). Row 2: a NULL *resource* name, which
+        // is still a full skip, unaffected by this change.
+        let (_configs_owned, config_ptrs) = c_array_opt(&[Some("retention.ms"), None, Some("ignored")]);
+        let (_values_owned, value_ptrs) = c_array_opt(&[Some("1000"), None, None]);
+        let op_types = [0i32, 0i32, 0i32]; // SET; irrelevant for the sentinel/skipped rows.
+        // Overwrite row 2's resource name with NULL directly (c_array can't
+        // express a NULL entry).
+        let mut resource_ptrs = resource_ptrs;
+        resource_ptrs[2] = std::ptr::null();
+
+        let result = unsafe {
+            read_alter_config_ops(
+                resource_types.as_ptr(),
+                resource_ptrs.as_ptr(),
+                config_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                op_types.as_ptr(),
+                3,
+            )
+        }
+        .unwrap();
+
+        let topic_a = ConfigResource::new(ConfigResourceType::Topic, "topic-a".to_string());
+        let topic_b = ConfigResource::new(ConfigResourceType::Topic, "topic-b".to_string());
+        assert_eq!(result.len(), 2, "row 2's NULL resource name must still be a full skip");
+        assert_eq!(result[&topic_a].len(), 1, "topic-a keeps its one real op");
+        assert!(
+            result.contains_key(&topic_b),
+            "the sentinel row must register topic-b even though it contributes no op"
+        );
+        assert!(result[&topic_b].is_empty(), "the sentinel row contributes no AlterConfigOp");
+    }
+
+    /// End-to-end regression test for the same finding, through the actual
+    /// public async entry point and a real `MockAdminClient`: a resource with
+    /// an empty op list must get its `Future` resolved (not hang) exactly
+    /// like every other resource. Uses a bounded channel `recv_timeout` so a
+    /// reintroduced version of the bug fails fast instead of hanging the test
+    /// process.
+    #[test]
+    fn incremental_alter_configs_async_resolves_a_zero_op_resource() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        // The mock only accepts an alter for a topic that exists.
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"zero-op-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        let topic_id = i32::from(ConfigResourceType::Topic.id());
+        let resource_types = [topic_id];
+        let (_resources_owned, resource_ptrs) = c_array(&["zero-op-topic"]);
+        // The sentinel row this fix introduces: no config name, no value.
+        let config_ptrs: [*const c_char; 1] = [std::ptr::null()];
+        let value_ptrs: [*const c_char; 1] = [std::ptr::null()];
+        let op_types = [-1i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>, bool)>);
+        extern "C" fn on_alter(
+            resource_type: i32,
+            resource_name: *const c_char,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = if resource_name.is_null() {
+                None
+            } else {
+                Some(unsafe { CStr::from_ptr(resource_name) }.to_string_lossy().into_owned())
+            };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            }
+            ctx.0.send((resource_type, name, had_error)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_incremental_alter_configs_async(
+                admin,
+                resource_types.as_ptr(),
+                resource_ptrs.as_ptr(),
+                config_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                op_types.as_ptr(),
+                1,
+                -1,
+                false,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        // Before the fix, this resource never reached `admin_async_per_key_op`
+        // at all, so the callback would never fire and this would hang until
+        // the test harness's own timeout. A bounded `recv_timeout` turns that
+        // into a fast, explicit failure instead.
+        let (resource_type, name, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the zero-op resource's callback must fire, not hang");
+        assert_eq!(resource_type, topic_id);
+        assert_eq!(name.as_deref(), Some("zero-op-topic"));
+        assert!(!had_error, "an alter with no ops on an existing topic succeeds");
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- COMMENTS.67 fixup: a key absent from `entries` must not hang --------
+    //
+    // Critic finding: `MockAdminClient::describe_replica_log_dirs` `continue`s
+    // before creating a future for a replica of an unknown topic, so that key
+    // is entirely absent from `entries` on success (not merely resolved with
+    // an error). `admin_async_per_key_op` previously only fanned an explicit
+    // error out to every key in `keys` on a *total* submission failure; a key
+    // missing from an otherwise-successful `entries` got no callback at all —
+    // and since the Python/C caller had already created a Future for it (from
+    // `keys`, before this call even runs), that Future stayed pending forever.
+    // Fixed generically: `admin_async_per_key_outcome_op` reports such a key
+    // as `None`. `describe_replica_log_dirs_async` delivers that as Java's
+    // absent key (both `value` and `error` null); every other per-key RPC,
+    // through `admin_async_per_key_op`, gets the explicit error below, because
+    // its Java result can never omit a requested key.
+
+    #[test]
+    fn admin_async_per_key_op_reports_an_explicit_error_for_a_key_missing_from_entries() {
+        // "present" gets a real (already-resolved) future; "missing" is
+        // requested but never appears in `entries` at all — simulating
+        // `MockAdminClient::describe_replica_log_dirs`'s `continue`-before-
+        // creating-a-future guard for an unknown-topic replica.
+        let present: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        present.complete(7);
+        let entries = vec![("present".to_string(), present.future())];
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["present".to_string(), "missing".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        // Both keys must fire, bounded so a regression to "never fires" hangs
+        // the test fast instead of forever.
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, result) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both the present and the missing key must get exactly one callback");
+            seen.insert(key, result);
+        }
+        assert_eq!(seen.len(), 2, "each key must fire exactly once");
+        assert_eq!(seen["present"].as_ref().unwrap(), &7);
+        let missing_err = seen["missing"].as_ref().unwrap_err();
+        assert!(
+            !missing_err.message().is_empty(),
+            "the synthetic error for a missing key must carry an explanatory message"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// A key requested twice is one key, as in Java's per-key result maps: the
+    /// callback fires once with the real outcome, never a second time with the
+    /// synthetic "not present" error. Duplicate `entries` register once too.
+    #[test]
+    fn admin_async_per_key_op_fires_once_per_distinct_key() {
+        let dup: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        dup.complete(1);
+        let other: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        other.complete(2);
+        let entries = vec![
+            ("dup".to_string(), dup.future()),
+            ("other".to_string(), other.future()),
+            ("dup".to_string(), dup.future()),
+        ];
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["dup".to_string(), "other".to_string(), "dup".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, result) = rx.recv_timeout(Duration::from_secs(5)).expect("each distinct key fires");
+            assert!(seen.insert(key, result).is_none(), "a key fired twice");
+        }
+        assert_eq!(seen["dup"].as_ref().unwrap(), &1);
+        assert_eq!(seen["other"].as_ref().unwrap(), &2);
+        // No third callback: the repeated "dup" is not reported missing.
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// A submission failure fans out once per distinct key, not per occurrence.
+    #[test]
+    fn admin_async_per_key_op_fans_a_submission_failure_out_once_per_distinct_key() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["a".to_string(), "a".to_string(), "b".to_string()],
+                move |_a: &dyn Admin| -> Result<Vec<(String, KafkaFuture<i32>)>, Error> {
+                    Err(Error::local_illegal_argument("bad input"))
+                },
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    assert_eq!(result.unwrap_err().message(), "bad input");
+                    tx.send(key).unwrap();
+                },
+            );
+        }
+        // The failure path runs inline, so every callback has fired already.
+        let fired: Vec<String> = rx.try_iter().collect();
+        assert_eq!(fired, vec!["a".to_string(), "b".to_string()]);
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// The outcome form reports a key the result omits as `None` — Java's key
+    /// absent from the result map — instead of a synthetic error.
+    #[test]
+    fn admin_async_per_key_outcome_op_reports_an_omitted_key_as_absent() {
+        let present: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        present.complete(7);
+        let entries = vec![("present".to_string(), present.future())];
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<Result<i32, Error>>)>();
+        unsafe {
+            admin_async_per_key_outcome_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["present".to_string(), "missing".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: String, outcome: Option<Result<i32, Error>>, _ud: *mut c_void| {
+                    tx.send((key, outcome)).unwrap();
+                },
+            );
+        }
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, outcome) = rx.recv_timeout(Duration::from_secs(5)).expect("both keys fire");
+            seen.insert(key, outcome);
+        }
+        assert_eq!(seen["present"].as_ref().unwrap().as_ref().unwrap(), &7);
+        assert!(seen["missing"].is_none(), "an omitted key is absent, not an error");
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    // -- Phase C (Log dirs family): describeLogDirs / alterReplicaLogDirs /
+    // describeReplicaLogDirs per-key callback delivery ----------------------
+    //
+    // Reuses Phase A/B's `admin_async_per_key_op` mechanism verbatim; only the
+    // OUTER per-broker/per-replica delivery changes here. The inner
+    // `LogDirDescriptionMap_t`/`ReplicaLogDirInfo_t` value handles are the
+    // same types the pre-existing flattened sync result already used
+    // (`LogDirDescriptionMapInner`/`ReplicaLogDirInfoInner`, tested above at
+    // `log_dir_description_map_sorts_by_path` /
+    // `replica_log_dir_info_carries_both_log_dirs`), just delivered
+    // individually and owned instead of embedded and borrowed.
+
+    #[test]
+    fn destroying_a_null_log_dirs_per_key_value_handle_is_a_no_op() {
+        unsafe {
+            kafka_admin_LogDirDescriptionMap_destroy(std::ptr::null_mut());
+            kafka_admin_ReplicaLogDirInfo_destroy(std::ptr::null_mut());
+        }
+    }
+
+    // The same temporal-independence property as
+    // `admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    // (Phase A) and `describe_configs_async_delivers_a_resolved_resource_without_
+    // waiting_on_a_pending_one` (Phase B), but exercised through
+    // `describeLogDirs`' actual key (broker id, `i32`) and value
+    // (`HashMap<String, LogDirDescription>`) types. `MockAdminClient` resolves
+    // every future synchronously (see the Phase A comment on the generic
+    // test), so this drives two hand-built `KafkaFutureImpl` instances
+    // directly, exactly as the Phase A/B precedents do, rather than proving
+    // only structural (dict-of-Futures) independence.
+    #[test]
+    fn describe_log_dirs_async_delivers_a_resolved_broker_without_waiting_on_a_pending_one() {
+        // Broker 0 is already complete when submitted; broker 1 is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+        fast.complete(HashMap::new());
+        let slow: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Result<HashMap<String, LogDirDescription>, Error>)>();
+        let entries = vec![(0i32, fast.future()), (1i32, slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![0i32, 1i32],
+                move |_a: &dyn Admin| Ok(entries),
+                move |broker, result: Result<HashMap<String, LogDirDescription>, Error>, _ud: *mut c_void| {
+                    tx.send((broker, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two brokers before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since broker 1 never
+        // completes. A bounded `recv_timeout` turns that into a fast,
+        // explicit failure instead.
+        let (broker, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved broker must be delivered without waiting on the pending one");
+        assert_eq!(broker, 0);
+        assert!(result.unwrap().is_empty());
+
+        // Broker 1 is still pending, so nothing further should arrive promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending broker must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    // A broker with ZERO log dirs (no topic replicas assigned to it) is the
+    // degenerate per-key value shape: `LogDirDescriptionMapInner::new` on an
+    // empty `HashMap` still produces a valid (zero-entry) handle, so the
+    // per-key callback must still fire for that broker rather than silently
+    // dropping it. Unlike COMMENTS.66's Configs-family bug (a C row-flattening
+    // step that produced ZERO ROWS for an empty collection, upgrading a
+    // data-loss bug into a hang), `describeLogDirs` never flattens to rows at
+    // the C-marshaling layer -- the per-broker value comes directly from the
+    // Rust admin core's `HashMap<String, LogDirDescription>`, so an empty map
+    // is just an empty map, not an absent one. This test exercises that path
+    // end-to-end through a real `MockAdminClient` (which seeds an empty entry
+    // per requested broker even when no topic references it -- see
+    // `MockAdminClient::describe_log_dirs`'s `unwrapped.entry(broker).or_default()`)
+    // rather than asserting it only at the unit level.
+    #[test]
+    fn describe_log_dirs_async_resolves_a_broker_with_zero_log_dirs() {
+        let admin = kafka_admin_MockAdminClient_new(2);
+        assert!(!admin.is_null());
+
+        let brokers = [0i32, 1i32];
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, i32, bool)>);
+        extern "C" fn on_describe(
+            broker_id: i32,
+            value: *mut kafka_admin_LogDirDescriptionMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                ctx.0.send((broker_id, -1, true)).unwrap();
+                return;
+            }
+            assert!(!value.is_null(), "a broker with no log dirs must still deliver a value");
+            let count = unsafe { kafka_admin_LogDirDescriptionMap_count(value) };
+            unsafe { kafka_admin_LogDirDescriptionMap_destroy(value) };
+            ctx.0.send((broker_id, count, false)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_log_dirs_async(
+                admin,
+                brokers.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        // Before a fix, a zero-element per-key value could be silently
+        // dropped or never delivered -- a bounded `recv_timeout` turns any
+        // regression of that kind into a fast, explicit failure instead of
+        // hanging the test process.
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (broker_id, count, had_error) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every requested broker's callback must fire, not hang");
+            assert!(!had_error, "MockAdminClient never fails a describe_log_dirs broker");
+            seen.insert(broker_id, count);
+        }
+        assert_eq!(seen.len(), 2, "both brokers must have delivered exactly once");
+        // Neither broker has any topic assigned to it, so both report zero
+        // log dirs -- the degenerate empty-value case this test targets.
+        assert_eq!(seen[&0], 0);
+        assert_eq!(seen[&1], 0);
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // End to end: `describe_replica_log_dirs_async` against a real
+    // `MockAdminClient` with a replica of an unknown topic alongside a known
+    // one. The mock never creates a future for the unknown replica (Java's
+    // `if (topicMetadata != null)` guard), so Java's caller finds it absent
+    // from the map. The callback still fires exactly once for it (no hang,
+    // COMMENTS.67), with both `value` and `error` null — Java's absent key —
+    // rather than an invented error.
+    #[test]
+    fn describe_replica_log_dirs_async_reports_an_unknown_topic_replica_as_absent() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"drld-known".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        let (_topics_owned, topic_ptrs) = c_array(&["drld-known", "drld-missing"]);
+        let partitions = [0i32, 0i32];
+        let broker_ids = [0i32, 0i32];
+
+        // (had value, had error) per topic.
+        let (tx, rx) = std::sync::mpsc::channel::<(String, (bool, bool))>();
+        struct Ctx(std::sync::mpsc::Sender<(String, (bool, bool))>);
+        extern "C" fn on_describe(
+            topic: *const c_char,
+            _partition: i32,
+            _broker_id: i32,
+            value: *mut kafka_admin_ReplicaLogDirInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let outcome = (!value.is_null(), !error.is_null());
+            unsafe {
+                crate::ffi::common::kafka_common_Error_destroy(error);
+                kafka_admin_ReplicaLogDirInfo_destroy(value);
+            }
+            ctx.0.send((name, outcome)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_replica_log_dirs_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                broker_ids.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (topic, outcome) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both the known and the unknown-topic replica must get exactly one callback, not hang");
+            seen.insert(topic, outcome);
+        }
+        assert_eq!(seen.len(), 2, "both replicas must have delivered exactly once");
+        assert_eq!(
+            seen["drld-known"],
+            (true, false),
+            "the known topic's replica resolves successfully"
+        );
+        assert_eq!(
+            seen["drld-missing"],
+            (false, false),
+            "the unknown topic's replica is absent: both null"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- Phase D (Partitions/offsets family): alterPartitionReassignments /
+    // listOffsets per-key callback delivery ----------------------------------
+    //
+    // Reuses Phase A/B/C's `admin_async_per_key_op` mechanism verbatim. Both
+    // RPCs are keyed by `TopicPartition`, delivered as `(topic, partition)`
+    // exactly like the pre-existing flattened sync results' `_get_topic(i)` /
+    // `_get_partition(i)` pair (`admin-client.md` §5's key-representation
+    // rule). `alterPartitionReassignments`' per-partition future is
+    // `KafkaFuture<Void>` (no value handle, like `alter_replica_log_dirs`);
+    // `listOffsets`' per-partition future is `KafkaFuture<ListOffsetsResultInfo>`,
+    // delivered as a newly-owned `kafka_admin_ListOffsetsResultInfo_t` reusing
+    // the existing `ListOffsetsResultInfoInner` backing type verbatim (dual
+    // provenance, like `kafka_common_Error_t`: borrowed from the flattened
+    // sync result, owned from this per-key callback).
+    //
+    // `listOffsets` is also the first RPC in this file whose real (non-mock)
+    // `Admin` impl resolves through `AdminApiDriver`/`PartitionLeaderStrategy`
+    // rather than a plain `Call` (`admin-client.md` §2) — partitions sharing a
+    // leader tend to resolve together in practice on a real broker. That does
+    // not weaken the per-key contract (`Admin::list_offsets` still returns one
+    // `KafkaFuture` per partition) and does not affect the direct
+    // `admin_async_per_key_op`-level tests below, which drive two hand-built
+    // futures directly rather than through a real leader lookup.
+
+    #[test]
+    fn destroying_a_null_list_offsets_per_key_value_handle_is_a_no_op() {
+        unsafe { kafka_admin_ListOffsetsResultInfo_destroy(std::ptr::null_mut()) };
+    }
+
+    /// The same temporal-independence property as
+    /// `admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    /// (Phase A), exercised through `alterPartitionReassignments`' actual key
+    /// (`TopicPartition`) and Void-shaped value. `MockAdminClient` resolves
+    /// every future synchronously (see the Phase A comment on the generic
+    /// test), so this drives two hand-built `KafkaFutureImpl<()>` instances
+    /// directly rather than proving only structural (dict-of-Futures)
+    /// independence.
+    #[test]
+    fn alter_partition_reassignments_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let fast_tp = TopicPartition::new("t".to_string(), 0);
+        let slow_tp = TopicPartition::new("t".to_string(), 1);
+
+        // Partition 0 is already complete when submitted; partition 1 is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        fast.complete(());
+        let slow: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<(), Error>)>();
+        let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![fast_tp.clone(), slow_tp.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, result: Result<(), Error>, _ud: *mut c_void| {
+                    tx.send((tp, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two partitions before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since partition 1 never
+        // completes. A bounded `recv_timeout` turns that into a fast,
+        // explicit failure instead.
+        let (tp, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, fast_tp);
+        assert!(result.is_ok());
+
+        // Partition 1 is still pending, so nothing further should arrive
+        // promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    /// The same temporal-independence property, exercised through
+    /// `listOffsets`' actual key (`TopicPartition`) and value
+    /// (`ListOffsetsResultInfo`) types — see the driver-architecture note
+    /// above for why this direct-mechanism test, rather than an end-to-end
+    /// one, is the way genuine (not merely structural) independence is
+    /// proven for this RPC.
+    #[test]
+    fn list_offsets_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let fast_tp = TopicPartition::new("t".to_string(), 0);
+        let slow_tp = TopicPartition::new("t".to_string(), 1);
+
+        let fast: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
+        fast.complete(ListOffsetsResultInfo::new(42, -1, None));
+        let slow: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<ListOffsetsResultInfo, Error>)>();
+        let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![fast_tp.clone(), slow_tp.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, result: Result<ListOffsetsResultInfo, Error>, _ud: *mut c_void| {
+                    tx.send((tp, result)).unwrap();
+                },
+            );
+        }
+
+        let (tp, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, fast_tp);
+        assert_eq!(result.unwrap().offset(), 42);
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// End-to-end structural test through the real public async entry point
+    /// and a `MockAdminClient`: two partitions, one accepted and one rejected
+    /// (an out-of-range partition — `MockAdminClient::alter_partition_reassignments`
+    /// fails any partition index at or beyond the topic's partition count with
+    /// `UnknownTopicOrPartition`), proving the Void-shaped per-key callback
+    /// delivers both with the right key and the right success/error split.
+    #[test]
+    fn alter_partition_reassignments_async_reports_per_partition_success_and_failure() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"apr-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        // Partition 0 exists (accepted); partition 5 does not (rejected as
+        // out of range). Both cancel their reassignment (Java's empty
+        // Optional) - the simplest non-empty request shape.
+        let (_topics_owned, topic_ptrs) = c_array(&["apr-topic", "apr-topic"]);
+        let partitions = [0i32, 5i32];
+        let cancel = [true, true];
+        let target_replicas: [*const i32; 2] = [std::ptr::null(), std::ptr::null()];
+        let target_replica_counts = [0i32, 0i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, i32, bool)>);
+        extern "C" fn on_alter(
+            topic: *const c_char,
+            partition: i32,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            }
+            ctx.0.send((name, partition, had_error)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_partition_reassignments_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                cancel.as_ptr(),
+                target_replicas.as_ptr(),
+                target_replica_counts.as_ptr(),
+                2,
+                -1,
+                true,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (_topic, partition, had_error) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both partitions must get exactly one callback, not hang");
+            seen.insert(partition, had_error);
+        }
+        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
+        assert!(!seen[&0], "partition 0 exists and its reassignment cancel is accepted");
+        assert!(seen[&5], "partition 5 is out of range and must report an error");
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end structural test through the real public async entry point
+    /// and a `MockAdminClient`: asserts the delivered `ListOffsetsResultInfo`
+    /// handle's scalar fields round-trip correctly through the per-key owned
+    /// value (offset/timestamp/leader-epoch), not just that the callback
+    /// fires.
+    #[test]
+    fn list_offsets_async_delivers_the_seeded_offset() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"lo-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+
+            let (_seed_topics_owned, seed_topic_ptrs) = c_array(&["lo-topic"]);
+            let seed_partitions = [0i32];
+            let seed_end_offsets = [123i64];
+            let seed_err = kafka_admin_MockAdminClient_update_end_offsets(
+                admin,
+                seed_topic_ptrs.as_ptr(),
+                seed_partitions.as_ptr(),
+                seed_end_offsets.as_ptr(),
+                1,
+            );
+            assert!(seed_err.is_null());
+        }
+
+        let (_topics_owned, topic_ptrs) = c_array(&["lo-topic"]);
+        let partitions = [0i32];
+        let is_timestamp = [false];
+        // -1 is the `latest()` sentinel, which `MockAdminClient::list_offsets`
+        // resolves against the seeded end offset for any non-`Earliest` spec.
+        let spec_timestamps = [-1i64];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, i32, i64, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, i32, i64, bool)>);
+        extern "C" fn on_list(
+            topic: *const c_char,
+            partition: i32,
+            value: *mut kafka_admin_ListOffsetsResultInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                ctx.0.send((name, partition, -99, true)).unwrap();
+                return;
+            }
+            assert!(!value.is_null());
+            let offset = unsafe { kafka_admin_ListOffsetsResultInfo_offset(value) };
+            unsafe { kafka_admin_ListOffsetsResultInfo_destroy(value) };
+            ctx.0.send((name, partition, offset, false)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_list_offsets_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                is_timestamp.as_ptr(),
+                spec_timestamps.as_ptr(),
+                1,
+                -1,
+                0,
+                on_list,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (topic, partition, offset, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the requested partition's callback must fire, not hang");
+        assert_eq!(topic, "lo-topic");
+        assert_eq!(partition, 0);
+        assert!(
+            !had_error,
+            "listOffsets against a known topic with a seeded end offset must succeed"
+        );
+        assert_eq!(
+            offset, 123,
+            "the seeded end offset must round-trip through the owned per-key value handle"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase E (consumer groups family) — per-key temporal independence
+    //
+    // `describeConsumerGroups`, `describeClassicGroups`, `listConsumerGroupOffsets`
+    // and `deleteConsumerGroups` are the four RPCs in this family that are
+    // genuinely `Map<groupId, KafkaFuture<...>>`-shaped: each group gets its
+    // own independent top-level future. `alterConsumerGroupOffsets`,
+    // `deleteConsumerGroupOffsets` and `removeMembersFromConsumerGroup` are
+    // NOT: Java derives every per-partition/per-member future from the SAME
+    // single source future via `whenComplete`/`thenApply`
+    // (`AlterConsumerGroupOffsetsResult.partitionResult`,
+    // `DeleteConsumerGroupOffsetsResult.partitionResult`,
+    // `RemoveMembersFromConsumerGroupResult.memberResult`), so all of that
+    // RPC's keys necessarily resolve at the exact same instant — there is no
+    // "resolves independently" behaviour to demonstrate for them, only for
+    // the four map-shaped RPCs below.
+    // -----------------------------------------------------------------------
+
+    /// `describeConsumerGroups` is `Map<String, KafkaFuture<ConsumerGroupDescription>>`
+    /// — one real (value-carrying) future per group. Drives
+    /// `admin_async_per_key_op` directly with a resolved group and a
+    /// deliberately-never-completed one, proving the resolved group is
+    /// delivered without waiting on the pending one.
+    #[test]
+    fn describe_consumer_groups_async_delivers_a_resolved_group_without_waiting_on_a_pending_one() {
+        let fast: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
+        fast.complete(ConsumerGroupDescription::new(
+            "fast-group",
+            false,
+            Vec::new(),
+            "range",
+            GroupType::Consumer,
+            GroupState::Stable,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let slow: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<ConsumerGroupDescription, Error>)>();
+        let entries = vec![
+            ("fast-group".to_string(), fast.future()),
+            ("slow-group".to_string(), slow_future),
+        ];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["fast-group".to_string(), "slow-group".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |group_id, result: Result<ConsumerGroupDescription, Error>, _ud: *mut c_void| {
+                    tx.send((group_id, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two groups before delivering
+        // either (reintroducing `join_map_results`), this would hang until
+        // the test harness's own timeout, since "slow-group" never completes.
+        // A bounded `recv_timeout` turns that into a fast, explicit failure
+        // instead.
+        let (group_id, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved group must be delivered without waiting on the pending one");
+        assert_eq!(group_id, "fast-group");
+        assert_eq!(result.unwrap().group_id(), "fast-group");
+
+        // "slow-group" is still pending, so nothing further should arrive
+        // promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending group must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and `slow_future` (the view
+        // registered above) share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    /// `deleteConsumerGroups` is `Map<String, KafkaFuture<Void>>` — the
+    /// void-shaped counterpart of the test above, over the same map-of-groups
+    /// contract.
+    #[test]
+    fn delete_consumer_groups_async_delivers_a_resolved_group_without_waiting_on_a_pending_one() {
+        let fast: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        fast.complete(());
+        let slow: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<(), Error>)>();
+        let entries = vec![
+            ("fast-group".to_string(), fast.future()),
+            ("slow-group".to_string(), slow_future),
+        ];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["fast-group".to_string(), "slow-group".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |group_id, result: Result<(), Error>, _ud: *mut c_void| {
+                    tx.send((group_id, result)).unwrap();
+                },
+            );
+        }
+
+        let (group_id, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved group must be delivered without waiting on the pending one");
+        assert_eq!(group_id, "fast-group");
+        assert!(result.is_ok());
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending group must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase E — end-to-end real-error proof, through the actual public async
+    // entry point and a real `MockAdminClient`. Every RPC in this family has a
+    // Java `MockAdminClient` that either throws
+    // `UnsupportedOperationException("Not implement(ed) yet")` unconditionally
+    // or does so only for a multi-group `listConsumerGroupOffsets` call (Java
+    // `MockAdminClient.java:750`).
+    //
+    // - The four map-shaped RPCs (describeConsumerGroups, describeClassicGroups,
+    //   listConsumerGroupOffsets, deleteConsumerGroups) deliver per key through
+    //   `admin_async_per_key_op`: their tests assert the REAL typed error (exact
+    //   message text) surfaces per key, not that helper's safety-net fallback
+    //   ("the requested key was not present in the admin RPC's response").
+    // - The three single-future RPCs (alterConsumerGroupOffsets,
+    //   deleteConsumerGroupOffsets, removeMembersFromConsumerGroup) wrap one
+    //   Java future and do not use `admin_async_per_key_op`: their tests
+    //   assert ONE callback carrying the whole-request error.
+    // -----------------------------------------------------------------------
+
+    /// `describeConsumerGroups`: two distinct group ids each independently
+    /// receive Java's real `UnsupportedOperationException("Not implemented
+    /// yet")` (`MockAdminClient.java:735`), proving `submit_describe_consumer_groups_entries`
+    /// always inserts a real per-key future rather than relying on the
+    /// generic fallback.
+    #[test]
+    fn describe_consumer_groups_async_reports_the_real_unsupported_error_per_group() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["group-a", "group-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_describe(
+            group_id: *const c_char,
+            value: *mut kafka_admin_ConsumerGroupDescription_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeConsumerGroups");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_ConsumerGroupDescription_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_consumer_groups_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                false,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both groups must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both groups must have delivered exactly once");
+        assert_eq!(seen["group-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["group-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describeClassicGroups`: same shape as the test above, for Java's
+    /// `MockAdminClient.java:1478` `UnsupportedOperationException`.
+    #[test]
+    fn describe_classic_groups_async_reports_the_real_unsupported_error_per_group() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["group-a", "group-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_describe(
+            group_id: *const c_char,
+            value: *mut kafka_admin_ClassicGroupDescription_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeClassicGroups");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_classic_groups_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                false,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both groups must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both groups must have delivered exactly once");
+        assert_eq!(seen["group-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["group-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `listConsumerGroupOffsets` against a single seeded group succeeds
+    /// end-to-end: `MockAdminClient` only rejects a *multi*-group request
+    /// (`MockAdminClient.java:750`), so a single group resolves against its
+    /// real committed offsets, proving the real value — not a fallback error —
+    /// reaches the per-key callback.
+    #[test]
+    fn list_consumer_group_offsets_async_delivers_real_value_for_a_single_group() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let (_seed_topics_owned, seed_topic_ptrs) = c_array(&["lcgo-topic"]);
+            let seed_partitions = [0i32];
+            let seed_offsets = [77i64];
+            let seed_err = kafka_admin_MockAdminClient_update_consumer_group_offsets(
+                admin,
+                seed_topic_ptrs.as_ptr(),
+                seed_partitions.as_ptr(),
+                seed_offsets.as_ptr(),
+                1,
+            );
+            assert!(seed_err.is_null());
+        }
+
+        let (_ids_owned, id_ptrs) = c_array(&["only-group"]);
+        let all_partitions = [true];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, i32, Option<i64>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, i32, Option<i64>)>);
+        extern "C" fn on_list(
+            group_id: *const c_char,
+            value: *mut kafka_admin_OffsetAndMetadataMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().into_owned();
+            assert!(error.is_null(), "a single-group request must succeed against MockAdminClient");
+            assert!(!value.is_null());
+            let count = unsafe { kafka_admin_OffsetAndMetadataMap_count(value) };
+            let offset = unsafe { kafka_admin_OffsetAndMetadataMap_get_offset(value, 0) };
+            unsafe { kafka_admin_OffsetAndMetadataMap_destroy(value) };
+            ctx.0.send((id, count, Some(offset))).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_list_consumer_group_offsets_async(
+                admin,
+                id_ptrs.as_ptr(),
+                all_partitions.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                -1,
+                false,
+                on_list,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (id, count, offset) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the single requested group's callback must fire, not hang");
+        assert_eq!(id, "only-group");
+        assert_eq!(
+            count, 1,
+            "the seeded partition must round-trip through the owned per-key value handle"
+        );
+        assert_eq!(offset, Some(77));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `listConsumerGroupOffsets` against *two* groups: Java's
+    /// `MockAdminClient.java:750` `UnsupportedOperationException` fires for
+    /// each requested group independently, proving the real error (not the
+    /// generic fallback) reaches every key even in this RPC's
+    /// multi-group-rejection branch.
+    #[test]
+    fn list_consumer_group_offsets_async_reports_the_real_unsupported_error_for_multiple_groups() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["group-a", "group-b"]);
+        let all_partitions = [true, true];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, bool, Option<String>)>);
+        extern "C" fn on_list(
+            group_id: *const c_char,
+            value: *mut kafka_admin_OffsetAndMetadataMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().into_owned();
+            let had_value = !value.is_null();
+            if had_value {
+                unsafe { kafka_admin_OffsetAndMetadataMap_destroy(value) };
+            }
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((id, had_value, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_list_consumer_group_offsets_async(
+                admin,
+                id_ptrs.as_ptr(),
+                all_partitions.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+                -1,
+                false,
+                on_list,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, had_value, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both groups must get exactly one callback, not hang");
+            assert!(!had_value, "a multi-group request must not succeed against MockAdminClient");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both groups must have delivered exactly once");
+        assert_eq!(seen["group-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["group-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// What a single-shot consumer-group-offsets / remove-members callback
+    /// delivered: whether a result handle arrived (it is destroyed on the
+    /// spot) and the error message, if any (the error is destroyed too).
+    type SingleShot = (bool, Option<String>);
+
+    /// Drains exactly one delivery from `rx`, then proves no second one
+    /// follows: Java's result is one future, so the callback fires once.
+    fn expect_exactly_one(rx: &std::sync::mpsc::Receiver<SingleShot>) -> SingleShot {
+        let delivered = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the callback must fire, not hang");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the callback must fire exactly once"
+        );
+        delivered
+    }
+
+    extern "C" fn on_alter_offsets_once(
+        result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    extern "C" fn on_delete_offsets_once(
+        result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    extern "C" fn on_remove_members_once(
+        result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<SingleShot>) };
+        let has_result = !result.is_null();
+        unsafe { kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result) };
+        tx.send((has_result, unsafe { consume_error_message(error) })).unwrap();
+    }
+
+    /// `alterConsumerGroupOffsets` async: Java's result is ONE future, so the
+    /// callback fires exactly once with the whole-request error Java's
+    /// `MockAdminClient` throws (`MockAdminClient.java:1213`, "Not implement
+    /// yet" — Java's own typo, preserved) — for two partitions, for an empty
+    /// offsets map (which used to fire nothing at all), and inline for a
+    /// request that cannot be submitted.
+    #[test]
+    fn alter_consumer_group_offsets_async_fires_one_callback_with_the_whole_request_outcome() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (_topics_owned, topic_ptrs) = c_array(&["acgo-topic", "acgo-topic"]);
+        let partitions = [0i32, 1i32];
+        let offsets = [10i64, 20i64];
+        let has_leader_epoch = [false, false];
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
+
+        for (count, group) in [(2, c"acgo-group".as_ptr()), (0, c"acgo-group".as_ptr())] {
+            unsafe {
+                kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+                    admin,
+                    group,
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    has_leader_epoch.as_ptr(),
+                    count,
+                    -1,
+                    on_alter_offsets_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implement yet".to_string())),
+                "count {count}"
+            );
+        }
+
+        // Not submittable: fires once, inline, before the call returns.
+        unsafe {
+            kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+                admin,
+                std::ptr::null(),
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                offsets.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                has_leader_epoch.as_ptr(),
+                2,
+                -1,
+                on_alter_offsets_once,
+                tx_ptr as *mut c_void,
+            );
+        }
+        assert_eq!(rx.try_recv().ok(), Some((false, Some("group_id must not be null".to_string()))));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        unsafe {
+            drop(Box::from_raw(tx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `deleteConsumerGroupOffsets` async: same shape as the test above, for
+    /// Java's `MockAdminClient.java:783` `UnsupportedOperationException`.
+    #[test]
+    fn delete_consumer_group_offsets_async_fires_one_callback_with_the_whole_request_outcome() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (_topics_owned, topic_ptrs) = c_array(&["dcgo-topic", "dcgo-topic"]);
+        let partitions = [0i32, 1i32];
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
+
+        for count in [2, 0] {
+            unsafe {
+                kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+                    admin,
+                    c"dcgo-group".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    count,
+                    -1,
+                    on_delete_offsets_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implemented yet".to_string())),
+                "count {count}"
+            );
+        }
+
+        unsafe {
+            kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+                admin,
+                std::ptr::null(),
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                2,
+                -1,
+                on_delete_offsets_once,
+                tx_ptr as *mut c_void,
+            );
+        }
+        assert_eq!(rx.try_recv().ok(), Some((false, Some("group_id must not be null".to_string()))));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        unsafe {
+            drop(Box::from_raw(tx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `removeMembersFromConsumerGroup` async: one callback carrying the
+    /// whole-request error Java's `MockAdminClient` throws
+    /// (`MockAdminClient.java:801-803`) — with explicit members, with a
+    /// repeated instance id (Java's `Set<MemberToRemove>` collapses it), and in
+    /// `removeAll` mode — and inline for an empty member list without
+    /// `remove_all` (Java's collection constructor throws), which used to fire
+    /// nothing at all.
+    #[test]
+    fn remove_members_from_consumer_group_async_fires_one_callback_with_the_whole_request_outcome() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (tx, rx) = std::sync::mpsc::channel::<SingleShot>();
+        let tx_ptr = Box::into_raw(Box::new(tx));
+
+        let (_two_owned, two) = c_array(&["instance-1", "instance-2"]);
+        let (_dup_owned, dup) = c_array(&["dup-instance", "dup-instance"]);
+        for (remove_all, ids, count) in [
+            (false, two.as_ptr(), 2),
+            (false, dup.as_ptr(), 2),
+            (true, std::ptr::null(), 0),
+        ] {
+            unsafe {
+                kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+                    admin,
+                    c"rmfcg-group".as_ptr(),
+                    remove_all,
+                    ids,
+                    count,
+                    std::ptr::null(),
+                    -1,
+                    on_remove_members_once,
+                    tx_ptr as *mut c_void,
+                );
+            }
+            assert_eq!(
+                expect_exactly_one(&rx),
+                (false, Some("Not implemented yet".to_string())),
+                "remove_all {remove_all}"
+            );
+        }
+
+        unsafe {
+            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+                admin,
+                c"rmfcg-group".as_ptr(),
+                false,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                on_remove_members_once,
+                tx_ptr as *mut c_void,
+            );
+        }
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some((false, Some("Invalid empty members has been provided".to_string())))
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        unsafe {
+            drop(Box::from_raw(tx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// The synchronous entry points' handles answer Java's accessors too.
+    /// Against `MockAdminClient` the single future fails, so every accessor on
+    /// a requested key reports that failure — while the delete / remove
+    /// "not included in the original request" guards still win, because Java
+    /// throws them before looking at the future.
+    #[test]
+    fn consumer_group_sync_results_answer_java_accessors_against_the_mock() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let (_topics_owned, topic_ptrs) = c_array(&["sync-topic"]);
+        let partitions = [0i32];
+        let offsets = [1i64];
+        unsafe {
+            let mut altered = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_alter_consumer_group_offsets(
+                    admin,
+                    c"g".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                    -1,
+                    &mut altered,
+                )
+                .is_null()
+            );
+            for (topic, partition) in [(c"sync-topic", 0), (c"other", 3)] {
+                assert_eq!(
+                    consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                        altered,
+                        topic.as_ptr(),
+                        partition
+                    ))
+                    .as_deref(),
+                    Some("Not implement yet")
+                );
+            }
+            assert_eq!(
+                consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered)).as_deref(),
+                Some("Not implement yet")
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+
+            let mut deleted = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_delete_consumer_group_offsets(
+                    admin,
+                    c"g".as_ptr(),
+                    topic_ptrs.as_ptr(),
+                    partitions.as_ptr(),
+                    1,
+                    -1,
+                    &mut deleted,
+                )
+                .is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"sync-topic".as_ptr(),
+                    0
+                ))
+                .as_deref(),
+                Some("Not implemented yet")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    deleted,
+                    c"other".as_ptr(),
+                    3
+                ))
+                .as_deref(),
+                Some("Partition other-3 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_DeleteConsumerGroupOffsetsResult_all(deleted)).as_deref(),
+                Some("Not implemented yet")
+            );
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+
+            let (_ids_owned, ids) = c_array(&["instance-1"]);
+            let mut removed = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_remove_members_from_consumer_group(
+                    admin,
+                    c"g".as_ptr(),
+                    false,
+                    ids.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    -1,
+                    &mut removed,
+                )
+                .is_null()
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-1".as_ptr()
+                ))
+                .as_deref(),
+                Some("Not implemented yet")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    removed,
+                    c"instance-9".as_ptr()
+                ))
+                .as_deref(),
+                Some("Member instance-9 was not included in the original request")
+            );
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)).as_deref(),
+                Some("Not implemented yet")
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `deleteConsumerGroups`: two distinct group ids each independently
+    /// receive Java's real `UnsupportedOperationException("Not implemented
+    /// yet")` (`MockAdminClient.java:773-775`).
+    #[test]
+    fn delete_consumer_groups_async_reports_the_real_unsupported_error_per_group() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["group-a", "group-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_delete(group_id: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((id, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_delete_consumer_groups_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_delete,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both groups must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both groups must have delivered exactly once");
+        assert_eq!(seen["group-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["group-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase F (ACLs/quotas/features family): createAcls, deleteAcls,
+    // alterClientQuotas, alterUserScramCredentials, updateFeatures.
+    // -----------------------------------------------------------------------
+
+    fn acl_binding_for_test(name: &str) -> AclBinding {
+        AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, name.to_string(), PatternType::Literal).unwrap(),
+            AccessControlEntry::new("User:alice", "*", AclOperation::All, AclPermissionType::Allow).unwrap(),
+        )
+    }
+
+    /// Genuine temporal-independence test (per the launcher brief's
+    /// requirement): two hand-built `KafkaFutureImpl<()>` instances driven
+    /// directly through `admin_async_per_key_op`, one already resolved and
+    /// one deliberately never completed, prove the already-resolved binding
+    /// is delivered without waiting on the pending one — not merely that the
+    /// result is dict-of-futures shaped. Mirrors
+    /// `describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one`.
+    #[test]
+    fn create_acls_async_delivers_a_resolved_binding_without_waiting_on_a_pending_one() {
+        use crate::common::internals::KafkaFutureImpl;
+
+        let binding_a = acl_binding_for_test("topic-a");
+        let binding_b = acl_binding_for_test("topic-b");
+        let key_a = acl_binding_key(&binding_a);
+        let key_b = acl_binding_key(&binding_b);
+
+        let fast: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        fast.complete(());
+        let slow: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(AclBindingKey, Result<(), Error>)>();
+        let entries = vec![(key_a.clone(), fast.future()), (key_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![key_a.clone(), key_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: AclBindingKey, result: Result<(), Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        let (key, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved binding must be delivered without waiting on the pending one");
+        assert_eq!(key, key_a);
+        assert!(result.is_ok());
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending binding must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// Same temporal-independence property as above, exercised through
+    /// `deleteAcls`'s actual key (`AclBindingFilter`) and value
+    /// (`FilterResults`) types, whose per-filter future carries a real
+    /// collection rather than `Void`.
+    #[test]
+    fn delete_acls_async_delivers_a_resolved_filter_without_waiting_on_a_pending_one() {
+        use crate::common::internals::KafkaFutureImpl;
+
+        let filter_a = acl_binding_for_test("topic-a").to_filter();
+        let filter_b = acl_binding_for_test("topic-b").to_filter();
+
+        let fast: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
+        fast.complete(FilterResults::new(vec![FilterResult::new(
+            Some(acl_binding_for_test("topic-a")),
+            None,
+        )]));
+        let slow: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(AclBindingFilter, Result<FilterResults, Error>)>();
+        let entries = vec![(filter_a.clone(), fast.future()), (filter_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![filter_a.clone(), filter_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |filter: AclBindingFilter, result: Result<FilterResults, Error>, _ud: *mut c_void| {
+                    tx.send((filter, result)).unwrap();
+                },
+            );
+        }
+
+        let (filter, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved filter must be delivered without waiting on the pending one");
+        assert_eq!(filter, filter_a);
+        assert_eq!(result.unwrap().values().len(), 1);
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending filter must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// An operation code Java's `AclOperation.fromCode` does not define (99)
+    /// becomes UNKNOWN in the binding, and the callback is keyed by that
+    /// binding: one callback, carrying the RPC's real outcome under operation
+    /// UNKNOWN — not a synthetic "not present" error for the raw row plus a
+    /// second callback under a key the caller never passed.
+    #[test]
+    fn create_acls_async_keys_an_undefined_enum_code_by_the_normalised_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        let resource_types = [i32::from(ResourceType::Topic.code())];
+        let pattern_types = [i32::from(PatternType::Literal.code())];
+        let operations = [99i32];
+        let permission_types = [i32::from(AclPermissionType::Allow.code())];
+        let (_names_owned, name_ptrs) = c_array(&["ca-topic"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let operation = unsafe { kafka_common_AclBinding_operation(key) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send((operation, message)).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                1,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+        let (operation, message) = rx.recv_timeout(Duration::from_secs(5)).expect("one callback");
+        assert_eq!(operation, i32::from(AclOperation::Unknown.code()));
+        // The mock's real per-binding outcome (`MockAdminClient.createAcls`
+        // throws "Not implemented yet"), not the synthetic "not present" error.
+        assert_eq!(message.as_deref(), Some("Not implemented yet"));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "exactly one callback");
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.createAcls` throws `UnsupportedOperationException`
+    /// synchronously, `MockAdminClient.java:806-808`): both bindings must
+    /// each get exactly one callback, and the delivered
+    /// `kafka_common_AclBinding_t` key must round-trip every field.
+    #[test]
+    fn create_acls_async_reports_the_real_unsupported_error_per_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-topic-a", "ca-topic-b"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(kafka_common_AclBinding_resource_name(key)) }
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(
+                unsafe { kafka_common_AclBinding_resource_type(key) },
+                i32::from(ResourceType::Topic.code())
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_AclBinding_principal(key)) }.to_string_lossy(),
+                "User:alice"
+            );
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both bindings must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both bindings must have delivered exactly once");
+        assert_eq!(seen["ca-topic-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["ca-topic-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.deleteAcls` throws `UnsupportedOperationException`
+    /// synchronously, `MockAdminClient.java:816-818`): the value handle must
+    /// stay null on a filter-level error, and the filter key must round-trip.
+    #[test]
+    fn delete_acls_async_reports_the_real_unsupported_error_per_filter() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_pattern = i32::from(PatternType::Any.code());
+        let any_op = i32::from(AclOperation::Any.code());
+        let any_perm = i32::from(AclPermissionType::Any.code());
+        let resource_types = [topic_id];
+        let pattern_types = [any_pattern];
+        let operations = [any_op];
+        let permission_types = [any_perm];
+        let (_names_owned, name_ptrs) = c_array(&["da-topic-a"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_delete(
+            key: *mut kafka_common_AclBindingFilter_t,
+            value: *mut kafka_admin_DeleteAclsFilterResults_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(key)) }.to_string_lossy(),
+                "da-topic-a"
+            );
+            assert!(value.is_null(), "MockAdminClient never succeeds deleteAcls");
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBindingFilter_destroy(key) };
+            unsafe { kafka_admin_DeleteAclsFilterResults_destroy(value) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_delete_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                1,
+                -1,
+                on_delete,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the filter must get exactly one callback");
+        assert_eq!(message.as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- Opus re-review: per-key entry points must dedup keys to DISTINCT so a
+    // caller passing a duplicate/collapsing key gets exactly ONE (real)
+    // callback, never a spurious "not present" error racing the real outcome.
+    // Each RPC below collapses duplicate keys in its Rust result map (Java's
+    // Map/Set semantics), so `keys` MUST be deduped to match, or
+    // `admin_async_per_key_op`'s claimed-mask fires the synthetic error for the
+    // second occurrence. See the dedup comment at each `_async` entry point.
+
+    /// `describe_log_dirs_async` with a repeated broker id fires exactly one
+    /// callback (Java keys `describeLogDirs` on broker id), never a spurious
+    /// "not present" error.
+    #[test]
+    fn describe_log_dirs_async_dedups_a_repeated_broker_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        // Broker 0 requested twice.
+        let brokers = [0i32, 0i32];
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, bool)>);
+        extern "C" fn on_describe(
+            broker_id: i32,
+            value: *mut kafka_admin_LogDirDescriptionMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_LogDirDescriptionMap_destroy(value) };
+            }
+            ctx.0.send((broker_id, had_error)).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_log_dirs_async(
+                admin,
+                brokers.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (broker_id, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped broker must get exactly one callback, not hang");
+        assert_eq!(broker_id, 0);
+        assert!(
+            !had_error,
+            "the real describe_log_dirs outcome succeeds, not a spurious 'not present' error"
+        );
+        // No spurious SECOND callback for the collapsed duplicate.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated broker id must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describe_replica_log_dirs_async` with a repeated replica fires exactly
+    /// one callback (Java keys on `TopicPartitionReplica`), never a spurious
+    /// "not present" error — while a genuinely-unknown replica still gets its
+    /// explicit error (covered by the sibling test above).
+    #[test]
+    fn describe_replica_log_dirs_async_dedups_a_repeated_replica() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"drld-dup".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        // Same (topic, partition, broker) replica requested twice.
+        let (_topics_owned, topic_ptrs) = c_array(&["drld-dup", "drld-dup"]);
+        let partitions = [0i32, 0i32];
+        let broker_ids = [0i32, 0i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        struct Ctx(std::sync::mpsc::Sender<bool>);
+        extern "C" fn on_describe(
+            _topic: *const c_char,
+            _partition: i32,
+            _broker_id: i32,
+            value: *mut kafka_admin_ReplicaLogDirInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_ReplicaLogDirInfo_destroy(value) };
+            }
+            ctx.0.send(had_error).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_replica_log_dirs_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                broker_ids.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let had_error = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped replica must get exactly one callback, not hang");
+        assert!(
+            !had_error,
+            "the known replica resolves successfully, not with a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated replica must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `create_acls_async` with a repeated (equal) binding fires exactly one
+    /// callback carrying the REAL per-binding outcome (`MockAdminClient` throws
+    /// "Not implemented yet"), never a spurious "not present" error racing it.
+    #[test]
+    fn create_acls_async_dedups_a_repeated_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        // Two IDENTICAL bindings.
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-dup", "ca-dup"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped binding must get exactly one callback, not hang");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the real per-binding outcome must win, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated binding must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `delete_acls_async` with a repeated (equal) filter fires exactly one
+    /// callback carrying the REAL per-filter outcome, never a spurious
+    /// "not present" error racing it.
+    #[test]
+    fn delete_acls_async_dedups_a_repeated_filter() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_pattern = i32::from(PatternType::Any.code());
+        let any_op = i32::from(AclOperation::Any.code());
+        let any_perm = i32::from(AclPermissionType::Any.code());
+        // Two IDENTICAL filters (same NULL principal/host so they compare equal).
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [any_pattern, any_pattern];
+        let operations = [any_op, any_op];
+        let permission_types = [any_perm, any_perm];
+        let (_names_owned, name_ptrs) = c_array(&["da-dup", "da-dup"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_delete(
+            key: *mut kafka_common_AclBindingFilter_t,
+            value: *mut kafka_admin_DeleteAclsFilterResults_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBindingFilter_destroy(key) };
+            unsafe { kafka_admin_DeleteAclsFilterResults_destroy(value) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_delete_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_delete,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped filter must get exactly one callback, not hang");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the real per-filter outcome must win, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated filter must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describe_configs_async` with a repeated resource fires exactly one
+    /// callback carrying the REAL per-resource outcome (Java keys
+    /// `describeConfigs` on `ConfigResource`), never a spurious "not present"
+    /// error racing it. Uses a BROKER resource, which `MockAdminClient`
+    /// resolves successfully.
+    #[test]
+    fn describe_configs_async_dedups_a_repeated_resource() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let broker_id = i32::from(ConfigResourceType::Broker.id());
+        // Broker "0" requested twice.
+        let resource_types = [broker_id, broker_id];
+        let (_names_owned, name_ptrs) = c_array(&["0", "0"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        struct Ctx(std::sync::mpsc::Sender<bool>);
+        extern "C" fn on_describe(
+            _resource_type: i32,
+            _resource_name: *const c_char,
+            value: *mut kafka_admin_Config_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_Config_destroy(value) };
+            }
+            ctx.0.send(had_error).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_configs_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                2,
+                -1,
+                false,
+                false,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let had_error = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped resource must get exactly one callback, not hang");
+        assert!(
+            !had_error,
+            "the real describe_configs outcome succeeds, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated resource must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.alterClientQuotas` throws
+    /// `UnsupportedOperationException` synchronously,
+    /// `MockAdminClient.java:1248-1250`): both entities must each get exactly
+    /// one callback, and the delivered `kafka_common_ClientQuotaEntity_t` key
+    /// must round-trip its (type, name) pair.
+    #[test]
+    fn alter_client_quotas_async_reports_the_real_unsupported_error_per_entity() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_types_owned, type_ptrs) = c_array(&["user", "user"]);
+        let entity_types_row_a = [type_ptrs[0]];
+        let entity_types_row_b = [type_ptrs[1]];
+        let entity_types: [*const *const c_char; 2] = [entity_types_row_a.as_ptr(), entity_types_row_b.as_ptr()];
+        let (_names_owned, name_ptrs) = c_array(&["acq-alice", "acq-bob"]);
+        let entity_names_row_a = [name_ptrs[0]];
+        let entity_names_row_b = [name_ptrs[1]];
+        let entity_names: [*const *const c_char; 2] = [entity_names_row_a.as_ptr(), entity_names_row_b.as_ptr()];
+        let entity_counts = [1i32, 1i32];
+        let (_op_keys_owned, op_key_ptrs) = c_array(&["producer_byte_rate", "producer_byte_rate"]);
+        let op_key_row_a = [op_key_ptrs[0]];
+        let op_key_row_b = [op_key_ptrs[1]];
+        let op_keys: [*const *const c_char; 2] = [op_key_row_a.as_ptr(), op_key_row_b.as_ptr()];
+        let op_values_row = [1000.0f64];
+        let op_values: [*const f64; 2] = [op_values_row.as_ptr(), op_values_row.as_ptr()];
+        let op_has_values_row = [true];
+        let op_has_values: [*const bool; 2] = [op_has_values_row.as_ptr(), op_has_values_row.as_ptr()];
+        let op_counts = [1i32, 1i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(
+            key: *mut kafka_common_ClientQuotaEntity_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            assert_eq!(unsafe { kafka_common_ClientQuotaEntity_entry_count(key) }, 1);
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(key, 0)) }.to_string_lossy(),
+                "user"
+            );
+            let name = unsafe { CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(key, 0)) }
+                .to_string_lossy()
+                .into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_ClientQuotaEntity_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_client_quotas_async(
+                admin,
+                entity_types.as_ptr(),
+                entity_names.as_ptr(),
+                entity_counts.as_ptr(),
+                op_keys.as_ptr(),
+                op_values.as_ptr(),
+                op_has_values.as_ptr(),
+                op_counts.as_ptr(),
+                2,
+                -1,
+                false,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both entities must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both entities must have delivered exactly once");
+        assert_eq!(seen["acq-alice"].as_deref(), Some("Not implement yet"));
+        assert_eq!(seen["acq-bob"].as_deref(), Some("Not implement yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.alterUserScramCredentials` throws
+    /// `UnsupportedOperationException` synchronously,
+    /// `MockAdminClient.java:1256-1259`): both users must each get exactly
+    /// one callback.
+    #[test]
+    fn alter_user_scram_credentials_async_reports_the_real_unsupported_error_per_user() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_users_owned, user_ptrs) = c_array(&["ausc-alice", "ausc-bob"]);
+        let is_deletions = [false, false];
+        let mechanism_id = i32::from(ScramMechanism::ScramSha256.r#type());
+        let mechanisms = [mechanism_id, mechanism_id];
+        let iterations = [4096i32, 4096i32];
+        let password_bytes = b"secret".to_vec();
+        let passwords: [*const u8; 2] = [password_bytes.as_ptr(), password_bytes.as_ptr()];
+        let password_lens = [password_bytes.len() as i32, password_bytes.len() as i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(user: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(user) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_user_scram_credentials_async(
+                admin,
+                user_ptrs.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+                -1,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both users must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both users must have delivered exactly once");
+        assert_eq!(seen["ausc-alice"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["ausc-bob"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// Two rows naming the SAME user (rotate a mechanism: delete one, upsert
+    /// another) collapse to ONE per-user outcome, as Java's user-keyed result
+    /// map does. The single callback for that user MUST carry the real error
+    /// ("Not implemented yet"), and the callback MUST fire exactly once — never
+    /// a second time with the synthetic "requested key was not present" error
+    /// that an un-deduped per-row fan-out would raise for the repeated user and
+    /// race ahead of the real outcome. Regression test for the distinct-user
+    /// `keys` dedup in `kafka_admin_AdminClient_alter_user_scram_credentials_async`.
+    #[test]
+    fn alter_user_scram_credentials_async_collapses_two_rows_for_one_user() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        // Same user twice: a SCRAM_SHA_256 upsertion and a SCRAM_SHA_512 deletion.
+        let (_users_owned, user_ptrs) = c_array(&["ausc-dup", "ausc-dup"]);
+        let is_deletions = [false, true];
+        let mechanisms = [
+            i32::from(ScramMechanism::ScramSha256.r#type()),
+            i32::from(ScramMechanism::ScramSha512.r#type()),
+        ];
+        let iterations = [4096i32, 4096i32];
+        let password_bytes = b"secret".to_vec();
+        let passwords: [*const u8; 2] = [password_bytes.as_ptr(), std::ptr::null()];
+        let password_lens = [password_bytes.len() as i32, 0];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(user: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(user) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_user_scram_credentials_async(
+                admin,
+                user_ptrs.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+                -1,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (name, message) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the single distinct user must get exactly one callback, not hang");
+        assert_eq!(name, "ausc-dup");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the collapsed user must carry the real per-user outcome, not the synthetic missing-key error"
+        );
+        // Exactly one firing: no second (synthetic) callback for the repeated user.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a second callback fired for the repeated user - the per-row fan-out was not deduped"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`,
+    /// whose `updateFeatures` has real in-memory validation logic (unlike the
+    /// four RPCs above): a single feature update against a fresh (unseeded)
+    /// mock, applying `SAFE_DOWNGRADE` to level 0, satisfies
+    /// `validate_feature_update`'s `cur(0) >= next(0)` / `min(0) <=
+    /// next(0) <= max(0)` checks and must deliver a **real success** (null
+    /// error), not a synthetic one — proving the per-key value path, not just
+    /// the per-key error path, for this family's one RPC with genuine mock
+    /// logic.
+    #[test]
+    fn update_features_async_delivers_the_real_success_for_a_single_feature() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_features_owned, feature_ptrs) = c_array(&["uf-feature"]);
+        let max_version_levels = [0i16];
+        let upgrade_types = [i32::from(UpgradeType::SafeDowngrade.code())];
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_update(_feature: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        let submitted = unsafe {
+            kafka_admin_AdminClient_update_features_async(
+                admin,
+                feature_ptrs.as_ptr(),
+                max_version_levels.as_ptr(),
+                upgrade_types.as_ptr(),
+                1,
+                -1,
+                false,
+                on_update,
+                ctx_ptr as *mut c_void,
+            )
+        };
+        assert!(submitted.is_null(), "a valid update is submitted");
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the feature must get exactly one callback");
+        assert_eq!(
+            message, None,
+            "a valid SAFE_DOWNGRADE to level 0 against an unseeded mock must succeed"
+        );
+
+        // Submission failures — an invalid `FeatureUpdate` (Java's constructor
+        // throws), a NULL feature name (C marshaling) and a NULL handle — are
+        // returned, as Java throws from the call, and the callback never fires.
+        let bad_levels = [0i16];
+        let upgrade = [i32::from(UpgradeType::Upgrade.code())];
+        let null_name: [*const c_char; 1] = [std::ptr::null()];
+        for (admin_arg, names, levels, expected) in [
+            (
+                admin as *const kafka_admin_AdminClient_t,
+                feature_ptrs.as_ptr(),
+                bad_levels.as_ptr(),
+                "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or \
+                 UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.",
+            ),
+            (
+                admin as *const _,
+                null_name.as_ptr(),
+                max_version_levels.as_ptr(),
+                "feature at index 0 must not be null",
+            ),
+            (
+                std::ptr::null(),
+                feature_ptrs.as_ptr(),
+                max_version_levels.as_ptr(),
+                "admin handle must not be null",
+            ),
+        ] {
+            let error = unsafe {
+                kafka_admin_AdminClient_update_features_async(
+                    admin_arg,
+                    names,
+                    levels,
+                    upgrade.as_ptr(),
+                    1,
+                    -1,
+                    false,
+                    on_update,
+                    ctx_ptr as *mut c_void,
+                )
+            };
+            assert!(!error.is_null(), "{expected}");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) };
+            assert_eq!(message.to_str(), Ok(expected));
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no callback after a returned error"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// Every requested binding still gets exactly one callback — with the
+    /// *same* submission error — when one row's enum combination makes the
+    /// whole `read_acl_bindings` parse fail (`AclBinding`'s constructors
+    /// validate). The raw `AclBindingKey` must round-trip both rows' fields
+    /// unchanged, proving `read_acl_binding_keys` is a faithful echo of the
+    /// input even for the row Java's constructors would reject.
+    #[test]
+    fn create_acls_async_reports_the_same_submission_error_to_every_binding_when_one_row_is_invalid() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_type = i32::from(ResourceType::Any.code()); // rejected by ResourcePattern::new
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        let resource_types = [topic_id, any_type];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-valid", "ca-invalid"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(kafka_common_AclBinding_resource_name(key)) }
+                .to_string_lossy()
+                .into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both rows must get exactly one callback even though the whole parse fails");
+            seen.insert(name, message);
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "both rows must have delivered exactly once, keyed by their own raw resource name"
+        );
+        let error_a = seen["ca-valid"]
+            .as_deref()
+            .expect("row 0 must report the shared submission error");
+        let error_b = seen["ca-invalid"]
+            .as_deref()
+            .expect("row 1 must report the shared submission error");
+        assert_eq!(error_a, error_b, "both rows must report the exact same submission error");
+        assert!(
+            error_a.contains("resourceType must not be ANY"),
+            "the error must be the real ResourcePattern validation message, got: {error_a}"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G — describeProducers / describeTransactions / fenceProducers
+    // per-key callback delivery. Reuses Phase A-F's `admin_async_per_key_op`
+    // mechanism verbatim; the per-key VALUE reuses the flattened result handle
+    // carrying a single key (index 0), since these three RPCs have no
+    // standalone value handle in the synchronous path (unlike describeConfigs'
+    // `Config`) and their Java value types have no C handle of their own.
+    // `listTransactions` does not use this mechanism: Java's
+    // `ListTransactionsResult` has no per-transactional-id future map but a
+    // `byBrokerId()` `KafkaFuture<Map<Integer, KafkaFuture<..>>>`, which the
+    // async entry point delivers in two stages (broker discovery, then one
+    // callback per broker; see `deliver_list_transactions_by_broker_id`). Only
+    // the synchronous entry point joins every broker into one result.
+    // -----------------------------------------------------------------------
+
+    // The same temporal-independence property as the Phase A/B tests
+    // (`admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    // and `describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one`),
+    // exercised through `describeProducers`' actual key (`TopicPartition`) and
+    // value (`PartitionProducerState`) types — so a type-specific mistake (e.g.
+    // a `PartitionProducerState` that is not `Send + Sync`, or relying on a
+    // `Hash`/`Eq` for `TopicPartition` that a raw C caller could not provide)
+    // shows up here even though the generic test compiles. The callback also
+    // boxes the resolved value into the single-key result handle exactly as the
+    // public entry point does, then reads it back — proving that reuse round-trips
+    // a real success value, which no `MockAdminClient`-backed test can (Java's
+    // mock throws `UnsupportedOperationException` per partition).
+    #[test]
+    fn describe_producers_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let tp_fast = TopicPartition::new("topic-a".to_string(), 0);
+        let tp_slow = TopicPartition::new("topic-a".to_string(), 1);
+
+        let fast: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
+        fast.complete(PartitionProducerState::new(vec![ProducerState::new(
+            1_001,
+            5,
+            17,
+            1_700_000_000_000,
+            Some(9),
+            Some(4_242),
+        )]));
+        let slow: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<i64, Error>)>();
+        let entries = vec![(tp_fast.clone(), fast.future()), (tp_slow.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![tp_fast.clone(), tp_slow.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, outcome: Result<PartitionProducerState, Error>, _ud: *mut c_void| {
+                    // Box into the single-key result handle exactly as the
+                    // public entry point does, then read the producer id back at
+                    // index 0.
+                    let outcome = match outcome {
+                        Ok(state) => {
+                            let mut single: DescribeProducersOutcomes = HashMap::with_capacity(1);
+                            single.insert(tp.clone(), Ok(state));
+                            let result = box_describe_producers_result(single);
+                            let producer_id = kafka_admin_DescribeProducersResult_get_producer_id(result, 0, 0);
+                            kafka_admin_DescribeProducersResult_destroy(result);
+                            Ok(producer_id)
+                        },
+                        Err(e) => Err(e),
+                    };
+                    tx.send((tp, outcome)).unwrap();
+                },
+            );
+        }
+
+        let (tp, outcome) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, tp_fast);
+        assert_eq!(
+            outcome.unwrap(),
+            1_001,
+            "the single-key value handle must expose the resolved producer id"
+        );
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// `describeProducers`: two distinct partitions each independently receive
+    /// Java's real `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1368-1370`), proving
+    /// `submit_describe_producers_entries` always inserts a real per-key future
+    /// rather than relying on `admin_async_per_key_op`'s synthetic fallback, and
+    /// that neither partition hangs.
+    #[test]
+    fn describe_producers_async_reports_the_real_unsupported_error_per_partition() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_topics_owned, topic_ptrs) = c_array(&["topic-a", "topic-a"]);
+        let partitions = [0i32, 1];
+        let (tx, rx) = std::sync::mpsc::channel::<((String, i32), Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<((String, i32), Option<String>)>);
+        extern "C" fn on_describe(
+            topic: *const c_char,
+            partition: i32,
+            value: *mut kafka_admin_DescribeProducersResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let topic = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeProducers");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_DescribeProducersResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send(((topic, partition), Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_producers_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                2,
+                false,
+                0,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both partitions must get exactly one callback, not hang");
+            seen.insert(key, message);
+        }
+        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
+        assert_eq!(seen[&("topic-a".to_string(), 0)].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen[&("topic-a".to_string(), 1)].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describeTransactions`: two distinct ids each independently receive
+    /// Java's real `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1373-1375`).
+    #[test]
+    fn describe_transactions_async_reports_the_real_unsupported_error_per_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["txn-a", "txn-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_describe(
+            id: *const c_char,
+            value: *mut kafka_admin_DescribeTransactionsResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeTransactions");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_DescribeTransactionsResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_transactions_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both ids must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both ids must have delivered exactly once");
+        assert_eq!(seen["txn-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["txn-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describeTransactions` dedup: two occurrences of the same id collapse to
+    /// exactly ONE callback carrying the real `UnsupportedOperationException`
+    /// message — NOT `admin_async_per_key_op`'s synthetic "not present" error
+    /// that a raw (undeduped) `keys` would produce for the second occurrence
+    /// (the scram-bug class the Phase A-F remediation closed).
+    #[test]
+    fn describe_transactions_async_collapses_a_duplicate_id_to_one_real_callback() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["dup", "dup"]);
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_describe(
+            _id: *const c_char,
+            value: *mut kafka_admin_DescribeTransactionsResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                Some(
+                    unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            };
+            unsafe { kafka_admin_DescribeTransactionsResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_transactions_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the single distinct id must get exactly one callback");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the duplicate must collapse to one real outcome, never the synthetic \"not present\" fallback"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a duplicate id must fire exactly once, not twice"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `fenceProducers`: two distinct ids each independently receive Java's real
+    /// `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1393-1395`).
+    #[test]
+    fn fence_producers_async_reports_the_real_unsupported_error_per_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["txn-a", "txn-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_fence(
+            id: *const c_char,
+            value: *mut kafka_admin_FenceProducersResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds fenceProducers");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_FenceProducersResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_fence_producers_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_fence,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both ids must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both ids must have delivered exactly once");
+        assert_eq!(seen["txn-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["txn-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
         }
     }
 }
