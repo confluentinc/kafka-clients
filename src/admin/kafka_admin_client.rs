@@ -5383,8 +5383,8 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
             // `handleUnsupportedVersionException` issued the fallback: `Call.fail`
             // skips that hook only once `runnable.closing` is set, which happens
             // when the I/O thread exits and no response is handled any more. Rust
-            // sets `ShutdownSignal::closing` as soon as `close()` starts (audit item
-            // A5), so during the close grace period `fail_call` comes straight here.
+            // sets `ShutdownSignal::closing` as soon as `close()` starts, so during
+            // the close grace period `fail_call` comes straight here.
             // Issue the fallback then, as Java's hook would have: the closing gate
             // rejects it with "Cannot accept new calls when AdminClient is
             // closing.", which fails every future instead of leaving them pending.
@@ -7904,7 +7904,7 @@ mod tests {
     /// because the hard-shutdown deadline is set, and every topic future fails
     /// with `IllegalStateException("Cannot accept new calls when AdminClient is
     /// closing.")` (`KafkaAdminClient.java:904-920`, `:2311-2323`, `:1598-1601`).
-    /// Rust's `fail_call` skips the hook while closing (audit item A5), so the
+    /// Rust's `fail_call` skips the hook while closing, so the
     /// failure hook issues the fallback itself; before that it swallowed the
     /// code-35 error and the futures never completed.
     #[tokio::test]
@@ -8110,7 +8110,7 @@ mod tests {
         );
     }
 
-    /// Regression for A13: a zero topic id in a by-id Metadata response fails
+    /// A zero topic id in a by-id Metadata response fails
     /// only that call.
     ///
     /// A 4.x broker returns the zero id for a topic deleted while a by-id
@@ -14592,7 +14592,7 @@ mod tests {
         count(runnable)
     }
 
-    /// Regression for A2: every key of a driver RPC resolves on `close()`, even
+    /// Every key of a driver RPC resolves on `close()`, even
     /// one whose fulfillment request had not been issued yet.
     ///
     /// The driver issues at most one fulfillment request per broker at a time
@@ -14662,7 +14662,7 @@ mod tests {
         );
     }
 
-    /// Regression for A3: a driver RPC issued after `close()` fails with Java's
+    /// A driver RPC issued after `close()` fails with Java's
     /// `IllegalStateException("Cannot accept new calls when AdminClient is
     /// closing.")` (`KafkaAdminClient.java:1599-1601`, reached through
     /// `invokeDriver` → `maybeSendRequests` → `runnable.call`), exactly like a
@@ -14690,7 +14690,7 @@ mod tests {
         );
     }
 
-    /// Regression for N2: a follow-up call issued during the I/O task's
+    /// A follow-up call issued during the I/O task's
     /// shutdown tail resolves instead of hanging, even when the loop ended
     /// without `close()` having set the closing gate.
     ///

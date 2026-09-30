@@ -1,4 +1,4 @@
-# Admin client Java-parity fixes: A1, A2, A13, F2, M-03, D1
+# Admin client Java-parity fixes
 
 Status: **APPROVED 2026-09-29** (decisions recorded at the end of this file).
 
@@ -10,7 +10,7 @@ Status: **APPROVED 2026-09-29** (decisions recorded at the end of this file).
 
 Every finding below was re-checked on `origin/master` and, where marked, reproduced in a throwaway test during planning. None of that throwaway code is on this branch.
 
-A11 (the `Error::unsupported_version` constructor) is **out of scope** for this PR by decision; see "Decisions". Nothing in this PR may change that constructor.
+Fixing the `Error::unsupported_version` constructor (it builds a generic code-35 error rather than the typed `UnsupportedVersion` variant) is **out of scope** for this PR by decision; see "Decisions". Nothing in this PR may change that constructor.
 
 ## Process (agent-roles.md, Manager role)
 
@@ -30,9 +30,9 @@ Agents must not edit `CLAUDE.md` or `.claude/rules/*` ("Any change to this promp
 - The shell is zsh: quote globs (`--include='*.java'`) and brace refs in `git show "${REF}:path"` (zsh reads `$R:s…` as a modifier).
 - A test that spawns the real admin loop over `MockClient` must make the loop park (see Phase 1); otherwise the loop never yields and starves the single-threaded test runtime.
 - **Commit messages and the PR description carry no AI attribution** — no `Co-Authored-By` trailer and no "Generated with Claude Code" line. Repo style: descriptive subject, body explaining what and why.
-- Final gate: `make verify` (build, format-check, lint, test, check-bindings), plus `make verify-c` and `make verify-python`, because M-01's value and D1's ELR lists are visible through the bindings.
+- Final gate: `make verify` (build, format-check, lint, test, check-bindings), plus `make verify-c` and `make verify-python`, because the mock's default cluster id and the `describeTopics` ELR lists are visible through the bindings.
 
-## Phase 1 — A1: a call submitted just before `close()` is dropped
+## Phase 1 — A call submitted just before `close()` is dropped
 
 **Symptom.** `create_topics(..)` then `close(30s)` fails the call with `"The AdminClient thread has exited. Call: createTopics"`. Java completes the create.
 
@@ -44,9 +44,9 @@ Planning reproduction: a unit test driving the real spawned `run()` with the loo
 
 **Tests.**
 - Regression test that spawns the real loop, parks it in its network poll, submits `create_topics`, calls `close(30s)`, and asserts the create **succeeds**. The park hook must wait on `client.wakeup_notify()` — the `Notify` that production `submit()` and `close()` poke — so the fixture uses the production primitive (DoD #12). (Planning used a park-once flag on the existing `WaitingClient` test client.)
-- Existing close/shutdown tests stay green, in particular `close_waits_for_an_active_external_call_until_the_hard_deadline` and `close_exits_the_io_task_while_only_the_internal_metadata_call_is_active`. Note that the former pumps once after submitting, which is why it never caught A1.
+- Existing close/shutdown tests stay green, in particular `close_waits_for_an_active_external_call_until_the_hard_deadline` and `close_exits_the_io_task_while_only_the_internal_metadata_call_is_active`. Note that the former pumps once after submitting, which is why it never caught this bug.
 
-## Phase 2 — A2: a driver RPC key never resolves after `close()`
+## Phase 2 — A driver RPC key never resolves after `close()`
 
 **Symptom.** `fence_producers(["a","b"])` then `close(0)`: one key's future never resolves.
 
@@ -58,11 +58,11 @@ Planning reproduction: 24 real-broker runs sweeping the delay before `close(0)` 
 
 **Change.** Give driver-issued calls the same closing gate as `submit()` (Rust's `closing` flag is set together with the hard-shutdown deadline, which is what Java's `call()` checks). Prefer one shared submission path over a second copy of the check.
 
-**Also expected to fix** A3 (driver RPCs issued after `close()` get a retriable Timeout instead of Java's `IllegalStateException`) and N2 (a driver RPC submitted during the shutdown tail hangs). They share the code path; the Actor verifies both with tests rather than assuming it.
+**Also expected to fix** two related symptoms: driver RPCs issued after `close()` get a retriable Timeout instead of Java's `IllegalStateException`, and a driver RPC submitted during the shutdown tail hangs. They share the code path; the Actor verifies both with tests rather than assuming it.
 
-**Tests.** Deterministic unit test (no timing sweeps): one broker, two transactional ids, prepared FindCoordinator + InitProducerId responses, close while the second key's fulfillment has not been issued yet; assert **every** key resolves and the unissued one fails with Java's message. Plus a test for the A3 case.
+**Tests.** Deterministic unit test (no timing sweeps): one broker, two transactional ids, prepared FindCoordinator + InitProducerId responses, close while the second key's fulfillment has not been issued yet; assert **every** key resolves and the unissued one fails with Java's message. Plus a test for the after-`close()` error case.
 
-## Phase 3 — A13: a zero topic id panics the whole admin task
+## Phase 3 — A zero topic id panics the whole admin task
 
 **Symptom.** `errors_by_topic_id` (`src/common/requests/metadata_response.rs:132`) `assert!`s on a zero topic id. A 4.x broker returns one when a topic is deleted during a by-id `describeTopics` (`KafkaApis.scala:869`). The panic ends the I/O task, that call hangs, and every later call is rejected.
 
@@ -70,13 +70,13 @@ Planning reproduction: 24 real-broker runs sweeping the delay before `close(0)` 
 
 **Change.** Return a `Result` (CLAUDE.md §10.2) with Java's message as `Error::local_illegal_state(..)`; the only caller (the by-id describe handler in `kafka_admin_client.rs`) returns `HandleResult::Retry(err)`, which routes through `fail_call` exactly like Java's `call.fail(now, t)` — non-retriable, so only that call's futures fail. No existing test pins the panic.
 
-Planning reproduction: today the panic leaves the by-id call **never resolved** and rejects the next unrelated call with "Cannot accept new calls when AdminClient is closing." (the audit's N3). With the fix (about 14 lines), the call fails with `LocalIllegalStateError: Use errors() when managing topic using topic name`, the next `listTopics` succeeds, and the full lib suite passes (3919 / 0). Origin: `5e1db7cf` (2026-04-09) translated Java's `throw` as `assert!`; the admin by-id handler is its only caller.
+Planning reproduction: today the panic leaves the by-id call **never resolved** and rejects the next unrelated call with "Cannot accept new calls when AdminClient is closing.". With the fix (about 14 lines), the call fails with `LocalIllegalStateError: Use errors() when managing topic using topic name`, the next `listTopics` succeeds, and the full lib suite passes (3919 / 0). Origin: `5e1db7cf` (2026-04-09) translated Java's `throw` as `assert!`; the admin by-id handler is its only caller.
 
 **Tests.** A metadata response containing a zero topic id fails only that call, with the exact message; a second call on the same client succeeds afterwards. Drive it with `pump` (`run_once` stepped by hand), **not** a spawned loop: once the panic is gone a spawned `MockClient` loop never yields and the test hangs — the planning probe hit exactly this.
 
 Out of scope: the sibling `errors()` has the same `expect`-where-Java-throws shape. The Actor notes whether an admin path can reach it; it is not changed in this PR unless it can.
 
-## Phase 4 — F2: six `Result` constructors are crate-private
+## Phase 4 — Six `Result` constructors are crate-private
 
 Make `new` public (`pub fn new`) on:
 - `DeleteRecordsResult`, `DescribeConsumerGroupsResult`, `DescribeClassicGroupsResult`, `ListOffsetsResult` — Java `public`;
@@ -90,7 +90,7 @@ Out of scope, noted for a later pass: 8 admin results whose Java constructor is 
 
 **Tests.** One external test under `tests/` (a separate crate, so it genuinely exercises visibility) that constructs all six from `KafkaFuture::completed(..)` values and reads a value back.
 
-## Phase 5 — M-03: `MockAdminClient` has no `Builder`
+## Phase 5 — `MockAdminClient` has no `Builder`
 
 **Rust today.** Only `create(num_brokers)` plus post-construction `set_feature_levels` / `set_broker_log_dirs`; cluster id, controller (broker 0), default partitions (1), replication factor (`min(n, 3)`) and default group configs are hard-coded. The state struct already has 10 of Java's 11 constructor fields.
 
@@ -118,17 +118,17 @@ Error mapping: Java's `IndexOutOfBoundsException` becomes `Error::local_illegal_
 
 **Constants the Builder depends on.** Java's builder defaults to `DEFAULT_CLUSTER_ID` and `DEFAULT_LOG_DIRS`, both `public static final`. So this phase also:
 - makes them public associated constants, `MockAdminClient::DEFAULT_CLUSTER_ID` and `MockAdminClient::DEFAULT_LOG_DIRS` (CLAUDE.md §2: a constant is exported by the struct that defines it);
-- fixes `DEFAULT_CLUSTER_ID`'s value to Java's `I4ZmrWqfT2e-upky_4fdPA` (this is M-01). The current `4A5xz_QZTB2CtL4wc0X0Jw` is also pinned by `bindings/python/test/unit/test_admin.py` and `bindings/c/tests/test_mock_admin.c`; those assertions change with it.
+- fixes `DEFAULT_CLUSTER_ID`'s value to Java's `I4ZmrWqfT2e-upky_4fdPA`. The current `4A5xz_QZTB2CtL4wc0X0Jw` is also pinned by `bindings/python/test/unit/test_admin.py` and `bindings/c/tests/test_mock_admin.c`; those assertions change with it.
 
 **`create(num_brokers)` is removed** (no Java counterpart). Its 28 callers on `origin/master` (`kafka_admin_client.rs` ×19, `mock_admin_client.rs` ×6, `mod.rs` ×1, `ffi/admin.rs` ×1, `tests/common/admin_backend.rs` ×1) move to the Builder; `create(n)` behaved exactly like `Builder::new().set_num_brokers(n)?.build()`, so the migration is behaviour-preserving. Keep every existing assertion those callers make.
 
 **C API.** `kafka_admin_MockAdminClient_new(num_brokers)` keeps its signature and builds through the Builder internally. Exposing the Builder in C or Python is out of scope.
 
-**Not included:** M-04 (Java's public `MockAdminClient()` / `MockAdminClient(List<Node>, Node)` constructors) was not requested.
+**Not included:** Java's public `MockAdminClient()` / `MockAdminClient(List<Node>, Node)` constructors, which were not requested.
 
 **Tests.** No clients-module Java test uses the Builder (its 6 users are in connect/streams/tools), so there is nothing to translate. Write tests for: each setter; the defaults of `Builder::new().build()`; `set_brokers`' log-dir resizing order; `set_num_brokers` shrink and grow; the three error points with exact messages; and the `shortValue()` narrowing.
 
-## Phase 6 — D1: `describeTopics` by name never uses `DescribeTopicPartitions`
+## Phase 6 — `describeTopics` by name never uses `DescribeTopicPartitions`
 
 **Why it exists.** A deliberate Phase-1 deferral (`src/admin/kafka_admin_client.rs` module header), contrary to `admin-client.md` §7, which lists `DescribeTopicPartitions` and its `DescribeCluster` prerequisite as required Phase-1 wire types. Java's 5 tests for the path were never translated nor listed as skipped. Nothing was ever implemented and removed, so this is a gap, not a regression.
 
@@ -137,7 +137,7 @@ Error mapping: Java's `IndexOutOfBoundsException` becomes `Error::local_illegal_
 **Change.**
 1. `DescribeTopicPartitionsRequest` / `DescribeTopicPartitionsResponse` wrappers + request builder in `src/common/requests/`, wired into every `ConcreteRequest` / `ConcreteResponse` match arm (`admin-client.md` §7), including `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`. The generated message types already exist; the `DescribeCluster` wrapper already exists. Follow `admin-client.md` / `producer-transactions.md` §12 for the builder's `super(...)` version bound.
 2. The by-name flow translated from `KafkaAdminClient.java:2152-2450`: `describeCluster` first for the node map, then paginated `DescribeTopicPartitions` calls following `nextCursor`, honouring `partitionSizeLimitPerResponse`, and falling back to the existing Metadata path on `UnsupportedVersionException` (older brokers) exactly as Java does. By-id stays on the Metadata API (Java does too). On `origin/master` the entry point is `describe_topics_with_topics_options` → `get_describe_topics_by_names_call`.
-   Because A11 is out of scope, `Error::unsupported_version(..)` still builds the generic code-35 variant; detect the fallback condition by error **code** (`error.error() == Errors::UnsupportedVersion`, as `fail_call` already does), not by matching the typed `Error::UnsupportedVersion(_)` variant.
+   Because the constructor fix is out of scope, `Error::unsupported_version(..)` still builds the generic code-35 variant; detect the fallback condition by error **code** (`error.error() == Errors::UnsupportedVersion`, as `fail_call` already does), not by matching the typed `Error::UnsupportedVersion(_)` variant.
 3. Remove the module-header deviation and correct `design/current/status.md` / `structure.md`, which currently describe the Metadata path as "behavior-faithful".
 
 **Tests.**
@@ -160,8 +160,8 @@ All items of `definition-of-done.md`, with these specifics:
 ## Decisions (approved 2026-09-29)
 
 1. **Base:** latest `origin/master` (`010d0620` at approval).
-2. **D1:** in this PR, as the last phase.
-3. **A11:** skipped — not part of this PR.
-4. **M-03:** Java's `Builder` shape exactly (Phase 5 table). `create(num_brokers)` is removed and its callers migrated (the plan's recommended option; no counter-instruction was given). M-04 not included.
-5. **F2:** `pub` for all six, including Java's two `protected` constructors.
+2. **`DescribeTopicPartitions` for `describeTopics`:** in this PR, as the last phase.
+3. **`Error::unsupported_version` constructor fix:** skipped — not part of this PR.
+4. **`MockAdminClient` Builder:** Java's `Builder` shape exactly (Phase 5 table). `create(num_brokers)` is removed and its callers migrated (the plan's recommended option; no counter-instruction was given). Java's two public `MockAdminClient` constructors are not included.
+5. **`Result` constructors:** `pub` for all six, including Java's two `protected` constructors.
 6. **Attribution:** no "Generated with Claude Code" in the PR description and no AI co-author trailer in commits.
