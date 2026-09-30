@@ -400,6 +400,149 @@ public sealed class PublicAdminConfigsShapeParityTests
     }
 
     /// <summary>
+    /// <see cref="Config"/> has Java's map semantics (M15/P13.4 G2-5): Java's constructor
+    /// <c>put</c>s each entry by name (<c>Config.java:36-40</c>), so a repeated name is one
+    /// entry and the <b>last</b> wins. It keeps the <b>first</b> occurrence's position, so
+    /// the ABI's sorted order holds whenever nothing repeats.
+    /// </summary>
+    [Fact]
+    public void Config_DuplicateNames_AreOneEntry_TheLastWinning_InTheFirstPosition()
+    {
+        ConfigEntry firstA = new ConfigEntry("a", "1");
+        ConfigEntry b = new ConfigEntry("b", "2");
+        ConfigEntry lastA = new ConfigEntry("a", "3");
+
+        Config config = new Config(new[] { firstA, b, lastA });
+
+        Assert.Equal(2, config.Entries.Count);
+        Assert.Equal(new[] { "a", "b" }, config.Entries.Select(entry => entry.Name));
+        Assert.Same(lastA, config.Entries.First());
+        Assert.Same(b, config.Entries.Last());
+        Assert.Same(lastA, config.Get("a"));
+        Assert.Equal("3", config.Get("a")!.Value);
+    }
+
+    /// <summary>
+    /// <c>Get(null)</c> returns <see langword="null"/>, as Java's <c>HashMap.get(null)</c>
+    /// does (<c>Config.java:52-54</c>) — it no longer throws.
+    /// </summary>
+    [Fact]
+    public void Config_GetNull_ReturnsNull()
+    {
+        Config config = new Config(new[] { new ConfigEntry("a", "1") });
+
+        Assert.Null(config.Get(null));
+        Assert.Null(new Config(Array.Empty<ConfigEntry>()).Get(null));
+    }
+
+    /// <summary>
+    /// <see cref="Config.Entries"/> is read-only at runtime — Java's
+    /// <c>Collections.unmodifiableCollection(entries.values())</c> (<c>Config.java:45-47</c>)
+    /// — so the view cannot be cast back to a list and changed.
+    /// </summary>
+    [Fact]
+    public void Config_Entries_CannotBeCastBackAndMutated()
+    {
+        Config config = new Config(new[] { new ConfigEntry("a", "1") });
+
+        Assert.False(config.Entries is List<ConfigEntry>);
+        ICollection<ConfigEntry> collection = Assert.IsAssignableFrom<ICollection<ConfigEntry>>(config.Entries);
+        Assert.True(collection.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => collection.Add(new ConfigEntry("b", "2")));
+        Assert.Equal(new[] { "a" }, config.Entries.Select(entry => entry.Name));
+    }
+
+    /// <summary>
+    /// Equality is Java's map equality (<c>Config.java:56-66</c>, <c>:68-71</c>): two
+    /// <b>distinct</b> instances holding equal entries in a different order are equal with
+    /// the same hash, and a single differing value makes them unequal — so neither
+    /// reference equality nor a constant-true <c>Equals</c> passes.
+    /// </summary>
+    [Fact]
+    public void Config_Equality_IsOrderInsensitiveMapEquality()
+    {
+        Config forward = new Config(new[] { new ConfigEntry("a", "1"), new ConfigEntry("b", "2") });
+        Config reversed = new Config(new[] { new ConfigEntry("b", "2"), new ConfigEntry("a", "1") });
+
+        Assert.NotSame(forward, reversed);
+        Assert.True(forward.Equals(reversed));
+        Assert.True(reversed.Equals(forward));
+        Assert.Equal(forward.GetHashCode(), reversed.GetHashCode());
+
+        // A repeated name collapses before comparison, as Java's put does.
+        Config withReplacedDuplicate = new Config(
+            new[] { new ConfigEntry("a", "0"), new ConfigEntry("b", "2"), new ConfigEntry("a", "1") });
+        Assert.True(forward.Equals(withReplacedDuplicate));
+        Assert.Equal(forward.GetHashCode(), withReplacedDuplicate.GetHashCode());
+
+        Config oneValueDiffers = new Config(new[] { new ConfigEntry("a", "1"), new ConfigEntry("b", "other") });
+        Assert.False(forward.Equals(oneValueDiffers));
+        Assert.False(oneValueDiffers.Equals(forward));
+
+        Config subset = new Config(new[] { new ConfigEntry("a", "1") });
+        Assert.False(forward.Equals(subset));
+        Assert.False(subset.Equals(forward));
+
+        Assert.False(forward.Equals(null));
+        Assert.False(forward.Equals("Config(entries=[])"));
+        Assert.True(new Config(Array.Empty<ConfigEntry>()).Equals(new Config(Array.Empty<ConfigEntry>())));
+    }
+
+    /// <summary>
+    /// <c>ToString</c> is Java's layout — <c>"Config(entries=" + entries.values() + ")"</c>
+    /// (<c>Config.java:73-76</c>) — with each entry rendered by
+    /// <see cref="ConfigEntry.ToString"/>, in <see cref="Config.Entries"/> order.
+    /// </summary>
+    [Fact]
+    public void Config_ToString_IsJavasLayout_InEntriesOrder()
+    {
+        ConfigEntry a = new ConfigEntry("a", "1");
+        ConfigEntry b = new ConfigEntry("b", "2");
+
+        Assert.Equal("Config(entries=[])", new Config(Array.Empty<ConfigEntry>()).ToString());
+        Assert.Equal("Config(entries=[" + a + "])", new Config(new[] { a }).ToString());
+        Assert.Equal("Config(entries=[" + b + ", " + a + "])", new Config(new[] { b, a }).ToString());
+    }
+
+    /// <summary>
+    /// The value members are <b>overrides declared on</b> <see cref="Config"/> — with no
+    /// <c>IEquatable&lt;Config&gt;</c> (the <see cref="NewTopic"/> precedent) — and
+    /// <see cref="Config.Get"/>'s parameter is annotated nullable, since a null name now
+    /// returns null rather than throwing.
+    /// </summary>
+    [Fact]
+    public void Config_ValueMembers_AreDeclaredOverrides_AndGetTakesANullableName()
+    {
+        const BindingFlags Declared = BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+        MethodInfo[] declared = typeof(Config).GetMethods(Declared);
+
+        MethodInfo equals = Assert.Single(declared, method => method.Name == nameof(object.Equals));
+        Assert.Equal(new[] { typeof(object) }, equals.GetParameters().Select(parameter => parameter.ParameterType));
+        MethodInfo hash = Assert.Single(declared, method => method.Name == nameof(object.GetHashCode));
+        Assert.Empty(hash.GetParameters());
+        MethodInfo toString = Assert.Single(declared, method => method.Name == nameof(object.ToString));
+        Assert.Empty(toString.GetParameters());
+
+        foreach (MethodInfo overridden in new[] { equals, hash, toString })
+        {
+            Assert.NotEqual(overridden.DeclaringType, overridden.GetBaseDefinition().DeclaringType);
+        }
+
+        Assert.DoesNotContain(typeof(IEquatable<Config>), typeof(Config).GetInterfaces());
+
+        MethodInfo get = Assert.Single(declared, method => method.Name == nameof(Config.Get));
+        ParameterInfo name = Assert.Single(get.GetParameters());
+        Assert.Equal(typeof(string), name.ParameterType);
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(name));
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(get.ReturnParameter));
+
+#if NET8_0_OR_GREATER
+        // The same reading through the runtime's own decoder, where it exists.
+        Assert.Equal(NullabilityState.Nullable, new NullabilityInfoContext().Create(name).ReadState);
+#endif
+    }
+
+    /// <summary>
     /// The two new options types match Java's fields and defaults exactly.
     /// </summary>
     [Fact]
