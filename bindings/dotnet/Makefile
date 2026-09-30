@@ -15,10 +15,10 @@ SOLUTION := $(RUST_PROJECT_ROOT)/bindings/dotnet/Confluent.Kafka.sln
 
 .PHONY: grpc-image grpc-image-async grpc-native build-dotnet test-dotnet test-soak-dotnet
 
-# Build the .NET gRPC consumer-backend image used by the multilanguage
-# integration test harness. The build context is the repo root so the
-# Dockerfile can copy from target/release/, bindings/dotnet/, and the
-# multilanguage-test-server/ proto crate. Requires
+# Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
+# by the multilanguage integration test harness. The build context is the repo
+# root so the Dockerfile can copy from target/release/, bindings/dotnet/, and
+# the multilanguage-test-server/ proto crate. Requires
 # `cargo build --features ffi --release` to have produced the Linux
 # libconfluent_kafka.so in target/release/ first.
 grpc-image:
@@ -27,10 +27,11 @@ grpc-image:
 		-f $(RUST_PROJECT_ROOT)/bindings/dotnet/Dockerfile.grpc \
 		$(RUST_PROJECT_ROOT)
 
-# Build the *async* .NET gRPC consumer-backend image (dotnet_async backend, M8/P2).
+# Build the *async* .NET gRPC backend image (dotnet_async backend, M8/P2).
 # Same build context and prerequisites as grpc-image; the image bakes
-# CONSUMER_FLAVOR=async so Program.cs hosts AsyncConsumerServiceImpl
-# (AsyncKafkaConsumer). Mirrors the Python two-image shape (grpc-image-async).
+# CONSUMER_FLAVOR=async so Program.cs hosts AsyncProducerServiceImpl +
+# AsyncConsumerServiceImpl (AsyncKafkaProducer / AsyncKafkaConsumer; no Admin,
+# M15/P12 D1). Mirrors the Python two-image shape (grpc-image-async).
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
