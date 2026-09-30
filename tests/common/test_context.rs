@@ -289,7 +289,6 @@ impl TestContext {
     /// Generate a unique topic name for this test.
     ///
     /// Example: `"test_api_versions_a3f9_my_topic"`.
-    #[allow(dead_code)]
     pub fn topic(&mut self, base_name: &str) -> String {
         let name = format!("{}_{}", self.prefix, base_name);
         self.created_topics.push(name.clone());
@@ -297,7 +296,6 @@ impl TestContext {
     }
 
     /// Generate a unique consumer group ID for this test.
-    #[allow(dead_code)]
     pub fn group_id(&self, base_name: &str) -> String {
         format!("{}_{}", self.prefix, base_name)
     }
@@ -307,7 +305,6 @@ impl TestContext {
     /// Currently a no-op since we do not have an admin client yet.
     /// Topics auto-created during the test are ephemeral and shared-cluster
     /// isolation is achieved through unique naming, not deletion.
-    #[allow(dead_code)]
     pub async fn cleanup(&mut self) {
         // Future: delete topics via admin client or docker exec
         self.created_topics.clear();

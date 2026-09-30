@@ -26,6 +26,7 @@ use crate::common::header::Header;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeader`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader")]
 pub struct RecordHeader {
     key: String,
     value: Option<Vec<u8>>,
@@ -38,6 +39,7 @@ impl RecordHeader {
     ///
     /// This method does not panic. The key must be a valid `String`
     /// (Rust's type system guarantees non-null).
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader")]
     pub fn new(key: String, value: Option<Vec<u8>>) -> Self {
         Self { key, value }
     }

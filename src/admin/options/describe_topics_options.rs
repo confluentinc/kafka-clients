@@ -23,6 +23,7 @@ const DEFAULT_PARTITION_SIZE_LIMIT_PER_RESPONSE: i32 = 2000;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions")]
 pub struct DescribeTopicsOptions {
     timeout_ms: Option<i32>,
     include_authorized_operations: bool,

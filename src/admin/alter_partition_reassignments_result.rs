@@ -26,12 +26,14 @@ use crate::common::{KafkaFuture, TopicPartition};
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult")]
 pub struct AlterPartitionReassignmentsResult {
     futures: HashMap<TopicPartition, KafkaFuture<()>>,
 }
 
 impl AlterPartitionReassignmentsResult {
     /// Creates a result from the per-partition futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#AlterPartitionReassignmentsResult")]
     pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -40,6 +42,7 @@ impl AlterPartitionReassignmentsResult {
     /// status of the reassignment.
     ///
     /// Mirrors `values()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#values")]
     pub fn values(&self) -> &HashMap<TopicPartition, KafkaFuture<()>> {
         &self.futures
     }
@@ -48,6 +51,7 @@ impl AlterPartitionReassignmentsResult {
     /// successfully initiated.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }
@@ -57,8 +61,8 @@ impl AlterPartitionReassignmentsResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {

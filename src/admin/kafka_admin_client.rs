@@ -46,7 +46,6 @@
 use crate::admin::CreateTopicsResult;
 use crate::common::requests::DescribeClusterRequest;
 use crate::common::requests::MetadataResponse;
-use crate::consumer::internals::ConsumerProtocol;
 use crate::{kafka_debug, kafka_error};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -82,29 +81,29 @@ use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
 use crate::alter_replica_log_dirs_request_data::{AlterReplicaLogDir, AlterReplicaLogDirTopic};
 use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, ScramCredentialUpsertion};
-use crate::common::Errors;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
+use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
+use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
-    AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
-    ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder,
-    CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder,
-    DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse,
-    DescribeClientQuotasRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
-    DescribeDelegationTokenRequestBuilder, DescribeLogDirsRequestBuilder, DescribeLogDirsResponse,
-    DescribeUserScramCredentialsRequestBuilder, ExpireDelegationTokenRequestBuilder,
-    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder,
-    MetadataRequestBuilder, RenewDelegationTokenRequestBuilder, RequestBuilder,
+    ConcreteResponse, CreateAclsRequest, DeleteAclsRequest, DeleteAclsResponse, DescribeAclsResponse,
+    DescribeLogDirsResponse, RequestBuilder, alter_client_quotas_request, alter_replica_log_dirs_request,
+    alter_user_scram_credentials_request, create_acls_request, create_delegation_token_request,
+    create_partitions_request, create_topics_request, delete_acls_request, delete_topics_request,
+    describe_acls_request, describe_client_quotas_request, describe_cluster_request, describe_configs_request,
+    describe_delegation_token_request, describe_log_dirs_request, describe_user_scram_credentials_request,
+    expire_delegation_token_request, incremental_alter_configs_request, list_config_resources_request,
+    list_groups_request, metadata_request, renew_delegation_token_request,
 };
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::{ExponentialBackoff, LogContext};
+use crate::common::utils::{ExponentialBackoff, LogContext, SystemTime, Time};
 use crate::common::{
     Cluster, Error, GroupState, GroupType, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };
@@ -176,11 +175,6 @@ use super::{
     DescribeUserScramCredentialsResult, ScramMechanism, UserScramCredentialAlteration, UserScramCredentialDeletion,
     UserScramCredentialUpsertion,
 };
-#[allow(deprecated)]
-use super::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
-    ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
-};
 use super::{
     DescribeFeaturesOptions, DescribeFeaturesResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange,
     SupportedVersionRange, UpdateFeaturesOptions, UpdateFeaturesResult,
@@ -195,8 +189,8 @@ use crate::UpdateFeaturesRequestData;
 use crate::alter_partition_reassignments_request_data::{ReassignablePartition, ReassignableTopic};
 use crate::common::TopicPartitionReplica;
 use crate::common::requests::{
-    AlterPartitionReassignmentsRequestBuilder, ApiVersionsRequestBuilder, ElectLeadersRequestBuilder,
-    ElectLeadersResponse, JoinGroupRequest, ListPartitionReassignmentsRequestBuilder, UpdateFeaturesRequestBuilder,
+    ElectLeadersResponse, JoinGroupRequest, alter_partition_reassignments_request, api_versions_request,
+    elect_leaders_request, list_partition_reassignments_request, update_features_request,
 };
 use crate::common::{ElectionType, Node};
 use crate::create_delegation_token_request_data::CreatableRenewers;
@@ -232,7 +226,6 @@ const MAX_CLOSE_WAIT_TIME_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// State shared between the `KafkaAdminClient` handle and (indirectly) the
 /// background task.
 struct Shared {
-    #[allow(dead_code)]
     client_id: String,
     default_api_timeout_ms: i32,
     /// The `request.timeout.ms` config, used as the default transaction timeout
@@ -242,7 +235,7 @@ struct Shared {
     wakeup: Arc<Notify>,
     shutdown: Arc<ShutdownSignal>,
     metadata_manager: AdminMetadataManager,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
     bg_handle: Mutex<Option<JoinHandle<()>>>,
     /// Retry-backoff parameters for the `AdminApiDriver` (mirrors the fields
     /// passed to the driver in `invokeDriver`).
@@ -259,6 +252,7 @@ struct Shared {
 /// The administrative client for Kafka.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.KafkaAdminClient`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient")]
 pub struct KafkaAdminClient {
     shared: Arc<Shared>,
 }
@@ -295,7 +289,8 @@ impl KafkaAdminClient {
     ///
     /// Returns an error if the bootstrap addresses cannot be resolved or the
     /// channel builder cannot be created.
-    pub fn new(config: AdminClientConfig) -> Result<Self, Error> {
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
+    pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
         // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
         // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
         //
@@ -336,12 +331,8 @@ impl KafkaAdminClient {
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
         let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
 
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        });
+        // Java's `Time.SYSTEM`.
+        let time: Arc<dyn Time> = Arc::new(SystemTime);
 
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
@@ -351,7 +342,7 @@ impl KafkaAdminClient {
         );
         // Seed with the bootstrap cluster so the first metadata refresh has
         // nodes to talk to (mirrors Java's constructor `metadataManager.update`).
-        let now = (time_provider)();
+        let now = time.milliseconds();
         metadata_manager.update(Cluster::bootstrap(&addresses), now);
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
@@ -370,22 +361,23 @@ impl KafkaAdminClient {
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
         // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
-        let selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
             log_context.clone(),
         );
+        selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             selector,
             metadata_manager.updater(),
             &client_id,
             100, // max in-flight requests per connection (admin sends <= 1 per node)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            <Selector as crate::common::network::Selectable>::USE_DEFAULT_BUFFER_SIZE,
-            <Selector as crate::common::network::Selectable>::USE_DEFAULT_BUFFER_SIZE,
+            USE_DEFAULT_BUFFER_SIZE,
+            USE_DEFAULT_BUFFER_SIZE,
             config.request_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
@@ -395,8 +387,9 @@ impl KafkaAdminClient {
             MetadataRecoveryStrategy::None,
             log_context.clone(),
         );
+        client.set_time(Arc::clone(&time));
 
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time_provider, log_context)?;
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
     }
@@ -410,7 +403,7 @@ impl KafkaAdminClient {
         metadata_manager: AdminMetadataManager,
         config: &AdminClientConfig,
         client_id: String,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<(Self, AdminClientRunnable<C>), Error> {
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
@@ -438,7 +431,7 @@ impl KafkaAdminClient {
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             Arc::clone(&shutdown),
             log_context.clone(),
         );
@@ -451,7 +444,7 @@ impl KafkaAdminClient {
             wakeup,
             shutdown,
             metadata_manager,
-            time_provider,
+            time,
             bg_handle: Mutex::new(None),
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
@@ -519,7 +512,7 @@ impl KafkaAdminClient {
     }
 
     fn now(&self) -> i64 {
-        (self.shared.time_provider)()
+        self.shared.time.milliseconds()
     }
 
     /// Builds the context used to submit `AdminApiDriver`-generated calls
@@ -528,7 +521,7 @@ impl KafkaAdminClient {
         DriverContext {
             tx: self.shared.admin_tx.clone(),
             wakeup: Arc::clone(&self.shared.wakeup),
-            time_provider: Arc::clone(&self.shared.time_provider),
+            time: Arc::clone(&self.shared.time),
             log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
     }
@@ -544,34 +537,35 @@ impl KafkaAdminClient {
         .expect("ExponentialBackoff::new only fails on invalid jitter")
     }
 
-    /// Drives a `listGroups` / `listConsumerGroups` broker-enumeration RPC: a
-    /// `findAllBrokers` metadata call whose response fans out one per-broker
-    /// `ListGroups` call, all feeding a shared [`ListGroupsResults`] accumulator.
+    /// Drives the `listGroups` broker-enumeration RPC: a `findAllBrokers`
+    /// metadata call whose response fans out one per-broker `ListGroups` call,
+    /// all feeding a shared [`ListGroupsResults`] accumulator.
     ///
     /// `maybe_add` maps a wire `ListedGroup` to an optional keyed listing
-    /// (returning `None` filters the group out). Mirrors the shared structure of
-    /// `KafkaAdminClient.listGroups` / `listConsumerGroups`.
-    fn submit_list_groups<L, F>(
+    /// (returning `None` filters the group out). Mirrors the structure of
+    /// `KafkaAdminClient.listGroups`.
+    fn submit_list_groups<F>(
         &self,
-        call_name: &'static str,
         deadline: i64,
         states_filter: Vec<String>,
         types_filter: Vec<String>,
         maybe_add: F,
-    ) -> KafkaFuture<Vec<Result<L, Error>>>
+    ) -> KafkaFuture<Vec<Result<GroupListing, Error>>>
     where
-        L: Clone + Send + Sync + 'static,
-        F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, L)> + Clone + Send + Sync + 'static,
+        F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, GroupListing)>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     {
-        let all: KafkaFutureImpl<Vec<Result<L, Error>>> = KafkaFutureImpl::new();
+        let all: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         let public = all.future();
         let ctx = self.driver_context();
 
         let fail_all = all.clone();
         let handle_failure = Box::new(move |error: &Error| {
             // `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-            // (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
-            // `listConsumerGroups` — Java hardcodes "ListGroups" in both). A *bare*
+            // (`KafkaAdminClient.java:3565`). A *bare*
             // `KafkaException`: `is_kafka_error()` true, `is_api_error()` /
             // `is_retriable_error()` / `is_authorization_error()` all false, the cause
             // reachable through `source()`, and the message fixed — it does not carry
@@ -585,10 +579,10 @@ impl KafkaAdminClient {
         let create_request = Box::new(move |_timeout_ms: i32| {
             // Empty topic list (just the broker list), matching Java's
             // MetadataRequest with setTopics(emptyList).setAllowAutoTopicCreation(true).
-            Ok(
-                Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
-                    as Box<dyn RequestBuilder>,
-            )
+            Ok(Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
+                Some(&[]),
+                true,
+            )) as Box<dyn RequestBuilder>)
         });
 
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
@@ -620,7 +614,7 @@ impl KafkaAdminClient {
                     data.set_states_filter(states.clone());
                     data.set_types_filter(types.clone());
                     let _ = &node_create;
-                    Ok(Box::new(ListGroupsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+                    Ok(Box::new(list_groups_request::Builder::new(data)) as Box<dyn RequestBuilder>)
                 });
 
                 let resp_results = Arc::clone(&results);
@@ -659,7 +653,7 @@ impl KafkaAdminClient {
                 });
 
                 let list_call = Call::new(
-                    call_name,
+                    "listGroups",
                     deadline,
                     NodeProvider::ConstantNodeId(node_id),
                     create_list_request,
@@ -740,8 +734,10 @@ impl KafkaAdminClient {
         request_data.set_resources(wire_resources);
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::with_data(request_data.clone()))
-                as Box<dyn RequestBuilder>)
+            Ok(
+                Box::new(incremental_alter_configs_request::Builder::with_data(request_data.clone()))
+                    as Box<dyn RequestBuilder>,
+            )
         });
 
         let handles = Arc::new(handles);
@@ -796,13 +792,14 @@ impl KafkaAdminClient {
 struct DriverContext {
     tx: mpsc::UnboundedSender<Call>,
     wakeup: Arc<Notify>,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
     log_context: LogContext,
 }
 
 /// Kicks off a driver-backed RPC: polls the driver for its initial requests and
 /// submits them. Mirrors `KafkaAdminClient.invokeDriver` + the initial
 /// `maybeSendRequests`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#invokeDriver")]
 fn invoke_driver<K, V>(driver: AdminApiDriver<K, V>, ctx: DriverContext, now: i64)
 where
     K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
@@ -814,6 +811,7 @@ where
 
 /// Polls the driver and submits one [`Call`] per produced request spec.
 /// Mirrors `KafkaAdminClient.maybeSendRequests`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#maybeSendRequests")]
 fn maybe_send_requests<K, V>(driver: &Arc<Mutex<AdminApiDriver<K, V>>>, ctx: &DriverContext, _now: i64)
 where
     K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
@@ -889,9 +887,9 @@ where
     let hf_ctx = ctx.clone();
     let hf_scope = scope.clone();
     let hf_keys = keys.clone();
-    let hf_time = Arc::clone(&ctx.time_provider);
+    let hf_time = Arc::clone(&ctx.time);
     let handle_failure = Box::new(move |error: &Error| {
-        let now = (hf_time)();
+        let now = hf_time.milliseconds();
         // Poison-tolerant on purpose. This closure is the recovery path: it runs
         // from `AdminClientRunnable::fail_all_remaining` after `run()` catches a
         // panic, and that panic may have poisoned this very mutex inside
@@ -986,6 +984,7 @@ where
 
 /// Computes the absolute deadline for a call. Mirrors
 /// `KafkaAdminClient.calcDeadlineMs`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#calcDeadlineMs")]
 fn calc_deadline_ms(now: i64, option_timeout: Option<i32>, default_api_timeout_ms: i32) -> i64 {
     now + option_timeout.unwrap_or(default_api_timeout_ms) as i64
 }
@@ -999,21 +998,22 @@ fn coordinator_keyed_by_id<V: Send + 'static>(
     map.into_iter().map(|(key, future)| (key.id_value, future)).collect()
 }
 
-/// Accumulates the per-broker results of a `listGroups` / `listConsumerGroups`
-/// broker-enumeration RPC, completing the combined future once every broker has
-/// reported. Mirrors `KafkaAdminClient.ListGroupsResults` /
-/// `ListConsumerGroupsResults` (generic over the listing type `L`).
-struct ListGroupsResults<L: Clone + Send + Sync + 'static> {
+/// Accumulates the per-broker results of a `listGroups` broker-enumeration RPC,
+/// completing the combined future once every broker has reported. Mirrors
+/// `KafkaAdminClient.ListGroupsResults`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults")]
+struct ListGroupsResults {
     errors: Vec<Error>,
-    listings: HashMap<String, L>,
+    listings: HashMap<String, GroupListing>,
     remaining: HashSet<i32>,
-    future: KafkaFutureImpl<Vec<Result<L, Error>>>,
+    future: KafkaFutureImpl<Vec<Result<GroupListing, Error>>>,
 }
 
-impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
+impl ListGroupsResults {
     /// Creates the accumulator for the given broker node ids, completing the
     /// future immediately if there are no brokers.
-    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<L, Error>>>) -> Arc<Mutex<Self>> {
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#ListGroupsResults")]
+    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<GroupListing, Error>>>) -> Arc<Mutex<Self>> {
         let results = Arc::new(Mutex::new(Self {
             errors: Vec::new(),
             listings: HashMap::new(),
@@ -1026,6 +1026,7 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
 
     /// Records an error for a broker, wrapping it with the broker context
     /// (mirrors Java's `ApiError.fromThrowable` + "Error listing groups on N").
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#addError")]
     fn add_error(&mut self, error: &Error, node: &Node) {
         let message = error.message();
         let wrapped = if message.is_empty() {
@@ -1037,7 +1038,8 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
     }
 
     /// Records a listing keyed by group id.
-    fn add_listing(&mut self, group_id: String, listing: L) {
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#addListing")]
+    fn add_listing(&mut self, group_id: String, listing: GroupListing) {
         self.listings.insert(group_id, listing);
     }
 
@@ -1047,9 +1049,10 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
         self.try_complete();
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#tryComplete")]
     fn try_complete(&mut self) {
         if self.remaining.is_empty() {
-            let mut results: Vec<Result<L, Error>> = self.listings.values().cloned().map(Ok).collect();
+            let mut results: Vec<Result<GroupListing, Error>> = self.listings.values().cloned().map(Ok).collect();
             results.extend(self.errors.iter().cloned().map(Err));
             self.future.complete(results);
         }
@@ -1109,12 +1112,14 @@ fn create_feature_metadata(data: &ApiVersionsResponseData) -> Result<FeatureMeta
 
 /// Returns `true` if a topic name cannot be represented in an RPC (empty).
 /// Mirrors `KafkaAdminClient.topicNameIsUnrepresentable`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#topicNameIsUnrepresentable")]
 fn topic_name_is_unrepresentable(topic_name: &str) -> bool {
     topic_name.is_empty()
 }
 
 /// Returns `true` if a topic id cannot be represented in an RPC (the zero id).
 /// Mirrors `KafkaAdminClient.topicIdIsUnrepresentable`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#topicIdIsUnrepresentable")]
 fn topic_id_is_unrepresentable(topic_id: Uuid) -> bool {
     topic_id == Uuid::ZERO_UUID
 }
@@ -1162,7 +1167,7 @@ fn get_create_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = CreateAclsRequestData::new();
         data.set_creations(acl_creations.clone());
-        Ok(Box::new(CreateAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_acls_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1220,7 +1225,7 @@ fn get_create_acls_call(
 /// `KafkaAdminClient.describeAcls`.
 fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<AclBinding>>, deadline: i64) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeAclsRequestBuilder::new(&filter)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_acls_request::Builder::new(&filter)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1270,7 +1275,7 @@ fn get_describe_client_quotas_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeClientQuotasRequestBuilder::new(&filter)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_client_quotas_request::Builder::new(&filter)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1317,7 +1322,10 @@ fn get_alter_client_quotas_call(
 ) -> Call {
     let request_entries = entries;
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(AlterClientQuotasRequestBuilder::new(&request_entries, validate_only)) as Box<dyn RequestBuilder>)
+        Ok(
+            Box::new(alter_client_quotas_request::Builder::new(&request_entries, validate_only))
+                as Box<dyn RequestBuilder>,
+        )
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -1388,7 +1396,7 @@ fn get_describe_user_scram_credentials_call(
                 data.set_users(Some(user_names));
             }
         }
-        Ok(Box::new(DescribeUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_user_scram_credentials_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1437,7 +1445,7 @@ fn get_alter_user_scram_credentials_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_upsertions(upsertions.clone()).set_deletions(deletions.clone());
-        Ok(Box::new(AlterUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_user_scram_credentials_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = metadata_manager;
@@ -1517,6 +1525,7 @@ fn get_alter_user_scram_credentials_call(
 /// Returns an [`Errors::UnsupportedSaslMechanism`] error if the public mechanism
 /// has no internal SCRAM mapping (the Rust analog of Java's
 /// `NoSuchAlgorithmException`).
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getScramCredentialUpsertion")]
 fn get_scram_credential_upsertion(upsertion: &UserScramCredentialUpsertion) -> Result<ScramCredentialUpsertion, Error> {
     let public_mechanism = upsertion.credential_info().mechanism();
     let internal = InternalScramMechanism::for_mechanism_name(public_mechanism.mechanism_name())
@@ -1537,6 +1546,7 @@ fn get_scram_credential_upsertion(upsertion: &UserScramCredentialUpsertion) -> R
 
 /// Builds the wire deletion for a user. Mirrors
 /// `KafkaAdminClient.getScramCredentialDeletion`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getScramCredentialDeletion")]
 fn get_scram_credential_deletion(deletion: &UserScramCredentialDeletion) -> ScramCredentialDeletion {
     let mut wire = ScramCredentialDeletion::new();
     wire.set_name(deletion.user().to_string())
@@ -1584,7 +1594,7 @@ fn get_create_delegation_token_call(
             data.owner_principal_name = Some(owner.name().to_string());
             data.owner_principal_type = Some(owner.principal_type().to_string());
         }
-        Ok(Box::new(CreateDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1646,7 +1656,7 @@ fn get_renew_delegation_token_call(
         let mut data = RenewDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.renew_period_ms = renew_time_period_ms;
-        Ok(Box::new(RenewDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(renew_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1690,7 +1700,7 @@ fn get_expire_delegation_token_call(
         let mut data = ExpireDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.expiry_time_period_ms = expiry_time_period_ms;
-        Ok(Box::new(ExpireDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(expire_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1730,7 +1740,7 @@ fn get_describe_delegation_token_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeDelegationTokenRequestBuilder::new(owners.as_deref())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_delegation_token_request::Builder::new(owners.as_deref())) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1774,7 +1784,7 @@ fn get_delete_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = DeleteAclsRequestData::new();
         data.set_filters(delete_acls_filters.clone());
-        Ok(Box::new(DeleteAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_acls_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1841,6 +1851,7 @@ fn get_delete_acls_call(
 /// Checks a create/delete response for a controller-change error, mirroring
 /// `KafkaAdminClient.handleNotControllerError`. Returns the error to retry with
 /// if the controller changed.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#handleNotControllerError")]
 fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap<Errors, i32>) -> Option<Error> {
     // Java dispatches on which code was present and rethrows `error.exception()`
     // for *that* code (`KafkaAdminClient.java:4145-4153`), so a
@@ -1866,6 +1877,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 /// `ListOffsets`.
 ///
 /// Mirrors `KafkaAdminClient.getOffsetFromSpec`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getOffsetFromSpec")]
 fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
@@ -1882,7 +1894,6 @@ fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
 /// Builds the `alterPartitionReassignments` controller call.
 ///
 /// Mirrors the anonymous `Call` in `KafkaAdminClient.alterPartitionReassignments`.
-#[allow(clippy::type_complexity)]
 fn get_alter_partition_reassignments_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<TopicPartition, KafkaFutureImpl<()>>>,
@@ -1913,7 +1924,7 @@ fn get_alter_partition_reassignments_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_allow_replication_factor_change(allow_replication_factor_change);
-        Ok(Box::new(AlterPartitionReassignmentsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_partition_reassignments_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2038,7 +2049,7 @@ fn get_list_partition_reassignments_call(
             }
             list_data.set_topics(Some(topics_by_name.into_values().collect()));
         }
-        Ok(Box::new(ListPartitionReassignmentsRequestBuilder::new(list_data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(list_partition_reassignments_request::Builder::new(list_data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2098,13 +2109,14 @@ fn get_list_partition_reassignments_call(
 /// resource is not associated with a particular broker.
 ///
 /// Mirrors `KafkaAdminClient.nodeFor`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
 fn node_for(resource: &ConfigResource) -> Option<i32> {
-    if (resource.resource_type() == ConfigResourceType::Broker && !resource.is_default())
-        || resource.resource_type() == ConfigResourceType::BrokerLogger
+    if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
+        || resource.resource_type() == config_resource::Type::BrokerLogger
     {
         // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
         // would throw. Here a parse failure degrades to "any broker" rather
-        // than panicking on a recoverable path (CLAUDE.md §10).
+        // than panicking on a recoverable path (CLAUDE.md §12).
         resource.name().parse::<i32>().ok()
     } else {
         None
@@ -2113,6 +2125,7 @@ fn node_for(resource: &ConfigResource) -> Option<i32> {
 
 /// Converts a `DescribeConfigsResult` wire result into a [`Config`], mirroring
 /// `KafkaAdminClient.describeConfigResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#describeConfigResult")]
 fn describe_config_result(result: &crate::describe_configs_response_data::DescribeConfigsResult) -> Config {
     Config::new(result.configs.iter().map(|config| {
         let synonyms = config
@@ -2168,7 +2181,7 @@ fn get_describe_configs_call(
         data.set_resources(resources);
         data.set_include_synonyms(include_synonyms);
         data.set_include_documentation(include_documentation);
-        Ok(Box::new(DescribeConfigsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_configs_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_unified = Arc::clone(&unified);
@@ -2256,6 +2269,7 @@ fn api_error_for_code(error_code: i16) -> Option<Error> {
 
 /// Builds a map from log-directory path to [`LogDirDescription`] from a
 /// `DescribeLogDirs` response. Mirrors `KafkaAdminClient.logDirDescriptions`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#logDirDescriptions")]
 fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, LogDirDescription> {
     let mut result = HashMap::with_capacity(response.data().results.len());
     for log_dir_result in &response.data().results {
@@ -2293,7 +2307,7 @@ fn get_describe_log_dirs_call(
         // Query selected partitions in all log directories (topics == null).
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(None);
-        Ok(Box::new(DescribeLogDirsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_log_dirs_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -2344,7 +2358,7 @@ fn get_alter_replica_log_dirs_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(AlterReplicaLogDirsRequestBuilder::new(assignment.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_replica_log_dirs_request::Builder::new(assignment.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2422,7 +2436,7 @@ fn get_describe_replica_log_dirs_call(
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
         // Query selected partitions in all log directories.
-        Ok(Box::new(DescribeLogDirsRequestBuilder::new(request_data.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_log_dirs_request::Builder::new(request_data.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2502,6 +2516,7 @@ fn get_describe_replica_log_dirs_call(
 
 /// Builds a [`TopicDescription`] from cluster metadata, mirroring
 /// `KafkaAdminClient.getTopicDescriptionFromCluster`.
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getTopicDescriptionFromCluster")]
 fn topic_description_from_cluster(
     cluster: &Cluster,
     topic_name: &str,
@@ -2537,7 +2552,8 @@ fn topic_description_from_cluster(
 /// Builds a `createTopics` [`Call`]. Free function so the quota-retry path can
 /// rebuild a fresh call with the same futures. Translated from
 /// `KafkaAdminClient.getCreateTopicsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getCreateTopicsCall")]
 fn get_create_topics_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<String, KafkaFutureImpl<TopicMetadataAndConfig>>>,
@@ -2548,7 +2564,7 @@ fn get_create_topics_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let req_topics = Arc::clone(&topics_by_name);
@@ -2558,13 +2574,13 @@ fn get_create_topics_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreateTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a CreateTopics response"));
@@ -2636,7 +2652,7 @@ fn get_create_topics_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_create_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2654,12 +2670,12 @@ fn get_create_topics_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
         // If there were any topics retried due to a quota exceeded exception,
         // propagate the initial error back to the caller if the request timed
         // out (mirrors maybeCompleteQuotaExceededException).
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2690,7 +2706,8 @@ fn get_create_topics_call(
 /// Builds a `createPartitions` [`Call`]. Free function so the quota-retry path
 /// can rebuild a fresh call with the same futures. Translated from
 /// `KafkaAdminClient.getCreatePartitionsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getCreatePartitionsCall")]
 fn get_create_partitions_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
@@ -2701,7 +2718,7 @@ fn get_create_partitions_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let req_topics = Arc::clone(&topics_by_name);
@@ -2711,13 +2728,13 @@ fn get_create_partitions_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreatePartitionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_partitions_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a CreatePartitions response"));
@@ -2758,7 +2775,7 @@ fn get_create_partitions_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_create_partitions_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2776,9 +2793,9 @@ fn get_create_partitions_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2808,7 +2825,8 @@ fn get_create_partitions_call(
 
 /// Builds a `deleteTopics` (by name) [`Call`]. Translated from
 /// `KafkaAdminClient.getDeleteTopicsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getDeleteTopicsCall")]
 fn get_delete_topics_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
@@ -2817,19 +2835,19 @@ fn get_delete_topics_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let create_request = Box::new(move |timeout_ms: i32| {
         let mut data = DeleteTopicsRequestData::new();
         data.set_topic_names(req_names.clone());
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
@@ -2873,7 +2891,7 @@ fn get_delete_topics_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_delete_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2889,9 +2907,9 @@ fn get_delete_topics_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2917,7 +2935,8 @@ fn get_delete_topics_call(
 
 /// Builds a `deleteTopics` (by id) [`Call`]. Translated from
 /// `KafkaAdminClient.getDeleteTopicsWithIdsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getDeleteTopicsWithIdsCall")]
 fn get_delete_topics_with_ids_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<Uuid, KafkaFutureImpl<()>>>,
@@ -2926,7 +2945,7 @@ fn get_delete_topics_with_ids_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_ids = ids.clone();
     let create_request = Box::new(move |timeout_ms: i32| {
@@ -2941,12 +2960,12 @@ fn get_delete_topics_with_ids_call(
             .collect();
         data.set_topics(states);
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
@@ -2996,7 +3015,7 @@ fn get_delete_topics_with_ids_call(
             }
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_delete_topics_with_ids_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -3012,9 +3031,9 @@ fn get_delete_topics_with_ids_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -3075,7 +3094,7 @@ impl Admin for KafkaAdminClient {
                 options.should_retry_on_quota_violation(),
                 now,
                 deadline,
-                Arc::clone(&self.shared.time_provider),
+                Arc::clone(&self.shared.time),
             );
             self.submit(call);
         }
@@ -3113,7 +3132,7 @@ impl Admin for KafkaAdminClient {
                         options.should_retry_on_quota_violation(),
                         now,
                         deadline,
-                        Arc::clone(&self.shared.time_provider),
+                        Arc::clone(&self.shared.time),
                     );
                     self.submit(call);
                 }
@@ -3145,7 +3164,7 @@ impl Admin for KafkaAdminClient {
                         options.should_retry_on_quota_violation(),
                         now,
                         deadline,
-                        Arc::clone(&self.shared.time_provider),
+                        Arc::clone(&self.shared.time),
                     );
                     self.submit(call);
                 }
@@ -3162,7 +3181,7 @@ impl Admin for KafkaAdminClient {
         let list_internal = options.should_list_internal();
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::all_topics()) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3318,7 +3337,7 @@ impl Admin for KafkaAdminClient {
                 options.should_retry_on_quota_violation(),
                 now,
                 deadline,
-                Arc::clone(&self.shared.time_provider),
+                Arc::clone(&self.shared.time),
             );
             self.submit(call);
         }
@@ -3515,7 +3534,7 @@ impl Admin for KafkaAdminClient {
                 data.set_topics(Some(Vec::new()));
                 data.set_allow_auto_topic_creation(true);
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
-                Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
                     return Err(Error::local_illegal_argument(
@@ -3531,7 +3550,7 @@ impl Admin for KafkaAdminClient {
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
                 data.set_endpoint_type(endpoint_type);
                 data.set_include_fenced_brokers(include_fenced_brokers);
-                Ok(Box::new(DescribeClusterRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(describe_cluster_request::Builder::new(data)) as Box<dyn RequestBuilder>)
             }
         });
 
@@ -3679,7 +3698,7 @@ impl Admin for KafkaAdminClient {
         for resource in configs.keys() {
             let mut node = node_for(resource);
             if self.shared.metadata_manager.using_bootstrap_controllers()
-                && resource.resource_type() != ConfigResourceType::BrokerLogger
+                && resource.resource_type() != config_resource::Type::BrokerLogger
             {
                 node = None;
             }
@@ -3710,7 +3729,7 @@ impl Admin for KafkaAdminClient {
 
     fn list_config_resources_with_options(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
         let now = self.now();
@@ -3718,11 +3737,11 @@ impl Admin for KafkaAdminClient {
         let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
         let public = handle.future();
 
-        let resource_type_ids: Vec<i8> = config_resource_types.iter().map(ConfigResourceType::id).collect();
+        let resource_type_ids: Vec<i8> = config_resource_types.iter().map(config_resource::Type::id).collect();
         let create_request = Box::new(move |_timeout_ms: i32| {
             let mut data = ListConfigResourcesRequestData::new();
             data.set_resource_types(resource_type_ids.clone());
-            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(list_config_resources_request::Builder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3755,64 +3774,6 @@ impl Admin for KafkaAdminClient {
         );
         self.submit(call);
         ListConfigResourcesResult::new(public)
-    }
-
-    #[allow(deprecated)]
-    fn list_client_metrics_resources_with_options(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> ListClientMetricsResourcesResult {
-        let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-        let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
-        let public = handle.future();
-
-        // Reuse the `ListConfigResources` wire path, filtered to the
-        // `CLIENT_METRICS` resource type (mirrors Java's
-        // `ListConfigResourcesRequest.Builder` seeded with
-        // `List.of(ConfigResource.Type.CLIENT_METRICS.id())`).
-        let create_request = Box::new(move |_timeout_ms: i32| {
-            let mut data = ListConfigResourcesRequestData::new();
-            data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
-            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
-        });
-
-        let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
-            let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
-            };
-            let error = list_response.error();
-            if error != Errors::None {
-                resp_handle.complete_with_error(Error::new(error));
-            } else {
-                let listings: Vec<ClientMetricsResourceListing> = list_response
-                    .config_resources()
-                    .into_iter()
-                    .filter(|resource| resource.resource_type() == ConfigResourceType::ClientMetrics)
-                    .map(|resource| ClientMetricsResourceListing::new(resource.name()))
-                    .collect();
-                resp_handle.complete(listings);
-            }
-            HandleResult::Done
-        });
-
-        let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &Error| {
-            fail_handle.complete_with_error(error.clone());
-        });
-
-        let call = Call::new(
-            "listClientMetricsResources",
-            deadline,
-            NodeProvider::LeastLoaded,
-            create_request,
-            handle_response,
-            handle_failure,
-            Box::new(|| false),
-        );
-        self.submit(call);
-        ListClientMetricsResourcesResult::new(public)
     }
 
     fn describe_log_dirs_with_options(
@@ -3957,7 +3918,7 @@ impl Admin for KafkaAdminClient {
 
         let req_partitions = request_partitions.clone();
         let create_request = Box::new(move |timeout_ms: i32| {
-            Ok(Box::new(ElectLeadersRequestBuilder::new(
+            Ok(Box::new(elect_leaders_request::Builder::new(
                 election_type,
                 req_partitions.clone(),
                 timeout_ms,
@@ -4148,7 +4109,7 @@ impl Admin for KafkaAdminClient {
         let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
         let protocol_types: HashSet<String> = options.protocol_types().clone();
 
-        let future = self.submit_list_groups("listGroups", deadline, states, types, move |group| {
+        let future = self.submit_list_groups(deadline, states, types, move |group| {
             if !protocol_types.is_empty() && !protocol_types.contains(&group.protocol_type) {
                 return None;
             }
@@ -4168,40 +4129,6 @@ impl Admin for KafkaAdminClient {
             ))
         });
         ListGroupsResult::new(future)
-    }
-
-    #[allow(deprecated)]
-    fn list_consumer_groups_with_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
-        let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-        let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
-        let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
-
-        let future = self.submit_list_groups("listConsumerGroups", deadline, states, types, move |group| {
-            if group.protocol_type != ConsumerProtocol::PROTOCOL_TYPE && !group.protocol_type.is_empty() {
-                return None;
-            }
-            let group_state = if group.group_state.is_empty() {
-                None
-            } else {
-                Some(GroupState::parse(&group.group_state))
-            };
-            let group_type = if group.group_type.is_empty() {
-                None
-            } else {
-                Some(GroupType::parse(&group.group_type))
-            };
-            Some((
-                group.group_id.clone(),
-                ConsumerGroupListing::with_group_state_group_type(
-                    group.group_id.clone(),
-                    group_state,
-                    group_type,
-                    group.protocol_type.is_empty(),
-                ),
-            ))
-        });
-        ListConsumerGroupsResult::new(future)
     }
 
     fn describe_consumer_groups_with_options(
@@ -4419,10 +4346,10 @@ impl Admin for KafkaAdminClient {
                     // now that the describe future has resolved. This mirrors Java's
                     // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
                     // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
-                    // whose `calcDeadlineMs(time.now.load(Ordering::Acquire), timeoutMs)` runs at
+                    // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
                     // this later moment — giving `LeaveGroup` a fresh full timeout
                     // window rather than the (already partially consumed) describe one.
-                    let leave_now = (ctx.time_provider)();
+                    let leave_now = ctx.time.milliseconds();
                     let leave_deadline = calc_deadline_ms(leave_now, options_timeout, default_api_timeout_ms);
                     let driver = AdminApiDriver::new(
                         Box::new(handler),
@@ -4777,8 +4704,9 @@ impl Admin for KafkaAdminClient {
             None => NodeProvider::LeastLoadedBrokerOrActiveKController,
         };
 
-        let create_request =
-            Box::new(move |_timeout_ms: i32| Ok(Box::new(ApiVersionsRequestBuilder::new()) as Box<dyn RequestBuilder>));
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            Ok(Box::new(api_versions_request::Builder::new()) as Box<dyn RequestBuilder>)
+        });
 
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
@@ -4859,7 +4787,7 @@ impl Admin for KafkaAdminClient {
             data.set_timeout_ms(timeout_ms);
             data.set_validate_only(validate_only);
             data.set_feature_updates(collection);
-            Ok(Box::new(UpdateFeaturesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(update_features_request::Builder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_mm = self.shared.metadata_manager.clone();
@@ -5068,9 +4996,9 @@ fn get_describe_topics_by_names_call(
             ));
             data.set_allow_auto_topic_creation(false);
             data.set_include_topic_authorized_operations(include_authorized_operations);
-            Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
         } else {
-            Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::all_topics()) as Box<dyn RequestBuilder>)
         }
     });
 
@@ -5146,7 +5074,7 @@ fn get_describe_topics_by_ids_call(
         ));
         data.set_allow_auto_topic_creation(false);
         data.set_include_topic_authorized_operations(include_authorized_operations);
-        Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -5211,7 +5139,7 @@ impl KafkaAdminClient {
         client: C,
         cluster: Cluster,
         config: &AdminClientConfig,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
     ) -> (Self, AdminClientRunnable<C>) {
         // Java's `AdminClientUnitTestEnv` goes through `createInternal`, which
         // resolves the id with `generateClientId` exactly like production.
@@ -5223,10 +5151,10 @@ impl KafkaAdminClient {
             false,
             log_context.clone(),
         );
-        metadata_manager.update(cluster, (time_provider)());
+        metadata_manager.update(cluster, time.milliseconds());
         // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
         // fixture, so panicking here is the right test behaviour.
-        Self::build(client, metadata_manager, config, client_id, time_provider, log_context)
+        Self::build(client, metadata_manager, config, client_id, time, log_context)
             .expect("the admin retry backoff constants are valid")
     }
 }
@@ -5234,6 +5162,7 @@ impl KafkaAdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::utils::MockTime;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -5244,13 +5173,14 @@ mod tests {
     use crate::MockClient;
     use crate::admin::MemberToRemove;
     use crate::admin::internals::AdminClientRunnable;
-    use crate::common::Errors;
     use crate::common::Node;
+    use crate::common::protocol::Errors;
     use crate::common::requests::RequestTestUtils;
     use crate::common::requests::metadata_response::{PartitionMetadata, TopicMetadata};
     use crate::common::requests::{CreatePartitionsResponse, DeleteRecordsResponse};
     use crate::common::requests::{CreateTopicsResponse, DeleteTopicsResponse};
     use crate::common::{TopicCollection, TopicPartition, Uuid};
+    use crate::consumer::internals::ConsumerProtocol;
     use crate::create_partitions_response_data::CreatePartitionsTopicResult;
     use crate::create_topics_response_data::CreatableTopicResult;
     use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
@@ -5308,22 +5238,11 @@ mod tests {
         assert_eq!(present.message(), "boom");
     }
 
-    /// A mutable mock clock so retry/backoff tests can advance time.
-    struct MockTime {
-        now: AtomicI64,
-    }
-
-    impl MockTime {
-        fn new(initial: i64) -> Arc<Self> {
-            Arc::new(Self { now: AtomicI64::new(initial) })
-        }
-        fn provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
-            let t = Arc::clone(self);
-            Arc::new(move || t.now.load(Ordering::Acquire))
-        }
-        fn sleep(&self, ms: i64) {
-            self.now.fetch_add(ms, Ordering::AcqRel);
-        }
+    /// Java's `new MockTime()` started at `initial_ms`, with a frozen monotonic clock.
+    fn mock_time(initial_ms: i64) -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, initial_ms, 0,
+        ))
     }
 
     fn test_config() -> AdminClientConfig {
@@ -5358,11 +5277,12 @@ mod tests {
         // false when `throttled_until_ms` is also 0, so a node never becomes
         // ready at t=0 (matching the producer's `SenderTest` which starts at
         // 1000 for the same reason).
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let config = test_config();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -5371,16 +5291,17 @@ mod tests {
     fn env_with_props(
         extra: &[(&str, &str)],
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
             props.insert((*k).to_string(), (*v).to_string());
         }
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -5441,16 +5362,17 @@ mod tests {
         num_nodes: i32,
         extra: &[(&str, &str)],
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(num_nodes, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
             props.insert((*k).to_string(), (*v).to_string());
         }
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -5582,8 +5504,8 @@ mod tests {
     use crate::CreateAclsResponseData;
     use crate::DeleteAclsResponseData;
     use crate::DescribeAclsResponseData;
-    use crate::common::ApiKeys;
     use crate::common::acl::{AccessControlEntry, AccessControlEntryFilter, AclPermissionType};
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{CreateAclsResponse, DeleteAclsResponse, DescribeAclsResponse};
     use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
     use crate::create_acls_response_data::AclCreationResult;
@@ -5678,6 +5600,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testDescribeAcls`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeAcls")]
     async fn test_describe_acls() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -5723,6 +5646,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testCreateAcls`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateAcls")]
     async fn test_create_acls() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -5765,6 +5689,7 @@ mod tests {
     /// least-loaded broker (no interposed metadata call). The observable
     /// contract — retry after NOT_CONTROLLER, then success — is preserved.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateAclsToController")]
     async fn test_create_acls_to_controller() {
         let (admin, mut runnable, time, _nodes) = env();
         runnable
@@ -5795,6 +5720,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testDeleteAcls`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteAcls")]
     async fn test_delete_acls() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -5865,6 +5791,7 @@ mod tests {
     /// stubbed off on this branch so the NOT_CONTROLLER retry goes straight to a
     /// least-loaded broker without an interposed metadata refresh.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteAclsToController")]
     async fn test_delete_acls_to_controller() {
         let (admin, mut runnable, time, _nodes) = env();
         let mut not_controller = DeleteAclsFilterResult::new();
@@ -5931,6 +5858,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testDescribeClientQuotas`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClientQuotas")]
     async fn test_describe_client_quotas() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -5966,6 +5894,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testAlterClientQuotas`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterClientQuotas")]
     async fn test_alter_client_quotas() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -6033,6 +5962,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testDescribeUserScramCredentials`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeUserScramCredentials")]
     async fn test_describe_user_scram_credentials() {
         let user0_name = "user0";
         let user0_mechanism0 = PublicScramMechanism::ScramSha256;
@@ -6109,6 +6039,7 @@ mod tests {
     /// Translated from
     /// `KafkaAdminClientTest.testAlterUserScramCredentialsUnknownMechanism`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterUserScramCredentialsUnknownMechanism")]
     async fn test_alter_user_scram_credentials_unknown_mechanism() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -6220,6 +6151,7 @@ mod tests {
     /// Rust equivalent exercises the same crypto path (each upsertion computes a
     /// salted password via `ScramFormatter::hi`).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterUserScramCredentials")]
     async fn test_alter_user_scram_credentials() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -6377,6 +6309,7 @@ mod tests {
     /// gated by `next_allowed_try_ms` — it does not fire until the mock time
     /// advances past the backoff.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateTopicsRetryBackoff")]
     async fn test_create_topics_retry_backoff() {
         let retry_backoff = 5000;
         let (admin, mut runnable, time, _nodes) = env_with_props(&[("retry.backoff.ms", &retry_backoff.to_string())]);
@@ -6416,6 +6349,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateTopicsHandleNotControllerException")]
     async fn test_create_topics_handle_not_controller_error() {
         let (admin, mut runnable, time, nodes) = env();
         // First attempt hits the wrong controller; then a metadata refresh
@@ -6457,6 +6391,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateTopicsRetryThrottlingExceptionWhenEnabled"
+    )]
     async fn test_create_topics_retry_throttling_error_when_enabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         // topic1 succeeds, topic2 is throttled (retried until success), topic3 already exists.
@@ -6492,6 +6429,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreateTopicsDontRetryThrottlingExceptionWhenDisabled"
+    )]
     async fn test_create_topics_dont_retry_throttling_error_when_disabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_response_throttled(
@@ -6611,6 +6551,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteTopicsPartialResponse")]
     async fn test_delete_topics_partial_response() {
         // By name: the response omits "myOtherTopic", so its future is
         // completed by the unrealized-futures sanity check.
@@ -6650,6 +6591,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteTopicsRetryThrottlingExceptionWhenEnabled"
+    )]
     async fn test_delete_topics_retry_throttling_error_when_enabled() {
         // By name.
         let (admin, mut runnable, _time, _nodes) = env();
@@ -6710,6 +6654,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteTopicsDontRetryThrottlingExceptionWhenDisabled"
+    )]
     async fn test_delete_topics_dont_retry_throttling_error_when_disabled() {
         // By name.
         let (admin, mut runnable, _time, _nodes) = env();
@@ -6994,7 +6941,7 @@ mod tests {
         // the queue can be observed instead of panicking again.
         let failures = Arc::new(AtomicI64::new(0));
         let counter = Arc::clone(&failures);
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.submit(Call::new(
             "panicOnPurpose",
             now - 1,
@@ -7043,7 +6990,7 @@ mod tests {
 
         let failure: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&failure);
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.submit(Call::new(
             "createRequestBoom",
             now + 60_000,
@@ -7117,9 +7064,7 @@ mod tests {
         );
 
         assert_ne!(
-            runnable
-                .metadata_manager()
-                .metadata_fetch_delay_ms(time.now.load(Ordering::Acquire)),
+            runnable.metadata_manager().metadata_fetch_delay_ms(time.milliseconds()),
             i64::MAX,
             "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
              updateFailed(e) makes it"
@@ -7218,6 +7163,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeTopicsByIds")]
     async fn test_describe_topics_by_ids() {
         // Valid id: the metadata response carries the topic, so it is described.
         let (admin, mut runnable, _time, nodes) = env();
@@ -7356,6 +7302,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitions`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreatePartitions")]
     async fn test_create_partitions() {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_partitions_with_options(&new_partitions_counts(), CreatePartitionsOptions::new());
@@ -7375,6 +7322,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitionsRetryThrottlingExceptionWhenEnabled`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreatePartitionsRetryThrottlingExceptionWhenEnabled"
+    )]
     async fn test_create_partitions_retry_throttling_error_when_enabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_partitions_response(
@@ -7414,6 +7364,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitionsDontRetryThrottlingExceptionWhenDisabled`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testCreatePartitionsDontRetryThrottlingExceptionWhenDisabled"
+    )]
     async fn test_create_partitions_dont_retry_throttling_error_when_disabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_partitions_response(
@@ -7547,6 +7500,7 @@ mod tests {
     /// success, an offset-out-of-range error, an authorization failure, and a
     /// missing partition (sanity-check failure).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteRecords")]
     async fn test_delete_records() {
         let (admin, mut runnable, _time, nodes) = env();
         // Lookup retries: LEADER_NOT_AVAILABLE, then UNKNOWN_TOPIC_OR_PARTITION
@@ -7574,10 +7528,22 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_before_offset(3));
-        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_before_offset(10));
+        records.insert(
+            TopicPartition::new("my_topic", 0),
+            RecordsToDelete::before_offset_with_offset(3),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 1),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 2),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
+        records.insert(
+            TopicPartition::new("my_topic", 3),
+            RecordsToDelete::before_offset_with_offset(10),
+        );
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7602,6 +7568,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testDeleteRecordsTopicAuthorizationError`: a
     /// topic-level authorization failure during lookup fails the partition.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteRecordsTopicAuthorizationError")]
     async fn test_delete_records_topic_authorization_error() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable.client_mut().prepare_response(metadata_resp(
@@ -7610,7 +7577,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7629,6 +7596,7 @@ mod tests {
     /// so this port substitutes a per-partition fatal error on the second broker
     /// to exercise the same multi-broker fan-out and independent completion.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteRecordsMultipleSends")]
     async fn test_delete_records_multiple_sends() {
         let (admin, mut runnable, _time, nodes) = env();
         // tp0 -> node0, tp1 -> node1.
@@ -7645,8 +7613,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset_with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7726,6 +7694,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeProducers`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeProducers")]
     async fn test_describe_producers() {
         let (admin, mut runnable, time, nodes) = env();
         let tp = TopicPartition::new("foo", 0);
@@ -7736,8 +7705,8 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
 
         let expected = vec![
-            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
-            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), None, Some(23423)),
         ];
         runnable
             .client_mut()
@@ -7756,6 +7725,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testDescribeProducersTimeout(boolean)`
     /// (`@ParameterizedTest` over `{true, false}` → loop).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeProducersTimeout")]
     async fn test_describe_producers_timeout() {
         for timeout_in_metadata_lookup in [true, false] {
             let request_timeout_ms = 15000;
@@ -7787,6 +7757,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeProducersRetryAfterDisconnect`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeProducersRetryAfterDisconnect")]
     async fn test_describe_producers_retry_after_disconnect() {
         let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
         let tp = TopicPartition::new("foo", 0);
@@ -7798,8 +7769,8 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
 
         let expected = vec![
-            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
-            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), None, Some(23423)),
         ];
         runnable
             .client_mut()
@@ -7823,6 +7794,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAbortTransaction`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAbortTransaction")]
     async fn test_abort_transaction() {
         let (admin, mut runnable, _time, nodes) = env();
         let tp = TopicPartition::new("foo", 13);
@@ -7843,6 +7815,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAbortTransactionFindLeaderAfterDisconnect`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAbortTransactionFindLeaderAfterDisconnect")]
     async fn test_abort_transaction_find_leader_after_disconnect() {
         let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
         let tp = TopicPartition::new("foo", 13);
@@ -7938,6 +7911,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeTransactions`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeTransactions")]
     async fn test_describe_transactions() {
         let (admin, mut runnable, _time, nodes) = env();
         let transactional_id = "foo";
@@ -7975,6 +7949,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testRetryDescribeTransactionsAfterNotCoordinatorError`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRetryDescribeTransactionsAfterNotCoordinatorError"
+    )]
     async fn test_retry_describe_transactions_after_not_coordinator_error() {
         let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
         let transactional_id = "foo";
@@ -8020,6 +7997,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testFenceProducers`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testFenceProducers")]
     async fn test_fence_producers() {
         let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
         let transactional_id = "copyCat";
@@ -8094,6 +8072,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testListTransactions`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListTransactions")]
     async fn test_list_transactions() {
         let (admin, mut runnable, _time, nodes) = env();
         // The all-brokers lookup returns every broker; then each broker answers
@@ -8122,6 +8101,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testForceTerminateTransaction`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testForceTerminateTransaction")]
     async fn test_force_terminate_transaction() {
         let (admin, mut runnable, _time, nodes) = env();
         let transactional_id = "testForceTerminate";
@@ -8142,6 +8122,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testForceTerminateTransactionWithError`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testForceTerminateTransactionWithError")]
     async fn test_force_terminate_transaction_with_error() {
         let (admin, mut runnable, _time, nodes) = env();
         let transactional_id = "testForceTerminateError";
@@ -8166,6 +8147,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testForceTerminateTransactionWithCustomTimeout`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testForceTerminateTransactionWithCustomTimeout")]
     async fn test_force_terminate_transaction_with_custom_timeout() {
         let (admin, mut runnable, _time, nodes) = env();
         let transactional_id = "testForceTerminateTimeout";
@@ -8213,7 +8195,7 @@ mod tests {
         OpType,
     };
     use crate::common::acl::AclOperation;
-    use crate::common::config::{ConfigResource, ConfigResourceType};
+    use crate::common::config::{ConfigResource, config_resource};
     use crate::common::requests::{
         DescribeClusterResponse, DescribeConfigsResponse, IncrementalAlterConfigsResponse, ListConfigResourcesResponse,
     };
@@ -8249,6 +8231,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeCluster")]
     async fn test_describe_cluster() {
         let (admin, mut runnable, _time, nodes) = env();
         let cluster_id = "mock-cluster";
@@ -8281,6 +8264,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClusterHandleError")]
     async fn test_describe_cluster_handle_error() {
         let (admin, mut runnable, _time, _nodes) = env();
         let error_message = "my error";
@@ -8305,6 +8289,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClusterFailBack")]
     async fn test_describe_cluster_fail_back() {
         let (admin, mut runnable, _time, nodes) = env();
         let cluster_id = "mock-cluster";
@@ -8360,14 +8345,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeBrokerConfigs")]
     async fn test_describe_broker_configs() {
         let (admin, mut runnable, _time, nodes) = env();
-        let broker0 = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let broker1 = ConfigResource::new(ConfigResourceType::Broker, "1".to_string());
+        let broker0 = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
+        let broker1 = ConfigResource::new(config_resource::Type::Broker, "1".to_string());
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "0",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::None,
             )]),
             &nodes[0],
@@ -8375,7 +8361,7 @@ mod tests {
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "1",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::None,
             )]),
             &nodes[1],
@@ -8390,16 +8376,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeBrokerAndLogConfigs")]
     async fn test_describe_broker_and_log_configs() {
         let (admin, mut runnable, _time, nodes) = env();
-        let broker = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let broker_logger = ConfigResource::new(ConfigResourceType::BrokerLogger, "0".to_string());
+        let broker = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
+        let broker_logger = ConfigResource::new(config_resource::Type::BrokerLogger, "0".to_string());
         // Both broker and broker-logger resources for node 0 go to node 0 in one
         // request.
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![
-                describe_configs_result("0", ConfigResourceType::Broker.id(), Errors::None),
-                describe_configs_result("0", ConfigResourceType::BrokerLogger.id(), Errors::None),
+                describe_configs_result("0", config_resource::Type::Broker.id(), Errors::None),
+                describe_configs_result("0", config_resource::Type::BrokerLogger.id(), Errors::None),
             ]),
             &nodes[0],
         );
@@ -8413,16 +8400,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConfigsPartialResponse")]
     async fn test_describe_configs_partial_response() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
-        let topic2 = ConfigResource::new(ConfigResourceType::Topic, "topic2".to_string());
+        let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
+        let topic2 = ConfigResource::new(config_resource::Type::Topic, "topic2".to_string());
         // The (single, least-loaded) response only contains `topic`.
         runnable
             .client_mut()
             .prepare_response(describe_configs_response(vec![describe_configs_result(
                 "topic",
-                ConfigResourceType::Topic.id(),
+                config_resource::Type::Topic.id(),
                 Errors::None,
             )]));
         let result =
@@ -8435,13 +8423,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConfigsUnrequested")]
     async fn test_describe_configs_unrequested() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
+        let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
         // Response contains an extra, unrequested resource; it is ignored.
         runnable.client_mut().prepare_response(describe_configs_response(vec![
-            describe_configs_result("topic", ConfigResourceType::Topic.id(), Errors::None),
-            describe_configs_result("unrequested", ConfigResourceType::Topic.id(), Errors::None),
+            describe_configs_result("topic", config_resource::Type::Topic.id(), Errors::None),
+            describe_configs_result("unrequested", config_resource::Type::Topic.id(), Errors::None),
         ]));
         let result = admin.describe_configs_with_options(std::slice::from_ref(&topic), DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
@@ -8451,13 +8440,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClientMetricsConfigs")]
     async fn test_describe_client_metrics_configs() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let sub1 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub1".to_string());
-        let sub2 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub2".to_string());
+        let sub1 = ConfigResource::new(config_resource::Type::ClientMetrics, "sub1".to_string());
+        let sub2 = ConfigResource::new(config_resource::Type::ClientMetrics, "sub2".to_string());
         runnable.client_mut().prepare_response(describe_configs_response(vec![
-            describe_configs_result("sub1", ConfigResourceType::ClientMetrics.id(), Errors::None),
-            describe_configs_result("sub2", ConfigResourceType::ClientMetrics.id(), Errors::None),
+            describe_configs_result("sub1", config_resource::Type::ClientMetrics.id(), Errors::None),
+            describe_configs_result("sub2", config_resource::Type::ClientMetrics.id(), Errors::None),
         ]));
         let result = admin.describe_configs_with_options(&[sub1.clone(), sub2.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
@@ -8490,13 +8480,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testIncrementalAlterConfigs")]
     async fn test_incremental_alter_configs() {
         let (admin, mut runnable, _time, _nodes) = env();
 
-        let broker_resource = ConfigResource::new(ConfigResourceType::Broker, String::new());
-        let topic_resource = ConfigResource::new(ConfigResourceType::Topic, "topic1".to_string());
-        let metric_resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "metric1".to_string());
-        let group_resource = ConfigResource::new(ConfigResourceType::Group, "group1".to_string());
+        let broker_resource = ConfigResource::new(config_resource::Type::Broker, String::new());
+        let topic_resource = ConfigResource::new(config_resource::Type::Topic, "topic1".to_string());
+        let metric_resource = ConfigResource::new(config_resource::Type::ClientMetrics, "metric1".to_string());
+        let group_resource = ConfigResource::new(config_resource::Type::Group, "group1".to_string());
 
         // Error scenario: all four resources are least-loaded-routed (default
         // broker, topic, client-metrics, group all have node_for == None), so a
@@ -8504,25 +8495,25 @@ mod tests {
         runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
             alter_configs_resource_response(
                 "",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::ClusterAuthorizationFailed,
                 "authorization error",
             ),
             alter_configs_resource_response(
                 "metric1",
-                ConfigResourceType::ClientMetrics.id(),
+                config_resource::Type::ClientMetrics.id(),
                 Errors::InvalidRequest,
                 "Subscription is not allowed",
             ),
             alter_configs_resource_response(
                 "topic1",
-                ConfigResourceType::Topic.id(),
+                config_resource::Type::Topic.id(),
                 Errors::InvalidRequest,
                 "Config value append is not allowed for config",
             ),
             alter_configs_resource_response(
                 "group1",
-                ConfigResourceType::Group.id(),
+                config_resource::Type::Group.id(),
                 Errors::InvalidConfig,
                 "Unknown group config name: group.initial.rebalance.delay.ms",
             ),
@@ -8572,9 +8563,9 @@ mod tests {
 
         // Success scenario.
         runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
-            alter_configs_resource_response("", ConfigResourceType::Broker.id(), Errors::None, ""),
-            alter_configs_resource_response("metric1", ConfigResourceType::ClientMetrics.id(), Errors::None, ""),
-            alter_configs_resource_response("group1", ConfigResourceType::Group.id(), Errors::None, ""),
+            alter_configs_resource_response("", config_resource::Type::Broker.id(), Errors::None, ""),
+            alter_configs_resource_response("metric1", config_resource::Type::ClientMetrics.id(), Errors::None, ""),
+            alter_configs_resource_response("group1", config_resource::Type::Group.id(), Errors::None, ""),
         ]));
         let mut success = HashMap::new();
         success.insert(broker_resource, vec![op1]);
@@ -8604,14 +8595,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConfigResources")]
     async fn test_list_config_resources() {
         let (admin, mut runnable, _time, _nodes) = env();
         let expected = [
-            ("client-metrics", ConfigResourceType::ClientMetrics.id()),
-            ("1", ConfigResourceType::Broker.id()),
-            ("1", ConfigResourceType::BrokerLogger.id()),
-            ("topic", ConfigResourceType::Topic.id()),
-            ("group", ConfigResourceType::Group.id()),
+            ("client-metrics", config_resource::Type::ClientMetrics.id()),
+            ("1", config_resource::Type::Broker.id()),
+            ("1", config_resource::Type::BrokerLogger.id()),
+            ("topic", config_resource::Type::Topic.id()),
+            ("group", config_resource::Type::Group.id()),
         ];
         runnable
             .client_mut()
@@ -8622,12 +8614,13 @@ mod tests {
         assert_eq!(listed.len(), expected.len());
         let expected_set: HashSet<ConfigResource> = expected
             .iter()
-            .map(|(name, type_id)| ConfigResource::new(ConfigResourceType::for_id(*type_id), (*name).to_string()))
+            .map(|(name, type_id)| ConfigResource::new(config_resource::Type::for_id(*type_id), (*name).to_string()))
             .collect();
         assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected_set);
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConfigResourcesEmpty")]
     async fn test_list_config_resources_empty() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable
@@ -8639,72 +8632,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConfigResourcesNotSupported")]
     async fn test_list_config_resources_not_supported() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
         let mut types = HashSet::new();
-        types.insert(ConfigResourceType::Unknown);
+        types.insert(config_resource::Type::Unknown);
         let result = admin.list_config_resources_with_options(&types, ListConfigResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
-    }
-
-    // --- listClientMetricsResources ------------------------------------------
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResources`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_client_metrics_resources() {
-        use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
-        let (admin, mut runnable, _time, _nodes) = env();
-        let client_metrics_id = ConfigResourceType::ClientMetrics.id();
-        let expected: HashSet<ClientMetricsResourceListing> = [
-            ClientMetricsResourceListing::new("one"),
-            ClientMetricsResourceListing::new("two"),
-        ]
-        .into_iter()
-        .collect();
-        runnable.client_mut().prepare_response(list_config_resources_response(
-            Errors::None,
-            &[("one", client_metrics_id), ("two", client_metrics_id)],
-        ));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        let listed = result.all().get().await.unwrap();
-        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
-    }
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesEmpty`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_client_metrics_resources_empty() {
-        use crate::admin::ListClientMetricsResourcesOptions;
-        let (admin, mut runnable, _time, _nodes) = env();
-        runnable
-            .client_mut()
-            .prepare_response(list_config_resources_response(Errors::None, &[]));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        assert!(result.all().get().await.unwrap().is_empty());
-    }
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesNotSupported`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_client_metrics_resources_not_supported() {
-        use crate::admin::ListClientMetricsResourcesOptions;
-        let (admin, mut runnable, _time, _nodes) = env();
-        runnable
-            .client_mut()
-            .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        let err = result.all().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
-        assert_eq!(err.message(), "The version of API is not supported.");
     }
 
     // Branch (2) coverage at the `Call` bridge: the `maybe_retry` hook installed
@@ -8747,7 +8686,7 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
-            time_provider: Arc::new(move || now),
+            time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
@@ -8786,7 +8725,7 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
-            time_provider: Arc::new(move || now),
+            time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
@@ -8882,7 +8821,7 @@ mod tests {
         describe_log_dirs_response(vec![r])
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn describe_log_dirs_single_cordoned(
         error: Errors,
         log_dir: &str,
@@ -8953,6 +8892,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirs`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeLogDirs")]
     async fn test_describe_log_dirs() {
         let log_dir = "/var/data/kafka";
         let tp = TopicPartition::new("topic", 12);
@@ -8994,7 +8934,6 @@ mod tests {
         assert_eq!(err2.error(), Errors::UnknownServerError);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn assert_description_contains(
         map: &HashMap<String, LogDirDescription>,
         log_dir: &str,
@@ -9022,6 +8961,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsWithVolumeBytes`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeLogDirsWithVolumeBytes")]
     async fn test_describe_log_dirs_with_volume_bytes() {
         let log_dir = "/var/data/kafka";
         let tp = TopicPartition::new("topic", 12);
@@ -9070,6 +9010,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsWithCordonedDir`
     /// (KIP-1066).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeLogDirsWithCordonedDir")]
     async fn test_describe_log_dirs_with_cordoned_dir() {
         let log_dir = "/var/data/kafka";
         let tp = TopicPartition::new("topic", 12);
@@ -9111,6 +9052,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsOfflineDir`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeLogDirsOfflineDir")]
     async fn test_describe_log_dirs_offline_dir() {
         let log_dir = "/var/data/kafka";
         let (admin, mut runnable, _time, nodes) = env();
@@ -9131,6 +9073,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsPartialFailure`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeLogDirsPartialFailure")]
     async fn test_describe_log_dirs_partial_failure() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, nodes) = env_with_props(&[
@@ -9155,6 +9098,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirs`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeReplicaLogDirs")]
     async fn test_describe_replica_log_dirs() {
         let tpr1 = TopicPartitionReplica::new("topic", 12, 1);
         let tpr2 = TopicPartitionReplica::new("topic", 12, 2);
@@ -9207,6 +9151,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirsUnexpected`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeReplicaLogDirsUnexpected")]
     async fn test_describe_replica_log_dirs_unexpected() {
         let expected = TopicPartitionReplica::new("topic", 12, 1);
         let unexpected = TopicPartitionReplica::new("topic", 12, 2);
@@ -9241,6 +9186,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirsWithNonExistReplica`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeReplicaLogDirsWithNonExistReplica")]
     async fn test_describe_replica_log_dirs_with_non_exist_replica() {
         let broker_id = 0;
         let tpr1 = TopicPartitionReplica::new("topic1", 12, broker_id);
@@ -9279,6 +9225,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsSuccess`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterReplicaLogDirsSuccess")]
     async fn test_alter_replica_log_dirs_success() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
@@ -9305,6 +9252,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsLogDirNotFound`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterReplicaLogDirsLogDirNotFound")]
     async fn test_alter_replica_log_dirs_log_dir_not_found() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
@@ -9332,6 +9280,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsUnrequested`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterReplicaLogDirsUnrequested")]
     async fn test_alter_replica_log_dirs_unrequested() {
         let (admin, mut runnable, _time, nodes) = env();
         // Response contains partitions 1 and 2, but only 1 was requested.
@@ -9348,6 +9297,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsPartialResponse`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterReplicaLogDirsPartialResponse")]
     async fn test_alter_replica_log_dirs_partial_response() {
         let (admin, mut runnable, _time, nodes) = env();
         // Response contains only partition 1; partition 2 was also requested.
@@ -9375,6 +9325,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsPartialFailure`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterReplicaLogDirsPartialFailure")]
     async fn test_alter_replica_log_dirs_partial_failure() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, nodes) = env_with_props(&[
@@ -9580,6 +9531,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testElectLeaders`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testElectLeaders")]
     async fn test_elect_leaders() {
         for election_type in ElectionType::values() {
             let (admin, mut runnable, time, _nodes) = env();
@@ -9639,7 +9591,7 @@ mod tests {
     use crate::admin::UpgradeType;
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::SupportedFeatureKey;
-    use crate::common::requests::{ApiVersionsResponse, ApiVersionsResponseBuilder, UpdateFeaturesResponse};
+    use crate::common::requests::{ApiVersionsResponse, UpdateFeaturesResponse, api_versions_response};
 
     /// Mirrors `KafkaAdminClientTest.defaultFeatureMetadata`.
     fn default_feature_metadata() -> FeatureMetadata {
@@ -9659,7 +9611,7 @@ mod tests {
             supported.set_max_version(5);
             let mut finalized = HashMap::new();
             finalized.insert("test_feature_1".to_string(), 2i16);
-            let response = ApiVersionsResponseBuilder::new()
+            let response = api_versions_response::Builder::new()
                 .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, false, false))
                 .set_supported_features(vec![supported])
                 .set_finalized_features(finalized)
@@ -9702,6 +9654,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesSuccess`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeFeaturesSuccess")]
     async fn test_describe_features_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable
@@ -9715,6 +9668,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesFailure`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeFeaturesFailure")]
     async fn test_describe_features_failure() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable
@@ -9729,6 +9683,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesWithNodeSuccess` — a set
     /// `nodeId` routes the request to that broker via `ConstantNodeIdProvider`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeFeaturesWithNodeSuccess")]
     async fn test_describe_features_with_node_success() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
@@ -9745,6 +9700,7 @@ mod tests {
     /// response is prepared for node 1 but the request targets node 0, so it is
     /// never answered and the future times out.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeFeaturesWithNodeFailure")]
     async fn test_describe_features_with_node_failure() {
         let (admin, mut runnable, time, nodes) = env();
         runnable
@@ -9762,6 +9718,7 @@ mod tests {
     /// `@ParameterizedTest` over `@ValueSource(shorts = {1, 2})`. v1 responses
     /// carry per-feature results; v2+ carry only a top-level NONE.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUpdateFeaturesDuringSuccess")]
     async fn test_update_features_during_success() {
         for version in [1i16, 2] {
             let (admin, mut runnable, _time, _nodes) = env();
@@ -9786,6 +9743,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesTopLevelError`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUpdateFeaturesTopLevelError")]
     async fn test_update_features_top_level_error() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable
@@ -9808,6 +9766,7 @@ mod tests {
     /// Drives `KafkaAdminClientTest.testUpdateFeaturesHandleNotControllerException`
     /// — a `@ParameterizedTest` over `@ValueSource(shorts = {1, 2})`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUpdateFeaturesHandleNotControllerException")]
     async fn test_update_features_handle_not_controller_error() {
         for version in [1i16, 2] {
             let (admin, mut runnable, time, nodes) = env();
@@ -9852,6 +9811,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesShouldFailRequestForEmptyUpdates`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUpdateFeaturesShouldFailRequestForEmptyUpdates"
+    )]
     async fn test_update_features_should_fail_request_for_empty_updates() {
         let (admin, _runnable, _time, _nodes) = env();
         let err = admin
@@ -9862,6 +9824,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesShouldFailRequestForInvalidFeatureName`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUpdateFeaturesShouldFailRequestForInvalidFeatureName"
+    )]
     async fn test_update_features_should_fail_request_for_invalid_feature_name() {
         let (admin, _runnable, _time, _nodes) = env();
         let mut updates = HashMap::new();
@@ -10189,6 +10154,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testListPartitionReassignments`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListPartitionReassignments")]
     async fn test_list_partition_reassignments() {
         let tp1 = TopicPartition::new("A", 0);
         let tp2 = TopicPartition::new("B", 0);
@@ -10267,6 +10233,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testListOffsets`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsets")]
     async fn test_list_offsets() {
         let (admin, mut runnable, _time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10314,6 +10281,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testListOffsetsNonRetriableErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsNonRetriableErrors")]
     async fn test_list_offsets_non_retriable_errors() {
         let (admin, mut runnable, _time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10337,6 +10305,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testListOffsetsRetriableErrors`: a
     /// LEADER_NOT_AVAILABLE partition triggers a metadata re-lookup then a retry.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsRetriableErrors")]
     async fn test_list_offsets_retriable_errors() {
         let (admin, mut runnable, time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10391,6 +10360,9 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testListOffsetsMaxTimestampUnsupportedSingleOffsetSpec`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsMaxTimestampUnsupportedSingleOffsetSpec"
+    )]
     async fn test_list_offsets_max_timestamp_unsupported_single_offset_spec() {
         let (admin, mut runnable, _time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10408,6 +10380,9 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testListOffsetsMaxTimestampUnsupportedMultipleOffsetSpec`:
     /// only the MAX_TIMESTAMP partition fails; the other is retried and succeeds.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsMaxTimestampUnsupportedMultipleOffsetSpec"
+    )]
     async fn test_list_offsets_max_timestamp_unsupported_multiple_offset_spec() {
         let (admin, mut runnable, time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10441,6 +10416,7 @@ mod tests {
     /// Mirrors `KafkaAdminClientTest.testListOffsetsPartialResponse`: the leader
     /// omits a result for one partition, which fails the sanity check.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsPartialResponse")]
     async fn test_list_offsets_partial_response() {
         let (admin, mut runnable, _time, nodes) = env();
         let tp0 = TopicPartition::new("foo", 0);
@@ -10482,6 +10458,9 @@ mod tests {
     /// the stale fulfillment fast-path on the second, the re-lookup, and the
     /// completion) exercises the production code path unchanged.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsRetriesLookupWhenCachedLeaderLeavesCluster"
+    )]
     async fn test_list_offsets_retries_lookup_when_cached_leader_leaves_cluster() {
         // node0 and node1 both exist initially; foo-0 is led by node1.
         // A large metadata.max.age.ms + retry.backoff.ms keeps the periodic
@@ -10524,7 +10503,7 @@ mod tests {
             Some(node0.clone()),
             HashMap::new(),
         );
-        admin.shared.metadata_manager.update(shrunk, (admin.shared.time_provider)());
+        admin.shared.metadata_manager.update(shrunk, admin.shared.time.milliseconds());
 
         // Second call: the cache sends foo-0 straight to fulfillment on node1,
         // which is gone. The admin client must re-resolve the leader (now node0)
@@ -10753,6 +10732,7 @@ mod tests {
     /// Broker enumeration: `list_groups` fans out one `ListGroups` per broker and
     /// unions the results.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroups")]
     async fn test_list_groups() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -10808,33 +10788,85 @@ mod tests {
         assert_eq!(ids, vec!["g1".to_string()]);
     }
 
-    /// Broker enumeration: `list_consumer_groups` fans out per broker.
+    /// Translated from `KafkaAdminClientTest.testListConsumerGroups`.
+    ///
+    /// `list_groups(for_consumer_groups())` fans out one `ListGroups` per broker:
+    /// an empty metadata response is retried, retriable per-broker errors are
+    /// retried, `connector` groups are filtered out by the protocol-type filter,
+    /// and a fatal broker error is surfaced through `all()` / `errors()` while
+    /// `valid()` still carries the three consumer groups.
     #[tokio::test]
-    #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroups")]
     async fn test_list_consumer_groups() {
-        let (admin, mut runnable, _time, nodes) = env();
+        fn list_groups_error(error: Errors) -> ConcreteResponse {
+            use crate::ListGroupsResponseData;
+            let mut data = ListGroupsResponseData::new();
+            data.set_error_code(error.code());
+            ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(data))
+        }
+
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(4, &[("retries", "2")]);
+        let consumer = ConsumerProtocol::PROTOCOL_TYPE;
+
+        // Empty metadata response should be retried
+        runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-1", consumer, "Stable", ""),
+                ("group-connect-1", "connector", "Stable", ""),
+            ]),
+            &nodes[0],
+        );
+        // handle retriable errors
         runnable
             .client_mut()
-            .prepare_response_from(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+            .prepare_response_from(list_groups_error(Errors::CoordinatorNotAvailable), &nodes[1]);
         runnable
             .client_mut()
-            .prepare_response_from(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
-        runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
+            .prepare_response_from(list_groups_error(Errors::CoordinatorLoadInProgress), &nodes[1]);
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-2", consumer, "Stable", ""),
+                ("group-connect-2", "connector", "Stable", ""),
+            ]),
+            &nodes[1],
+        );
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-3", consumer, "Stable", ""),
+                ("group-connect-3", "connector", "Stable", ""),
+            ]),
+            &nodes[2],
+        );
+        // fatal error
+        runnable
+            .client_mut()
+            .prepare_response_from(list_groups_error(Errors::UnknownServerError), &nodes[3]);
 
-        let result = admin.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
-        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+        let result = admin.list_groups_with_options(ListGroupsOptions::for_consumer_groups());
+        for _ in 0..80 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnknownServerError);
 
-        // Only the consumer-protocol group is retained.
-        let ids: Vec<String> = result
-            .valid()
-            .get()
-            .await
-            .unwrap()
-            .iter()
-            .map(|g| g.group_id().to_string())
-            .collect();
-        assert_eq!(ids, vec!["g1".to_string()]);
+        let listings = result.valid().get().await.unwrap();
+        assert_eq!(listings.len(), 3);
+        let mut group_ids = HashSet::new();
+        for listing in &listings {
+            group_ids.insert(listing.group_id().to_string());
+            assert!(listing.group_state().is_some());
+        }
+        assert_eq!(
+            group_ids,
+            HashSet::from(["group-1".to_string(), "group-2".to_string(), "group-3".to_string()])
+        );
+        assert_eq!(result.errors().get().await.unwrap().len(), 1);
     }
 
     /// Translated from `KafkaAdminClientTest.testListGroupsWithTypes`.
@@ -10843,8 +10875,9 @@ mod tests {
     /// derived from `ListGroupsOptions::with_types`, then that both listings are
     /// returned.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsWithTypes")]
     async fn test_list_groups_with_types() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -10858,7 +10891,7 @@ mod tests {
             let reqs = runnable.client_mut().requests_mut();
             assert_eq!(reqs.len(), 1);
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert!(req.data().states_filter.is_empty());
                     assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
                 },
@@ -10900,8 +10933,9 @@ mod tests {
     /// with `prepare_unsupported_version_response` (the same version-mismatch
     /// response the real `NetworkClient` produces when the builder throws).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsWithTypesOlderBrokerVersion")]
     async fn test_list_groups_with_types_older_broker_version() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
 
@@ -10923,7 +10957,7 @@ mod tests {
             assert_eq!(reqs.len(), 1);
             // At v5 the request still carries the classic types filter ...
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert_eq!(req.data().types_filter, vec![GroupType::Classic.to_string()]);
                 },
                 other => panic!("expected a ListGroups request, got {other:?}"),
@@ -10931,7 +10965,7 @@ mod tests {
             // ... but building at the older broker's v4 omits it (the request
             // succeeds against the older broker with an empty filter).
             match reqs[0].request_builder_mut().build_version(4).unwrap() {
-                ConcreteRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
+                AbstractRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
                 other => panic!("expected a ListGroups request, got {other:?}"),
             }
         }
@@ -10959,8 +10993,9 @@ mod tests {
     /// asserts that filter reaches the wire request, then that both consumer
     /// groups are returned.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsWithStates")]
     async fn test_list_consumer_groups_with_states() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -10970,7 +11005,7 @@ mod tests {
         {
             let reqs = runnable.client_mut().requests_mut();
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     let mut types = req.data().types_filter.clone();
                     types.sort();
                     assert_eq!(types, vec![GroupType::Classic.to_string(), GroupType::Consumer.to_string()]);
@@ -11006,8 +11041,11 @@ mod tests {
     /// A states filter reaches a v4 broker (states are v4+), and a `SHARE` types
     /// filter surfaces `UnsupportedVersion` against the older broker.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsWithTypesOlderBrokerVersion"
+    )]
     async fn test_list_consumer_groups_with_types_older_broker_version() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
 
@@ -11019,7 +11057,7 @@ mod tests {
         {
             let reqs = runnable.client_mut().requests_mut();
             match reqs[0].request_builder_mut().build_version(4).unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
                     assert!(req.data().types_filter.is_empty());
                 },
@@ -11042,71 +11080,19 @@ mod tests {
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
-    /// Translated from the deprecated
-    /// `KafkaAdminClientTest.testListConsumerGroupsWithStates` /
-    /// `...WithTypes` variants: the deprecated `list_consumer_groups` API also
-    /// carries the states/types filter to the wire request.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_consumer_groups_deprecated_with_states_and_types() {
-        use crate::common::requests::ConcreteRequest;
-
-        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
-        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-
-        let options = ListConsumerGroupsOptions::new()
-            .in_group_states(HashSet::from([GroupState::Stable]))
-            .with_types(HashSet::from([GroupType::Consumer]));
-        let result = admin.list_consumer_groups_with_options(options);
-        pump_until_request_queued(&mut runnable).await;
-        {
-            let reqs = runnable.client_mut().requests_mut();
-            match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
-                    assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
-                    assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
-                },
-                other => panic!("expected a ListGroups request, got {other:?}"),
-            }
-        }
-        runnable.client_mut().respond_from(
-            listed_groups(&[("group-1", ConsumerProtocol::PROTOCOL_TYPE, "Stable", "Consumer")]),
-            &nodes[0],
-        );
-        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
-        assert_eq!(result.valid().get().await.unwrap().len(), 1);
-    }
-
-    /// Translated from the deprecated
-    /// `KafkaAdminClientTest.testListConsumerGroupsWithTypesOlderBrokerVersion`:
-    /// a SHARE types filter surfaces `UnsupportedVersion` through the deprecated
-    /// API's future.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_consumer_groups_deprecated_older_broker_version() {
-        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
-        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-        runnable.client_mut().prepare_unsupported_version_response();
-
-        let options = ListConsumerGroupsOptions::new().with_types(HashSet::from([GroupType::Share]));
-        let result = admin.list_consumer_groups_with_options(options);
-        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
-    }
-
     /// Translated from `KafkaAdminClientTest.testListConsumerGroupsMetadataFailure`.
     ///
     /// An empty metadata response leaves no brokers to send `ListGroups` to; with
     /// `retries=0` the metadata call fails terminally and `handle_failure` wraps
-    /// it as "Failed to find brokers to send listConsumerGroups".
+    /// it as "Failed to find brokers to send ListGroups".
     #[tokio::test]
-    #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsMetadataFailure")]
     async fn test_list_consumer_groups_metadata_failure() {
-        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
         // Empty broker list → no brokers to send to.
         runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
 
-        let result = admin.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
+        let result = admin.list_groups_with_options(ListGroupsOptions::for_consumer_groups());
         for _ in 0..40 {
             if result.all().is_done() {
                 break;
@@ -11115,21 +11101,18 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message at both call sites
-        // (`KafkaAdminClient.java:3565` and `:3723`), and
-        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
         assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
         assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
         assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
-        let _ = &nodes;
     }
 
-    /// The `list_groups` metadata-failure counterpart of
-    /// `testListConsumerGroupsMetadataFailure` (Java exercises the shared
-    /// `findAllBrokers` path from both entry points).
+    /// Translated from `KafkaAdminClientTest.testListGroupsMetadataFailure`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsMetadataFailure")]
     async fn test_list_groups_metadata_failure() {
         let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
         runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
@@ -11143,9 +11126,8 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message at both call sites
-        // (`KafkaAdminClient.java:3565` and `:3723`), and
-        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
         assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
@@ -11156,6 +11138,7 @@ mod tests {
     /// `describe_consumer_groups` finds the coordinator then describes the group
     /// with the KIP-848 `ConsumerGroupDescribe` API.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConsumerGroups")]
     async fn test_describe_consumer_groups() {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
@@ -11190,6 +11173,7 @@ mod tests {
     /// `GROUP_ID_NOT_FOUND` after the classic fallback also reports it, keeping
     /// the more-informative `ConsumerGroupDescribe` message.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConsumerGroupsGroupIdNotFound")]
     async fn test_describe_consumer_groups_group_id_not_found() {
         let (admin, mut runnable, time, nodes) = env();
         runnable
@@ -11229,6 +11213,7 @@ mod tests {
     /// too fails with `UNSUPPORTED_VERSION` the group future surfaces the
     /// `UnsupportedVersionException`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeGroupsWithBothUnsupportedApis")]
     async fn test_describe_groups_with_both_unsupported_apis() {
         let (admin, mut runnable, time, nodes) = env();
         runnable
@@ -11264,6 +11249,7 @@ mod tests {
     /// trigger a re-lookup, and the final response's two members have their
     /// assignment bytes decoded via `ConsumerProtocol::deserialize_assignment`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClassicGroups")]
     async fn test_describe_classic_groups() {
         use crate::common::ClassicGroupState;
         use crate::consumer::consumer_partition_assignor::Assignment;
@@ -11348,6 +11334,9 @@ mod tests {
     /// Translated from
     /// `KafkaAdminClientTest.testDescribeClassicGroupsWithAuthorizedOperationsOmitted`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClassicGroupsWithAuthorizedOperationsOmitted"
+    )]
     async fn test_describe_classic_groups_with_authorized_operations_omitted() {
         use crate::describe_groups_response_data::DescribedGroup;
 
@@ -11377,6 +11366,7 @@ mod tests {
 
     /// Translated from `KafkaAdminClientTest.testDescribeMultipleClassicGroups`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeMultipleClassicGroups")]
     async fn test_describe_multiple_classic_groups() {
         use crate::common::ClassicGroupState;
         use crate::consumer::consumer_partition_assignor::Assignment;
@@ -11439,7 +11429,7 @@ mod tests {
     /// resource).
     async fn seed_mock_group(mock: &crate::admin::MockAdminClient, group_id: &str) {
         use crate::admin::{AlterConfigOp, ConfigEntry, OpType};
-        let resource = ConfigResource::new(ConfigResourceType::Group, group_id.to_string());
+        let resource = ConfigResource::new(config_resource::Type::Group, group_id.to_string());
         let ops = vec![AlterConfigOp::new(
             ConfigEntry::new("consumer.session.timeout.ms".to_string(), Some("45000".to_string())),
             OpType::Set,
@@ -11466,20 +11456,6 @@ mod tests {
         assert_eq!(listings[0].group_id(), "g1");
         assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
         assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
-    }
-
-    /// The mock's `list_consumer_groups` returns one listing per seeded group.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_mock_list_consumer_groups() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        seed_mock_group(&mock, "g1").await;
-        let result = mock.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
-        let listings = result.valid().get().await.unwrap();
-        assert_eq!(listings.len(), 1);
-        assert_eq!(listings[0].group_id(), "g1");
-        assert!(!listings[0].is_simple_consumer_group());
     }
 
     /// The mock's `describe_consumer_groups` mirrors Java's
@@ -11541,7 +11517,7 @@ mod tests {
         data.set_groups(vec![g]);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
@@ -11567,7 +11543,7 @@ mod tests {
         data.set_groups(vec![g]);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
@@ -11634,6 +11610,7 @@ mod tests {
     /// and OffsetFetch errors are retried, and the final response's negative
     /// offset maps to `None`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsets")]
     async fn test_list_consumer_group_offsets() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp0 = TopicPartition::new("my_topic", 0);
@@ -11689,6 +11666,7 @@ mod tests {
 
     /// Translated from `testListConsumerGroupOffsetsNonRetriableErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsetsNonRetriableErrors")]
     async fn test_list_consumer_group_offsets_non_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         for error in [
@@ -11749,13 +11727,14 @@ mod tests {
         data.set_groups(wire_groups);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
     /// Translated from `testBatchedListConsumerGroupOffsets`: two groups behind a
     /// single (batched) FindCoordinator and OffsetFetch.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testBatchedListConsumerGroupOffsets")]
     async fn test_batched_list_consumer_group_offsets() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         runnable
@@ -11785,6 +11764,9 @@ mod tests {
     /// a `NoBatchedFindCoordinatorsException` disables batching, after which the
     /// groups are looked up individually.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testBatchedListConsumerGroupOffsetsWithNoFindCoordinatorBatching"
+    )]
     async fn test_batched_list_consumer_group_offsets_with_no_find_coordinator_batching() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         // The batched FindCoordinator build fails (broker only supports v3) —
@@ -11817,6 +11799,9 @@ mod tests {
     /// a `NoBatchedOffsetFetchRequestException` disables batching, after which
     /// both FindCoordinator and OffsetFetch are re-sent per group.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testBatchedListConsumerGroupOffsetsWithNoOffsetFetchBatching"
+    )]
     async fn test_batched_list_consumer_group_offsets_with_no_offset_fetch_batching() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         // Batched FindCoordinator succeeds, but the batched OffsetFetch build
@@ -11852,8 +11837,11 @@ mod tests {
     /// option and the request timeout propagate to the built `OffsetFetch` wire
     /// request, and the group id / topic / partition indexes map through.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsetsOptionsWithBatchedApi"
+    )]
     async fn test_list_consumer_group_offsets_options_with_batched_api() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         // Java uses mockCluster(3, 0) with RETRIES_CONFIG = "0".
         let (admin, mut runnable, _time, nodes) = env_with_props(&[("retries", "0")]);
@@ -11882,7 +11870,7 @@ mod tests {
         // sent request's timeout (Java asserts clientRequest.requestTimeoutMs()).
         assert_eq!(client_request.request_timeout_ms(), 300);
         match client_request.request_builder_mut().build().unwrap() {
-            ConcreteRequest::OffsetFetch(req) => {
+            AbstractRequest::OffsetFetch(req) => {
                 let data = req.data();
                 // The core contract this test pins: requireStable(true) reaches
                 // the wire.
@@ -11908,6 +11896,7 @@ mod tests {
 
     /// Translated from `testAlterConsumerGroupOffsets` (happy path).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterConsumerGroupOffsets")]
     async fn test_alter_consumer_group_offsets() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -11940,6 +11929,7 @@ mod tests {
 
     /// Translated from `testOffsetCommitWithMultipleErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testOffsetCommitWithMultipleErrors")]
     async fn test_offset_commit_with_multiple_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let foo0 = TopicPartition::new("foo", 0);
@@ -11974,6 +11964,9 @@ mod tests {
 
     /// Translated from `testAlterConsumerGroupOffsetsNonRetriableErrors`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterConsumerGroupOffsetsNonRetriableErrors"
+    )]
     async fn test_alter_consumer_group_offsets_non_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12005,6 +11998,9 @@ mod tests {
 
     /// Translated from `testAlterConsumerGroupOffsetsFindCoordinatorNonRetriableErrors`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAlterConsumerGroupOffsetsFindCoordinatorNonRetriableErrors"
+    )]
     async fn test_alter_consumer_group_offsets_find_coordinator_non_retriable_errors() {
         let (admin, mut runnable, time, _nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12030,6 +12026,7 @@ mod tests {
     /// Translated from `testDeleteConsumerGroupOffsets` (happy path with one
     /// partition-level `GROUP_SUBSCRIBED_TO_TOPIC`).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupOffsets")]
     async fn test_delete_consumer_group_offsets() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12079,6 +12076,9 @@ mod tests {
 
     /// Translated from `testDeleteConsumerGroupOffsetsNonRetriableErrors`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupOffsetsNonRetriableErrors"
+    )]
     async fn test_delete_consumer_group_offsets_non_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12106,6 +12106,9 @@ mod tests {
 
     /// Translated from `testDeleteConsumerGroupOffsetsFindCoordinatorNonRetriableErrors`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupOffsetsFindCoordinatorNonRetriableErrors"
+    )]
     async fn test_delete_consumer_group_offsets_find_coordinator_non_retriable_errors() {
         let (admin, mut runnable, time, _nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12130,6 +12133,7 @@ mod tests {
     /// Translated from `testDeleteConsumerGroupOffsetsRetriableErrors`: retriable
     /// group errors are retried (with re-lookup for coordinator-moved errors).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupOffsetsRetriableErrors")]
     async fn test_delete_consumer_group_offsets_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let tp1 = TopicPartition::new("foo", 0);
@@ -12249,6 +12253,7 @@ mod tests {
     /// `NOT_COORDINATOR` re-lookup exhausts the retry budget and the deletion
     /// times out.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupsNumRetries")]
     async fn test_delete_consumer_groups_num_retries() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, nodes) = env_nodes_with_props(
@@ -12282,6 +12287,7 @@ mod tests {
     /// coordinator-moved `DeleteGroups` errors trigger a re-lookup. Uses the old
     /// (single-coordinator) `FindCoordinator` response form throughout.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupsWithOlderBroker")]
     async fn test_delete_consumer_groups_with_older_broker() {
         let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[("retries", "2147483647")]);
 
@@ -12340,6 +12346,7 @@ mod tests {
 
     /// Translated from `testRemoveMembersFromGroupNumRetries`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupNumRetries")]
     async fn test_remove_members_from_group_num_retries() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, nodes) = env_nodes_with_props(
@@ -12372,6 +12379,7 @@ mod tests {
 
     /// Translated from `testRemoveMembersFromGroupRetriableErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupRetriableErrors")]
     async fn test_remove_members_from_group_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         runnable
@@ -12407,6 +12415,7 @@ mod tests {
 
     /// Translated from `testRemoveMembersFromGroupNonRetriableErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupNonRetriableErrors")]
     async fn test_remove_members_from_group_non_retriable_errors() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         for error in [
@@ -12432,6 +12441,7 @@ mod tests {
     /// Translated from `testRemoveMembersFromGroup`: member-level error, then a
     /// missing member, then success, and finally the two `removeAll` scenarios.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroup")]
     async fn test_remove_members_from_group() {
         let (admin, mut runnable, time, nodes) = offsets_env(1);
         let instance_one = "instance-1";
@@ -12580,7 +12590,7 @@ mod tests {
     /// code that ties the describe deadline to `options.timeout_ms()`.
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         // request.timeout.ms (30000) > default.api.timeout.ms (20000) so the
         // describe budget is observable uncapped; options.timeout (5000) is
         // smaller still, so the buggy and fixed budgets are distinguishable.
@@ -12618,7 +12628,7 @@ mod tests {
     /// Java computes the `LeaveGroup` driver's deadline INSIDE
     /// `memFuture.whenComplete(...)`, after the describe future resolves
     /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
-    /// → `calcDeadlineMs(time.now.load(Ordering::Acquire), ...)`), so `LeaveGroup` gets a
+    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
     /// fresh full timeout window starting when describe completes. Here the mock
     /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
     /// before describe completes: the fix recomputes the LeaveGroup deadline from
@@ -12627,7 +12637,7 @@ mod tests {
     /// have the LeaveGroup window already expired and issue no request at all.
     #[tokio::test]
     async fn test_remove_all_leave_group_deadline_computed_after_describe() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         // default.api.timeout.ms is large so the describe step survives the clock
         // advance (the describe-timeout fix is a prerequisite); options.timeout
         // (5000) is smaller than request.timeout.ms so the LeaveGroup budget is
@@ -12691,7 +12701,7 @@ mod tests {
     /// no such matcher, so we inspect the emitted (queued, unanswered) request
     /// directly, which is the established request-inspection pattern.
     async fn assert_remove_members_reason(reason: Option<&str>, expected_reason: &str) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
         let (admin, mut runnable, _time, nodes) = offsets_env(3);
         // Answer only FindCoordinator so the LeaveGroup request is sent but stays
         // queued (no prepared response), ready for inspection.
@@ -12709,7 +12719,7 @@ mod tests {
             r.client_mut()
                 .requests_mut()
                 .iter_mut()
-                .any(|req| matches!(req.request_builder_mut().build(), Ok(ConcreteRequest::LeaveGroup(_))))
+                .any(|req| matches!(req.request_builder_mut().build(), Ok(AbstractRequest::LeaveGroup(_))))
         })
         .await;
 
@@ -12718,7 +12728,7 @@ mod tests {
             .requests_mut()
             .iter_mut()
             .find_map(|req| match req.request_builder_mut().build() {
-                Ok(ConcreteRequest::LeaveGroup(r)) => Some(r),
+                Ok(AbstractRequest::LeaveGroup(r)) => Some(r),
                 _ => None,
             })
             .expect("a LeaveGroup request should be queued");
@@ -12730,6 +12740,7 @@ mod tests {
 
     /// Translated from `testRemoveMembersFromGroupReason`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupReason")]
     async fn test_remove_members_from_group_reason() {
         assert_remove_members_reason(Some("testing remove members reason"), "testing remove members reason").await;
     }
@@ -12737,6 +12748,7 @@ mod tests {
     /// Translated from `testRemoveMembersFromGroupTruncatesReason`: a reason
     /// longer than 255 chars is truncated to exactly 255 on the wire.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupTruncatesReason")]
     async fn test_remove_members_from_group_truncates_reason() {
         let reason = "Very looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong reason that is 271 characters long to make sure that length limit logic handles the scenario nicely";
         assert_eq!(reason.chars().count(), 271);
@@ -12747,6 +12759,7 @@ mod tests {
     /// Translated from `testRemoveMembersFromGroupDefaultReason`: a null or empty
     /// reason falls back to the default reason.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRemoveMembersFromGroupDefaultReason")]
     async fn test_remove_members_from_group_default_reason() {
         assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
         assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
@@ -12911,9 +12924,9 @@ mod tests {
     /// `message()`.
     #[tokio::test]
     async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let inner = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let inner = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let client = AuthFailingClient::new(
             inner,
             Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
@@ -12924,7 +12937,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         props.insert("retries".to_string(), "0".to_string());
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         runnable
             .client_mut()
@@ -12973,15 +12987,13 @@ mod tests {
     /// Regression for finding 243(a). `handleFailure` on the `findAllBrokers`
     /// metadata call builds
     /// `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-    /// (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
-    /// `listConsumerGroups`) — a **bare** `KafkaException`, which is a *sibling* of
-    /// `ApiException`, not a subclass. So:
+    /// (`KafkaAdminClient.java:3565`) — a **bare** `KafkaException`, which is a
+    /// *sibling* of `ApiException`, not a subclass. So:
     ///
     ///   * `is_kafka_error()` is `true`, `is_api_error()` / `is_retriable_error()`
     ///     are `false`;
     ///   * the cause is reachable through `getCause()`;
-    ///   * the message is fixed — it does NOT carry the cause's text, and Java
-    ///     hardcodes "ListGroups" even for `listConsumerGroups`.
+    ///   * the message is fixed — it does NOT carry the cause's text.
     ///
     /// Reusing the inner error's code made the wrapper *inherit* the inner class,
     /// so a metadata timeout came back retriable and causeless.
@@ -13226,7 +13238,7 @@ mod tests {
             .store(i64::MAX, Ordering::Release);
 
         assert!(
-            runnable.should_exit_for_test(time.now.load(Ordering::Acquire)),
+            runnable.should_exit_for_test(time.milliseconds()),
             "close() must not wait on an internal call: the I/O task has to exit at once"
         );
     }
@@ -13244,7 +13256,7 @@ mod tests {
             "the submitted listTopics call should be an active external call"
         );
 
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
@@ -13337,7 +13349,7 @@ mod tests {
             }
             let now = if self.advance_clock.load(Ordering::Acquire) {
                 self.time.sleep(timeout);
-                self.time.now.load(Ordering::Acquire)
+                self.time.milliseconds()
             } else {
                 now
             };
@@ -13435,14 +13447,17 @@ mod tests {
     /// callers would see the same overrun.
     #[tokio::test]
     async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client =
-            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
         let poll_timeouts = client.poll_timeouts();
         let advance_clock = client.advance_clock();
         let config = test_config();
-        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         // Put an external RPC in flight. The mock has no prepared response, so
         // the call sits in `correlation_id_to_calls`: `pending_calls` is empty,
@@ -13466,7 +13481,7 @@ mod tests {
         );
 
         // `close(Duration::from_millis(100))`.
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         let hard_deadline = now + 100;
         admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
@@ -13494,7 +13509,7 @@ mod tests {
                  (100 ms), got {timeouts:?}"
             );
         }
-        let waited = time.now.load(Ordering::Acquire) - now;
+        let waited = time.milliseconds() - now;
         assert!(
             waited <= 100,
             "close(100ms) must not overrun its deadline: the I/O task waited {waited}ms"
@@ -13520,13 +13535,16 @@ mod tests {
     /// connect timeout.
     #[tokio::test]
     async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client =
-            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
         let stuck = client.stuck();
         let config = test_config();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         // From its first poll on, the I/O task is parked forever: it can neither
         // finish work nor re-evaluate `should_exit`, so nothing but the timed
@@ -13561,7 +13579,7 @@ mod tests {
     #[tokio::test]
     async fn close_never_widens_an_existing_hard_shutdown_deadline() {
         let (admin, _runnable, time, _nodes) = env();
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         let deadline = || admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
 
         // No task was spawned, so each `close()` here only publishes the deadline.
@@ -13585,7 +13603,7 @@ mod tests {
     #[tokio::test]
     async fn close_clamps_the_wait_to_a_year() {
         let (admin, _runnable, time, _nodes) = env();
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.close_with_timeout(Duration::from_millis(i64::MAX as u64)).await;
         assert_eq!(
             admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),

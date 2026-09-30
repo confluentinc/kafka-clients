@@ -18,6 +18,8 @@
 /// `org.apache.kafka.common.utils.Utils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.utils.Utils")]
 pub struct Utils;
 
 impl Utils {
@@ -25,6 +27,7 @@ impl Utils {
     ///
     /// Translated from `org.apache.kafka.common.utils.Utils.toPositive`.
     #[inline]
+    #[doc(alias = "org.apache.kafka.common.utils.Utils#toPositive")]
     pub fn to_positive(number: i32) -> i32 {
         number & 0x7fff_ffff
     }
@@ -37,7 +40,7 @@ impl Utils {
     /// # Panics
     ///
     /// Panics if any bit index is out of the `0..=31` range, matching Java's
-    /// `IllegalArgumentException` (a programming error, per CLAUDE.md §10.1).
+    /// `IllegalArgumentException` (a programming error, per CLAUDE.md §12.1).
     pub fn to_32_bit_field(bytes: &std::collections::HashSet<i8>) -> i32 {
         let mut value: i32 = 0;
         for &b in bytes {
@@ -72,6 +75,7 @@ impl Utils {
     /// the hash is used for deterministic key-based partitioning.
     ///
     /// Translated from `org.apache.kafka.common.utils.Utils.murmur2`.
+    #[doc(alias = "org.apache.kafka.common.utils.Utils#murmur2")]
     pub fn murmur2(data: &[u8]) -> i32 {
         let length = data.len() as i32;
         let seed: i32 = -0x68b84d74_i32; // 0x9747b28c as signed i32
@@ -141,6 +145,7 @@ mod tests {
     /// 2, 2, 0, 2, 0, 3), so the trailing-byte handling is exercised for
     /// remainders 0, 2, and 3.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.UtilsTest#testMurmur2")]
     fn test_murmur2() {
         // `(input, expected)` exactly as Java's `cases` map.
         let cases: &[(&[u8], i32)] = &[

@@ -28,6 +28,7 @@ use crate::common::TopicPartition;
 /// `coordinator_id` and `producer_epoch` are `i32` (Java `int`);
 /// `transaction_start_time_ms` is optional (Java `OptionalLong`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription")]
 pub struct TransactionDescription {
     coordinator_id: i32,
     state: TransactionState,
@@ -40,6 +41,7 @@ pub struct TransactionDescription {
 
 impl TransactionDescription {
     /// Creates a new `TransactionDescription`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#TransactionDescription")]
     pub fn new(
         coordinator_id: i32,
         state: TransactionState,
@@ -61,37 +63,44 @@ impl TransactionDescription {
     }
 
     /// The id of the coordinator that owns this transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#coordinatorId")]
     pub fn coordinator_id(&self) -> i32 {
         self.coordinator_id
     }
 
     /// The current state of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#state")]
     pub fn state(&self) -> TransactionState {
         self.state
     }
 
     /// The producer id of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
     /// The producer epoch of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#producerEpoch")]
     pub fn producer_epoch(&self) -> i32 {
         self.producer_epoch
     }
 
     /// The transaction timeout in milliseconds.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#transactionTimeoutMs")]
     pub fn transaction_timeout_ms(&self) -> i64 {
         self.transaction_timeout_ms
     }
 
     /// The transaction start time in milliseconds, if a transaction is in
     /// progress.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#transactionStartTimeMs")]
     pub fn transaction_start_time_ms(&self) -> Option<i64> {
         self.transaction_start_time_ms
     }
 
     /// The set of topic partitions that have been added to the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#topicPartitions")]
     pub fn topic_partitions(&self) -> &HashSet<TopicPartition> {
         &self.topic_partitions
     }

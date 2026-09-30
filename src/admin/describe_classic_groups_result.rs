@@ -25,12 +25,14 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClassicGroupsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult")]
 pub struct DescribeClassicGroupsResult {
     futures: HashMap<String, KafkaFuture<ClassicGroupDescription>>,
 }
 
 impl DescribeClassicGroupsResult {
     /// Creates a result from the per-group-id futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult#DescribeClassicGroupsResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<ClassicGroupDescription>>) -> Self {
         Self { futures }
     }
@@ -38,6 +40,7 @@ impl DescribeClassicGroupsResult {
     /// A map from group id to futures yielding group descriptions.
     ///
     /// Mirrors `describedGroups()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult#describedGroups")]
     pub fn described_groups(&self) -> HashMap<String, KafkaFuture<ClassicGroupDescription>> {
         self.futures.clone()
     }
@@ -45,6 +48,7 @@ impl DescribeClassicGroupsResult {
     /// A future yielding all descriptions if all describes succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, ClassicGroupDescription>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }

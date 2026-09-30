@@ -22,6 +22,7 @@ use crate::common::{GroupState, GroupType};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.GroupListing`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing")]
 pub struct GroupListing {
     group_id: String,
     group_type: Option<GroupType>,
@@ -34,6 +35,7 @@ impl GroupListing {
     ///
     /// Mirrors `new GroupListing(String, Optional<GroupType>, String,
     /// Optional<GroupState>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#GroupListing")]
     pub fn new(
         group_id: impl Into<String>,
         group_type: Option<GroupType>,
@@ -44,6 +46,7 @@ impl GroupListing {
     }
 
     /// The group id. Mirrors `groupId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
@@ -54,17 +57,20 @@ impl GroupListing {
     }
 
     /// The protocol of the group. Mirrors `protocol()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#protocol")]
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
 
     /// The group state, if available. Mirrors `groupState()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupState")]
     pub fn group_state(&self) -> Option<GroupState> {
         self.group_state
     }
 
     /// Whether the group is a simple consumer group. Mirrors
     /// `isSimpleConsumerGroup()`: a classic group with an empty protocol.
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.group_type == Some(GroupType::Classic) && self.protocol.is_empty()
     }
@@ -92,6 +98,7 @@ mod tests {
 
     /// Translated from `GroupListingTest.testSimpleConsumerGroup`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListingTest#testSimpleConsumerGroup")]
     fn test_simple_consumer_group() {
         let gl = GroupListing::new(GROUP_ID, Some(GroupType::Classic), "", Some(GroupState::Empty));
         assert!(gl.is_simple_consumer_group());

@@ -35,6 +35,7 @@ use super::CoordinatorKey;
 ///
 /// Corresponds to `ApiRequestScope`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.ApiRequestScope")]
 pub(crate) enum ApiRequestScope {
     /// A single shared lookup scope: all keys are batched into one lookup
     /// request (`PartitionLeaderStrategy`, batched `CoordinatorStrategy`). Has no
@@ -57,6 +58,7 @@ impl ApiRequestScope {
     /// request can be sent to any broker (i.e. lookup is required first).
     ///
     /// Mirrors `ApiRequestScope.destinationBrokerId`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ApiRequestScope#destinationBrokerId")]
     pub(crate) fn destination_broker_id(&self) -> Option<i32> {
         match self {
             ApiRequestScope::SingleLookup => None,

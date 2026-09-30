@@ -80,34 +80,14 @@
 //!     — a stable classic group with a joined member. That stays covered by the
 //!     unit tests in `src/consumer/internals/consumer_protocol.rs` and
 //!     `src/admin/internals/describe_classic_groups_handler.rs`.
-//!   - **`ConsumerGroupDescription`'s `state()` / `group_state()` pair cannot be
-//!     caught transposed.** Java defines
-//!     `state() == ConsumerGroupState.parse(groupState().toString())`, and the two
-//!     enums' constant names coincide for all eight `ConsumerGroupState` values,
-//!     so the only state that separates them is `GroupState.NOT_READY`
-//!     (`clients/src/main/java/org/apache/kafka/common/GroupState.java:60`), which
-//!     has no `ConsumerGroupState` counterpart and parses to `Unknown`.
-//!     `NOT_READY` is reachable **only for a STREAMS group** — `GroupState`'s
-//!     javadoc table and `groupStatesForType` (`GroupState.java:80-89`) list it
-//!     under STREAMS alone — and a streams group is not something
-//!     `describeConsumerGroups` can return, since the coordinator's
-//!     `consumerGroup(...)` lookup answers `GROUP_ID_NOT_FOUND` for a group of
-//!     another type. So a transposition of that pair is invisible *by
-//!     construction*, not merely unreached on this fixture. A **dropped** field is
-//!     not invisible: `MultilanguageAdmin::check_derived_state` rejects a wire
-//!     `state` that disagrees with the value Java derives, so every scenario here
-//!     exercises that check.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-#[allow(deprecated)]
-use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
     DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
     ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
@@ -268,15 +248,12 @@ async fn assert_real_coordinator<B: AdminBackend>(admin: &B, coordinator: Option
 }
 
 // ---------------------------------------------------------------------------
-// listGroups / listConsumerGroups
+// listGroups
 // ---------------------------------------------------------------------------
 
 /// A live KIP-848 group appears in `listGroups` as a `Consumer`-type `Stable`
-/// group, and in the deprecated `listConsumerGroups` too.
-async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+/// group.
+async fn list_groups_shows_live_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
     let topic = ctx.topic("admin_groups_list");
@@ -288,7 +265,7 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
     let mut consumer = new_bytes_consumer(ctx, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
-    // (a) list_groups: the created group appears with type Consumer, state Stable.
+    // The created group appears with type Consumer, state Stable.
     let mut found_stable = false;
     for _ in 0..40 {
         // Keep heartbeating while we poll the coordinator's group registry.
@@ -317,20 +294,6 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
     assert!(
         found_stable,
         "{backend} backend: list_groups should report {group_id} as Stable"
-    );
-
-    // list_consumer_groups (deprecated) also reports it.
-    #[allow(deprecated)]
-    let consumer_groups = admin
-        .list_consumer_groups(ListConsumerGroupsOptions::new())
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: list consumer groups: {e}"));
-    consumer_groups
-        .all()
-        .unwrap_or_else(|e| panic!("{backend} backend: list consumer groups reported a per-broker error: {e}"));
-    assert!(
-        consumer_groups.valid.iter().any(|g| g.group_id() == group_id),
-        "{backend} backend: list_consumer_groups should report {group_id}"
     );
 
     drop(consumer);
@@ -767,9 +730,8 @@ async fn describe_consumer_groups_nonexistent_group<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: {missing} missing from the describe result"))
     {
         Err(err) => {
-            assert_eq!(
-                err.error(),
-                Errors::GroupIdNotFound,
+            assert!(
+                matches!(err, Error::GroupIdNotFound(_)),
                 "{backend} backend: nonexistent group should fail with GROUP_ID_NOT_FOUND, got: {err}"
             );
         },
@@ -844,9 +806,8 @@ async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(
         .expect_err(&format!(
             "{backend} backend: a KIP-848 group is not a classic group, so describeClassicGroups must fail for it"
         ));
-    assert_eq!(
-        err.error(),
-        Errors::GroupIdNotFound,
+    assert!(
+        matches!(err, Error::GroupIdNotFound(_)),
         "{backend} backend: the coordinator reports GROUP_ID_NOT_FOUND for a group that is not a ClassicGroup, \
          got: {err}"
     );
@@ -1100,9 +1061,8 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: {live_group} missing from the delete result"))
         .as_ref()
         .expect_err(&format!("{backend} backend: deleting a group with active members must fail"));
-    assert_eq!(
-        non_empty_err.error(),
-        Errors::NonEmptyGroup,
+    assert!(
+        matches!(non_empty_err, Error::GroupNotEmpty(_)),
         "{backend} backend: deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
     );
     assert!(
@@ -1131,9 +1091,8 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         .get(&empty_group)
         .unwrap_or_else(|| panic!("{backend} backend: {empty_group} missing from the describe result"))
     {
-        Err(err) => assert_eq!(
-            err.error(),
-            Errors::GroupIdNotFound,
+        Err(err) => assert!(
+            matches!(err, Error::GroupIdNotFound(_)),
             "{backend} backend: a deleted group is GROUP_ID_NOT_FOUND, got: {err}"
         ),
         Ok(desc) => assert!(
@@ -1292,7 +1251,7 @@ async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mu
                 emptied = true;
                 break;
             },
-            Some(Err(err)) if err.error() == Errors::GroupIdNotFound => {
+            Some(Err(Error::GroupIdNotFound(_))) => {
                 emptied = true;
                 break;
             },
@@ -1419,8 +1378,8 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
 }
 
 multilanguage_admin_test!(
-    test_ml_admin_list_groups_and_list_consumer_groups_show_live_group,
-    list_groups_and_list_consumer_groups_show_live_group,
+    test_ml_admin_list_groups_shows_live_group,
+    list_groups_shows_live_group,
     kip848_3_broker(NUM_PARTITIONS as u16)
 );
 multilanguage_admin_test!(

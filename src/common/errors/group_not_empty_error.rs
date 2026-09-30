@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.GroupNotEmptyException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The group is not empty.
     ///
-    /// Corresponds to Java's `GroupNotEmptyException`, error code [`Errors::NonEmptyGroup`].
+    /// Corresponds to Java's `GroupNotEmptyException`, error code `Errors::NonEmptyGroup`.
     ///
     /// Java `extends` chain:
     ///    `GroupNotEmptyException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupNotEmptyException")]
     GroupNotEmptyError,
     code: Errors::NonEmptyGroup,
     extends: [

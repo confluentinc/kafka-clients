@@ -21,8 +21,8 @@ use std::fmt;
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::{ConfigDef, SslConfig};
-use crate::common::security::SecurityProtocol;
+use crate::common::config::{ConfigDef, SslConfigs};
+use crate::common::security::auth::SecurityProtocol;
 
 /// Controls how the client uses DNS lookups (the `client.dns.lookup`
 /// configuration).
@@ -30,6 +30,7 @@ use crate::common::security::SecurityProtocol;
 /// Translated from the Java enum `org.apache.kafka.clients.ClientDnsLookup`,
 /// which in Apache Kafka 4.3.1 has exactly two constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[doc(alias = "org.apache.kafka.clients.ClientDnsLookup")]
 pub enum ClientDnsLookup {
     /// `use_all_dns_ips` (the default): connect to each returned IP address in
     /// sequence until a successful connection is established. After a
@@ -68,6 +69,9 @@ impl ClientDnsLookup {
     /// Returns [`Error::LocalIllegalArgument`] if `config` does not name a
     /// constant, matching the `IllegalArgumentException` Java's `Enum.valueOf`
     /// throws (with the same message text).
+    // Translated in full (DoD #2); the client parses the key with
+    // `parse_config_value`, so only the tests call this.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn for_config(config: &str) -> Result<Self, Error> {
         let upper = config.to_uppercase();
         match upper.as_str() {
@@ -129,7 +133,7 @@ impl ClientDnsLookup {
     pub(crate) fn warn_if_tls_hostname_verification_affected(
         self,
         security_protocol: SecurityProtocol,
-        ssl_config: &SslConfig,
+        ssl_config: &SslConfigs,
     ) -> bool {
         let affected = self == Self::ResolveCanonicalBootstrapServersOnly
             && matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl)
@@ -268,9 +272,9 @@ mod tests {
 
     #[test]
     fn test_warn_if_tls_hostname_verification_affected() {
-        let verifying = SslConfig::default();
+        let verifying = SslConfigs::default();
         assert!(!verifying.endpoint_identification_algorithm.is_empty());
-        let not_verifying = SslConfig { endpoint_identification_algorithm: String::new(), ..SslConfig::default() };
+        let not_verifying = SslConfigs { endpoint_identification_algorithm: String::new(), ..SslConfigs::default() };
         let canonical = ClientDnsLookup::ResolveCanonicalBootstrapServersOnly;
         for protocol in [SecurityProtocol::Ssl, SecurityProtocol::SaslSsl] {
             assert!(canonical.warn_if_tls_hostname_verification_affected(protocol, &verifying));

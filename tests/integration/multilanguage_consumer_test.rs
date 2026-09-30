@@ -86,9 +86,12 @@ async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
     ]);
     ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("producer config");
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-            .expect("create producer");
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("create producer");
     for &(k, v) in records {
         let record = ProducerRecord::with_key(topic.to_string(), Some(b(k)), Some(b(v)));
         // Fully-qualified trait call: KafkaProducer also has an inherent

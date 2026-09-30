@@ -34,7 +34,7 @@ use confluent_kafka::admin::{
     CreatePartitionsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeTopicsOptions, NewPartitions,
     RecordsToDelete,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
@@ -55,7 +55,12 @@ fn build_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     ]);
     ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer)).expect("build producer")
+    KafkaProducer::new(
+        config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("build producer")
 }
 
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks.
@@ -159,9 +164,8 @@ async fn create_partitions_decreasing_count_fails<F: AdminBackendFactory>(ctx: &
     let err = created[&topic]
         .as_ref()
         .expect_err(&format!("{backend} backend: decreasing partitions should fail"));
-    assert_eq!(
-        err.error(),
-        Errors::InvalidPartitions,
+    assert!(
+        matches!(err, Error::InvalidPartitions(_)),
         "{backend} backend: expected INVALID_PARTITIONS, got {err:?}"
     );
 
@@ -272,9 +276,8 @@ async fn create_partitions_with_an_empty_assignment_list_is_rejected<F: AdminBac
     let err = created[&topic].as_ref().expect_err(&format!(
         "{backend} backend: increase_to_new_assignments(3, []) must be rejected, not treated as increase_to(3)"
     ));
-    assert_eq!(
-        err.error(),
-        Errors::InvalidReplicaAssignment,
+    assert!(
+        matches!(err, Error::InvalidReplicaAssignment(_)),
         "{backend} backend: expected INVALID_REPLICA_ASSIGNMENT, got {err:?}"
     );
 
@@ -314,7 +317,7 @@ async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut
 
     // Delete everything before offset 5; the low watermark advances to 5.
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(5))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset_with_offset(5))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -344,7 +347,7 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
     produce_records(ctx, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(1000))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset_with_offset(1000))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -352,9 +355,8 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
     let err = deleted[&tp]
         .as_ref()
         .expect_err(&format!("{backend} backend: out-of-range delete should fail"));
-    assert_eq!(
-        err.error(),
-        Errors::OffsetOutOfRange,
+    assert!(
+        matches!(err, Error::OffsetOutOfRange(_)),
         "{backend} backend: expected OFFSET_OUT_OF_RANGE, got {err:?}"
     );
 
@@ -381,7 +383,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
 
     // Partition 5 does not exist (topic has only partition 0).
     let tp = TopicPartition::new(topic.clone(), 5);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(0))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset_with_offset(0))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -392,7 +394,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
     // The leader lookup never succeeds, so the driver fails the key when the
     // API timeout elapses.
     assert!(
-        err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
+        err.is_retriable_error() || matches!(err, Error::Timeout(_)),
         "{backend} backend: expected a timeout, got {err:?}"
     );
 

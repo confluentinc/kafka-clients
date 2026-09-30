@@ -32,7 +32,7 @@
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use std::ffi::{CStr, CString, c_char};
 
@@ -172,7 +172,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 /// error with `instanceof`, and a Rust caller discriminates it by matching the
 /// [`Error`] variant. C can do neither — it cannot see enum variants — so its
 /// whole budget for classifying an error is the numeric code, a free-text
-/// message, and the hierarchy predicates. This is the same reason CLAUDE.md §3
+/// message, and the hierarchy predicates. This is the same reason CLAUDE.md §4
 /// gives for exporting the predicates at all, applied to the other half of the
 /// problem: the predicates place an error in a *family*, and this enum names
 /// the *class*.
@@ -715,7 +715,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kaf
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
 // here. `org.apache.kafka.common.requests` carries the package disclaimer "This
 // package is not a supported Kafka API; the implementation may change without
-// warning between minor or patch releases", and CLAUDE.md §3 forbids C bindings
+// warning between minor or patch releases", and CLAUDE.md §4 forbids C bindings
 // for such packages. A C caller that needs the classification composes it from
 // the exported predicates (`kafka_common_Error_is_authentication_error`,
 // `kafka_common_Error_is_authorization_error`) and the error code.
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_c
 
 /// Returns whether the error's Java exception extends `ApiException` — an error the broker can report over the protocol, as opposed to a client-side programming or serialization failure.
 ///
-/// Mirrors `Error::is_api_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_api_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -780,7 +780,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_com
 
 /// Returns whether the error is retriable AND a metadata/coordinator refresh is what clears it (Java `RefreshRetriableException`).
 ///
-/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -805,7 +805,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *c
 
 /// Returns whether the error means the client's cached metadata may be stale (Java `InvalidMetadataException`).
 ///
-/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -830,7 +830,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *co
 
 /// Returns whether the error is an authentication failure reported by the broker (Java `AuthenticationException`).
 ///
-/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -855,7 +855,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *cons
 
 /// Returns whether the error is an authorization failure — a missing ACL (Java `AuthorizationException`).
 ///
-/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §12.4. Exposed because C cannot see
 /// enum variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -882,7 +882,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const
 /// authorization families, so a broad classification a C caller cannot make from
 /// the numeric code alone.
 ///
-/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -908,7 +908,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error
 /// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
 /// producer or rejoining the group.
 ///
-/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -935,7 +935,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
 
 /// Returns whether the error's Java class extends `InvalidOffsetException` (common.errors).
 ///
-/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -960,7 +960,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *cons
 
 /// Returns whether the error's Java class extends `OutOfOrderSequenceException`.
 ///
-/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -985,7 +985,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error
 
 /// Returns whether the error's Java class extends `SerializationException`.
 ///
-/// Mirrors `Error::is_serialization_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_serialization_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const
 
 /// Returns whether the error's Java class extends `TimeoutException` (also covers `BufferExhaustedException`).
 ///
-/// Mirrors `Error::is_timeout_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_timeout_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka
 
 /// Returns whether the error's Java class extends the consumer package's `InvalidOffsetException`.
 ///
-/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1063,7 +1063,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
 /// Returns whether the error's Java class extends the consumer package's `OffsetOutOfRangeException` (also covers
 /// `LogTruncationException`).
 ///
-/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_erro
 
 /// Returns whether the error's Java class extends `TransactionAbortableException` — the transaction may be aborted and retried.
 ///
-/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error
 /// beyond its numeric code.
 ///
@@ -1131,7 +1131,7 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
 }
 
 // ---------------------------------------------------------------------------
-// Per-variant payload accessors (CLAUDE.md §3: "Exceptions having additional
+// Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
 //
 // Of the ~156 `Error` variants, the 13 below carry state beyond
@@ -1156,8 +1156,8 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
 use crate::common::header::Header;
 use crate::ffi::consumer::{
     box_long_offset_map, box_offset_map, box_string_list, box_topic_partition, box_topic_partition_list,
-    kafka_consumer_LongOffsetMap_t, kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t,
-    kafka_consumer_TopicPartition_t, kafka_consumer_TopicPartitionList_t,
+    kafka_common_TopicPartition_t, kafka_common_TopicPartitionList_t, kafka_consumer_LongOffsetMap_t,
+    kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t,
 };
 
 /// `TopicAuthorizationException` -> `kafka_common_TopicAuthorizationError_t`.
@@ -1401,57 +1401,6 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time
     e.throttle_time_ms()
 }
 
-/// `CorrelationIdMismatchException` -> `kafka_common_CorrelationIdMismatchError_t`.
-#[repr(C)]
-pub struct kafka_common_CorrelationIdMismatchError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `CorrelationIdMismatchException` payload, or null if
-/// the error is not that variant.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_CorrelationIdMismatchError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    match &unsafe { error_ref(error) }.error {
-        Error::CorrelationIdMismatch(e) => e as *const _ as *const kafka_common_CorrelationIdMismatchError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the correlation id the request was sent with.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correlation_id(
-    handle: *const kafka_common_CorrelationIdMismatchError_t,
-) -> i32 {
-    let e = unsafe { &*(handle as *const crate::common::requests::CorrelationIdMismatchError) };
-    e.request_correlation_id()
-}
-
-/// Returns the correlation id found on the response.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_response_correlation_id(
-    handle: *const kafka_common_CorrelationIdMismatchError_t,
-) -> i32 {
-    let e = unsafe { &*(handle as *const crate::common::requests::CorrelationIdMismatchError) };
-    e.response_correlation_id()
-}
-
 /// `RecordDeserializationException` -> `kafka_common_RecordDeserializationError_t`.
 #[repr(C)]
 pub struct kafka_common_RecordDeserializationError_t {
@@ -1477,38 +1426,25 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     }
 }
 
-/// Returns which side of the record failed to deserialize
-/// (`0` = key, `1` = value), writing it to `*out_origin` and returning `true`
-/// if recorded; returns `false` (leaving `*out_origin` untouched) if absent —
-/// Java's deprecated four-argument constructor does not record it.
+/// Returns which side of the record failed to deserialize, as the ordinal of
+/// Java's `DeserializationExceptionOrigin` (`0` = key, `1` = value).
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_origin` must be a valid pointer.
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     handle: *const kafka_common_RecordDeserializationError_t,
-    out_origin: *mut i32,
-) -> bool {
+) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     match e.origin() {
-        Some(origin) => {
-            if !out_origin.is_null() {
-                let id = match origin {
-                    crate::common::errors::DeserializationErrorOrigin::Key => 0,
-                    crate::common::errors::DeserializationErrorOrigin::Value => 1,
-                };
-                unsafe { *out_origin = id };
-            }
-            true
-        },
-        None => false,
+        crate::common::errors::DeserializationErrorOrigin::Key => 0,
+        crate::common::errors::DeserializationErrorOrigin::Value => 1,
     }
 }
 
 /// Returns the partition of the offending record, as an owned handle the
-/// caller must destroy with [`kafka_consumer_TopicPartition_destroy`](crate::ffi::consumer::kafka_consumer_TopicPartition_destroy).
+/// caller must destroy with [`kafka_common_TopicPartition_destroy`](crate::ffi::consumer::kafka_common_TopicPartition_destroy).
 ///
 /// # Safety
 ///
@@ -1516,7 +1452,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
     handle: *const kafka_common_RecordDeserializationError_t,
-) -> *mut kafka_consumer_TopicPartition_t {
+) -> *mut kafka_common_TopicPartition_t {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     box_topic_partition(e.topic_partition().clone())
 }
@@ -1871,7 +1807,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
 
 /// Returns the partitions with no defined offset and no reset policy, as an
 /// owned handle the caller must destroy with
-/// [`kafka_consumer_TopicPartitionList_destroy`](crate::ffi::consumer::kafka_consumer_TopicPartitionList_destroy).
+/// [`kafka_common_TopicPartitionList_destroy`](crate::ffi::consumer::kafka_common_TopicPartitionList_destroy).
 ///
 /// # Safety
 ///
@@ -1879,7 +1815,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
     handle: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     let e = unsafe { &*(handle as *const crate::consumer::ConsumerNoOffsetForPartitionError) };
     box_topic_partition_list(e.partitions().iter().cloned())
 }
@@ -2361,19 +2297,17 @@ mod tests {
     };
     use crate::common::metrics::QuotaViolationError;
     use crate::common::network::InvalidReceiveError;
-    use crate::common::requests::CorrelationIdMismatchError;
     use crate::common::{MetricName, TopicPartition};
     use crate::consumer::{
         ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerNoOffsetForPartitionError,
         ConsumerOffsetOutOfRangeError, ConsumerRetriableCommitFailedError,
     };
     use crate::ffi::consumer::{
-        kafka_consumer_LongOffsetMap_count, kafka_consumer_LongOffsetMap_destroy,
+        kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_partition, kafka_common_TopicPartition_topic,
+        kafka_common_TopicPartitionList_count, kafka_common_TopicPartitionList_destroy,
+        kafka_common_TopicPartitionList_get, kafka_consumer_LongOffsetMap_count, kafka_consumer_LongOffsetMap_destroy,
         kafka_consumer_LongOffsetMap_get_value, kafka_consumer_OffsetMap_count, kafka_consumer_OffsetMap_destroy,
         kafka_consumer_StringList_count, kafka_consumer_StringList_destroy, kafka_consumer_StringList_get,
-        kafka_consumer_TopicPartition_destroy, kafka_consumer_TopicPartition_partition,
-        kafka_consumer_TopicPartition_topic, kafka_consumer_TopicPartitionList_count,
-        kafka_consumer_TopicPartitionList_destroy, kafka_consumer_TopicPartitionList_get,
         kafka_consumer_string_destroy,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2787,38 +2721,20 @@ mod tests {
     }
 
     #[test]
-    fn correlation_id_mismatch_payload() {
-        let error = box_error(Error::CorrelationIdMismatch(CorrelationIdMismatchError::new("m", 7, 8)));
-        unsafe {
-            let handle = kafka_common_Error_correlation_id_mismatch(error);
-            assert!(!handle.is_null());
-            assert_eq!(kafka_common_CorrelationIdMismatchError_request_correlation_id(handle), 7);
-            assert_eq!(kafka_common_CorrelationIdMismatchError_response_correlation_id(handle), 8);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_correlation_id_mismatch(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
     fn record_deserialization_payload() {
         let error = box_error(Error::RecordDeserialization(Box::new(record_deserialization_error_full())));
         unsafe {
             let handle = kafka_common_Error_record_deserialization(error);
             assert!(!handle.is_null());
 
-            let mut origin = -1;
-            assert!(kafka_common_RecordDeserializationError_origin(handle, &mut origin));
-            assert_eq!(origin, 0, "Key -> 0");
+            assert_eq!(kafka_common_RecordDeserializationError_origin(handle), 0, "Key -> 0");
 
             let partition = kafka_common_RecordDeserializationError_partition(handle);
             assert!(!partition.is_null());
-            let topic = CStr::from_ptr(kafka_consumer_TopicPartition_topic(partition)).to_str().unwrap();
+            let topic = CStr::from_ptr(kafka_common_TopicPartition_topic(partition)).to_str().unwrap();
             assert_eq!(topic, "t2");
-            assert_eq!(kafka_consumer_TopicPartition_partition(partition), 5);
-            kafka_consumer_TopicPartition_destroy(partition);
+            assert_eq!(kafka_common_TopicPartition_partition(partition), 5);
+            kafka_common_TopicPartition_destroy(partition);
 
             assert_eq!(kafka_common_RecordDeserializationError_offset(handle), 42);
             assert_eq!(kafka_common_RecordDeserializationError_timestamp(handle), 99);
@@ -2860,10 +2776,8 @@ mod tests {
             // No key/value/headers -> absent conventions.
             let sparse = box_error(Error::RecordDeserialization(Box::new(record_deserialization_error())));
             let sparse_handle = kafka_common_Error_record_deserialization(sparse);
-            let mut no_origin = -1;
             // `record_deserialization_error()` uses `DeserializationErrorOrigin::Value`.
-            assert!(kafka_common_RecordDeserializationError_origin(sparse_handle, &mut no_origin));
-            assert_eq!(no_origin, 1, "Value -> 1");
+            assert_eq!(kafka_common_RecordDeserializationError_origin(sparse_handle), 1, "Value -> 1");
             let mut none_len = -2;
             assert!(kafka_common_RecordDeserializationError_key_buffer(sparse_handle, &mut none_len).is_null());
             assert_eq!(none_len, -1);
@@ -2941,10 +2855,10 @@ mod tests {
             let handle = kafka_common_Error_consumer_no_offset_for_partition(error);
             assert!(!handle.is_null());
             let list = kafka_common_ConsumerNoOffsetForPartitionError_partitions(handle);
-            assert_eq!(kafka_consumer_TopicPartitionList_count(list), 1);
-            let tp = kafka_consumer_TopicPartitionList_get(list, 0);
-            assert_eq!(kafka_consumer_TopicPartition_partition(tp), 3);
-            kafka_consumer_TopicPartitionList_destroy(list);
+            assert_eq!(kafka_common_TopicPartitionList_count(list), 1);
+            let tp = kafka_common_TopicPartitionList_get(list, 0);
+            assert_eq!(kafka_common_TopicPartition_partition(tp), 3);
+            kafka_common_TopicPartitionList_destroy(list);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());

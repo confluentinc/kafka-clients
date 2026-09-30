@@ -30,9 +30,10 @@
 use tokio::sync::oneshot;
 
 use crate::common::{Error, TopicPartition};
-use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 
 /// Single-enum translation of Java's `BackgroundEvent` hierarchy.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.BackgroundEvent")]
 pub(crate) enum BackgroundEvent {
     /// `ErrorEvent` — surfaces a non-fatal error from the bg task to the
     /// app side. The app side returns this through the next `poll()` /

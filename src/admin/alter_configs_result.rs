@@ -24,18 +24,21 @@ use crate::common::config::ConfigResource;
 /// The result of the `Admin::incremental_alter_configs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConfigsResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult")]
 pub struct AlterConfigsResult {
     futures: HashMap<ConfigResource, KafkaFuture<()>>,
 }
 
 impl AlterConfigsResult {
     /// Creates a new result from the per-resource futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult#AlterConfigsResult")]
     pub(crate) fn new(futures: HashMap<ConfigResource, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
 
     /// Returns a map from resources to futures which can be used to check the
     /// status of the alteration for each resource.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult#values")]
     pub fn values(&self) -> &HashMap<ConfigResource, KafkaFuture<()>> {
         &self.futures
     }
@@ -44,6 +47,7 @@ impl AlterConfigsResult {
     /// succeed.
     ///
     /// Corresponds to `AlterConfigsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

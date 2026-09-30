@@ -94,7 +94,8 @@ impl ops::BitAnd for InterestOps {
 /// In Rust, the async I/O capabilities and the Kafka-specific methods are combined
 /// into this single trait. I/O methods return boxed futures for object safety (`dyn TransportLayer`).
 ///
-/// Per CLAUDE.md rule 8, all I/O is async using Tokio.
+/// Per CLAUDE.md rule 10, all I/O is async using Tokio.
+#[doc(alias = "org.apache.kafka.common.network.TransportLayer")]
 pub trait TransportLayer: Send + Sync {
     /// Returns the remote address of the connected peer, if available.
     ///
@@ -107,6 +108,7 @@ pub trait TransportLayer: Send + Sync {
     fn peer_addr(&self) -> io::Result<SocketAddr>;
 
     /// Returns `true` if the channel has completed handshake and authentication.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#ready")]
     fn ready(&self) -> bool;
 
     /// Finishes the process of connecting a socket channel.
@@ -114,12 +116,15 @@ pub trait TransportLayer: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the connection cannot be completed.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#finishConnect")]
     fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
 
     /// Disconnects the underlying socket channel.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#disconnect")]
     fn disconnect(&mut self);
 
     /// Returns `true` if this channel's network socket is connected.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#isConnected")]
     fn is_connected(&self) -> bool;
 
     /// Performs protocol-specific handshake.
@@ -135,19 +140,24 @@ pub trait TransportLayer: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the handshake fails.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#handshake")]
     fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 
     /// Adds the given interest operations.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#addInterestOps")]
     fn add_interest_ops(&mut self, ops: InterestOps);
 
     /// Removes the given interest operations.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#removeInterestOps")]
     fn remove_interest_ops(&mut self, ops: InterestOps);
 
     /// Returns `true` if this channel is muted (not interested in read operations).
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#isMute")]
     fn is_mute(&self) -> bool;
 
     /// Returns `true` if the channel has bytes to be read in any intermediate buffers
     /// which may be processed without reading additional data from the network.
+    #[doc(alias = "org.apache.kafka.common.network.TransportLayer#hasBytesBuffered")]
     fn has_bytes_buffered(&self) -> bool;
 
     /// Returns `true` if there are any pending writes that have not yet been flushed

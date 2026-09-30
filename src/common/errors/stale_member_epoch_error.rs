@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.StaleMemberEpochException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The member epoch is stale. The member must retry after receiving its
     /// updated member epoch via the ConsumerGroupHeartbeat API.
     ///
-    /// Corresponds to Java's `StaleMemberEpochException`, error code [`Errors::StaleMemberEpoch`].
+    /// Corresponds to Java's `StaleMemberEpochException`, error code `Errors::StaleMemberEpoch`.
     ///
     /// Java `extends` chain:
     ///    `StaleMemberEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StaleMemberEpochException")]
     StaleMemberEpochError,
     code: Errors::StaleMemberEpoch,
     extends: [

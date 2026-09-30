@@ -43,6 +43,7 @@ use crate::producer::internals::ProduceRequestResult;
 
 /// The final state of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch$FinalState")]
 pub enum FinalState {
     Aborted,
     Failed,
@@ -74,6 +75,7 @@ fn from_final_state(state: FinalState) -> u8 {
 }
 
 /// A callback and the associated FutureRecordMetadata argument to pass to it.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch$Thunk")]
 pub(crate) struct Thunk {
     pub callback: Option<Callback>,
     pub future: Arc<FutureRecordMetadata>,
@@ -82,6 +84,7 @@ pub(crate) struct Thunk {
 /// A batch of records that is or will be sent.
 ///
 /// This class is not thread safe and external synchronization must be used when modifying it.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch")]
 pub struct ProducerBatch {
     /// The time this batch was created (milliseconds).
     pub created_ms: i64,
@@ -121,11 +124,13 @@ pub struct ProducerBatch {
 
 impl ProducerBatch {
     /// Create a new `ProducerBatch`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#ProducerBatch")]
     pub fn new(tp: TopicPartition, records_builder: MemoryRecordsBuilder, created_ms: i64) -> Self {
         Self::with_split(tp, records_builder, created_ms, false)
     }
 
     /// Create a new `ProducerBatch`, optionally marking it as a split batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#ProducerBatch")]
     pub fn with_split(
         tp: TopicPartition,
         mut records_builder: MemoryRecordsBuilder,
@@ -162,6 +167,7 @@ impl ProducerBatch {
     }
 
     /// Update the leader epoch if a newer leader is known.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#maybeUpdateLeaderEpoch")]
     pub fn maybe_update_leader_epoch(&mut self, latest_leader_epoch: Option<i32>) {
         if let Some(latest) = latest_leader_epoch {
             if self.current_leader_epoch.is_none() || self.current_leader_epoch.unwrap() < latest {
@@ -199,6 +205,7 @@ impl ProducerBatch {
     }
 
     /// Returns true if the batch is being retried to a newer leader.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#hasLeaderChangedForTheOngoingRetry")]
     pub fn has_leader_changed_for_the_ongoing_retry(&self) -> bool {
         let attempts = self.attempts();
         let is_retry = attempts >= 1;
@@ -213,6 +220,7 @@ impl ProducerBatch {
     ///
     /// Returns `Ok(future)` if the record was appended, or `Err(callback)` if there isn't
     /// sufficient room (the callback is returned so the caller can retry with a new batch).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#tryAppend")]
     pub fn try_append(
         &mut self,
         timestamp: i64,
@@ -260,6 +268,7 @@ impl ProducerBatch {
     ///
     /// Returns `Ok(())` if the record has been successfully appended, or returns the
     /// `Thunk` back via `Err(thunk)` if there was no room so it can be reused.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#tryAppendForSplit")]
     fn try_append_for_split(
         &mut self,
         timestamp: i64,
@@ -300,6 +309,7 @@ impl ProducerBatch {
     }
 
     /// Abort the batch and complete the future and callbacks.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#abort")]
     pub fn abort(&self, error: Error) {
         let prev = self.final_state.compare_exchange(
             FINAL_STATE_NONE,
@@ -327,6 +337,7 @@ impl ProducerBatch {
     }
 
     /// Check if the batch has been completed (either successfully or exceptionally).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isDone")]
     pub fn is_done(&self) -> bool {
         self.final_state().is_some()
     }
@@ -334,6 +345,7 @@ impl ProducerBatch {
     /// Complete the batch successfully.
     ///
     /// Returns `true` if the batch was completed as a result of this call.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#complete")]
     pub fn complete(&self, base_offset: i64, log_append_time: i64) -> bool {
         self.done(base_offset, log_append_time, None)
     }
@@ -341,6 +353,7 @@ impl ProducerBatch {
     /// Complete the batch exceptionally.
     ///
     /// Returns `true` if the batch was completed as a result of this call.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#complete")]
     pub fn complete_with_error(
         &self,
         _top_level_error: Error,
@@ -350,6 +363,7 @@ impl ProducerBatch {
     }
 
     /// Finalize the state of a batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#done")]
     fn done(
         &self,
         base_offset: i64,
@@ -409,6 +423,7 @@ impl ProducerBatch {
         false
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#completeFutureAndFireCallbacks")]
     fn complete_future_and_fire_callbacks(
         &self,
         base_offset: i64,
@@ -475,6 +490,7 @@ impl ProducerBatch {
     }
 
     /// Split the batch into smaller batches.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#split")]
     pub fn split(&mut self, split_batch_size: i32) -> VecDeque<ProducerBatch> {
         let memory_records = self.validate_and_get_records();
         let mut batches = self.split_records_into_batches(&memory_records, split_batch_size);
@@ -500,6 +516,7 @@ impl ProducerBatch {
         memory_records
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#splitRecordsIntoBatches")]
     fn split_records_into_batches(
         &mut self,
         memory_records: &MemoryRecords,
@@ -556,6 +573,7 @@ impl ProducerBatch {
         batches
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#finalizeSplitBatches")]
     fn finalize_split_batches(&self, batches: &mut VecDeque<ProducerBatch>) {
         // Chain all split batch ProduceRequestResults to the original batch's produceFuture
         for split_batch in batches.iter() {
@@ -588,6 +606,7 @@ impl ProducerBatch {
     /// sequence is not set" — so a `MESSAGE_TOO_LARGE` response would break the
     /// idempotent send path. Surfaced by Milestone 11 Phase 4, which is the first
     /// phase where the accumulator has a `TransactionManager` at all.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#assignProducerStateToBatches")]
     fn assign_producer_state_to_batches(&self, batches: &mut VecDeque<ProducerBatch>) {
         if !self.has_sequence() {
             return;
@@ -602,6 +621,7 @@ impl ProducerBatch {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#createBatchOffAccumulatorForRecord")]
     fn create_batch_off_accumulator_for_record(
         &self,
         key: Option<&[u8]>,
@@ -629,26 +649,31 @@ impl ProducerBatch {
     }
 
     /// Returns whether the batch uses compression.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isCompressed")]
     pub fn is_compressed(&self) -> bool {
         self.records_builder.compression().compression_type() != CompressionType::None
     }
 
     /// Whether the delivery timeout has been reached.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#hasReachedDeliveryTimeout")]
     pub fn has_reached_delivery_timeout(&self, delivery_timeout_ms: i64, now: i64) -> bool {
         delivery_timeout_ms <= now - self.created_ms
     }
 
     /// The final state of this batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#finalState")]
     pub fn final_state(&self) -> Option<FinalState> {
         to_final_state(self.final_state.load(Ordering::SeqCst))
     }
 
     /// The number of delivery attempts.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#attempts")]
     pub fn attempts(&self) -> i32 {
         self.attempts.load(Ordering::SeqCst)
     }
 
     /// Re-enqueue this batch for retry.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#reenqueued")]
     pub fn reenqueued(&mut self, now: i64) {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         self.last_attempt_ms = self.last_append_time.max(now);
@@ -657,26 +682,31 @@ impl ProducerBatch {
     }
 
     /// The time the batch has been in the queue.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#queueTimeMs")]
     pub fn queue_time_ms(&self) -> i64 {
         self.drained_ms - self.created_ms
     }
 
     /// How long the batch has waited since the last attempt.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#waitedTimeMs")]
     pub fn waited_time_ms(&self, now_ms: i64) -> i64 {
         (now_ms - self.last_attempt_ms).max(0)
     }
 
     /// Mark the batch as drained at the given time.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#drained")]
     pub fn drained(&mut self, now_ms: i64) {
         self.drained_ms = self.drained_ms.max(now_ms);
     }
 
     /// Whether this batch was created by splitting a larger batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isSplitBatch")]
     pub fn is_split_batch(&self) -> bool {
         self.is_split_batch
     }
 
     /// Returns if the batch is being retried for sending to kafka.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#inRetry")]
     pub fn in_retry(&self) -> bool {
         self.retry
     }
@@ -689,27 +719,32 @@ impl ProducerBatch {
     /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
     ///
     /// The returned [`MemoryRecords`] wraps a refcounted [`bytes::Bytes`], so this
-    /// clones a handle, not the record bytes (CLAUDE.md §12).
+    /// clones a handle, not the record bytes (CLAUDE.md §14).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#records")]
     pub fn records(&mut self) -> MemoryRecords {
         self.records_builder.build()
     }
 
     /// The estimated size in bytes of the batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#estimatedSizeInBytes")]
     pub fn estimated_size_in_bytes(&self) -> usize {
         self.records_builder.estimated_size_in_bytes()
     }
 
     /// The compression ratio of the batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#compressionRatio")]
     pub fn compression_ratio(&self) -> f64 {
         self.records_builder.compression_ratio()
     }
 
     /// Whether the batch is full.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isFull")]
     pub fn is_full(&self) -> bool {
         self.records_builder.is_full()
     }
 
     /// Set the producer state for idempotent/transactional producing.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#setProducerState")]
     pub fn set_producer_state(
         &mut self,
         producer_id: i64,
@@ -722,6 +757,7 @@ impl ProducerBatch {
     }
 
     /// Reset the producer state (for sequence number reset).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#resetProducerState")]
     pub fn reset_producer_state(&mut self, producer_id: i64, producer_epoch: i16, base_sequence: i32) {
         debug!(
             "Resetting sequence number of batch with current sequence {} for partition {} to {}",
@@ -739,11 +775,13 @@ impl ProducerBatch {
     }
 
     /// Release resources required for record appends (e.g. compression buffers).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#closeForRecordAppends")]
     pub fn close_for_record_appends(&mut self) {
         self.records_builder.close_for_record_appends();
     }
 
     /// Close this batch, updating compression ratio estimates.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#close")]
     pub fn close(&mut self) {
         self.records_builder.close();
         if !self.records_builder.is_control_batch() {
@@ -757,11 +795,13 @@ impl ProducerBatch {
     }
 
     /// Abort the record builder and reset the state of the underlying buffer.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#abortRecordAppends")]
     pub fn abort_record_appends(&mut self) {
         self.records_builder.abort();
     }
 
     /// Whether the records have been built (closed).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isClosed")]
     pub fn is_closed(&self) -> bool {
         self.records_builder.is_closed()
     }
@@ -771,7 +811,8 @@ impl ProducerBatch {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#buffer")]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
     }
@@ -785,84 +826,100 @@ impl ProducerBatch {
     }
 
     /// Returns the initial capacity of the buffer.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#initialCapacity")]
     pub fn initial_capacity(&self) -> usize {
         self.records_builder.initial_capacity()
     }
 
     /// Whether the batch is still writable (not closed).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isWritable")]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
     }
 
     /// The magic version.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#magic")]
     pub fn magic(&self) -> i8 {
         self.records_builder.magic()
     }
 
     /// The producer ID.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.records_builder.producer_id()
     }
 
     /// The producer epoch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#producerEpoch")]
     pub fn producer_epoch(&self) -> i16 {
         self.records_builder.producer_epoch()
     }
 
     /// The base sequence.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#baseSequence")]
     pub fn base_sequence(&self) -> i32 {
         self.records_builder.base_sequence()
     }
 
     /// The last sequence number.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#lastSequence")]
     pub fn last_sequence(&self) -> i32 {
         self.records_builder.base_sequence() + self.records_builder.num_records() - 1
     }
 
     /// Whether this batch has a sequence assigned.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#hasSequence")]
     pub fn has_sequence(&self) -> bool {
         self.base_sequence() != RecordBatch::NO_SEQUENCE
     }
 
     /// Whether this batch is transactional.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isTransactional")]
     pub fn is_transactional(&self) -> bool {
         self.records_builder.is_transactional()
     }
 
     /// Whether the sequence has been reset.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#sequenceHasBeenReset")]
     pub fn sequence_has_been_reset(&self) -> bool {
         self.reopened
     }
 
     /// Whether the buffer has been deallocated.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isBufferDeallocated")]
     pub fn is_buffer_deallocated(&self) -> bool {
         self.buffer_deallocated
     }
 
     /// Mark the buffer as deallocated.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#markBufferDeallocated")]
     pub fn mark_buffer_deallocated(&mut self) {
         self.buffer_deallocated = true;
     }
 
     /// Whether the batch is in-flight.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isInflight")]
     pub fn is_inflight(&self) -> bool {
         self.inflight
     }
 
     /// Set the inflight status.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#setInflight")]
     pub fn set_inflight(&mut self, inflight: bool) {
         self.inflight = inflight;
     }
 
     /// The current leader epoch (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#currentLeaderEpoch")]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#attemptsWhenLeaderLastChanged")]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed
     }
@@ -891,8 +948,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::compress::Compression;
+    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 
@@ -901,11 +958,12 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none().build(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchAbort")]
     fn test_batch_abort() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let future = batch
@@ -924,6 +982,7 @@ mod tests {
     /// Translated from `ProducerBatchTest.testBatchCannotAbortTwice`.
     #[test]
     #[should_panic(expected = "Batch has already been completed")]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchCannotAbortTwice")]
     fn test_batch_cannot_abort_twice() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         batch
@@ -943,6 +1002,7 @@ mod tests {
     /// Java: `assertThrows(IllegalStateException.class, () -> batch.complete(1000L, 20L))`
     /// Rust: panics because a Succeeded batch must not attempt another state change to Succeeded.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchCannotCompleteTwice")]
     fn test_batch_cannot_complete_twice() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         batch
@@ -1044,6 +1104,7 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testBatchExpiration`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchExpiration")]
     fn test_batch_expiration() {
         let delivery_timeout_ms: i64 = 10240;
         let batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
@@ -1056,6 +1117,7 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testBatchExpirationAfterReenqueue`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchExpirationAfterReenqueue")]
     fn test_batch_expiration_after_reenqueue() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         // Set batch.retry = true
@@ -1066,6 +1128,9 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testShouldNotAttemptAppendOnceRecordsBuilderIsClosedForAppends`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testShouldNotAttemptAppendOnceRecordsBuilderIsClosedForAppends"
+    )]
     fn test_should_not_attempt_append_once_records_builder_is_closed_for_appends() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let result0 = batch.try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW);
@@ -1083,11 +1148,12 @@ mod tests {
     /// Only tests with NONE compression since we only support NONE currently
     /// in record-level iteration.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testSplitPreservesHeaders")]
     fn test_split_preserves_headers() {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -1128,6 +1194,7 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testWithLeaderChangesAcrossRetries`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testWithLeaderChangesAcrossRetries")]
     fn test_with_leader_changes_across_retries() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
 
@@ -1291,13 +1358,16 @@ mod tests {
     /// original batch. Only tests magic V2 + NONE compression since our MemoryRecordsBuilder
     /// only supports magic V2 and record-level iteration for NONE compression.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testSplitPreservesMagicAndCompressionType"
+    )]
     fn test_split_preserves_magic_and_compression_type() {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -1346,7 +1416,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -1377,7 +1447,7 @@ mod tests {
         assert_eq!(split_record_count, appended, "no record may be lost by the split");
     }
 
-    /// `definition-of-done.md` §10 / CLAUDE.md §11-12 for
+    /// `definition-of-done.md` §10 / CLAUDE.md §13-12 for
     /// [`ProducerBatch::records`], which `Sender::send_producer_data` calls once per
     /// drained batch.
     ///
@@ -1391,7 +1461,7 @@ mod tests {
     ///   2. **Re-reading is free and copies nothing.** Every call after the first
     ///      allocates zero and hands back the *same* bytes, at the same address. That
     ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
-    ///      (CLAUDE.md §12) now that it re-reads the batch instead of panicking.
+    ///      (CLAUDE.md §14) now that it re-reads the batch instead of panicking.
     ///
     /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
     /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a
@@ -1406,7 +1476,7 @@ mod tests {
             let builder = MemoryRecords::builder_with_buffer_magic(
                 vec![0u8; 4096],
                 RecordBatch::CURRENT_MAGIC_VALUE,
-                Compression::none(),
+                Compression::none().build(),
                 TimestampType::CreateTime,
                 0,
             );
@@ -1491,6 +1561,7 @@ mod tests {
     ///
     /// Verifies that callbacks are invoked exactly once when a batch is aborted.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testBatchAbort")]
     fn test_batch_abort_with_callback() {
         use std::sync::atomic::{AtomicI32, Ordering};
 

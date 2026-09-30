@@ -42,8 +42,8 @@ use confluent_kafka::admin::{
     DescribeTopicsOptions, ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
     NewPartitionReassignment, OffsetSpec, OpType,
 };
-use confluent_kafka::common::Errors;
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::Error;
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
@@ -73,9 +73,12 @@ async fn produce_records(ctx: &TestContext, topic: &str, partition: i32, num: us
     ]);
     ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-            .expect("build producer");
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("build producer");
     let value = vec![b'x'; value_len];
     let mut last = None;
     for i in 0..num {
@@ -206,7 +209,7 @@ async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPart
             .get(topic)
             .unwrap_or_else(|| panic!("{backend} backend: {topic} missing from the describe result"))
         {
-            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Err(format!(
+            Err(e) if matches!(e, Error::UnknownTopicOrPartition(_)) => Err(format!(
                 "{backend} backend: describe topic {topic}: {e} \
                  (the topic has not reached the broker that answered describeTopics yet)"
             )),
@@ -396,7 +399,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // `ListOffsetsRequest.json`'s `"validVersions": "1-11"` /
     // `"latestVersionUnstable": false` mark v11 as a stable, released part of
     // 4.2 — not gated behind an unstable-versions flag). Our client already
-    // negotiates v11 for this spec (`ListOffsetsRequestBuilder::
+    // negotiates v11 for this spec (`list_offsets_request::Builder::
     // for_consumer_options` sets `min_version = 11` for
     // `require_earliest_pending_upload_timestamp`, covered by
     // `for_consumer_require_earliest_pending_upload_forces_v11`), so the
@@ -582,9 +585,8 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
     let error = outcome
         .as_ref()
         .expect_err(&format!("{backend} backend: the preferred replica is already the leader"));
-    assert_eq!(
-        error.error(),
-        Errors::ElectionNotNeeded,
+    assert!(
+        matches!(error, Error::ElectionNotNeeded(_)),
         "{backend} backend: on a single-broker cluster the only expected error is ELECTION_NOT_NEEDED, got {error}"
     );
 
@@ -615,7 +617,7 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// distinction is *preserved* is the code path rather than this scenario — every
 /// layer keeps it as an explicit discriminant (`optional TopicPartitionList` on
 /// the wire, the C entry points' `all_partitions` flag, `admin.py`'s
-/// `partitions is None` column, `ElectLeadersRequestBuilder`'s
+/// `partitions is None` column, `elect_leaders_request::Builder`'s
 /// `set_topic_partitions(None)`), never as an emptiness test.
 ///
 /// Both election types are exercised. On a healthy partition they agree — Java
@@ -654,9 +656,8 @@ async fn elect_leaders_explicit_set_is_not_cluster_wide<F: AdminBackendFactory>(
             .unwrap_or_else(|| panic!("{backend} backend: {tp} missing from the explicit result"))
             .as_ref()
             .expect_err(&format!("{backend} backend: {election_type:?} election is not needed"));
-        assert_eq!(
-            error.error(),
-            Errors::ElectionNotNeeded,
+        assert!(
+            matches!(error, Error::ElectionNotNeeded(_)),
             "{backend} backend: {election_type:?} on a healthy partition is ELECTION_NOT_NEEDED, got {error}"
         );
 
@@ -674,7 +675,7 @@ async fn elect_leaders_explicit_set_is_not_cluster_wide<F: AdminBackendFactory>(
         assert!(
             cluster_wide
                 .values()
-                .all(|outcome| !matches!(outcome.as_ref().err().map(|e| e.error()), Some(Errors::ElectionNotNeeded))),
+                .all(|outcome| !matches!(outcome, Err(Error::ElectionNotNeeded(_)))),
             "{backend} backend: no entry of a cluster-wide election may be ELECTION_NOT_NEEDED, got {cluster_wide:?}"
         );
     }
@@ -805,9 +806,8 @@ async fn alter_partition_reassignments_cancel_reaches_the_broker<F: AdminBackend
         .expect_err(&format!(
             "{backend} backend: cancelling a partition with no reassignment in progress must fail"
         ));
-    assert_eq!(
-        error.error(),
-        Errors::NoReassignmentInProgress,
+    assert!(
+        matches!(error, Error::NoReassignmentInProgress(_)),
         "{backend} backend: a cancellation with nothing in flight is NO_REASSIGNMENT_IN_PROGRESS; \
          an INVALID_REPLICA_ASSIGNMENT or IllegalArgument here would mean the absent Optional was \
          encoded as an empty replica list. Got {error}"
@@ -856,11 +856,11 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
     // Throttle replication before there is anything to replicate. Both halves are
     // required: the rate is a dynamic *broker* config and the replica list is a
     // *topic* config, and a rate with no throttled replicas throttles nothing.
-    let topic_resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let topic_resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
     set_config(&admin, &topic_resource, "leader.replication.throttled.replicas", "*").await;
     set_config(&admin, &topic_resource, "follower.replication.throttled.replicas", "*").await;
     for id in &ids {
-        let broker_resource = ConfigResource::new(ConfigResourceType::Broker, id.to_string());
+        let broker_resource = ConfigResource::new(config_resource::Type::Broker, id.to_string());
         set_config(&admin, &broker_resource, "leader.replication.throttled.rate", "1024").await;
         set_config(&admin, &broker_resource, "follower.replication.throttled.rate", "1024").await;
     }

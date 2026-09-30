@@ -17,8 +17,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.MemberState`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 /// Membership state for a single KIP-848 consumer group member.
@@ -27,6 +25,7 @@ use std::fmt;
 /// per-variant `previousValidStates` via per-enum-constant bodies; Rust
 /// collapses to a single `match` per method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberState")]
 pub(crate) enum MemberState {
     /// Member has a group id, but it is not subscribed to any topic to receive
     /// automatic assignments. This will be the state when the member has never
@@ -103,6 +102,7 @@ impl MemberState {
     ///
     /// Mirrors Java's `MemberState.getPreviousValidStates()`. The list is
     /// `&'static` to avoid per-call allocations.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberState#getPreviousValidStates")]
     pub(crate) fn previous_valid_states(&self) -> &'static [MemberState] {
         match self {
             // STABLE.previousValidStates = Arrays.asList(JOINING, ACKNOWLEDGING, RECONCILING);
@@ -158,6 +158,7 @@ impl MemberState {
     /// preparing to leave the group).
     ///
     /// Mirrors Java's `MemberState.canHandleNewAssignment()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberState#canHandleNewAssignment")]
     pub(crate) fn can_handle_new_assignment(&self) -> bool {
         Self::Reconciling.previous_valid_states().contains(self)
     }

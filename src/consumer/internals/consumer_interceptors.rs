@@ -21,8 +21,6 @@
 //! `AsyncKafkaConsumer` (Phase 11); `dead_code` is allowed at the module
 //! level to keep the public-API surface frozen ahead of consumer wiring.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -101,6 +99,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
 ///    not the previous-good batch. See
 ///    [`ConsumerInterceptor::on_consume`] §"Anti-pattern" for the
 ///    explicit example.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptors")]
 pub(crate) struct ConsumerInterceptors<K: 'static, V: 'static> {
     interceptors: Vec<Box<dyn ConsumerInterceptor<K, V>>>,
 }
@@ -116,6 +115,7 @@ where
     /// Translates Java's `ConsumerInterceptors(List<ConsumerInterceptor<K,V>>,
     /// Metrics)` constructor. The `Metrics` parameter is dropped — see Phase
     /// 2 PLAN.md for the rationale (no metrics framework in this milestone).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptors#ConsumerInterceptors")]
     pub(crate) fn new(interceptors: Vec<Box<dyn ConsumerInterceptor<K, V>>>) -> Self {
         Self { interceptors }
     }
@@ -124,6 +124,7 @@ where
     /// will be no-ops in this case.
     ///
     /// Translates Java's `boolean isEmpty()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptors#isEmpty")]
     pub(crate) fn is_empty(&self) -> bool {
         self.interceptors.is_empty()
     }
@@ -160,6 +161,7 @@ where
     ///
     /// Translates Java's
     /// `ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptors#onConsume")]
     pub(crate) fn on_consume(&self, records: &mut ConsumerRecords<K, V>) {
         for interceptor in &self.interceptors {
             // Wrap the `&mut` call in `AssertUnwindSafe`: `&mut T` is not
@@ -192,6 +194,7 @@ where
     ///
     /// Translates Java's
     /// `void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptors#onCommit")]
     pub(crate) fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
         for interceptor in &self.interceptors {
             // `&self` call: trait objects are not auto-`RefUnwindSafe`, so
@@ -478,6 +481,7 @@ mod tests {
 
     /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptorsTest#testOnConsumeChain")]
     fn test_on_consume_chain() {
         let filter_partition1 = 5;
         let filter_partition2 = 6;
@@ -551,6 +555,7 @@ mod tests {
 
     /// Translates `ConsumerInterceptorsTest.testOnCommitChain`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerInterceptorsTest#testOnCommitChain")]
     fn test_on_commit_chain() {
         let filter_partition1 = 5;
         let filter_partition2 = 6;

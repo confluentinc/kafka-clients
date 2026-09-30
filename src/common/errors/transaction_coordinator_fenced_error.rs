@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Indicates that the transaction coordinator sending a WriteTxnMarker is no
     /// longer the current coordinator for a given producer.
     ///
-    /// Corresponds to Java's `TransactionCoordinatorFencedException`, error code [`Errors::TransactionCoordinatorFenced`].
+    /// Corresponds to Java's `TransactionCoordinatorFencedException`, error code `Errors::TransactionCoordinatorFenced`.
     ///
     /// Java `extends` chain:
     ///    `TransactionCoordinatorFencedException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionCoordinatorFencedException")]
     TransactionCoordinatorFencedError,
     code: Errors::TransactionCoordinatorFenced,
     extends: [

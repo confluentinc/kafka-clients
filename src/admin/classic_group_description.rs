@@ -26,6 +26,7 @@ use crate::common::{ClassicGroupState, Node};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ClassicGroupDescription`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription")]
 pub struct ClassicGroupDescription {
     group_id: String,
     protocol: String,
@@ -45,6 +46,7 @@ impl ClassicGroupDescription {
     /// Collection<MemberDescription>, ClassicGroupState, Node,
     /// Set<AclOperation>)`. `coordinator` is `None` when the coordinator is not
     /// known (Java's nullable `Node`).
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription")]
     pub fn new(
         group_id: impl Into<String>,
         protocol: impl Into<String>,
@@ -66,43 +68,51 @@ impl ClassicGroupDescription {
     }
 
     /// The id of the classic group. Mirrors `groupId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
     /// The group protocol type. Mirrors `protocol()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#protocol")]
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
 
     /// The group protocol data. Mirrors `protocolData()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#protocolData")]
     pub fn protocol_data(&self) -> &str {
         &self.protocol_data
     }
 
     /// Whether the group is a simple consumer group (empty protocol). Mirrors
     /// `isSimpleConsumerGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.protocol.is_empty()
     }
 
     /// The members of the classic group. Mirrors `members()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#members")]
     pub fn members(&self) -> &[MemberDescription] {
         &self.members
     }
 
     /// The classic group state. Mirrors `state()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#state")]
     pub fn state(&self) -> ClassicGroupState {
         self.state
     }
 
     /// The classic group coordinator, or `None` if not known. Mirrors
     /// `coordinator()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#coordinator")]
     pub fn coordinator(&self) -> Option<&Node> {
         self.coordinator.as_ref()
     }
 
     /// The authorized operations for this group. Mirrors `authorizedOperations()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#authorizedOperations")]
     pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
         self.authorized_operations.as_ref()
     }

@@ -22,6 +22,7 @@ use super::ScramMechanism;
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialDeletion")]
 pub struct UserScramCredentialDeletion {
     user: String,
     mechanism: ScramMechanism,
@@ -32,6 +33,7 @@ impl UserScramCredentialDeletion {
     ///
     /// * `user` — the mandatory user
     /// * `mechanism` — the mandatory mechanism
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialDeletion#UserScramCredentialDeletion")]
     pub fn new(user: impl Into<String>, mechanism: ScramMechanism) -> Self {
         Self { user: user.into(), mechanism }
     }
@@ -42,6 +44,7 @@ impl UserScramCredentialDeletion {
     }
 
     /// Returns the always non-null mechanism.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialDeletion#mechanism")]
     pub fn mechanism(&self) -> ScramMechanism {
         self.mechanism
     }

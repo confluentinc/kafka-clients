@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
 //! SSL/TLS configuration for Kafka connections.
 //!
 //! Translated from `org.apache.kafka.common.config.SslConfigs`.
@@ -37,12 +36,6 @@ use crate::common::config::config_def::ValidList;
 // Config key constants (matching Java SslConfigs constant values)
 // ---------------------------------------------------------------------------
 
-/// Translates the Java constants class
-/// `org.apache.kafka.common.config.SslConfigs`,
-/// which has no instance state, so it becomes a unit struct hosting its
-/// statics as associated items.
-pub struct SslConfigs;
-
 impl SslConfigs {
     /// Config key: `ssl.protocol`.
     pub const SSL_PROTOCOL_CONFIG: &str = "ssl.protocol";
@@ -65,7 +58,7 @@ impl SslConfigs {
     /// Config key: `ssl.keystore.type`.
     pub const SSL_KEYSTORE_TYPE_CONFIG: &str = "ssl.keystore.type";
 
-    /// Default keystore type in Java. Rust defaults to PEM (see [`SslConfig::default`]).
+    /// Default keystore type in Java. Rust defaults to PEM (see [`SslConfigs::default`]).
     pub const DEFAULT_SSL_KEYSTORE_TYPE: &str = "JKS";
 
     /// Config key: `ssl.keystore.key`.
@@ -89,7 +82,7 @@ impl SslConfigs {
     /// Config key: `ssl.truststore.type`.
     pub const SSL_TRUSTSTORE_TYPE_CONFIG: &str = "ssl.truststore.type";
 
-    /// Default truststore type in Java. Rust defaults to PEM (see [`SslConfig::default`]).
+    /// Default truststore type in Java. Rust defaults to PEM (see [`SslConfigs::default`]).
     pub const DEFAULT_SSL_TRUSTSTORE_TYPE: &str = "JKS";
 
     /// Config key: `ssl.truststore.location`.
@@ -112,83 +105,87 @@ impl SslConfigs {
 
     /// Config key: `ssl.secure.random.implementation`.
     pub const SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG: &str = "ssl.secure.random.implementation";
-
-    /// Config key: `ssl.engine.factory.class`.
-    pub const SSL_ENGINE_FACTORY_CLASS_CONFIG: &str = "ssl.engine.factory.class";
 }
 
 // ---------------------------------------------------------------------------
-// SslConfig struct
+// SslConfigs value fields
 // ---------------------------------------------------------------------------
 
 /// SSL/TLS configuration for Kafka connections.
 ///
-/// Maps to Java's `SslConfigs` — only the client-relevant subset.
+/// Translated from `org.apache.kafka.common.config.SslConfigs`. The Java class
+/// hosts only the `ssl.*` config keys and defaults; the values themselves
+/// travel in the `Map<String, ?>` handed to `SslFactory.configure`. The Rust
+/// struct keeps Java's name and constants, and additionally holds the
+/// client-relevant subset of those values, parsed once from the client config
+/// properties. The fields are crate-private: callers set them through the
+/// `ssl.*` properties of a client config, as a Java caller does.
+///
 /// Java defaults to JKS keystores; Rust/rustls works natively with PEM,
 /// so `truststore_type` and `keystore_type` default to `"PEM"`.
-///
-/// Translated from `org.apache.kafka.common.config.SslConfigs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SslConfig {
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
+pub struct SslConfigs {
     /// Path to the trust store file (CA certificates).
     /// Corresponds to `ssl.truststore.location`.
-    pub truststore_location: Option<String>,
+    pub(crate) truststore_location: Option<String>,
 
     /// Password for the trust store file.
     /// Corresponds to `ssl.truststore.password`.
-    pub truststore_password: Option<String>,
+    pub(crate) truststore_password: Option<String>,
 
     /// Trusted certificates in PEM format (alternative to `truststore_location`).
     /// Corresponds to `ssl.truststore.certificates`.
-    pub truststore_certificates: Option<String>,
+    pub(crate) truststore_certificates: Option<String>,
 
     /// Trust store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
     /// Corresponds to `ssl.truststore.type`. Default: `"PEM"`.
-    pub truststore_type: String,
+    pub(crate) truststore_type: String,
 
     /// Path to the key store file (client certificate for mTLS).
     /// Corresponds to `ssl.keystore.location`.
-    pub keystore_location: Option<String>,
+    pub(crate) keystore_location: Option<String>,
 
     /// Password for the key store file.
     /// Corresponds to `ssl.keystore.password`.
-    pub keystore_password: Option<String>,
+    pub(crate) keystore_password: Option<String>,
 
     /// Private key in PEM format (alternative to `keystore_location`).
     /// Corresponds to `ssl.keystore.key`.
-    pub keystore_key: Option<String>,
+    pub(crate) keystore_key: Option<String>,
 
     /// Certificate chain in PEM format (alternative to `keystore_location`).
     /// Corresponds to `ssl.keystore.certificate.chain`.
-    pub keystore_certificate_chain: Option<String>,
+    pub(crate) keystore_certificate_chain: Option<String>,
 
     /// Key store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
     /// Corresponds to `ssl.keystore.type`. Default: `"PEM"`.
-    pub keystore_type: String,
+    pub(crate) keystore_type: String,
 
     /// Password for the private key.
     /// Corresponds to `ssl.key.password`.
-    pub key_password: Option<String>,
+    pub(crate) key_password: Option<String>,
 
     /// Endpoint identification algorithm for hostname verification.
     /// `"https"` enables hostname verification (default). Empty string disables it.
     /// Corresponds to `ssl.endpoint.identification.algorithm`.
-    pub endpoint_identification_algorithm: String,
+    pub(crate) endpoint_identification_algorithm: String,
 
     /// Enabled TLS protocol versions.
     /// Corresponds to `ssl.enabled.protocols`. Default: `["TLSv1.2", "TLSv1.3"]`.
-    pub enabled_protocols: Vec<String>,
+    pub(crate) enabled_protocols: Vec<String>,
 }
 
-impl Default for SslConfig {
-    /// Returns an `SslConfig` with sensible defaults for Rust/rustls:
+impl Default for SslConfigs {
+    /// Returns an `SslConfigs` with sensible defaults for Rust/rustls:
     ///
     /// - PEM format for both truststore and keystore
     /// - TLSv1.2 and TLSv1.3 enabled
     /// - `"https"` endpoint identification (hostname verification enabled)
     /// - All optional paths/passwords are `None`
     fn default() -> Self {
-        SslConfig {
+        SslConfigs {
             truststore_location: None,
             truststore_password: None,
             truststore_certificates: None,
@@ -205,7 +202,7 @@ impl Default for SslConfig {
     }
 }
 
-impl SslConfig {
+impl SslConfigs {
     /// Applies a single `ssl.*` configuration key/value pair to `ssl`.
     ///
     /// Shared by [`crate::producer::ProducerConfig`] and
@@ -221,7 +218,7 @@ impl SslConfig {
     /// [`Error::Config`] if `ssl.enabled.protocols` or `ssl.cipher.suites`
     /// fails Java's `ValidList.anyNonDuplicateValues(true, false)`
     /// (`SslConfigs.java:129-130`): an empty element (duplicates are removed).
-    pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfig, key: &str, value: &str) -> Result<(), Error> {
+    pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfigs, key: &str, value: &str) -> Result<(), Error> {
         match key {
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
                 ssl.truststore_location = Some(value.to_string());
@@ -287,31 +284,31 @@ mod tests {
 
     #[test]
     fn test_default_truststore_type() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         assert_eq!(config.truststore_type, "PEM");
     }
 
     #[test]
     fn test_default_keystore_type() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         assert_eq!(config.keystore_type, "PEM");
     }
 
     #[test]
     fn test_default_endpoint_identification() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         assert_eq!(config.endpoint_identification_algorithm, "https");
     }
 
     #[test]
     fn test_default_enabled_protocols() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         assert_eq!(config.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"]);
     }
 
     #[test]
     fn test_default_optional_fields_are_none() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         assert!(config.truststore_location.is_none());
         assert!(config.truststore_password.is_none());
         assert!(config.truststore_certificates.is_none());
@@ -324,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_custom_config() {
-        let config = SslConfig {
+        let config = SslConfigs {
             truststore_location: Some("/path/to/truststore.pem".to_owned()),
             truststore_password: Some("changeit".to_owned()),
             keystore_location: Some("/path/to/keystore.pem".to_owned()),
@@ -334,7 +331,7 @@ mod tests {
             keystore_type: "PKCS12".to_owned(),
             key_password: Some("keypass".to_owned()),
             endpoint_identification_algorithm: String::new(),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         assert_eq!(config.truststore_location.as_deref(), Some("/path/to/truststore.pem"));
         assert_eq!(config.truststore_password.as_deref(), Some("changeit"));
@@ -346,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_clone() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         let cloned = config.clone();
         assert_eq!(config.truststore_type, cloned.truststore_type);
         assert_eq!(config.keystore_type, cloned.keystore_type);
@@ -384,7 +381,6 @@ mod tests {
             SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
             "ssl.secure.random.implementation"
         );
-        assert_eq!(SslConfigs::SSL_ENGINE_FACTORY_CLASS_CONFIG, "ssl.engine.factory.class");
         assert_eq!(SslConfigs::SSL_KEYMANAGER_ALGORITHM_CONFIG, "ssl.keymanager.algorithm");
         assert_eq!(SslConfigs::SSL_TRUSTMANAGER_ALGORITHM_CONFIG, "ssl.trustmanager.algorithm");
     }
@@ -400,31 +396,31 @@ mod tests {
 
     #[test]
     fn test_apply_ssl_config_key_sets_each_field() {
-        let mut ssl = SslConfig::default();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass").unwrap();
-        SslConfig::apply_ssl_config_key(
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass").unwrap();
+        SslConfigs::apply_ssl_config_key(
             &mut ssl,
             SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
             "-----BEGIN CERTIFICATE-----",
         )
         .unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----")
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----")
             .unwrap();
-        SslConfig::apply_ssl_config_key(
+        SslConfigs::apply_ssl_config_key(
             &mut ssl,
             SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
             "-----BEGIN CERTIFICATE-----",
         )
         .unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "")
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "")
             .unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3")
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3")
             .unwrap();
 
         assert_eq!(ssl.truststore_location.as_deref(), Some("/ts.pem"));
@@ -443,9 +439,9 @@ mod tests {
 
     #[test]
     fn test_apply_ssl_config_key_unknown_key_is_ignored() {
-        let mut ssl = SslConfig::default();
+        let mut ssl = SslConfigs::default();
         // Unknown key must not panic and must leave defaults untouched.
-        SslConfig::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value").unwrap();
         assert_eq!(ssl.truststore_type, "PEM");
         assert!(ssl.truststore_location.is_none());
     }
@@ -456,12 +452,12 @@ mod tests {
     #[test]
     fn test_enabled_protocols_list_parsing() {
         for value in ["TLSv1.2,TLSv1.3", "TLSv1.2, TLSv1.3", " TLSv1.2 ,TLSv1.3 "] {
-            let mut ssl = SslConfig::default();
-            SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value).unwrap();
+            let mut ssl = SslConfigs::default();
+            SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value).unwrap();
             assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"], "{value:?}");
         }
-        let mut ssl = SslConfig::default();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, " ").unwrap();
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, " ").unwrap();
         assert!(ssl.enabled_protocols.is_empty());
     }
 
@@ -478,17 +474,17 @@ mod tests {
             ),
             (",,", "Configuration 'ssl.enabled.protocols' values must not be empty."),
         ] {
-            let mut ssl = SslConfig::default();
-            match SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value) {
+            let mut ssl = SslConfigs::default();
+            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value) {
                 Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
                 other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
             }
         }
-        let mut ssl = SslConfig::default();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "").unwrap();
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "").unwrap();
         assert!(ssl.enabled_protocols.is_empty());
         // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")
             .unwrap();
         assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2".to_string()]);
     }
@@ -501,14 +497,14 @@ mod tests {
             ("A,,B", "Configuration 'ssl.cipher.suites' values must not be empty."),
             (",,", "Configuration 'ssl.cipher.suites' values must not be empty."),
         ] {
-            let mut ssl = SslConfig::default();
-            match SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, value) {
+            let mut ssl = SslConfigs::default();
+            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, value) {
                 Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
                 other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
             }
         }
-        let mut ssl = SslConfig::default();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
-        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
+        let mut ssl = SslConfigs::default();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
+        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
     }
 }

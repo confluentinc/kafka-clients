@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnsupportedVersionException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The version of API is not supported.
     ///
-    /// Corresponds to Java's `UnsupportedVersionException`, error code [`Errors::UnsupportedVersion`].
+    /// Corresponds to Java's `UnsupportedVersionException`, error code `Errors::UnsupportedVersion`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedVersionException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedVersionException")]
     UnsupportedVersionError,
     code: Errors::UnsupportedVersion,
     extends: [

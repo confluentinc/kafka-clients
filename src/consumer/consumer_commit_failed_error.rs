@@ -31,6 +31,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// unlike its sibling [`ConsumerRetriableCommitFailedError`](super::ConsumerRetriableCommitFailedError),
 /// which goes through `RetriableException`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException")]
 pub struct ConsumerCommitFailedError {
     message: String,
 }
@@ -42,11 +43,13 @@ impl ConsumerCommitFailedError {
     pub const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
 
     /// Create the error with the given message.
+    #[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException#CommitFailedException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
     }
 
     /// Create the error with Java's no-arg constructor message.
+    #[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException#CommitFailedException")]
     pub fn with_default_message() -> Self {
         Self::new(ConsumerCommitFailedError::CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE)
     }

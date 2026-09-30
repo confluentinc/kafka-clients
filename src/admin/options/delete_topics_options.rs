@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions")]
 pub struct DeleteTopicsOptions {
     timeout_ms: Option<i32>,
     retry_on_quota_violation: bool,

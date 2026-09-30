@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that gives the min over its samples.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Min")]
 pub struct Min {
     inner: SampledStat,
 }
@@ -43,6 +44,7 @@ impl SampledStatKind for MinKind {
 
 impl Min {
     /// Create a `Min`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Min#Min")]
     pub fn new() -> Self {
         // Java seeds the initial value with Double.MAX_VALUE.
         Self { inner: SampledStat::new(f64::MAX, Box::new(MinKind)) }

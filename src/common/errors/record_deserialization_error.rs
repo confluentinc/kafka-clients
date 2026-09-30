@@ -26,6 +26,7 @@ use crate::common::record::TimestampType;
 /// Corresponds to Java's nested
 /// `RecordDeserializationException.DeserializationExceptionOrigin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeserializationErrorOrigin {
     /// The key could not be deserialized.
     Key,
@@ -43,15 +44,16 @@ pub enum DeserializationErrorOrigin {
 ///    `RecordDeserializationException` -> `SerializationException` ->
 ///   `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because it
+/// Hand-written rather than declared with `kafka_error_type!` because it
 /// carries the eight fields Java exposes — they identify *which* record failed,
 /// and consumer error handlers read them.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException")]
 pub struct RecordDeserializationError {
     message: String,
     /// The underlying cause — Java's ten-argument constructor takes one.
     source: Option<Box<crate::common::Error>>,
-    origin: Option<DeserializationErrorOrigin>,
+    origin: DeserializationErrorOrigin,
     partition: TopicPartition,
     offset: i64,
     timestamp: i64,
@@ -63,11 +65,15 @@ pub struct RecordDeserializationError {
 
 impl RecordDeserializationError {
     /// Create a deserialization error with the full record context, mirroring
-    /// Java's ten-argument constructor (minus the `cause`, which [`Error`] does
-    /// not carry).
+    /// Java's ten-argument constructor minus the `cause`, which
+    /// [`Self::with_source`] attaches.
     ///
-    /// [`Error`]: crate::common::Error
-    #[allow(clippy::too_many_arguments)]
+    /// Java's deprecated nine-argument constructor, which records no origin, is
+    /// not translated (CLAUDE.md §3).
+    #[expect(clippy::too_many_arguments)]
+    #[doc(
+        alias = "org.apache.kafka.common.errors.RecordDeserializationException#RecordDeserializationException(DeserializationExceptionOrigin,TopicPartition,long,long,TimestampType,ByteBuffer,ByteBuffer,Headers,String,Throwable)"
+    )]
     pub fn new(
         origin: DeserializationErrorOrigin,
         partition: TopicPartition,
@@ -82,7 +88,7 @@ impl RecordDeserializationError {
         Self {
             message: message.into(),
             source: None,
-            origin: Some(origin),
+            origin,
             partition,
             offset,
             timestamp,
@@ -93,43 +99,50 @@ impl RecordDeserializationError {
         }
     }
 
-    /// Which side (key or value) failed; `None` via the deprecated Java
-    /// constructor that does not record it.
-    pub fn origin(&self) -> Option<DeserializationErrorOrigin> {
+    /// Which side (key or value) failed.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#origin")]
+    pub fn origin(&self) -> DeserializationErrorOrigin {
         self.origin
     }
 
     /// The partition of the offending record.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#topicPartition")]
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.partition
     }
 
     /// The offset of the offending record.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// The timestamp of the offending record.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The timestamp type of the offending record.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#timestampType")]
     pub fn timestamp_type(&self) -> TimestampType {
         self.timestamp_type
     }
 
     /// The raw key bytes, or `None` if absent.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#keyBuffer")]
     pub fn key_buffer(&self) -> Option<&[u8]> {
         self.key_buffer.as_deref()
     }
 
     /// The raw value bytes, or `None` if absent.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#valueBuffer")]
     pub fn value_buffer(&self) -> Option<&[u8]> {
         self.value_buffer.as_deref()
     }
 
     /// The record headers, or `None` if absent.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#headers")]
     pub fn headers(&self) -> Option<&RecordHeaders> {
         self.headers.as_ref()
     }
@@ -137,6 +150,9 @@ impl RecordDeserializationError {
     /// Attach the error that caused this deserialization failure, mirroring the
     /// `cause` argument of Java's ten-argument constructor.
     #[must_use]
+    #[doc(
+        alias = "org.apache.kafka.common.errors.RecordDeserializationException#RecordDeserializationException(DeserializationExceptionOrigin,TopicPartition,long,long,TimestampType,ByteBuffer,ByteBuffer,Headers,String,Throwable)"
+    )]
     pub fn with_source(mut self, source: crate::common::Error) -> Self {
         self.source = Some(Box::new(source));
         self

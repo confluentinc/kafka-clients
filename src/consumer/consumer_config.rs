@@ -36,10 +36,10 @@ use log::warn;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::requests::JoinGroupRequest;
-use crate::common::security::SecurityProtocol;
-use crate::consumer::AutoOffsetResetStrategy;
+use crate::common::security::auth::SecurityProtocol;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
@@ -57,6 +57,7 @@ static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---
     /// `group.id` — the consumer group identifier. `None` means no group.
@@ -169,12 +170,6 @@ pub struct ConsumerConfig {
     pub(crate) metrics_num_samples: i32,
     /// `metrics.recording.level`
     pub(crate) metrics_recording_level: String,
-    /// `metric.reporters`
-    pub(crate) metric_reporter_classes: Vec<String>,
-
-    // --- Interceptors ---
-    /// `interceptor.classes`
-    pub(crate) interceptor_classes: Vec<String>,
 
     // --- Share consumer (accepted silently per scope §20) ---
     /// `share.acknowledgement.mode`
@@ -190,10 +185,10 @@ pub struct ConsumerConfig {
     pub(crate) security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub(crate) sasl_config: SaslConfig,
+    pub(crate) sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    pub(crate) ssl_config: SslConfig,
+    pub(crate) ssl_config: SslConfigs,
 
     // --- Config providers ---
     /// `config.providers`
@@ -259,17 +254,14 @@ impl Default for ConsumerConfig {
             metrics_sample_window_ms: 30_000,
             metrics_num_samples: 2,
             metrics_recording_level: "INFO".to_string(),
-            metric_reporter_classes: Vec::new(),
-
-            interceptor_classes: Vec::new(),
 
             share_acknowledgement_mode: "implicit".to_string(),
             share_acquire_mode: "batch_optimized".to_string(),
 
             security_providers: None,
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
 
             config_providers: Vec::new(),
         }
@@ -303,9 +295,8 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup` (see
-    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ConsumerConfig.java`
-    /// declares its own public alias of the `CommonClientConfigs` constant.
+    /// Config key: `client.dns.lookup`. Java's `ConsumerConfig.java` declares it as its
+    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
@@ -396,11 +387,6 @@ impl ConsumerConfig {
     pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = "metrics.num.samples";
     /// Config key: `metrics.recording.level`.
     pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = "metrics.recording.level";
-    /// Config key: `metric.reporters`.
-    pub const METRIC_REPORTER_CLASSES_CONFIG: &'static str = "metric.reporters";
-
-    /// Config key: `interceptor.classes`.
-    pub const INTERCEPTOR_CLASSES_CONFIG: &'static str = "interceptor.classes";
 
     /// Config key: `share.acknowledgement.mode`.
     pub const SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: &'static str = "share.acknowledgement.mode";
@@ -426,7 +412,7 @@ impl ConsumerConfig {
         &self.bootstrap_servers
     }
     /// `client.dns.lookup`.
-    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+    pub(crate) fn client_dns_lookup(&self) -> ClientDnsLookup {
         self.client_dns_lookup
     }
     /// `client.id`.
@@ -575,6 +561,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
@@ -823,15 +810,6 @@ impl ConsumerConfig {
                     }
                     config.metrics_recording_level = value.clone();
                 },
-                Self::METRIC_REPORTER_CLASSES_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:576`).
-                    config.metric_reporter_classes = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
-                Self::INTERCEPTOR_CLASSES_CONFIG => {
-                    // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:618`).
-                    config.interceptor_classes = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
                 Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => {
                     // Accepted silently per scope §20.
                     config.share_acknowledgement_mode = value.clone();
@@ -859,7 +837,7 @@ impl ConsumerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
                     // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:707`).
@@ -1088,6 +1066,7 @@ mod tests {
     /// Invalid `security.protocol` → `illegal_argument` with asserted message
     /// content (DoD §3): the config key, the bad value, and the valid names.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
@@ -1333,14 +1312,12 @@ mod tests {
 
     /// The consumer's other list keys use
     /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
-    /// 449, 576, 618, 707): empty elements are rejected, duplicates are
-    /// removed, and an empty list is allowed.
+    /// 449, 707): empty elements are rejected, duplicates are removed, and an
+    /// empty list is allowed.
     #[test]
     fn test_other_list_configs_valid_list() {
         for key in [
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
-            ConsumerConfig::METRIC_REPORTER_CLASSES_CONFIG,
-            ConsumerConfig::INTERCEPTOR_CLASSES_CONFIG,
             ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
         ] {
             let with = |value: &str| {

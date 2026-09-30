@@ -46,7 +46,7 @@
 //! 5. **Refresh `maximumTimeToWait`** — fold each manager's
 //!    `maximum_time_to_wait(now)` into a min; store into the cached
 //!    `AtomicI64` so the app side can read it without locking the
-//!    manager set (CLAUDE.md §11: single numeric across tasks ⇒ atomic).
+//!    manager set (CLAUDE.md §13: single numeric across tasks ⇒ atomic).
 //! 6. **Reap expired application events** — `CompletableEventReaper::reap`.
 //!
 //! `cleanup()` is the symmetric path: `pollOnClose` from each manager,
@@ -98,7 +98,7 @@
 //! `maybeFailOnMetadataError(List.of(event))` arm) covers "immediately
 //! completed events" — both arms are present and behavior-faithful.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -106,6 +106,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::KafkaClient;
+use crate::common::utils::Time;
 
 use super::ConsumerMembershipManager;
 use super::NetworkClientDelegate;
@@ -115,65 +116,6 @@ use super::events::ApplicationEventEnvelope;
 use super::events::ApplicationEventProcessor;
 use super::events::CompletableEventReaper;
 use super::events::EventProcessor;
-
-/// Time source used by `ConsumerNetworkThread` for the `current_time_ms`
-/// argument to `runOnce` and `cleanup`. Mirrors Java's `Time` interface
-/// (production: `SystemTime::now()`; tests: a mock clock).
-///
-/// Sync, single `milliseconds()` method — same shape as the existing
-/// `FetchCollectorTime` (`fetch_collector.rs`).
-pub(crate) trait ThreadTime: Send + Sync + 'static {
-    fn milliseconds(&self) -> i64;
-
-    /// Monotonic nanoseconds. Mirrors Java's `Time.nanoseconds()`, which is
-    /// `System.nanoTime()` (`SystemTime.java:41`) — monotonic, with an arbitrary
-    /// origin, so only differences between two readings are meaningful.
-    ///
-    /// Used by `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
-    /// `committed-time-ns-total` sensors, both of which are computed as
-    /// `nanoseconds() - start`. The default derives from `milliseconds()`
-    /// (sufficient for mock clocks in tests, which do not assert nanosecond
-    /// precision); `SystemThreadTime` overrides it with a real monotonic
-    /// reading.
-    fn nanoseconds(&self) -> i64 {
-        self.milliseconds().saturating_mul(1_000_000)
-    }
-}
-
-/// Process-wide origin for [`SystemThreadTime::nanoseconds`], the analog of the
-/// arbitrary origin `System.nanoTime()` counts from.
-///
-/// `Instant` deliberately exposes no epoch, so a fixed reference is needed to
-/// turn it into an `i64`. Captured once on first use; only differences between
-/// readings are meaningful, which is all any caller uses.
-static NANO_ORIGIN: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
-
-/// Production implementation of [`ThreadTime`]. `milliseconds()` is wall-clock
-/// (Java's `Time.milliseconds()` is `System.currentTimeMillis()`);
-/// `nanoseconds()` is monotonic (Java's is `System.nanoTime()`).
-#[derive(Debug, Default)]
-pub(crate) struct SystemThreadTime;
-
-impl ThreadTime for SystemThreadTime {
-    fn milliseconds(&self) -> i64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    }
-
-    /// Monotonic, via `Instant` — NOT `SystemTime`.
-    ///
-    /// This used to read `SystemTime::now().duration_since(UNIX_EPOCH)`, which is
-    /// wall-clock: an NTP step backwards makes a later reading smaller than an
-    /// earlier one, so `nanoseconds() - start` goes negative and the *monotonic*
-    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters run
-    /// backwards. `Instant` cannot regress.
-    fn nanoseconds(&self) -> i64 {
-        NANO_ORIGIN.elapsed().as_nanos() as i64
-    }
-}
 
 /// Consumer background task — single `tokio::spawn` per consumer instance
 /// per `consumer-threading.md` §10. Owns the request managers, the
@@ -194,6 +136,7 @@ impl ThreadTime for SystemThreadTime {
 /// `request_managers` is wrapped in `Arc<std::sync::Mutex<...>>` to
 /// match the ownership scheme established in Phase 10 commit 4 (the
 /// `ApplicationEventProcessor` also borrows it).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread")]
 pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Receiver half of the application event channel. Drained at the
     /// start of every `run_once` via non-blocking `try_recv`.
@@ -232,8 +175,8 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
     /// metric (wired in `run_once` when `async_consumer_metrics` is set).
     last_poll_time_ms: i64,
-    /// Time source — `SystemThreadTime` in production, mock in tests.
-    time: Arc<dyn ThreadTime>,
+    /// Time source — `SystemTime` in production, `MockTime` in tests.
+    time: Arc<dyn Time>,
     /// Membership manager — driven explicitly per iteration per the
     /// Phase-10 Critic round-1 aside. Java drives it via
     /// `entries()` because `AbstractMembershipManager` implements
@@ -282,9 +225,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// `Supplier<...>` indirections (Rust takes the already-constructed
     /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
     /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#ConsumerNetworkThread")]
     pub(crate) fn new(
-        time: Arc<dyn ThreadTime>,
+        time: Arc<dyn Time>,
         application_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
         application_event_reaper: Arc<std::sync::Mutex<CompletableEventReaper>>,
         application_event_processor: ApplicationEventProcessor,
@@ -337,6 +281,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     }
 
     /// Java: `isRunning()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#isRunning")]
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -353,6 +298,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
     /// Java: `maximumTimeToWait()` — read-only accessor exposed to the
     /// app side.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#maximumTimeToWait")]
     pub(crate) fn maximum_time_to_wait(&self) -> i64 {
         self.cached_max_time_to_wait_ms.load(Ordering::Acquire)
     }
@@ -362,6 +308,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// `network_client_delegate.wakeup()` to unblock the underlying
     /// `KafkaClient::poll`. The trigger is shared with the app side
     /// (`AsyncKafkaConsumer::wakeup()` in Phase 11).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#wakeup")]
     pub(crate) async fn wakeup(&self) {
         self.wakeup.wakeup();
         // Java additionally calls `networkClientDelegate.wakeup()` to
@@ -392,6 +339,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// One iteration of the bg-task loop. Mirrors Java's
     /// `ConsumerNetworkThread.runOnce()` line-for-line; see the
     /// module-level docstring for the phase-by-phase mapping.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#runOnce")]
     pub(crate) async fn run_once(&mut self) {
         // ──── Phase 1: drain application events ────
         self.process_application_events();
@@ -621,7 +569,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // races it against the wakeup signals would drop the poll future at an
         // `.await` — e.g. right after `connection_states.connecting()` marked a
         // node `Connecting` but before the socket is created — permanently
-        // stranding that node (CLAUDE.md §9.6.1; full analysis in
+        // stranding that node (CLAUDE.md §11.6.1; full analysis in
         // `design/current/consumer-join-stall-rootcause.md`).
         //
         // Instead we run the poll to completion and deliver wakeups the way
@@ -764,6 +712,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     ///
     /// We use `try_recv` in a `while let` loop instead of `recv().await`
     /// to mirror Java's `drainTo` (`consumer-threading.md` §10).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents")]
     fn process_application_events(&mut self) {
         // Phase 28: drain into a scratch buffer reused across iterations
         // (taken/restored so `&mut self` stays available to the dispatch
@@ -903,6 +852,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// managers, drains any remaining unsent requests for up to the
     /// close-timeout, reaps any in-flight completable events, and closes
     /// the managers / delegate.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#cleanup")]
     pub(crate) async fn cleanup(&mut self) {
         log::trace!("Closing the consumer network thread");
         let close_timeout_ms = self.close_timeout_ms.load(Ordering::Acquire);
@@ -1033,6 +983,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// and the wakeup-token shutdown signal, and calls `cleanup` on
     /// exit. Intended to be spawned via `tokio::spawn` from the Phase
     /// 11 consumer constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
         log::debug!("Consumer network thread started");
         while self.is_running() {
@@ -1046,41 +997,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::Notify;
-    /// Regression: `SystemThreadTime::nanoseconds()` must be monotonic.
-    ///
-    /// It previously read `SystemTime::now().duration_since(UNIX_EPOCH)` —
-    /// wall-clock — so an NTP step backwards made
-    /// `nanoseconds() - commit_start_ns` negative, driving the monotonic
-    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters backwards
-    /// (`async_kafka_consumer.rs:4079`, `:4519`). Java uses `System.nanoTime()`.
-    #[test]
-    fn system_thread_time_nanoseconds_is_monotonic_and_not_epoch_based() {
-        use super::{SystemThreadTime, ThreadTime};
-
-        let t = SystemThreadTime;
-        let mut previous = t.nanoseconds();
-        for _ in 0..1_000 {
-            let current = t.nanoseconds();
-            assert!(current >= previous, "nanoseconds() went backwards: {current} < {previous}");
-            previous = current;
-        }
-
-        // An elapsed count from process start, not a Unix-epoch timestamp
-        // (~1.7e18). Fails loudly if this reverts to wall-clock.
-        assert!(
-            t.nanoseconds() < 1_577_836_800_000_000_000,
-            "nanoseconds() looks like a Unix-epoch timestamp, not an elapsed count"
-        );
-
-        // milliseconds() stays wall-clock, matching System.currentTimeMillis().
-        assert!(t.milliseconds() > 1_577_836_800_000, "milliseconds() should remain wall-clock");
-    }
-
     use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize};
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     use crate::ApiVersions;
     use crate::MockClient;
@@ -1088,9 +1009,9 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::GroupMembershipOperation;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMembershipManager;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::OffsetsRequestManager;
@@ -1110,23 +1031,12 @@ mod tests {
 
     use super::*;
 
-    // ─── Mock time source for tests (Java's MockTime) ───
-    struct MockTime {
-        millis: Mutex<i64>,
-    }
-    impl MockTime {
-        fn new(start: i64) -> Self {
-            Self { millis: Mutex::new(start) }
-        }
-        fn sleep(&self, dur_ms: i64) {
-            let mut g = self.millis.lock().unwrap();
-            *g += dur_ms;
-        }
-    }
-    impl ThreadTime for MockTime {
-        fn milliseconds(&self) -> i64 {
-            *self.millis.lock().unwrap()
-        }
+    use crate::common::utils::MockTime;
+
+    /// Java's `new MockTime(0, start, 0)`: no auto-tick, the wall clock at
+    /// `start_ms`.
+    fn mock_time(start_ms: i64) -> MockTime {
+        MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, start_ms, 0)
     }
 
     /// `RequestManager` spy used to replace Mockito's
@@ -1366,8 +1276,7 @@ mod tests {
     }
 
     fn make_delegate(config: &ConsumerConfig, metadata: Arc<ConsumerMetadata>) -> NetworkClientDelegate<MockClient> {
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time_provider);
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0)));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1378,8 +1287,7 @@ mod tests {
         config: &ConsumerConfig,
         metadata: Arc<ConsumerMetadata>,
     ) -> NetworkClientDelegate<CountingClient> {
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = CountingClient::new(MockClient::with_static_nodes(Vec::<Node>::new(), time_provider));
+        let client = CountingClient::new(MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0))));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1421,13 +1329,18 @@ mod tests {
         let has_in_flight_script = counting_delegate.client_for_test_ref().has_in_flight_script();
         let delegate = Arc::new(AsyncMutex::new(counting_delegate));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let thread = ConsumerNetworkThread::new(
-            time.clone() as Arc<dyn ThreadTime>,
+            time.clone() as Arc<dyn Time>,
             rx,
             reaper.clone(),
             processor,
@@ -1482,13 +1395,18 @@ mod tests {
         let event_notify = counting_delegate.wakeup_handle();
         let delegate = Arc::new(AsyncMutex::new(counting_delegate));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let mut thread = ConsumerNetworkThread::new(
-            time.clone() as Arc<dyn ThreadTime>,
+            time.clone() as Arc<dyn Time>,
             rx,
             reaper.clone(),
             processor,
@@ -1521,6 +1439,7 @@ mod tests {
             subs,
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             config.request_timeout_ms() as i64,
             60_000,
@@ -1559,13 +1478,18 @@ mod tests {
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let thread = ConsumerNetworkThread::new(
-            time.clone() as Arc<dyn ThreadTime>,
+            time.clone() as Arc<dyn Time>,
             rx,
             reaper.clone(),
             processor,
@@ -1599,7 +1523,7 @@ mod tests {
             beh,
             false,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(
@@ -1613,13 +1537,18 @@ mod tests {
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let thread = ConsumerNetworkThread::new(
-            time as Arc<dyn ThreadTime>,
+            time as Arc<dyn Time>,
             rx,
             reaper,
             processor,
@@ -1640,6 +1569,9 @@ mod tests {
     /// is the caller's responsibility; the flag-flip semantics are
     /// identical.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testEnsureCloseStopsRunningThread"
+    )]
     async fn test_ensure_close_stops_running_thread() {
         let (thread, _tx, _reaper, _time, _rm) = make_thread_no_membership();
         assert!(thread.is_running(), "ConsumerNetworkThread should start running when created");
@@ -1740,6 +1672,9 @@ mod tests {
     ///   `verify(networkClientDelegate).addAll(...);`
     ///   `verify(networkClientDelegate).poll(...)`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testRequestsTransferFromManagersToClientOnThreadRun"
+    )]
     async fn test_requests_transfer_from_managers_to_client_on_thread_run() {
         let coordinator_spy = SpyRequestManager::new(1_000, 1_000);
         let heartbeat_spy = SpyRequestManager::new(2_000, 2_000);
@@ -1796,6 +1731,7 @@ mod tests {
     ///      manager's `maximumTimeToWait(now)`. With a single heartbeat
     ///      spy returning 1_000, the cached value must be 1_000.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testMaximumTimeToWait")]
     async fn test_maximum_time_to_wait() {
         const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 1_000;
 
@@ -1825,6 +1761,7 @@ mod tests {
     /// Rust observes via a deadline-zero tracked event becoming
     /// `Err(Timeout)` on its receiver.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testCleanupInvokesReaper")]
     async fn test_cleanup_invokes_reaper() {
         let (mut thread, _tx, reaper, _time, _rm) = make_thread_no_membership();
         // Add a deadline-zero completable event so reap-on-close
@@ -1847,6 +1784,7 @@ mod tests {
     /// Rust observes via a same-instant-deadline tracked event whose
     /// receiver becomes `Err(Timeout)` after `runOnce`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testRunOnceInvokesReaper")]
     async fn test_run_once_invokes_reaper() {
         let (mut thread, _tx, reaper, time, _rm) = make_thread_no_membership();
         // Register a deadline-zero event; clock starts at 1_000, so
@@ -1872,6 +1810,7 @@ mod tests {
     /// Verifies `delegate.poll(..., onClose=true)` is called exactly
     /// twice during cleanup.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testSendUnsentRequests")]
     async fn test_send_unsent_requests() {
         let (mut fixture, poll_call_count, _poll_timeouts, has_in_flight_script) =
             make_thread_with_dyn_managers(Vec::new());
@@ -2068,13 +2007,18 @@ mod tests {
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let mut thread = ConsumerNetworkThread::new(
-            time as Arc<dyn ThreadTime>,
+            time as Arc<dyn Time>,
             rx,
             reaper,
             processor,
@@ -2131,13 +2075,18 @@ mod tests {
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let mut thread = ConsumerNetworkThread::new(
-            time as Arc<dyn ThreadTime>,
+            time as Arc<dyn Time>,
             rx,
             reaper,
             processor,
@@ -2391,7 +2340,7 @@ mod tests {
             subs.clone(),
             "g".to_string(),
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ));
 
@@ -2414,13 +2363,18 @@ mod tests {
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor =
-            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
         let mut thread = ConsumerNetworkThread::new(
-            time as Arc<dyn ThreadTime>,
+            time as Arc<dyn Time>,
             rx,
             reaper,
             processor,

@@ -27,6 +27,7 @@ use std::fmt;
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.SubscriptionPattern`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern")]
 pub struct SubscriptionPattern {
     pattern: String,
 }
@@ -35,11 +36,13 @@ impl SubscriptionPattern {
     /// Create a new `SubscriptionPattern` for the given regex pattern.
     ///
     /// The pattern is stored as-is; no client-side validation is performed.
+    #[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern#SubscriptionPattern")]
     pub fn new(pattern: impl Into<String>) -> Self {
         Self { pattern: pattern.into() }
     }
 
     /// Returns the regular expression pattern compatible with RE2/J.
+    #[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern#pattern")]
     pub fn pattern(&self) -> &str {
         &self.pattern
     }

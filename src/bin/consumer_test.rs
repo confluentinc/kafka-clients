@@ -68,8 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Commit explicitly after each batch instead of on a timer.
     .set_enable_auto_commit(false);
 
-    let mut consumer =
-        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        config,
+        Box::new(StringDeserializer::new()),
+        Box::new(StringDeserializer::new()),
+    )?;
 
     consumer.subscribe_with_topics(vec![TOPIC.to_string()]).await?;
     println!("Subscribed to '{TOPIC}' on {BOOTSTRAP_SERVERS}. Press Ctrl-C to stop.");

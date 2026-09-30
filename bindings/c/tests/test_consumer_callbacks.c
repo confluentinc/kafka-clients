@@ -93,13 +93,13 @@ static void on_commit(kafka_consumer_OffsetMap_t *offsets,
         int32_t count = kafka_consumer_OffsetMap_count(offsets);
         r->entry_count = count;
         for (int32_t i = 0; i < count && i < 4; i++) {
-            const kafka_consumer_TopicPartition_t *key =
+            const kafka_common_TopicPartition_t *key =
                 kafka_consumer_OffsetMap_get_key(offsets, i);
             const kafka_consumer_OffsetAndMetadata_t *value =
                 kafka_consumer_OffsetMap_get_value(offsets, i);
             snprintf(r->topics[i], sizeof(r->topics[i]), "%s",
-                     kafka_consumer_TopicPartition_topic(key));
-            r->partitions[i] = kafka_consumer_TopicPartition_partition(key);
+                     kafka_common_TopicPartition_topic(key));
+            r->partitions[i] = kafka_common_TopicPartition_partition(key);
             r->offsets[i] = kafka_consumer_OffsetAndMetadata_offset(value);
             snprintf(r->metadata[i], sizeof(r->metadata[i]), "%s",
                      kafka_consumer_OffsetAndMetadata_metadata(value));
@@ -411,9 +411,9 @@ static void test_consumer_handle_new_destroy(void) {
     TEST_ASSERT_NOT_EQUAL(h, h2);
     kafka_consumer_ConsumerHandle_destroy(h2);
 
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
     TEST_ASSERT_NOT_NULL(asg);
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    kafka_common_TopicPartitionList_destroy(asg);
 
     /* NULL is a no-op. */
     kafka_consumer_ConsumerHandle_destroy(NULL);
@@ -437,26 +437,26 @@ static void test_consumer_handle_sync_getters_empty_on_mock(void) {
     TEST_ASSERT_NOT_NULL(h);
 
     /* The consumer itself does see the assignment... */
-    kafka_consumer_TopicPartitionList_t *owner_asg = kafka_consumer_Consumer_assignment(c);
+    kafka_common_TopicPartitionList_t *owner_asg = kafka_consumer_Consumer_assignment(c);
     TEST_ASSERT_NOT_NULL(owner_asg);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(owner_asg));
-    kafka_consumer_TopicPartitionList_destroy(owner_asg);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(owner_asg));
+    kafka_common_TopicPartitionList_destroy(owner_asg);
 
     /* ...while the mock-derived handle reports empty sets. */
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
     TEST_ASSERT_NOT_NULL(asg);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(asg));
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(asg));
+    kafka_common_TopicPartitionList_destroy(asg);
 
     kafka_consumer_StringList_t *sub = kafka_consumer_ConsumerHandle_subscription(h);
     TEST_ASSERT_NOT_NULL(sub);
     TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(sub));
     kafka_consumer_StringList_destroy(sub);
 
-    kafka_consumer_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
+    kafka_common_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
     TEST_ASSERT_NOT_NULL(paused);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(paused));
-    kafka_consumer_TopicPartitionList_destroy(paused);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(paused));
+    kafka_common_TopicPartitionList_destroy(paused);
 
     kafka_consumer_ConsumerHandle_destroy(h);
     kafka_consumer_Consumer_destroy(c);
@@ -593,10 +593,10 @@ static void on_commit_probing_guard(kafka_consumer_OffsetMap_t *offsets,
     kafka_common_Error_destroy(owner_err);
 
     /* The handle bypasses it: the getter succeeds... */
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
     p->handle_assignment_non_null = asg != NULL;
-    p->handle_assignment_count = asg != NULL ? kafka_consumer_TopicPartitionList_count(asg) : -1;
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    p->handle_assignment_count = asg != NULL ? kafka_common_TopicPartitionList_count(asg) : -1;
+    kafka_common_TopicPartitionList_destroy(asg);
 
     /* ...and the async op reaches the core (mock => unsupported, NOT the
      * ConcurrentModification the guarded path would have produced). */
@@ -683,15 +683,15 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     kafka_consumer_StringList_destroy(sub);
 
     /* Nothing assigned yet (no broker), so these are empty but non-null. */
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
     TEST_ASSERT_NOT_NULL(asg);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(asg));
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(asg));
+    kafka_common_TopicPartitionList_destroy(asg);
 
-    kafka_consumer_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
+    kafka_common_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
     TEST_ASSERT_NOT_NULL(paused);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(paused));
-    kafka_consumer_TopicPartitionList_destroy(paused);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(paused));
+    kafka_common_TopicPartitionList_destroy(paused);
 
     /* An async op reaches the real implementation: `position` on a partition
      * that is not assigned fails immediately (no broker round trip). */
@@ -720,14 +720,14 @@ typedef struct {
 } tp_snapshot_t;
 
 /* Snapshots `list` and then destroys it — the callee owns the delivered list. */
-static void take_and_destroy_list(kafka_consumer_TopicPartitionList_t *list, tp_snapshot_t *out) {
-    out->count = list != NULL ? kafka_consumer_TopicPartitionList_count(list) : -1;
+static void take_and_destroy_list(kafka_common_TopicPartitionList_t *list, tp_snapshot_t *out) {
+    out->count = list != NULL ? kafka_common_TopicPartitionList_count(list) : -1;
     for (int32_t i = 0; i < out->count && i < 4; i++) {
-        const kafka_consumer_TopicPartition_t *tp = kafka_consumer_TopicPartitionList_get(list, i);
-        snprintf(out->topics[i], sizeof(out->topics[i]), "%s", kafka_consumer_TopicPartition_topic(tp));
-        out->partitions[i] = kafka_consumer_TopicPartition_partition(tp);
+        const kafka_common_TopicPartition_t *tp = kafka_common_TopicPartitionList_get(list, i);
+        snprintf(out->topics[i], sizeof(out->topics[i]), "%s", kafka_common_TopicPartition_topic(tp));
+        out->partitions[i] = kafka_common_TopicPartition_partition(tp);
     }
-    kafka_consumer_TopicPartitionList_destroy(list);
+    kafka_common_TopicPartitionList_destroy(list);
 }
 
 /* What the plain revoked/assigned listener callbacks observed. */
@@ -750,7 +750,7 @@ static void listener_result_init(listener_result_t *r) {
     r->assigned.count = -1;
 }
 
-static kafka_common_Error_t *on_revoked(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_revoked(kafka_common_TopicPartitionList_t *partitions, void *user_data) {
     listener_result_t *r = (listener_result_t *)user_data;
     r->revoked_thread = pthread_self();
     take_and_destroy_list(partitions, &r->revoked);
@@ -760,7 +760,7 @@ static kafka_common_Error_t *on_revoked(kafka_consumer_TopicPartitionList_t *par
 
 #define LISTENER_ERROR_MESSAGE "listener refused the assignment"
 
-static kafka_common_Error_t *on_assigned(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_assigned(kafka_common_TopicPartitionList_t *partitions, void *user_data) {
     listener_result_t *r = (listener_result_t *)user_data;
     r->assigned_thread = pthread_self();
     take_and_destroy_list(partitions, &r->assigned);
@@ -820,9 +820,9 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
     TEST_ASSERT_EQUAL_INT32(1, result.assigned.partitions[1]);
 
     /* The assignment really was applied. */
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_Consumer_assignment(c);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_TopicPartitionList_count(asg));
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TopicPartitionList_count(asg));
+    kafka_common_TopicPartitionList_destroy(asg);
 
     /* Second rebalance down to {test-1}: test-0 is revoked, nothing is added —
      * but `onPartitionsAssigned` still fires, with an empty list. */
@@ -839,8 +839,8 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
     TEST_ASSERT_EQUAL_INT32(0, result.assigned.count);
 
     asg = kafka_consumer_Consumer_assignment(c);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(asg));
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(asg));
+    kafka_common_TopicPartitionList_destroy(asg);
 
     kafka_consumer_Consumer_destroy(c);
 }
@@ -936,10 +936,10 @@ typedef struct {
     kafka_common_Error_t *rebalance_error;
 } parking_listener_t;
 
-static kafka_common_Error_t *on_assigned_parking(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_parking(kafka_common_TopicPartitionList_t *partitions,
                                                      void *user_data) {
     parking_listener_t *p = (parking_listener_t *)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
 
     atomic_store(&p->in_callback, 1);
     pthread_mutex_lock(&p->mutex);
@@ -952,10 +952,10 @@ static kafka_common_Error_t *on_assigned_parking(kafka_consumer_TopicPartitionLi
     return NULL;
 }
 
-static kafka_common_Error_t *on_revoked_parking(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_revoked_parking(kafka_common_TopicPartitionList_t *partitions,
                                                     void *user_data) {
     (void)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
     return NULL;
 }
 
@@ -1041,10 +1041,10 @@ typedef struct {
     int owner_commit_error_code;
 } listener_reentrancy_t;
 
-static kafka_common_Error_t *on_assigned_reentrant(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_reentrant(kafka_common_TopicPartitionList_t *partitions,
                                                        void *user_data) {
     listener_reentrancy_t *p = (listener_reentrancy_t *)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
 
     /* The sanctioned reentrancy path: a blocking handle op from inside the
      * listener returns (it does not deadlock and is not guard-rejected). */
@@ -1056,9 +1056,9 @@ static kafka_common_Error_t *on_assigned_reentrant(kafka_consumer_TopicPartition
         kafka_common_Error_destroy(handle_err);
     }
 
-    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
     p->handle_assignment_non_null = asg != NULL;
-    kafka_consumer_TopicPartitionList_destroy(asg);
+    kafka_common_TopicPartitionList_destroy(asg);
 
     /* The plain API is not: the app thread driving the rebalance holds the
      * access guard. */
@@ -1070,9 +1070,9 @@ static kafka_common_Error_t *on_assigned_reentrant(kafka_consumer_TopicPartition
     return NULL;
 }
 
-static kafka_common_Error_t *on_revoked_noop(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_revoked_noop(kafka_common_TopicPartitionList_t *partitions, void *user_data) {
     (void)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
     return NULL;
 }
 
@@ -1147,18 +1147,18 @@ static void test_listener_error_propagates(void) {
 
 /* Listener callbacks paired with `destroy_counter_t` user_data — they must NOT
  * reinterpret it as a `listener_result_t`. */
-static kafka_common_Error_t *on_revoked_counting(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_revoked_counting(kafka_common_TopicPartitionList_t *partitions,
                                                      void *user_data) {
     destroy_counter_t *counter = (destroy_counter_t *)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
     atomic_fetch_add(&counter->callback_calls, 1);
     return NULL;
 }
 
-static kafka_common_Error_t *on_assigned_counting(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_counting(kafka_common_TopicPartitionList_t *partitions,
                                                       void *user_data) {
     destroy_counter_t *counter = (destroy_counter_t *)user_data;
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
     atomic_fetch_add(&counter->callback_calls, 1);
     return NULL;
 }
