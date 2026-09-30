@@ -105,7 +105,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
     public void Dispose_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
         Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -118,7 +118,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
     public async Task DisposeAsync_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
         Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -131,7 +131,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
     public async Task Close_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         using AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
         Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -146,7 +146,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // The fourth flavor: Close(CancellationToken) — the same worker, reached with a live token.
         using CancellationTokenSource cts = new CancellationTokenSource();
         using AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
         Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -231,7 +231,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         for (int round = 0; round < Rounds; round++)
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
             // Left in the accumulator: teardown's own StopAccumulator is what drains them, so the
             // group reaches the pump's queue in exactly the F4 window — microseconds before
@@ -282,7 +282,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         for (int round = 0; round < Rounds; round++)
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
             Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -308,7 +308,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         for (int round = 0; round < Rounds; round++)
         {
             using AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
             Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -329,7 +329,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // The accumulator drain must therefore not be what hangs — it hands the records over and
         // exits, and the pre-existing flush-before-join ordering does the rest.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false));
 
         Task<RecordMetadata>[] sends = Fire(producer);
 
@@ -367,7 +367,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // mock would make the test's outcome depend on whether Clear() beat the 10 ms drain window —
         // i.e. on which side of the pre-existing race won, which is not a contract.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
         Task<RecordMetadata>[] sends = Fire(producer);
         producer.Clear();
@@ -392,7 +392,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         for (int round = 0; round < 8; round++)
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
 
             Task sender = Task.Run(() =>
             {
@@ -423,7 +423,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         for (int i = 0; i < 24; i++)
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
             _ = producer.Send(NewRecord(i));
             TestTimeout.Run(producer.Dispose, s_deadline);
         }
@@ -433,7 +433,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
     public void SendAfterDispose_IsRefusedByTheDisposedGuard()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ProducerSendPath.Pump(() => new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray));
         _ = producer.Send(NewRecord(0));
         TestTimeout.Run(producer.Dispose, s_deadline);
 

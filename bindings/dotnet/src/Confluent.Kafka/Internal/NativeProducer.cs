@@ -139,9 +139,67 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    private NativeProducer(SafeProducerHandle handle)
+    /// <summary>
+    /// Selects the async flavor's send path (send-approach-2 POC). Unset or <c>direct</c> → the direct
+    /// path (<see cref="SendDirect"/>: caller-thread <c>send_with_callback_cancellable</c> + push
+    /// delivery on the core's dispatcher thread, no accumulator, no pump). <c>pump</c> → the M11/P3.x
+    /// accumulator + batch thread + pull pump, unchanged, kept so both paths can be measured from one
+    /// build. Read once per producer, before the native producer is created; any other value is
+    /// rejected so a typo cannot silently measure the wrong path.
+    /// </summary>
+    internal const string AsyncSendPathVariable = "CONFLUENT_KAFKA_PRODUCER_ASYNC_SEND_PATH";
+
+    /// <summary>
+    /// Test seam: forces the send path for producers created in the current async flow, overriding
+    /// <see cref="AsyncSendPathVariable"/> without touching process-wide state that a parallel test
+    /// could observe (<see langword="true"/> = direct, <see langword="false"/> = pump).
+    /// </summary>
+    internal static readonly AsyncLocal<bool?> DirectSendOverride = new AsyncLocal<bool?>();
+
+    // kafka_common_ErrorCode_INTERRUPT: a send woken by its SendCancelToken (Java's InterruptException).
+    private const int InterruptErrorCode = -12;
+
+    // The native-token half of a cancellable direct send: fired by the CancellationToken, it wakes
+    // the send parked in the core. Static, so registering allocates only the boxed token pointer.
+    private static readonly Action<object?> s_interruptSend =
+        static state => NativeMethods.SendCancelTokenCancel((IntPtr)state!);
+
+    // true = the direct send path (SendDirect); false = the accumulator + pump path. Fixed at
+    // construction (AsyncSendPathVariable).
+    private readonly bool _directSend;
+
+    private NativeProducer(SafeProducerHandle handle, bool directSend)
     {
         _handle = handle;
+        _directSend = directSend;
+    }
+
+    /// <summary>Whether this producer's async sends take the direct path (test observation point).</summary>
+    internal bool UsesDirectSend => _directSend;
+
+    /// <summary>Resolves <see cref="AsyncSendPathVariable"/> (or the test override) to the send path.</summary>
+    /// <exception cref="ArgumentException">The variable holds a value other than <c>direct</c> / <c>pump</c>.</exception>
+    private static bool ResolveDirectSend()
+    {
+        bool? forced = DirectSendOverride.Value;
+        if (forced.HasValue)
+        {
+            return forced.Value;
+        }
+
+        string? raw = Environment.GetEnvironmentVariable(AsyncSendPathVariable);
+        if (string.IsNullOrWhiteSpace(raw) || string.Equals(raw!.Trim(), "direct", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(raw.Trim(), "pump", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        throw new ArgumentException(
+            $"Environment variable {AsyncSendPathVariable} must be 'direct' or 'pump', not '{raw}'.");
     }
 
     /// <summary>
@@ -187,6 +245,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                     nameof(config));
             }
         }
+
+        // Before any native allocation, so a bad value cannot leak a producer.
+        bool directSend = ResolveDirectSend();
 
         SafeProducerHandle handle;
         IntPtr error;
@@ -240,7 +301,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // The config map is NOT retained: every entry was consumed above, verbatim, into the
         // producer properties the core now owns.
-        return new NativeProducer(handle);
+        return new NativeProducer(handle, directSend);
     }
 
     /// <summary>
@@ -256,9 +317,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         // Non-fallible: MockProducer_new always returns a valid owned handle,
         // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
+        bool directSend = ResolveDirectSend();
         SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
 
-        return new NativeProducer(handle);
+        return new NativeProducer(handle, directSend);
     }
 
     /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
@@ -494,6 +556,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken = default)
     {
+        // send-approach-2 POC: the direct path unless AsyncSendPathVariable selected the pump. Every
+        // line below this is the unchanged pump path.
+        if (_directSend)
+        {
+            return SendDirect(record, delivery, cancellationToken);
+        }
+
         // Preconditions BEFORE any pin (ffi §A5): the ABI does not validate them and panics on
         // violation (UB across FFI). The null-record + serializer-throw preconditions run in the
         // generic client's Send skin (above this carrier — M11/P5, PLAN §5.3), so `record` here is
@@ -608,6 +677,175 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // The SAME awaitable on both routes — the record's delivery future, never a submission
         // handle. (It only held before because the slow path re-awaited `completion.Task` itself.)
         return completion.Task;
+    }
+
+    /// <summary>
+    /// The async flavor's <b>direct</b> send (send-approach-2 POC; Java <c>Producer.send(record)</c> /
+    /// <c>send(record, Callback)</c>): hands the record to the core <b>on the caller's thread</b> and
+    /// returns its delivery <see cref="Task{TResult}"/>, whose outcome arrives through the core's push
+    /// delivery callback (<see cref="ProducerCallbacks.Send"/>) on its dispatcher thread. No
+    /// accumulator, no batch thread, no completion pump.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Blocking — Java's shape.</b> Like Java's <c>send()</c>, the call blocks until the record is
+    /// in the core's accumulator: at most <c>max.block.ms</c> waiting for metadata or
+    /// <c>buffer.memory</c>. Only this caller is blocked — the core takes its producer mutex only
+    /// briefly and never across that wait — so other sends, <c>Flush</c>, <c>PartitionsFor</c> and
+    /// <c>Close</c> proceed, and a close wakes a parked send (it then throws, as Java's does when the
+    /// producer is closed under it). The key / value are pinned only for the call, because the core
+    /// has consumed them by the time it returns (ffi §A4): there is no "do not mutate after Send"
+    /// window on this path.
+    /// </para>
+    /// <para>
+    /// <b>Cancellation — Java's interrupt.</b> An already-canceled token →
+    /// <see cref="OperationCanceledException"/> before anything is sent (precondition, ffi §A5). A
+    /// token canceled <em>while the call is parked</em> wakes it: the record is not appended, the
+    /// delivery callback never fires, and this method throws <see cref="OperationCanceledException"/>
+    /// carrying the token (its <see cref="Exception.InnerException"/> is the core's <c>INTERRUPT</c>
+    /// <see cref="KafkaException"/>) — Java's <c>InterruptException</c> out of a blocked <c>send()</c>,
+    /// with no callback (<c>KafkaProducer.java:1062-1065</c>). A send that did not need to wait is not
+    /// affected: the core polls the send before the token. After the record is appended the token can
+    /// only cancel the returned task's wait (best-effort, as before): the record is still sent and the
+    /// delivery callback still fires.
+    /// </para>
+    /// <para>
+    /// <b>Failures, and who fires the callback.</b> A failure the core reports from the call itself
+    /// (closed producer, a close during the metadata wait) is thrown synchronously and fires
+    /// <b>nothing</b> — Java's <c>doSend</c> rethrows its <c>KafkaException</c> without invoking the
+    /// callback (<c>KafkaProducer.java:1073-1077</c>). An API-level rejection (metadata not available
+    /// after <c>max.block.ms</c>, record too large) is <b>not</b> thrown: as in Java's
+    /// <c>catch (ApiException e)</c> arm the callback fires with the placeholder metadata and the
+    /// returned task faults. The one failure Java reports both ways — a record already appended when a
+    /// transaction-state check failed — is thrown here <em>and</em> later fires the callback with the
+    /// batch's outcome; the core's <c>out_callback_pending</c> is what tells the two kinds apart, so the
+    /// context is released by exactly one side.
+    /// </para>
+    /// <para>
+    /// <b>Ordering.</b> Records from one caller reach the core in call order (each call returns only
+    /// once its record is appended), and the core's single dispatcher thread fires record callbacks in
+    /// completion order, ahead of a later flush's completion — so an awaited <c>Flush</c> returns only
+    /// after every earlier record's callback has run and its task has completed.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was canceled before the call, or while it was parked.
+    /// </exception>
+    /// <exception cref="KafkaException">The core rejected the send synchronously.</exception>
+    internal Task<RecordMetadata> SendDirect(
+        SerializedProducerRecord record,
+        DeliveryRegistration? delivery,
+        CancellationToken cancellationToken = default)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §A5), as on the pump path.
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        int partition = record.Partition ?? -1;
+        long timestamp = record.Timestamp ?? -1L;
+
+        DirectSendCompletion completion = new DirectSendCompletion(delivery);
+        IntPtr userData = completion.Root();
+
+        bool callbackPending = false;
+        IntPtr future = IntPtr.Zero;
+        IntPtr error = IntPtr.Zero;
+        IntPtr cancel = IntPtr.Zero;
+        CancellationTokenRegistration interrupt = default;
+        PinnedTopicCache.TopicPin topic = default;
+        try
+        {
+            // The interned topic pointer is only read during the call (the core copies the topic
+            // before it can park), and the cache is never disposed eagerly on this path — see
+            // ReleaseTopicCache — so the pointer outlives every call that can hold it.
+            topic = _topics.Rent(record.Topic);
+
+            // Only a cancelable token gets a native token + registration, so the plain Send(record)
+            // path allocates nothing for cancellation (DoD §10).
+            if (cancellationToken.CanBeCanceled)
+            {
+                cancel = NativeMethods.SendCancelTokenNew();
+                interrupt = cancellationToken.Register(s_interruptSend, cancel);
+            }
+
+            future = ProducerSendMarshal.SendWithCallback(
+                _handle,
+                topic.Pointer,
+                partition,
+                timestamp,
+                record.Key,
+                record.Value,
+                userData,
+                cancel,
+                out callbackPending,
+                out error);
+        }
+        finally
+        {
+            // Dispose BEFORE destroy: Dispose waits out a cancel callback running on another thread,
+            // so the native token cannot be cancelled after it is freed (the ABI's lifetime rule).
+            interrupt.Dispose();
+            NativeMethods.SendCancelTokenDestroy(cancel);
+            topic.Release();
+
+            // The core will never fire the callback, so the root is ours to free. On a pending
+            // return the trampoline frees it after delivering.
+            if (!callbackPending)
+            {
+                completion.Unroot();
+            }
+        }
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            if (!callbackPending
+                && failure.Code == InterruptErrorCode
+                && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(failure.Message, failure, cancellationToken);
+            }
+
+            throw failure;
+        }
+
+        // The callback carries the same outcome as the future, so the future is not needed.
+        NativeMethods.FutureRecordMetadataDestroy(future);
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            RegisterBestEffortCancel(completion, cancellationToken);
+        }
+
+        return completion.Task;
+    }
+
+    /// <summary>
+    /// After the record is appended, a canceled token cancels only the returned task's wait (the
+    /// pre-POC contract, kept): the record is still sent and the delivery callback still fires; the
+    /// trampoline's later <c>TrySet*</c> on the canceled task is a no-op. The registration is released
+    /// when the task settles.
+    /// </summary>
+    private static void RegisterBestEffortCancel(
+        TaskCompletionSource<RecordMetadata> completion,
+        CancellationToken cancellationToken)
+    {
+        CancellationTokenRegistration registration = cancellationToken.Register(
+            static state =>
+            {
+                (TaskCompletionSource<RecordMetadata> tcs, CancellationToken token) =
+                    ((TaskCompletionSource<RecordMetadata>, CancellationToken))state!;
+                tcs.TrySetCanceled(token);
+            },
+            (completion, cancellationToken));
+
+        completion.Task.ContinueWith(
+            static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+            registration,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     /// <summary>
@@ -1059,7 +1297,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </remarks>
     private void ReleaseTopicCache(bool accumulatorDrained)
     {
-        if (accumulatorDrained)
+        // Direct path (send-approach-2 POC): never eagerly. A direct send reads an interned pointer
+        // on its caller's thread, and a caller that passed ThrowIfClosed before teardown won the
+        // latch can still be between Rent and the native copy, so there is no point at which an
+        // eager free is provably safe. The finalizer is: the cache stays reachable from any thread
+        // still inside SendDirect.
+        if (accumulatorDrained && !_directSend)
         {
             _topics.Dispose();
         }

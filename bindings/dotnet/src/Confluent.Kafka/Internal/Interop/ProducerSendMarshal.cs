@@ -132,4 +132,98 @@ internal static class ProducerSendMarshal
             return future;
         }
     }
+
+    /// <summary>
+    /// The direct async send (send-approach-2 POC): one
+    /// <c>kafka_producer_Producer_send_with_callback_cancellable</c> call on the caller's thread,
+    /// with the key / value pinned <b>call-scoped</b> exactly as <see cref="Send"/> pins them — the
+    /// core consumes both before it returns (ffi §A4), so nothing is borrowed past this call and the
+    /// deferred-send "do not mutate after Send" window does not exist on this path. The same
+    /// absent / empty / present sentinels as <see cref="Send"/>.
+    /// </summary>
+    /// <remarks>
+    /// Returns the raw results rather than throwing, because the caller must look at
+    /// <paramref name="callbackPending"/> and the error code together before deciding who owns
+    /// <paramref name="userData"/> and which exception to raise.
+    /// </remarks>
+    /// <param name="producer">The producer, as the <see cref="SafeProducerHandle"/> (call-scoped auto-ref).</param>
+    /// <param name="topic">A NUL-terminated UTF-8 topic buffer, valid for the duration of the call.</param>
+    /// <param name="partition">The target partition, or <c>-1</c>.</param>
+    /// <param name="timestamp">The timestamp in ms, or <c>-1</c>.</param>
+    /// <param name="key">The key, or <see langword="null"/>.</param>
+    /// <param name="value">The value, or <see langword="null"/>.</param>
+    /// <param name="userData">The rooted <see cref="DirectSendCompletion"/> handle.</param>
+    /// <param name="cancel">A <c>SendCancelToken_t</c>, or <see cref="IntPtr.Zero"/> for a non-cancellable send.</param>
+    /// <param name="callbackPending">Whether the delivery callback owns <paramref name="userData"/>.</param>
+    /// <param name="error">The synchronous error handle (owned by the caller), or <see cref="IntPtr.Zero"/>.</param>
+    /// <returns>The future handle on success (owned by the caller), or <see cref="IntPtr.Zero"/>.</returns>
+    internal static unsafe IntPtr SendWithCallback(
+        SafeProducerHandle producer,
+        IntPtr topic,
+        int partition,
+        long timestamp,
+        ReadOnlyMemory<byte>? key,
+        ReadOnlyMemory<byte>? value,
+        IntPtr userData,
+        IntPtr cancel,
+        out bool callbackPending,
+        out IntPtr error)
+    {
+        ReadOnlySpan<byte> keySpan = key.HasValue ? key.Value.Span : default;
+        ReadOnlySpan<byte> valueSpan = value.HasValue ? value.Value.Span : default;
+
+        // Non-null stack sentinel for a present-but-empty buffer (see Send).
+        byte emptySentinel = 0;
+
+        fixed (byte* keyPtr = keySpan)
+        fixed (byte* valuePtr = valueSpan)
+        {
+            SelectArgument(key.HasValue, keySpan.Length, keyPtr, &emptySentinel, out byte* keyArg, out int keyLen);
+            SelectArgument(value.HasValue, valueSpan.Length, valuePtr, &emptySentinel, out byte* valueArg, out int valueLen);
+
+            return NativeMethods.ProducerSendWithCallbackCancellable(
+                producer,
+                topic,
+                partition,
+                timestamp,
+                (IntPtr)keyArg,
+                keyLen,
+                (IntPtr)valueArg,
+                valueLen,
+                ProducerCallbacks.Send,
+                userData,
+                cancel,
+                out callbackPending,
+                out error);
+        }
+    }
+
+    /// <summary>
+    /// The ABI's key / value sentinel for one buffer (ffi §A4): absent → null + <c>-1</c>; empty →
+    /// the non-null <paramref name="emptySentinel"/> + <c>0</c>; present → the pinned pointer + length.
+    /// </summary>
+    private static unsafe void SelectArgument(
+        bool hasValue,
+        int length,
+        byte* pinned,
+        byte* emptySentinel,
+        out byte* argument,
+        out int argumentLength)
+    {
+        if (!hasValue)
+        {
+            argument = null;
+            argumentLength = -1;
+        }
+        else if (length == 0)
+        {
+            argument = emptySentinel;
+            argumentLength = 0;
+        }
+        else
+        {
+            argument = pinned;
+            argumentLength = length;
+        }
+    }
 }

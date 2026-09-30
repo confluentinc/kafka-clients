@@ -2368,6 +2368,76 @@ internal static partial class NativeMethods
         int valueLen,
         out IntPtr outError);
 
+    // ---- Approach 2 (send-approach-2 POC): caller-thread send + push delivery callback ----
+    //
+    // The async flavor's DIRECT send path (NativeProducer.SendDirect). It replaces the
+    // accumulator + batch thread + pull pump with one call per record on the caller's thread:
+    // Producer_send_with_callback_cancellable blocks only this caller (the core no longer holds
+    // its kind mutex across the wait), hands the record to the core, and the outcome arrives
+    // through ProducerCallbacks.Send on the core's dispatcher thread. This is ffi §A7's Option B
+    // (push), which the M11/P3.1 block above records as not adopted there; the POC adopts it for
+    // the async flavor only, and leaves the pump path selectable (NativeProducer.AsyncSendPathVariable).
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send_with_callback_cancellable</c> — sends one record, blocking the
+    /// caller until the record is appended (or <c>max.block.ms</c> / cancellation / close ends the
+    /// wait), and reports the outcome exactly once through <paramref name="callback"/> on the
+    /// producer's dispatcher thread. The key / value / topic buffers are consumed before this returns,
+    /// so their pins are <b>call-scoped</b> (ffi §A4).
+    /// <para>
+    /// <paramref name="callbackPending"/> is written on every return: <see langword="true"/> means the
+    /// callback owns <paramref name="userData"/> (always on success, and on the one post-append failure
+    /// Java also reports both ways); <see langword="false"/> means the callback will never fire and the
+    /// caller must release <paramref name="userData"/> itself. Cancelling <paramref name="cancel"/>
+    /// while the call is parked makes it fail with <c>INTERRUPT</c> (-12), nothing appended,
+    /// <paramref name="callbackPending"/> false — Java's <c>InterruptException</c> out of a blocked
+    /// <c>send()</c>.
+    /// </para>
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the sync-op call-scoped
+    /// auto-ref, ffi §A2): the call is synchronous, and the ref is what keeps
+    /// <c>ReleaseHandle → Producer_destroy</c> from freeing the producer under a parked send. The
+    /// callback is a <c>static readonly</c> rooted delegate (ffi §A6 keep-alive).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_with_callback_cancellable", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerSendWithCallbackCancellable(
+        SafeProducerHandle producer,
+        IntPtr topic,
+        int partition,
+        long timestamp,
+        IntPtr key,
+        int keyLen,
+        IntPtr value,
+        int valueLen,
+        ProducerCallbacks.SendCallback callback,
+        IntPtr userData,
+        IntPtr cancel,
+        [MarshalAs(UnmanagedType.I1)] out bool callbackPending,
+        out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_SendCancelToken_new</c> — a fresh, not-yet-cancelled token, freed with
+    /// <see cref="SendCancelTokenDestroy"/>. Never null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_SendCancelToken_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr SendCancelTokenNew();
+
+    /// <summary>
+    /// <c>kafka_producer_SendCancelToken_cancel</c> — cancels the token, waking a send parked on it.
+    /// Idempotent, any thread, null-safe. Called from a <see cref="System.Threading.CancellationToken"/>
+    /// registration, which is disposed (waiting out a running callback) before the token is destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_SendCancelToken_cancel", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void SendCancelTokenCancel(IntPtr token);
+
+    /// <summary>
+    /// <c>kafka_producer_SendCancelToken_destroy</c> — frees the token. Null-safe. No send may still
+    /// be using it and no <see cref="SendCancelTokenCancel"/> on it may be running.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_SendCancelToken_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void SendCancelTokenDestroy(IntPtr token);
+
     /// <summary>
     /// <c>kafka_producer_Producer_send_batch</c> — sends <paramref name="count"/> records in one
     /// call, writing one result pair per index: <paramref name="outFutures"/><c>[i]</c> is a non-null

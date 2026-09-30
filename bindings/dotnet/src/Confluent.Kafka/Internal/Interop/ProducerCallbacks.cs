@@ -96,6 +96,79 @@ internal static class ProducerCallbacks
     }
 
     /// <summary>
+    /// The C signature for <c>kafka_producer_Producer_send_callback_t</c>:
+    /// <c>void (*)(kafka_producer_RecordMetadata_t* metadata, kafka_common_Error_t* error,
+    /// void* user_data)</c> — the per-record delivery report of the direct send path
+    /// (send-approach-2 POC). <paramref name="error"/> non-null is failure; note a real producer's
+    /// API-level rejection delivers <b>both</b> an error and a placeholder metadata, so the error is
+    /// tested first. The callee owns, and frees, every non-null handle.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void SendCallback(IntPtr metadata, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The single rooted instance passed to every direct send. Rooted for the process lifetime, so
+    /// the native thunk never dangles (ffi §A6 keep-alive).
+    /// </summary>
+    internal static readonly SendCallback Send = OnSend;
+
+    /// <summary>
+    /// The direct send's delivery trampoline, run on the core's dispatcher thread. Copies the outcome
+    /// out, then <see cref="DirectSendCompletion.Deliver"/> fires the user's
+    /// <see cref="IDeliveryCallback"/> and completes the record's task, in that order (D3).
+    /// </summary>
+    /// <remarks>
+    /// Failure delivers <see langword="null"/> metadata to <see cref="DirectSendCompletion.Deliver"/>
+    /// even when the core supplied a placeholder, so the user callback sees the same placeholder
+    /// (<see cref="DeliveryRegistration.Fire"/> builds it from the record's topic / partition) that the
+    /// sync send and the pump deliver. A metadata copy-out failure after a successful send is treated
+    /// as the sync send treats it: the callback and the task both see the marshalling failure.
+    /// No-throw boundary; both native handles and the root are freed in the <c>finally</c> on every
+    /// path.
+    /// </remarks>
+    private static void OnSend(IntPtr metadata, IntPtr error, IntPtr userData)
+    {
+        DirectSendCompletion? context = null;
+        try
+        {
+            context = (DirectSendCompletion)GCHandle.FromIntPtr(userData).Target!;
+
+            // FromHandle frees the error on every path, including when it throws.
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                context.Deliver(null, failure);
+                return;
+            }
+
+            RecordMetadata result;
+            try
+            {
+                result = RecordMetadataMarshal.CopyOut(metadata);
+            }
+            catch (Exception exception)
+            {
+                context.Deliver(null, exception);
+                return;
+            }
+
+            context.Deliver(result, null);
+        }
+        catch (Exception exception)
+        {
+            // Reached only if reading the error itself failed. Deliver is at most once, so this
+            // cannot double-fire; it keeps the exactly-once callback obligation on this path too.
+            context?.Deliver(null, exception);
+        }
+        finally
+        {
+            // Null-safe: the success metadata, or the placeholder that accompanies an API error.
+            NativeMethods.RecordMetadataDestroy(metadata);
+            context?.Unroot();
+        }
+    }
+
+    /// <summary>
     /// The C signature for <c>kafka_producer_Producer_partitions_for_callback_t</c>:
     /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
     /// kafka_common_Error_t* error, void* user_data)</c> — the <b>owned-handle</b>

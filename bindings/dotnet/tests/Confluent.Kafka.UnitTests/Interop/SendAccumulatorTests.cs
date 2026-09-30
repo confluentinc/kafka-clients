@@ -656,7 +656,8 @@ public sealed class SendAccumulatorTests
         using ManualResetEventSlim entered = new ManualResetEventSlim(false);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
 
-        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+        // The accumulator's own drain bound is under test, so this producer must take the pump path.
+        NativeProducer producer = ProducerSendPath.Pump(() => NativeProducer.CreateMock(autoComplete: true));
         Task<RecordMetadata>? send = null;
         try
         {
@@ -704,7 +705,7 @@ public sealed class SendAccumulatorTests
         // The control for the test above, and the half that makes its bound meaningful: the same
         // producer, the same zero bound, an accumulator that IS empty-and-idle — no throw. Without
         // this a Flush that threw unconditionally would pass the expiry test.
-        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+        NativeProducer producer = ProducerSendPath.Pump(() => NativeProducer.CreateMock(autoComplete: true));
 
         SerializedProducerRecord record =
             new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x7B, 0xAA, 0xBB });
