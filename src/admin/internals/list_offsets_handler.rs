@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use crate::admin::ListOffsetsOptions;
 use crate::admin::ListOffsetsResultInfo;
-use crate::common::Errors;
 use crate::common::errors::ApiError;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptionsBuilder,
-    ListOffsetsResponse, RequestBuilder,
+    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilderOptionsBuilder, ListOffsetsResponse, RequestBuilder,
+    list_offsets_request,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
@@ -42,6 +42,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `ListOffsetsHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`ListOffsetsResultInfo`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler")]
 pub(crate) struct ListOffsetsHandler {
     offset_timestamps_by_partition: HashMap<TopicPartition, i64>,
     options: ListOffsetsOptions,
@@ -52,6 +53,7 @@ pub(crate) struct ListOffsetsHandler {
 
 impl ListOffsetsHandler {
     /// Creates a handler for the given per-partition offset timestamps.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#ListOffsetsHandler")]
     pub(crate) fn new(
         offset_timestamps_by_partition: HashMap<TopicPartition, i64>,
         options: ListOffsetsOptions,
@@ -74,6 +76,7 @@ impl ListOffsetsHandler {
     /// resolved.
     ///
     /// Mirrors `ListOffsetsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -85,11 +88,12 @@ impl ListOffsetsHandler {
     ///
     /// Mirrors `buildBatchedRequest`. Returns the concrete builder so the
     /// version-selection logic (`oldest_allowed_version`) can be inspected.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _broker_id: i32,
         keys: &HashSet<TopicPartition>,
-    ) -> ListOffsetsRequestBuilder {
+    ) -> list_offsets_request::Builder {
         let mut topics_by_name: HashMap<String, ListOffsetsTopic> = HashMap::new();
         for topic_partition in keys {
             let offset_timestamp = self.offset_timestamps_by_partition.get(topic_partition).copied().unwrap_or(0);
@@ -118,7 +122,7 @@ impl ListOffsetsHandler {
         });
 
         let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
-        let mut builder = ListOffsetsRequestBuilder::for_consumer_options(
+        let mut builder = list_offsets_request::Builder::for_consumer_options(
             ListOffsetsRequestBuilderOptionsBuilder::new()
                 .set_require_timestamp(true)
                 .set_isolation_level(self.options.isolation_level())
@@ -139,6 +143,7 @@ impl ListOffsetsHandler {
     /// (left out of the result to retry) or failed (fatal).
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,

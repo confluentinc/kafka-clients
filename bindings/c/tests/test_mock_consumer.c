@@ -377,13 +377,13 @@ static void test_mock_consumer_subscribe_subscription(void) {
 
 static void test_mock_consumer_assignment(void) {
     kafka_consumer_Consumer_t *c = make_assigned_mock("test", 3);
-    kafka_consumer_TopicPartitionList_t *as = kafka_consumer_Consumer_assignment(c);
+    kafka_common_TopicPartitionList_t *as = kafka_consumer_Consumer_assignment(c);
     TEST_ASSERT_NOT_NULL(as);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(as));
-    const kafka_consumer_TopicPartition_t *tp = kafka_consumer_TopicPartitionList_get(as, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_TopicPartition_topic(tp), "test"));
-    TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_TopicPartition_partition(tp));
-    kafka_consumer_TopicPartitionList_destroy(as);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(as));
+    const kafka_common_TopicPartition_t *tp = kafka_common_TopicPartitionList_get(as, 0);
+    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartition_topic(tp), "test"));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_common_TopicPartition_partition(tp));
+    kafka_common_TopicPartitionList_destroy(as);
     kafka_consumer_Consumer_destroy(c);
 }
 
@@ -430,10 +430,10 @@ static void test_mock_consumer_commit_committed(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(map);
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_OffsetMap_count(map));
-    const kafka_consumer_TopicPartition_t *k = kafka_consumer_OffsetMap_get_key(map, 0);
+    const kafka_common_TopicPartition_t *k = kafka_consumer_OffsetMap_get_key(map, 0);
     const kafka_consumer_OffsetAndMetadata_t *v = kafka_consumer_OffsetMap_get_value(map, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_TopicPartition_topic(k), "test"));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartition_partition(k));
+    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartition_topic(k), "test"));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(k));
     TEST_ASSERT_EQUAL_INT64(7, kafka_consumer_OffsetAndMetadata_offset(v));
     TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_OffsetAndMetadata_metadata(v), "checkpoint"));
     int32_t epoch = 999;
@@ -467,8 +467,8 @@ static void test_mock_consumer_beginning_end_offsets(void) {
     TEST_ASSERT_NULL(kafka_consumer_Consumer_end_offsets(c, topics, partitions, 1, &end));
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_LongOffsetMap_count(end));
     TEST_ASSERT_EQUAL_INT64(55, kafka_consumer_LongOffsetMap_get_value(end, 0));
-    const kafka_consumer_TopicPartition_t *k = kafka_consumer_LongOffsetMap_get_key(end, 0);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartition_partition(k));
+    const kafka_common_TopicPartition_t *k = kafka_consumer_LongOffsetMap_get_key(end, 0);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(k));
     kafka_consumer_LongOffsetMap_destroy(end);
 
     kafka_consumer_Consumer_destroy(c);
@@ -484,14 +484,14 @@ static void test_mock_consumer_pause_resume(void) {
     int32_t partitions[1] = {0};
 
     TEST_ASSERT_NULL(kafka_consumer_Consumer_pause(c, topics, partitions, 1));
-    kafka_consumer_TopicPartitionList_t *paused = kafka_consumer_Consumer_paused(c);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(paused));
-    kafka_consumer_TopicPartitionList_destroy(paused);
+    kafka_common_TopicPartitionList_t *paused = kafka_consumer_Consumer_paused(c);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(paused));
+    kafka_common_TopicPartitionList_destroy(paused);
 
     TEST_ASSERT_NULL(kafka_consumer_Consumer_resume(c, topics, partitions, 1));
     paused = kafka_consumer_Consumer_paused(c);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(paused));
-    kafka_consumer_TopicPartitionList_destroy(paused);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(paused));
+    kafka_common_TopicPartitionList_destroy(paused);
 
     kafka_consumer_Consumer_destroy(c);
 }
@@ -511,28 +511,23 @@ static void test_mock_consumer_group_metadata(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
-// The public group-metadata constructor builds a handle whose four accessors
-// read back exactly the fields passed in; a null group_instance_id (a dynamic,
-// non-static member) reads back as null. This is the constructor a producer
-// gRPC server uses to rebuild the handle from group-metadata fields received
-// over the wire for send_offsets_to_transaction.
-static void test_consumer_group_metadata_new(void) {
-    kafka_consumer_ConsumerGroupMetadata_t *meta =
-        kafka_consumer_ConsumerGroupMetadata_new("my-group", 42, "member-7", "static-3");
+// The group-metadata handle's four accessors read back the consumer's values:
+// MockConsumer reports Java's MockConsumer.groupMetadata() fields, a dynamic
+// member with no group instance id (null). The C API has no constructor (Java
+// deprecated ConsumerGroupMetadata's), so the consumer is the only source. The
+// handle shares the consumer's metadata, so it stays readable after the
+// consumer is destroyed.
+static void test_consumer_group_metadata_accessors(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(c);
     TEST_ASSERT_NOT_NULL(meta);
-    TEST_ASSERT_EQUAL_STRING("my-group", kafka_consumer_ConsumerGroupMetadata_group_id(meta));
-    TEST_ASSERT_EQUAL_INT(42, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
-    TEST_ASSERT_EQUAL_STRING("member-7", kafka_consumer_ConsumerGroupMetadata_member_id(meta));
-    TEST_ASSERT_EQUAL_STRING("static-3", kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta));
-    kafka_consumer_ConsumerGroupMetadata_destroy(meta);
+    kafka_consumer_Consumer_destroy(c);
 
-    kafka_consumer_ConsumerGroupMetadata_t *dynamic =
-        kafka_consumer_ConsumerGroupMetadata_new("g", -1, "", NULL);
-    TEST_ASSERT_NOT_NULL(dynamic);
-    TEST_ASSERT_EQUAL_STRING("", kafka_consumer_ConsumerGroupMetadata_member_id(dynamic));
-    TEST_ASSERT_EQUAL_INT(-1, kafka_consumer_ConsumerGroupMetadata_generation_id(dynamic));
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(dynamic));
-    kafka_consumer_ConsumerGroupMetadata_destroy(dynamic);
+    TEST_ASSERT_EQUAL_STRING("dummy.group.id", kafka_consumer_ConsumerGroupMetadata_group_id(meta));
+    TEST_ASSERT_EQUAL_INT(1, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
+    TEST_ASSERT_EQUAL_STRING("1", kafka_consumer_ConsumerGroupMetadata_member_id(meta));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta));
+    kafka_consumer_ConsumerGroupMetadata_destroy(meta);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,14 +540,14 @@ static void test_mock_consumer_partitions_and_topics(void) {
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_partitions(
         c, "test", 2, 1, "broker1", 9092));
 
-    kafka_consumer_PartitionInfoList_t *infos = NULL;
+    kafka_common_PartitionInfoList_t *infos = NULL;
     TEST_ASSERT_NULL(kafka_consumer_Consumer_partitions_for(c, "test", &infos));
     TEST_ASSERT_NOT_NULL(infos);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_PartitionInfoList_count(infos));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_PartitionInfoList_count(infos));
 
-    const kafka_consumer_PartitionInfo_t *p0 = kafka_consumer_PartitionInfoList_get(infos, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_PartitionInfo_topic(p0), "test"));
-    const kafka_common_Node_t *leader = kafka_consumer_PartitionInfo_leader(p0);
+    const kafka_common_PartitionInfo_t *p0 = kafka_common_PartitionInfoList_get(infos, 0);
+    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_PartitionInfo_topic(p0), "test"));
+    const kafka_common_Node_t *leader = kafka_common_PartitionInfo_leader(p0);
     TEST_ASSERT_NOT_NULL(leader);
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(leader));
     TEST_ASSERT_EQUAL_INT32(9092, kafka_common_Node_port(leader));
@@ -560,20 +555,20 @@ static void test_mock_consumer_partitions_and_topics(void) {
     const char *host = kafka_common_Node_host(leader, &host_len);
     TEST_ASSERT_EQUAL_INT32(7, host_len);
     TEST_ASSERT_EQUAL_INT(0, strncmp(host, "broker1", 7));
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_PartitionInfo_replica_count(p0));
-    TEST_ASSERT_NOT_NULL(kafka_consumer_PartitionInfo_replica(p0, 0));
-    TEST_ASSERT_NULL(kafka_consumer_PartitionInfo_replica(p0, 5));
-    kafka_consumer_PartitionInfoList_destroy(infos);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_PartitionInfo_replica_count(p0));
+    TEST_ASSERT_NOT_NULL(kafka_common_PartitionInfo_replica(p0, 0));
+    TEST_ASSERT_NULL(kafka_common_PartitionInfo_replica(p0, 5));
+    kafka_common_PartitionInfoList_destroy(infos);
 
-    kafka_consumer_TopicPartitionInfoMap_t *map = NULL;
+    kafka_common_TopicPartitionInfoMap_t *map = NULL;
     TEST_ASSERT_NULL(kafka_consumer_Consumer_list_topics(c, &map));
     TEST_ASSERT_NOT_NULL(map);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionInfoMap_count(map));
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_TopicPartitionInfoMap_get_topic(map, 0), "test"));
-    const kafka_consumer_PartitionInfoList_t *plist =
-        kafka_consumer_TopicPartitionInfoMap_get_partitions(map, 0);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_PartitionInfoList_count(plist));
-    kafka_consumer_TopicPartitionInfoMap_destroy(map);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionInfoMap_count(map));
+    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartitionInfoMap_get_topic(map, 0), "test"));
+    const kafka_common_PartitionInfoList_t *plist =
+        kafka_common_TopicPartitionInfoMap_get_partitions(map, 0);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_PartitionInfoList_count(plist));
+    kafka_common_TopicPartitionInfoMap_destroy(map);
 
     kafka_consumer_Consumer_destroy(c);
 }
@@ -717,7 +712,7 @@ int main(void) {
     RUN_TEST(test_mock_consumer_beginning_end_offsets);
     RUN_TEST(test_mock_consumer_pause_resume);
     RUN_TEST(test_mock_consumer_group_metadata);
-    RUN_TEST(test_consumer_group_metadata_new);
+    RUN_TEST(test_consumer_group_metadata_accessors);
     RUN_TEST(test_mock_consumer_partitions_and_topics);
     RUN_TEST(test_mock_consumer_record_metadata_getters);
     RUN_TEST(test_mock_consumer_poll_error);

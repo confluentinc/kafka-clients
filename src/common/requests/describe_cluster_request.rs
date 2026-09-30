@@ -22,12 +22,13 @@ use crate::DescribeClusterRequestData;
 use crate::DescribeClusterResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeClusterResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeClusterResponse, RequestBuilder};
 
 /// A DescribeCluster request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeClusterRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest")]
 pub struct DescribeClusterRequest {
     data: DescribeClusterRequestData,
     version: i16,
@@ -41,11 +42,13 @@ impl DescribeClusterRequest {
     pub const ENDPOINT_TYPE_CONTROLLER: i8 = 2;
 
     /// Creates a new `DescribeClusterRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest#DescribeClusterRequest")]
     pub fn new(data: DescribeClusterRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest#data")]
     pub fn data(&self) -> &DescribeClusterRequestData {
         &self.data
     }
@@ -69,6 +72,7 @@ impl DescribeClusterRequest {
     ///
     /// Mirrors `DescribeClusterRequest.getErrorResponse` (Java uses
     /// `ApiError.fromThrowable`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = DescribeClusterResponseData::new();
         data.set_error_code(error.code());
@@ -82,6 +86,7 @@ impl DescribeClusterRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeClusterRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -98,14 +103,16 @@ impl std::fmt::Display for DescribeClusterRequest {
 ///
 /// Corresponds to `DescribeClusterRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct DescribeClusterRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest$Builder")]
+pub struct Builder {
     data: DescribeClusterRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeClusterRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest$Builder#Builder")]
     pub fn new(data: DescribeClusterRequestData) -> Self {
         Self {
             data,
@@ -115,7 +122,7 @@ impl DescribeClusterRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeClusterRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_CLUSTER
     }
@@ -128,8 +135,8 @@ impl RequestBuilder for DescribeClusterRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeCluster(DescribeClusterRequest::new(
             self.data.clone(),
             version,
         )))
@@ -157,9 +164,9 @@ mod tests {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
         data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
-        let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
+        let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClusterRequest::parse(&mut readable, 1).unwrap();
         assert!(parsed.data().include_cluster_authorized_operations);
         assert_eq!(parsed.data().endpoint_type, DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
@@ -175,7 +182,7 @@ mod tests {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
         data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
-        let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
+        let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x01, // include_cluster_authorized_operations = true

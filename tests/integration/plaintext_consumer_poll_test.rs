@@ -149,7 +149,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
@@ -251,8 +251,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("Failed to build test producer")
 }
@@ -1007,7 +1007,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // to service — it just polls until the rebalance completes and the
     // in-callback commit has landed.
     //
-    // `tokio::select!` is still avoided here (CLAUDE.md §9.6): it cancels the
+    // `tokio::select!` is still avoided here (CLAUDE.md §11.6): it cancels the
     // losing branch mid-execution, and the consumer's poll has side effects on
     // internal state that are not cancellation-safe.
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1473,7 +1473,7 @@ fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
     ]);
     ctx.apply_security(&mut props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
-    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+    AdminClient::create(config).expect("admin client")
 }
 
 /// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.

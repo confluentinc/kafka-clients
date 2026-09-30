@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::OffsetCommitRequestData;
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetCommitRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_commit_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
@@ -40,6 +40,7 @@ type PartitionErrors = HashMap<TopicPartition, Errors>;
 /// The `alterConsumerGroupOffsets` handler.
 ///
 /// Corresponds to `AlterConsumerGroupOffsetsHandler`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler")]
 pub(crate) struct AlterConsumerGroupOffsetsHandler {
     group_id: CoordinatorKey,
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -49,6 +50,9 @@ pub(crate) struct AlterConsumerGroupOffsetsHandler {
 
 impl AlterConsumerGroupOffsetsHandler {
     /// Creates a handler.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#AlterConsumerGroupOffsetsHandler"
+    )]
     pub(crate) fn new(
         group_id: &str,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -65,12 +69,14 @@ impl AlterConsumerGroupOffsetsHandler {
     /// Creates the future bundle for the given group id.
     ///
     /// Mirrors `AlterConsumerGroupOffsetsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#newFuture")]
     pub(crate) fn new_future(group_id: &str) -> SimpleAdminApiFuture<CoordinatorKey, PartitionErrors> {
         SimpleAdminApiFuture::for_keys(HashSet::from([CoordinatorKey::by_group_id(group_id)]))
     }
 
     /// Mirrors `validateKeys`: the requested keys must be exactly the single
     /// group id owned by this handler.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#validateKeys")]
     fn validate_keys(&self, group_ids: &HashSet<CoordinatorKey>) {
         let expected = HashSet::from([self.group_id.clone()]);
         assert!(
@@ -80,11 +86,12 @@ impl AlterConsumerGroupOffsetsHandler {
     }
 
     /// Builds the single `OffsetCommit` request. Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> OffsetCommitRequestBuilder {
+    ) -> offset_commit_request::Builder {
         self.validate_keys(group_ids);
 
         let mut offset_data: HashMap<String, OffsetCommitRequestTopic> = HashMap::new();
@@ -106,10 +113,10 @@ impl AlterConsumerGroupOffsetsHandler {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id(self.group_id.id_value.clone());
         data.set_topics(offset_data.into_values().collect());
-        OffsetCommitRequestBuilder::for_topic_names(data)
+        offset_commit_request::Builder::for_topic_names(data)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#handleError")]
     fn handle_error(
         &self,
         topic_partition: TopicPartition,
@@ -311,6 +318,7 @@ mod tests {
 
     /// Translated from `testBuildRequest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandlerTest#testBuildRequest")]
     fn test_build_request() {
         let request = handler().build_batched_request(-1, &keys());
         let data = request.data();
@@ -326,6 +334,9 @@ mod tests {
 
     /// Translated from `testHandleSuccessfulResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandlerTest#testHandleSuccessfulResponse"
+    )]
     fn test_handle_successful_response() {
         let response_data = PartitionErrors::from([(tp("t0", 0), Errors::None)]);
         let result = handle(&response_data);
@@ -357,6 +368,9 @@ mod tests {
 
     /// Translated from `testHandleRetriableResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandlerTest#testHandleRetriableResponse"
+    )]
     fn test_handle_retriable_response() {
         assert_unmapped_key(partition_errors(Errors::NotCoordinator));
         assert_unmapped_key(partition_errors(Errors::CoordinatorNotAvailable));
@@ -366,6 +380,9 @@ mod tests {
 
     /// Translated from `testHandleErrorResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandlerTest#testHandleErrorResponse"
+    )]
     fn test_handle_error_response() {
         for error in [
             Errors::TopicAuthorizationFailed,
@@ -384,6 +401,9 @@ mod tests {
 
     /// Translated from `testHandleMultipleErrorsResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandlerTest#testHandleMultipleErrorsResponse"
+    )]
     fn test_handle_multiple_errors_response() {
         let partition_errors = PartitionErrors::from([
             (tp("t0", 0), Errors::UnknownTopicOrPartition),

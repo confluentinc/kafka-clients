@@ -27,6 +27,7 @@
 /// two must remain distinct here; folding them together would break
 /// `equals`/wire encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ClientQuotaMatch {
     /// Matches the provided entity name exactly (`Optional.of(name)`).
     Exact(String),
@@ -40,6 +41,7 @@ pub enum ClientQuotaMatch {
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaFilterComponent`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent")]
 pub struct ClientQuotaFilterComponent {
     entity_type: String,
     match_spec: ClientQuotaMatch,
@@ -50,6 +52,7 @@ impl ClientQuotaFilterComponent {
     /// provided entity name for the entity type.
     ///
     /// Mirrors `ClientQuotaFilterComponent.ofEntity`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntity")]
     pub fn of_entity(entity_type: impl Into<String>, entity_name: impl Into<String>) -> Self {
         Self {
             entity_type: entity_type.into(),
@@ -61,6 +64,7 @@ impl ClientQuotaFilterComponent {
     /// default entity name for the entity type.
     ///
     /// Mirrors `ClientQuotaFilterComponent.ofDefaultEntity`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofDefaultEntity")]
     pub fn of_default_entity(entity_type: impl Into<String>) -> Self {
         Self { entity_type: entity_type.into(), match_spec: ClientQuotaMatch::Default }
     }
@@ -69,6 +73,7 @@ impl ClientQuotaFilterComponent {
     /// for the entity type.
     ///
     /// Mirrors `ClientQuotaFilterComponent.ofEntityType`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntityType")]
     pub fn of_entity_type(entity_type: impl Into<String>) -> Self {
         Self { entity_type: entity_type.into(), match_spec: ClientQuotaMatch::Any }
     }
@@ -76,6 +81,7 @@ impl ClientQuotaFilterComponent {
     /// Returns the component's entity type.
     ///
     /// Mirrors `ClientQuotaFilterComponent.entityType()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#entityType")]
     pub fn entity_type(&self) -> &str {
         &self.entity_type
     }

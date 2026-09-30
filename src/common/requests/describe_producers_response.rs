@@ -28,12 +28,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeProducersResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse")]
 pub struct DescribeProducersResponse {
     data: DescribeProducersResponseData,
 }
 
 impl DescribeProducersResponse {
     /// Creates a new `DescribeProducersResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#DescribeProducersResponse")]
     pub fn new(data: DescribeProducersResponseData) -> Self {
         Self { data }
     }
@@ -44,6 +46,7 @@ impl DescribeProducersResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#data")]
     pub fn data(&self) -> &DescribeProducersResponseData {
         &self.data
     }
@@ -54,11 +57,13 @@ impl DescribeProducersResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -74,6 +79,7 @@ impl DescribeProducersResponse {
     /// Returns the error counts aggregated across all partition responses.
     ///
     /// Mirrors `DescribeProducersResponse.errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -90,6 +96,7 @@ impl DescribeProducersResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeProducersResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -132,7 +139,7 @@ mod tests {
         data.set_throttle_time_ms(7);
         let mut concrete = super::super::ConcreteResponse::DescribeProducers(DescribeProducersResponse::new(data));
         let bytes = concrete.serialize(0).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeProducersResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 7);
     }

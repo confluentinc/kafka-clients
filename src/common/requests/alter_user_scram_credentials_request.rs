@@ -25,13 +25,14 @@ use crate::AlterUserScramCredentialsResponseData;
 use crate::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResult;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{AlterUserScramCredentialsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterUserScramCredentialsResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterUserScramCredentials request.
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.AlterUserScramCredentialsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest")]
 pub struct AlterUserScramCredentialsRequest {
     data: AlterUserScramCredentialsRequestData,
     version: i16,
@@ -39,11 +40,13 @@ pub struct AlterUserScramCredentialsRequest {
 
 impl AlterUserScramCredentialsRequest {
     /// Creates a new request from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#AlterUserScramCredentialsRequest")]
     pub fn new(data: AlterUserScramCredentialsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#data")]
     pub fn data(&self) -> &AlterUserScramCredentialsRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AlterUserScramCredentialsRequest {
     /// Mirrors `AlterUserScramCredentialsRequest.getErrorResponse`: one errored
     /// result per distinct affected user (deletions ∪ upsertions), sorted by
     /// user name.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut users: BTreeSet<&str> = BTreeSet::new();
         for deletion in &self.data.deletions {
@@ -97,6 +101,7 @@ impl AlterUserScramCredentialsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterUserScramCredentialsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -121,14 +126,16 @@ impl std::fmt::Display for AlterUserScramCredentialsRequest {
 ///
 /// Corresponds to `AlterUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
-pub struct AlterUserScramCredentialsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder")]
+pub struct Builder {
     data: AlterUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterUserScramCredentialsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: AlterUserScramCredentialsRequestData) -> Self {
         Self {
             data,
@@ -138,7 +145,7 @@ impl AlterUserScramCredentialsRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterUserScramCredentialsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_USER_SCRAM_CREDENTIALS
     }
@@ -151,8 +158,8 @@ impl RequestBuilder for AlterUserScramCredentialsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterUserScramCredentials(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterUserScramCredentials(
             AlterUserScramCredentialsRequest::new(self.data.clone(), version),
         ))
     }
@@ -208,10 +215,10 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().deletions.len(), 1);
         assert_eq!(parsed.data().deletions[0].name, "d0");
@@ -228,7 +235,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.OffsetMovedToTieredStorageException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The requested offset is moved to tiered storage.
     ///
-    /// Corresponds to Java's `OffsetMovedToTieredStorageException`, error code [`Errors::OffsetMovedToTieredStorage`].
+    /// Corresponds to Java's `OffsetMovedToTieredStorageException`, error code `Errors::OffsetMovedToTieredStorage`.
     ///
     /// Java `extends` chain:
     ///    `OffsetMovedToTieredStorageException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OffsetMovedToTieredStorageException")]
     OffsetMovedToTieredStorageError,
     code: Errors::OffsetMovedToTieredStorage,
     extends: [

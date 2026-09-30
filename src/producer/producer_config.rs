@@ -20,6 +20,7 @@
 //! reflection framework. The field names and default values match the Java
 //! config keys.
 
+use std::any::{Any, type_name};
 use std::collections::HashMap;
 use std::sync::atomic::{self, AtomicI32};
 
@@ -27,9 +28,9 @@ use log::{info, warn};
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
-use crate::common::security::SecurityProtocol;
+use crate::common::security::auth::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
 use crate::producer::{Partitioner, RoundRobinPartitioner};
 use crate::{ClientDnsLookup, CommonClientConfigs};
@@ -51,7 +52,8 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#producerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig")]
 pub struct ProducerConfig {
     // --- Connection ---
     /// `bootstrap.servers` - A list of host/port pairs to use for establishing the
@@ -71,10 +73,10 @@ pub struct ProducerConfig {
     pub(crate) security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub(crate) sasl_config: SaslConfig,
+    pub(crate) sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    pub(crate) ssl_config: SslConfig,
+    pub(crate) ssl_config: SslConfigs,
 
     // --- Batching ---
     /// `batch.size` - The producer will attempt to batch records together into fewer
@@ -188,7 +190,7 @@ pub struct ProducerConfig {
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
 
-    /// `partitioner.class` - Selects the partitioning strategy. Default: `None`
+    /// `partitioner.type` - Selects the partitioning strategy. Default: `None`
     /// (unset), which uses the built-in default partitioner keyed by IEEE CRC-32
     /// ([`KeyHasher::Crc32`], librdkafka `consistent_random` parity).
     ///
@@ -198,24 +200,28 @@ pub struct ProducerConfig {
     /// - `Murmur2RandomPartitioner` — the default built-in partitioner with a
     ///   murmur2 key hash, identical to the Java client's built-in partitioner
     ///   (exact Java parity).
-    /// - `RoundRobinPartitioner`, or the Java fully-qualified class name
-    ///   `org.apache.kafka.clients.producer.RoundRobinPartitioner` — the
+    /// - `RoundRobinPartitioner` — the
     ///   [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner), which
     ///   distributes writes evenly across a topic's available partitions and
     ///   ignores the record key. Selecting it **disables adaptive partitioning**,
     ///   exactly as Java does when a `partitioner.class` is configured.
     ///
-    /// Any other value is rejected by [`from_properties`](Self::from_properties)
-    /// with the Java `ConfigException` "could not be found" message. Java loads
-    /// the named class reflectively; Rust has no reflection, so only the built-in
-    /// names above resolve here, and a user-written
-    /// [`Partitioner`](crate::producer::Partitioner) is instead passed as an
-    /// instance through
-    /// [`KafkaProducer`](crate::producer::KafkaProducer)'s
-    /// `with_partitioner` constructor. Unlike Java, this Rust
-    /// client's default key hash is CRC-32, not murmur2 — see
+    /// Any other value is rejected by [`new`](Self::new) as not supported. Java's
+    /// `partitioner.class` names a class to load reflectively; Rust has no
+    /// reflection, so this key names one of the built-in types above, and a
+    /// user-written
+    /// [`Partitioner`](crate::producer::Partitioner) is instead set with
+    /// [`set_partitioner`](Self::set_partitioner). Unlike Java, this
+    /// Rust client's default key hash is CRC-32, not murmur2 — see
     /// `design/current/partitioner.md`.
-    pub(crate) partitioner_class: Option<String>,
+    pub(crate) partitioner_type: Option<String>,
+
+    /// The [`Partitioner`] set with [`set_partitioner`](Self::set_partitioner),
+    /// the value of Java's `partitioner.class`. Its record types are erased,
+    /// because `ProducerConfig` is not generic over them;
+    /// [`resolve_partitioner`](Self::resolve_partitioner) recovers them for the
+    /// producer being built.
+    pub(crate) partitioner: Option<ConfiguredPartitioner>,
 
     // --- Transactions ---
     /// `transactional.id` - TransactionalId for transactional delivery.
@@ -271,6 +277,20 @@ pub struct ProducerConfig {
     pub(crate) originals: HashMap<String, String>,
 }
 
+/// The [`Partitioner`] set with [`ProducerConfig::set_partitioner`], with its
+/// record types erased.
+///
+/// No Java counterpart: Java holds the `partitioner.class` value in the config
+/// map as an `Object`. It is needed because [`ProducerConfig`] is not generic
+/// over the record types the partitioner is written for.
+#[derive(Debug)]
+pub(crate) struct ConfiguredPartitioner {
+    /// A `Box<dyn Partitioner<K, V>>`.
+    partitioner: Box<dyn Any + Send + Sync>,
+    /// `dyn Partitioner<K, V>`, named in the type mismatch error.
+    type_name: &'static str,
+}
+
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
@@ -278,8 +298,8 @@ impl Default for ProducerConfig {
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
@@ -306,7 +326,8 @@ impl Default for ProducerConfig {
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
-            partitioner_class: None,
+            partitioner_type: None,
+            partitioner: None,
             transactional_id: None,
             transaction_timeout_ms: 60_000,
             metrics_sample_window_ms: 30_000,
@@ -326,9 +347,8 @@ impl ProducerConfig {
 
     /// Config key: `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup` (see
-    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ProducerConfig.java`
-    /// declares its own public alias of the `CommonClientConfigs` constant.
+    /// Config key: `client.dns.lookup`. Java's `ProducerConfig.java` declares it as its
+    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
@@ -381,23 +401,17 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
-    /// Config key: `partitioner.class`
-    pub const PARTITIONER_CLASS_CONFIG: &'static str = "partitioner.class";
-    /// Accepted `partitioner.class` value selecting the CRC-32 key hash
+    /// Config key: `partitioner.type`
+    pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
+    /// Accepted `partitioner.type` value selecting the CRC-32 key hash
     /// (the crate-internal `KeyHasher::Crc32`) — the default, librdkafka `consistent_random` parity.
     pub const CONSISTENT_RANDOM_PARTITIONER: &'static str = "ConsistentRandomPartitioner";
-    /// Accepted `partitioner.class` value selecting the murmur2 key hash
+    /// Accepted `partitioner.type` value selecting the murmur2 key hash
     /// (the crate-internal `KeyHasher::Murmur2`) — exact Java-client parity.
     pub const MURMUR2_RANDOM_PARTITIONER: &'static str = "Murmur2RandomPartitioner";
-    /// Accepted `partitioner.class` value selecting the
+    /// Accepted `partitioner.type` value selecting the
     /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner).
     pub const ROUND_ROBIN_PARTITIONER: &'static str = "RoundRobinPartitioner";
-    /// The Java fully-qualified class name for the
-    /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner), also
-    /// accepted as a `partitioner.class` value so a Java producer config
-    /// naming the built-in round-robin partitioner works unchanged. Java
-    /// resolves it reflectively; Rust maps it to the built-in instance.
-    pub const ROUND_ROBIN_PARTITIONER_FQCN: &'static str = "org.apache.kafka.clients.producer.RoundRobinPartitioner";
     /// Config key: `transactional.id`
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
@@ -429,6 +443,7 @@ impl ProducerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // Java's `AbstractConfig.originals()` is the user-supplied map captured
         // verbatim, before any derived default (e.g. a generated `client.id`) is
@@ -456,7 +471,8 @@ impl ProducerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    config.client_id = value.to_string();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_id = value.trim().to_string();
                 },
                 Self::BATCH_SIZE_CONFIG => {
                     config.batch_size = Self::parse_i32(key, value)?;
@@ -544,27 +560,29 @@ impl ProducerConfig {
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
                 },
-                Self::PARTITIONER_CLASS_CONFIG => {
-                    // Only the built-in partitioner names resolve. Java's
-                    // `ConfigDef` reflectively loads the class named here and
-                    // throws `ConfigException` when it cannot be found; we mirror
-                    // that error text exactly for any unrecognised value. The two
+                Self::PARTITIONER_TYPE_CONFIG => {
+                    // Only the built-in partitioner types are accepted. The two
                     // `*RandomPartitioner` names select the built-in default
-                    // partitioner's key hash; the RoundRobin spellings select the
-                    // `RoundRobinPartitioner` (resolved to an instance in
-                    // `KafkaProducer::from_config`). The verbatim string is kept
-                    // so both consumers below can recognise it.
+                    // partitioner's key hash; `RoundRobinPartitioner` selects the
+                    // `RoundRobinPartitioner` (resolved to an instance by
+                    // `resolve_partitioner`). The verbatim string is kept so both
+                    // can recognise it.
                     if value != Self::CONSISTENT_RANDOM_PARTITIONER
                         && value != Self::MURMUR2_RANDOM_PARTITIONER
-                        && !Self::is_round_robin_partitioner(value)
+                        && value != Self::ROUND_ROBIN_PARTITIONER
                     {
                         return Err(Error::config_name_value_message(
-                            Self::PARTITIONER_CLASS_CONFIG,
+                            Self::PARTITIONER_TYPE_CONFIG,
                             value,
-                            format!("Class {value} could not be found."),
+                            format!(
+                                "Partitioner type {value} is not supported; the supported types are {}, {} and {}.",
+                                Self::CONSISTENT_RANDOM_PARTITIONER,
+                                Self::MURMUR2_RANDOM_PARTITIONER,
+                                Self::ROUND_ROBIN_PARTITIONER
+                            ),
                         ));
                     }
-                    config.partitioner_class = Some(value.to_string());
+                    config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
                     config.transactional_id = if value.is_empty() {
@@ -632,7 +650,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
@@ -652,27 +670,15 @@ impl ProducerConfig {
         Ok(config)
     }
 
-    /// Whether `value` names the built-in
-    /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner) — either
-    /// the simple name [`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER)
-    /// or the Java fully-qualified class name
-    /// [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN).
-    ///
-    /// The accepted spellings are stated once here so `from_properties`
-    /// validation and the partitioner resolver cannot drift apart.
-    fn is_round_robin_partitioner(value: &str) -> bool {
-        value == Self::ROUND_ROBIN_PARTITIONER || value == Self::ROUND_ROBIN_PARTITIONER_FQCN
-    }
-
-    /// Resolves `partitioner.class` to the [`KeyHasher`] used on the built-in
+    /// Resolves `partitioner.type` to the [`KeyHasher`] used on the built-in
     /// default partitioner's keyed partition path.
     ///
     /// This helper has no direct Java counterpart (Java resolves a `Partitioner`
     /// instance instead); it exists only to map the validated
-    /// [`partitioner_class`](Self::partitioner_class) string to the internal
+    /// [`partitioner_type`](Self::partitioner_type) string to the internal
     /// [`KeyHasher`] enum. Only `Murmur2RandomPartitioner` maps to murmur2;
     /// every other accepted value — unset (`None`), `ConsistentRandomPartitioner`,
-    /// and the two `RoundRobinPartitioner` spellings — maps to the CRC-32
+    /// and `RoundRobinPartitioner` — maps to the CRC-32
     /// default.
     ///
     /// For a `RoundRobinPartitioner` config the hash is moot: the producer uses
@@ -681,16 +687,16 @@ impl ProducerConfig {
     /// partitioner, so this value is never consulted. It is defined here only to
     /// keep the accessor total.
     pub(crate) fn key_hasher(&self) -> KeyHasher {
-        match self.partitioner_class.as_deref() {
+        match self.partitioner_type.as_deref() {
             Some(Self::MURMUR2_RANDOM_PARTITIONER) => KeyHasher::Murmur2,
-            // Unset (`None`), `ConsistentRandomPartitioner`, and the RoundRobin
-            // spellings all use the CRC-32 default. `from_properties` rejects
+            // Unset (`None`), `ConsistentRandomPartitioner`, and
+            // `RoundRobinPartitioner` all use the CRC-32 default. `new` rejects
             // every other value, so no other string can reach here.
             _ => KeyHasher::Crc32,
         }
     }
 
-    /// Resolves `partitioner.class` to a built-in [`Partitioner`] instance, if
+    /// Resolves `partitioner.type` to a built-in [`Partitioner`] instance, if
     /// the configured value names one that has a dedicated partitioner type.
     ///
     /// This is the Rust stand-in for Java's
@@ -699,25 +705,71 @@ impl ProducerConfig {
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
-    /// - the two [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner)
-    ///   spellings ([`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) and
-    ///   [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN)) →
+    /// - [`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) →
     ///   `Some(Box::new(RoundRobinPartitioner::new()))`;
     /// - every other accepted value (unset, `ConsistentRandomPartitioner`,
     ///   `Murmur2RandomPartitioner`) → `None`, meaning the built-in default
     ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
     ///
-    /// A user-supplied `Partitioner` is instead passed as an instance through
-    /// [`KafkaProducer::with_partitioner`](crate::producer::KafkaProducer::with_partitioner).
+    /// The partitioner set with [`set_partitioner`](Self::set_partitioner)
+    /// takes precedence over a `partitioner.type` name.
     ///
-    /// `from_properties` has already rejected any value that is neither a
-    /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
-    /// here.
-    pub(crate) fn resolve_partitioner<K, V>(&self) -> Option<Box<dyn Partitioner<K, V>>> {
-        match self.partitioner_class.as_deref() {
-            Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
-            _ => None,
+    /// `new` has already rejected any value that is not a built-in type, so no
+    /// unknown string reaches here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KafkaError`] when the partitioner set with
+    /// `set_partitioner` partitions records of other types than the producer's
+    /// `K` / `V`: Java's `getConfiguredInstance` throws
+    /// `KafkaException(c.getName() + " is not an instance of " + t.getName())`
+    /// when the configured value does not implement the requested type.
+    ///
+    /// Takes `&mut self` because the partitioner set with `set_partitioner` is
+    /// moved out: the producer being built owns it, as a Java producer owns
+    /// the instance it creates from `partitioner.class`.
+    pub(crate) fn resolve_partitioner<K: 'static, V: 'static>(
+        &mut self,
+    ) -> Result<Option<Box<dyn Partitioner<K, V>>>, Error> {
+        if let Some(configured) = self.partitioner.take() {
+            let Ok(partitioner) = configured.partitioner.downcast::<Box<dyn Partitioner<K, V>>>() else {
+                return Err(Error::kafka_message(format!(
+                    "{} is not an instance of {}",
+                    configured.type_name,
+                    type_name::<dyn Partitioner<K, V>>()
+                )));
+            };
+            return Ok(Some(*partitioner));
         }
+        Ok(match self.partitioner_type.as_deref() {
+            Some(Self::ROUND_ROBIN_PARTITIONER) => Some(Box::new(RoundRobinPartitioner::new())),
+            _ => None,
+        })
+    }
+
+    /// Sets the [`Partitioner`] that determines which partition each record
+    /// goes to: the value of Java's `partitioner.class`.
+    ///
+    /// Java names a class, which the producer instantiates by reflection; here
+    /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
+    /// `configure`s it with the user configs plus the resolved `client.id`, as
+    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// with any configured partitioner, adaptive partitioning is then disabled.
+    /// The producer built from this config takes ownership of the partitioner.
+    ///
+    /// This replaces a `partitioner.type` given in the properties passed to
+    /// [`new`](Self::new), as a later value for the same key would.
+    ///
+    /// The partitioner's `K` / `V` must be the record types of the producer built
+    /// from this config; otherwise `KafkaProducer::new` fails with
+    /// "`<partitioner>` is not an instance of `<expected>`".
+    pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Box<dyn Partitioner<K, V>>) -> Self {
+        self.partitioner_type = None;
+        self.partitioner = Some(ConfiguredPartitioner {
+            partitioner: Box::new(partitioner),
+            type_name: type_name::<dyn Partitioner<K, V>>(),
+        });
+        self
     }
 
     /// Whether the user set `key` explicitly.
@@ -739,6 +791,7 @@ impl ProducerConfig {
     /// `max.in.flight.requests.per.connection` it is **always** an error. The
     /// silent-disable path is what keeps existing non-idempotent configurations
     /// working, so removing it would be a breaking change.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#postProcessAndValidateIdempotenceConfigs")]
     fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), Error> {
         let user_configured_idempotence = self.user_configured(Self::ENABLE_IDEMPOTENCE_CONFIG);
         let mut idempotence_enabled = self.enable_idempotence;
@@ -817,6 +870,7 @@ impl ProducerConfig {
     /// `producer-<transactional.id>` when a transactional id is set, otherwise
     /// `producer-<n>` from a process-wide counter starting at 1 — matching
     /// Java's `static AtomicInteger PRODUCER_CLIENT_ID_SEQUENCE`.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#maybeOverrideClientId")]
     fn maybe_override_client_id(&mut self) {
         if self.user_configured(Self::CLIENT_ID_CONFIG) {
             return;
@@ -856,7 +910,8 @@ impl ProducerConfig {
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
-    pub fn parse_acks(acks_string: &str) -> Result<i16, Error> {
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
+    pub(crate) fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
         if trimmed.eq_ignore_ascii_case("all") {
             Ok(-1)
@@ -905,7 +960,7 @@ mod tests {
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
-        assert!(config.partitioner_class.is_none());
+        assert!(config.partitioner_type.is_none());
         // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
         // Java-client murmur2 default.
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
@@ -1068,82 +1123,77 @@ mod tests {
         assert_eq!(config.bootstrap_servers, vec!["localhost:9092"]);
     }
 
-    /// `partitioner.class=ConsistentRandomPartitioner` selects the CRC-32 hash
+    /// `partitioner.type=ConsistentRandomPartitioner` selects the CRC-32 hash
     /// (identical to the unset default, librdkafka `consistent_random` parity).
     #[test]
-    fn test_partitioner_class_consistent_random() {
+    fn test_partitioner_type_consistent_random() {
         let mut props = base_props();
-        props.insert("partitioner.class".to_string(), "ConsistentRandomPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "ConsistentRandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(config.partitioner_class.as_deref(), Some("ConsistentRandomPartitioner"));
+        assert_eq!(config.partitioner_type.as_deref(), Some("ConsistentRandomPartitioner"));
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
     }
 
-    /// `partitioner.class=Murmur2RandomPartitioner` selects the murmur2 hash
+    /// `partitioner.type=Murmur2RandomPartitioner` selects the murmur2 hash
     /// (exact Java-client parity).
     #[test]
-    fn test_partitioner_class_murmur2_random() {
+    fn test_partitioner_type_murmur2_random() {
         let mut props = base_props();
-        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "Murmur2RandomPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(config.partitioner_class.as_deref(), Some("Murmur2RandomPartitioner"));
+        assert_eq!(config.partitioner_type.as_deref(), Some("Murmur2RandomPartitioner"));
         assert_eq!(config.key_hasher(), KeyHasher::Murmur2);
     }
 
-    /// An unrecognised `partitioner.class` is rejected with the EXACT Java
-    /// `ConfigException` text (DoD §3: error messages are the contract).
+    /// An unrecognised `partitioner.type` is rejected with the exact message
+    /// naming the supported types (DoD §3: error messages are the contract).
+    /// A Java fully-qualified class name is not a type, so it is rejected too.
     #[test]
-    fn test_partitioner_class_unknown_rejected_with_exact_message() {
+    fn test_partitioner_type_unknown_rejected_with_exact_message() {
         let mut props = base_props();
-        props.insert("partitioner.class".to_string(), "com.example.MyPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "com.example.MyPartitioner".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         // `err.to_string()` prepends the variant tag, so assert on the exact
-        // inner `ConfigException` text with `ends_with`, matching
+        // inner text with `ends_with`, matching
         // `test_metrics_recording_level_validator` above.
         assert!(
             err.to_string().ends_with(
-                "Invalid value com.example.MyPartitioner for configuration partitioner.class: \
-                 Class com.example.MyPartitioner could not be found."
+                "Invalid value com.example.MyPartitioner for configuration partitioner.type: \
+                 Partitioner type com.example.MyPartitioner is not supported; the supported types are \
+                 ConsistentRandomPartitioner, Murmur2RandomPartitioner and RoundRobinPartitioner."
+            ),
+            "unexpected message: {err}"
+        );
+
+        let mut props = base_props();
+        props.insert(
+            "partitioner.type".to_string(),
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value org.apache.kafka.clients.producer.RoundRobinPartitioner for configuration \
+                 partitioner.type: Partitioner type org.apache.kafka.clients.producer.RoundRobinPartitioner \
+                 is not supported; the supported types are ConsistentRandomPartitioner, \
+                 Murmur2RandomPartitioner and RoundRobinPartitioner."
             ),
             "unexpected message: {err}"
         );
     }
 
-    /// `partitioner.class=RoundRobinPartitioner` (the simple name) is accepted
+    /// `partitioner.type=RoundRobinPartitioner` (the simple name) is accepted
     /// and stored verbatim. The key hash is the CRC-32 default (moot: a
     /// RoundRobin producer uses the partitioner instance, not the key hash).
     #[test]
-    fn test_partitioner_class_round_robin_simple_name() {
+    fn test_partitioner_type_round_robin_simple_name() {
         let mut props = base_props();
-        props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
+        props.insert("partitioner.type".to_string(), "RoundRobinPartitioner".to_string());
         let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(config.partitioner_class.as_deref(), Some("RoundRobinPartitioner"));
+        assert_eq!(config.partitioner_type.as_deref(), Some("RoundRobinPartitioner"));
         assert_eq!(
-            config.partitioner_class.as_deref(),
+            config.partitioner_type.as_deref(),
             Some(ProducerConfig::ROUND_ROBIN_PARTITIONER)
-        );
-        assert_eq!(config.key_hasher(), KeyHasher::Crc32);
-    }
-
-    /// `partitioner.class=org.apache.kafka.clients.producer.RoundRobinPartitioner`
-    /// (the Java fully-qualified class name) is accepted and stored verbatim, so
-    /// a Java producer config naming the built-in round-robin partitioner works
-    /// unchanged.
-    #[test]
-    fn test_partitioner_class_round_robin_fqcn() {
-        let mut props = base_props();
-        props.insert(
-            "partitioner.class".to_string(),
-            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
-        );
-        let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(
-            config.partitioner_class.as_deref(),
-            Some("org.apache.kafka.clients.producer.RoundRobinPartitioner")
-        );
-        assert_eq!(
-            config.partitioner_class.as_deref(),
-            Some(ProducerConfig::ROUND_ROBIN_PARTITIONER_FQCN)
         );
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
     }
@@ -1155,47 +1205,34 @@ mod tests {
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();
-        props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
-        let config = ProducerConfig::new(&props).unwrap();
-        assert!(config.resolve_partitioner::<String, String>().is_some());
+        props.insert("partitioner.type".to_string(), "RoundRobinPartitioner".to_string());
+        let mut config = ProducerConfig::new(&props).unwrap();
+        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_some());
     }
 
-    /// `resolve_partitioner` also resolves the fully-qualified Java class name,
-    /// so a Java producer config naming the round-robin partitioner works.
-    #[test]
-    fn test_resolve_partitioner_round_robin_fqcn() {
-        let mut props = base_props();
-        props.insert(
-            "partitioner.class".to_string(),
-            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
-        );
-        let config = ProducerConfig::new(&props).unwrap();
-        assert!(config.resolve_partitioner::<String, String>().is_some());
-    }
-
-    /// With no `partitioner.class`, `resolve_partitioner` returns `None`: the
+    /// With no `partitioner.type`, `resolve_partitioner` returns `None`: the
     /// built-in default partitioner's keyed path is used, not a partitioner
     /// instance.
     #[test]
     fn test_resolve_partitioner_default_none() {
-        let config = ProducerConfig::new(&base_props()).unwrap();
-        assert!(config.partitioner_class.is_none());
-        assert!(config.resolve_partitioner::<String, String>().is_none());
+        let mut config = ProducerConfig::new(&base_props()).unwrap();
+        assert!(config.partitioner_type.is_none());
+        assert!(config.resolve_partitioner::<String, String>().expect("resolves").is_none());
     }
 
-    /// The other accepted `partitioner.class` values name Java's built-in
+    /// The other accepted `partitioner.type` values name Java's built-in
     /// random/sticky partitioners, which in this client are handled by the
     /// key-hash path (see [`key_hasher`](ProducerConfig::key_hasher)), not by a
     /// [`Partitioner`] instance. So `resolve_partitioner` returns `None` for
-    /// both — only the round-robin names map to a dedicated partitioner type.
+    /// both — only `RoundRobinPartitioner` maps to a dedicated partitioner type.
     #[test]
     fn test_resolve_partitioner_random_names_none() {
         for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
             let mut props = base_props();
-            props.insert("partitioner.class".to_string(), name.to_string());
-            let config = ProducerConfig::new(&props).unwrap();
+            props.insert("partitioner.type".to_string(), name.to_string());
+            let mut config = ProducerConfig::new(&props).unwrap();
             assert!(
-                config.resolve_partitioner::<String, String>().is_none(),
+                config.resolve_partitioner::<String, String>().expect("resolves").is_none(),
                 "{name} must not resolve to a Partitioner instance"
             );
         }
@@ -1206,13 +1243,13 @@ mod tests {
     /// generated `producer-<n>` id lands on `client_id` but NOT in `originals`.
     #[test]
     fn test_originals_kept_verbatim_without_generated_client_id() {
-        let props = props_with(&[("partitioner.class", "RoundRobinPartitioner"), ("acks", "all")]);
+        let props = props_with(&[("partitioner.type", "RoundRobinPartitioner"), ("acks", "all")]);
         let config = ProducerConfig::new(&props).expect("valid");
 
         // Verbatim: originals equals the input map exactly (keys and values).
         assert_eq!(config.originals, props);
         assert_eq!(
-            config.originals.get("partitioner.class").map(String::as_str),
+            config.originals.get("partitioner.type").map(String::as_str),
             Some("RoundRobinPartitioner")
         );
         assert_eq!(config.originals.get("acks").map(String::as_str), Some("all"));
@@ -1359,6 +1396,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
@@ -1409,6 +1447,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testCaseInsensitiveSecurityProtocol")]
     fn test_case_insensitive_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
@@ -1656,6 +1695,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testUpperboundCheckOfEnableIdempotence")]
     fn test_upperbound_check_of_enable_idempotence() {
         let error = ProducerConfig::new(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
             .expect_err("6 exceeds the cap");
@@ -1671,6 +1711,9 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testTwoPhaseCommitIncompatibleWithTransactionTimeout`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testTwoPhaseCommitIncompatibleWithTransactionTimeout"
+    )]
     fn test_two_phase_commit_incompatible_with_transaction_timeout() {
         let both = props_with(&[
             ("enable.idempotence", "true"),
@@ -1710,6 +1753,18 @@ mod tests {
     fn test_explicit_client_id_is_preserved() {
         let config = ProducerConfig::new(&props_with(&[("client.id", "my-client")])).expect("valid");
         assert_eq!(config.client_id, "my-client");
+    }
+
+    /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
+    /// on the key being present in the originals, not on emptiness
+    /// (`ProducerConfig.java:581-583`), so a blank explicit id stays empty,
+    /// as in Java. The consumer and admin client generate one instead.
+    #[test]
+    fn test_explicit_client_id_is_trimmed() {
+        let config = ProducerConfig::new(&props_with(&[("client.id", " my-client ")])).expect("valid");
+        assert_eq!(config.client_id, "my-client");
+        let config = ProducerConfig::new(&props_with(&[("client.id", " ")])).expect("valid");
+        assert_eq!(config.client_id, "");
     }
 
     /// Without an explicit client.id or transactional.id, the derived form is

@@ -112,19 +112,19 @@ void test_send_with_key_and_value(void) {
     const uint8_t value[] = "my-value";
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "test-topic", 2, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1,
         &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
     /* Get metadata */
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(metadata);
 
@@ -143,7 +143,7 @@ void test_send_with_key_and_value(void) {
     TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -152,16 +152,16 @@ void test_send_null_key(void) {
     const uint8_t value[] = "value-only";
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -170,7 +170,7 @@ void test_send_null_value(void) {
     const uint8_t key[] = "key-only";
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         key, (int32_t)sizeof(key) - 1,
         NULL, -1,
@@ -178,7 +178,7 @@ void test_send_null_value(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -191,19 +191,19 @@ void test_multiple_sends_incrementing_offsets(void) {
 
     for (int i = 0; i < 3; i++) {
         kafka_common_Error_t *err = NULL;
-        kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+        kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
             producer, "topic", 0, -1,
             NULL, -1, NULL, -1, &err);
         TEST_ASSERT_NULL(err);
 
         err = NULL;
         kafka_producer_RecordMetadata_t *metadata =
-            kafka_producer_FutureRecordMetadata_get(future, &err);
+            kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
         TEST_ASSERT_NULL(err);
         TEST_ASSERT_EQUAL_INT64((int64_t)i, kafka_producer_RecordMetadata_offset(metadata));
 
         kafka_producer_RecordMetadata_destroy(metadata);
-        kafka_producer_FutureRecordMetadata_destroy(future);
+        kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     }
 
     TEST_ASSERT_EQUAL_INT32(3, kafka_producer_MockProducer_history_count(producer));
@@ -219,27 +219,27 @@ void test_manual_complete(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
-    TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
     /* Complete it */
     TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(producer));
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
     /* Get metadata and verify getters */
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(metadata);
     TEST_ASSERT_EQUAL_INT64(0, kafka_producer_RecordMetadata_offset(metadata));
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -247,7 +247,7 @@ void test_manual_error(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     TEST_ASSERT_NULL(err);
@@ -257,7 +257,7 @@ void test_manual_error(void) {
 
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(metadata);
 
@@ -268,7 +268,7 @@ void test_manual_error(void) {
     TEST_ASSERT_NOT_NULL(msg);
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -293,7 +293,7 @@ void test_send_batch(void) {
         { "topic2", 1, -1, NULL, -1, NULL, -1 },
     };
 
-    kafka_producer_FutureRecordMetadata_t *futures[2] = { NULL, NULL };
+    kafka_common_KafkaFuture_RecordMetadata_t *futures[2] = { NULL, NULL };
     kafka_common_Error_t *errors[2] = { NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
@@ -303,8 +303,8 @@ void test_send_batch(void) {
     for (int i = 0; i < 2; i++) {
         TEST_ASSERT_NULL(errors[i]);
         TEST_ASSERT_NOT_NULL(futures[i]);
-        TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
-        kafka_producer_FutureRecordMetadata_destroy(futures[i]);
+        TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(futures[i]));
+        kafka_common_KafkaFuture_RecordMetadata_destroy(futures[i]);
     }
 
     TEST_ASSERT_EQUAL_INT32(2, kafka_producer_MockProducer_history_count(producer));
@@ -322,7 +322,7 @@ void test_send_batch_partial_failure(void) {
         { "topic3", -1, -1, NULL, -1, NULL, -1 },
     };
 
-    kafka_producer_FutureRecordMetadata_t *futures[3] = { NULL, NULL, NULL };
+    kafka_common_KafkaFuture_RecordMetadata_t *futures[3] = { NULL, NULL, NULL };
     kafka_common_Error_t *errors[3] = { NULL, NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
@@ -345,9 +345,9 @@ void test_send_batch_partial_failure(void) {
     TEST_ASSERT_NOT_NULL(futures[2]);
     TEST_ASSERT_NULL(errors[2]);
 
-    kafka_producer_FutureRecordMetadata_destroy(futures[0]);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(futures[0]);
     kafka_common_Error_destroy(errors[1]);
-    kafka_producer_FutureRecordMetadata_destroy(futures[2]);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(futures[2]);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -363,7 +363,7 @@ void test_close_then_send(void) {
     TEST_ASSERT_NULL(err);
 
     err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     /* `MockProducer::send` on a closed producer returns
@@ -499,18 +499,18 @@ void test_flush(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     TEST_ASSERT_NULL(err);
-    TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
     err = NULL;
     kafka_producer_Producer_flush(producer, &err);
     TEST_ASSERT_NULL(err);
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -526,7 +526,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_NULL(err);
 
     err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     TEST_ASSERT_NOT_NULL(err);
@@ -539,7 +539,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
 
-    /* Every hierarchy predicate (CLAUDE.md §10.4) on a real handle, asserted
+    /* Every hierarchy predicate (CLAUDE.md §12.4) on a real handle, asserted
      * rather than merely called, so a predicate wired to the wrong Rust method
      * fails here.
      *
@@ -552,7 +552,7 @@ void test_error_inspection(void) {
      * predicates are complementary, not redundant: the code names the class,
      * while the false predicates tell a C caller "you misused the client"
      * rather than "the broker reported an error". (Fatality is not exported:
-     * `common.requests` is not a supported Kafka API — CLAUDE.md §3.) */
+     * `common.requests` is not a supported Kafka API — CLAUDE.md §4.) */
     TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(err));
@@ -599,10 +599,10 @@ void test_error_null_safety(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-variant payload accessors (CLAUDE.md §3: "Exceptions having additional
+// Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
 //
-// Of the 13 `Error` variants with extra fields, only the 7 below have a Java
+// Of the 12 `Error` variants with extra fields exposed to C, only the 7 below have a Java
 // protocol error code, so they are the only ones reachable through
 // `kafka_producer_MockProducer_error_next(code, message)`, which dispatches
 // through `Errors::error()` — the same "default instance for this code" path
@@ -613,8 +613,8 @@ void test_error_null_safety(void) {
 // same accessors with populated, custom field values by constructing the
 // errors directly, since Rust can call the identical `extern "C"` functions.
 //
-// The other 6 payload-bearing variants (`CorrelationIdMismatch`,
-// `RecordDeserialization`, `QuotaViolation`, `ConsumerLogTruncation`,
+// The other 5 payload-bearing variants (`RecordDeserialization`,
+// `QuotaViolation`, `ConsumerLogTruncation`,
 // `ConsumerNoOffsetForPartition`, `ConsumerOffsetOutOfRange`) have NO Java
 // protocol error code — they are client-side-only classes `Errors::for_code`
 // cannot produce — so there is no existing C-reachable trigger for them
@@ -627,14 +627,14 @@ void test_error_null_safety(void) {
 /// `kafka_producer_MockProducer_error_next`, returning the populated
 /// `kafka_common_Error_t`. Caller owns the returned handle and `*out_future`.
 static kafka_common_Error_t *trigger_error(kafka_producer_Producer_t *producer, int32_t error_code,
-                                            const char *message, kafka_producer_FutureRecordMetadata_t **out_future) {
+                                            const char *message, kafka_common_KafkaFuture_RecordMetadata_t **out_future) {
     kafka_common_Error_t *send_err = NULL;
     *out_future = kafka_producer_Producer_send(producer, "topic", -1, -1, NULL, -1, NULL, -1, &send_err);
     TEST_ASSERT_NULL(send_err);
     TEST_ASSERT_TRUE(kafka_producer_MockProducer_error_next(producer, error_code, message));
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_RecordMetadata_t *metadata = kafka_producer_FutureRecordMetadata_get(*out_future, &err);
+    kafka_producer_RecordMetadata_t *metadata = kafka_common_KafkaFuture_RecordMetadata_get(*out_future, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(metadata);
     return err;
@@ -642,7 +642,7 @@ static kafka_common_Error_t *trigger_error(kafka_producer_Producer_t *producer, 
 
 void test_error_payload_topic_authorization(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 29 = TOPIC_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 29, NULL, &future);
 
@@ -657,13 +657,13 @@ void test_error_payload_topic_authorization(void) {
     TEST_ASSERT_NULL(kafka_common_Error_group_authorization(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_group_authorization(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 30 = GROUP_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 30, NULL, &future);
 
@@ -677,13 +677,13 @@ void test_error_payload_group_authorization(void) {
     TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_invalid_topic(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 17 = INVALID_TOPIC_ERROR */
     kafka_common_Error_t *err = trigger_error(producer, 17, NULL, &future);
 
@@ -697,13 +697,13 @@ void test_error_payload_invalid_topic(void) {
     TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_duplicate_resource(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 92 = DUPLICATE_RESOURCE */
     kafka_common_Error_t *err = trigger_error(producer, 92, NULL, &future);
 
@@ -715,13 +715,13 @@ void test_error_payload_duplicate_resource(void) {
     TEST_ASSERT_NULL(kafka_common_Error_resource_not_found(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_resource_not_found(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 91 = RESOURCE_NOT_FOUND */
     kafka_common_Error_t *err = trigger_error(producer, 91, NULL, &future);
 
@@ -732,13 +732,13 @@ void test_error_payload_resource_not_found(void) {
     TEST_ASSERT_NULL(kafka_common_Error_duplicate_resource(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_throttling_quota_exceeded(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 89 = THROTTLING_QUOTA_EXCEEDED */
     kafka_common_Error_t *err = trigger_error(producer, 89, NULL, &future);
 
@@ -749,13 +749,13 @@ void test_error_payload_throttling_quota_exceeded(void) {
     TEST_ASSERT_NULL(kafka_common_Error_record_too_large(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_payload_record_too_large(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
-    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     /* 10 = MESSAGE_TOO_LARGE */
     kafka_common_Error_t *err = trigger_error(producer, 10, NULL, &future);
 
@@ -768,7 +768,7 @@ void test_error_payload_record_too_large(void) {
     TEST_ASSERT_NULL(kafka_common_Error_throttling_quota_exceeded(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -780,7 +780,7 @@ void test_mock_clear(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
     TEST_ASSERT_NULL(err);
@@ -789,7 +789,7 @@ void test_mock_clear(void) {
     kafka_producer_MockProducer_clear(producer);
     TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -807,7 +807,7 @@ void test_record_metadata_getters_from_batch(void) {
           value, (int32_t)sizeof(value) - 1 },
     };
 
-    kafka_producer_FutureRecordMetadata_t *futures[1] = { NULL };
+    kafka_common_KafkaFuture_RecordMetadata_t *futures[1] = { NULL };
     kafka_common_Error_t *errors[1] = { NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
@@ -817,7 +817,7 @@ void test_record_metadata_getters_from_batch(void) {
 
     kafka_common_Error_t *err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(futures[0], &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(futures[0], &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(metadata);
 
@@ -832,7 +832,7 @@ void test_record_metadata_getters_from_batch(void) {
     TEST_ASSERT_EQUAL_INT64(-1, kafka_producer_RecordMetadata_timestamp(metadata));
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(futures[0]);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(futures[0]);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -952,13 +952,13 @@ void test_future_get_async(void) {
     const uint8_t value[] = "fv";
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "fut-topic", 1, -1, NULL, -1, value, (int32_t)sizeof(value) - 1, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
 
     async_record_result_t result = {0};
-    kafka_producer_FutureRecordMetadata_get_async(future, on_record, &result);
+    kafka_common_KafkaFuture_RecordMetadata_get_async(future, on_record, &result);
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_TRUE(result.had_metadata);
@@ -966,7 +966,7 @@ void test_future_get_async(void) {
     TEST_ASSERT_EQUAL_INT32(1, result.partition);
     TEST_ASSERT_EQUAL_STRING("fut-topic", result.topic);
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -1063,13 +1063,13 @@ static void assert_error_message(kafka_common_Error_t *err, const char *expected
 static void send_one(kafka_producer_Producer_t *producer, const char *topic) {
     const uint8_t value[] = "v";
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send(
         producer, topic, -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
 }
 
 void test_transaction_commit_publishes_records(void) {
@@ -1363,7 +1363,7 @@ void test_transaction_commit_error_requires_abort(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(120, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_transaction_abortable_error(err));
-    /* Fatality is deliberately not exported (CLAUDE.md §3: `common.requests` is
+    /* Fatality is deliberately not exported (CLAUDE.md §4: `common.requests` is
      * not a supported Kafka API). `request_utils::is_fatal_error` is
      * authentication || authorization || one of five standalone classes, and
      * TRANSACTION_ABORTABLE is none of them — so assert the exported halves. */
@@ -1448,7 +1448,7 @@ void test_transaction_commit_flushes_pending_sends(void) {
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
 
     const uint8_t value[] = "v";
-    kafka_producer_FutureRecordMetadata_t *futures[3];
+    kafka_common_KafkaFuture_RecordMetadata_t *futures[3];
     for (int i = 0; i < 3; i++) {
         kafka_common_Error_t *err = NULL;
         futures[i] = kafka_producer_Producer_send(
@@ -1458,21 +1458,21 @@ void test_transaction_commit_flushes_pending_sends(void) {
         TEST_ASSERT_NULL(err);
         TEST_ASSERT_NOT_NULL(futures[i]);
         /* Still pending, and invisible in the sent history. */
-        TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
+        TEST_ASSERT_FALSE(kafka_common_KafkaFuture_RecordMetadata_is_done(futures[i]));
     }
     TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
 
     TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
 
     for (int i = 0; i < 3; i++) {
-        TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
+        TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(futures[i]));
         kafka_common_Error_t *err = NULL;
         kafka_producer_RecordMetadata_t *metadata =
-            kafka_producer_FutureRecordMetadata_get(futures[i], &err);
+            kafka_common_KafkaFuture_RecordMetadata_get(futures[i], &err);
         TEST_ASSERT_NULL(err);
         TEST_ASSERT_NOT_NULL(metadata);
         kafka_producer_RecordMetadata_destroy(metadata);
-        kafka_producer_FutureRecordMetadata_destroy(futures[i]);
+        kafka_common_KafkaFuture_RecordMetadata_destroy(futures[i]);
     }
     TEST_ASSERT_EQUAL_INT32(3, kafka_producer_MockProducer_history_count(producer));
 
@@ -1850,7 +1850,7 @@ void test_send_with_callback_fires_metadata_on_complete_next(void) {
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-topic", 4, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1,
@@ -1860,7 +1860,7 @@ void test_send_with_callback_fires_metadata_on_complete_next(void) {
 
     /* auto_complete=false: nothing has completed yet, so neither the future nor
      * the callback has a result. */
-    TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
 
     TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(producer));
@@ -1874,10 +1874,10 @@ void test_send_with_callback_fires_metadata_on_complete_next(void) {
     TEST_ASSERT_EQUAL_STRING("cb-topic", result.topic);
 
     /* The future reports the same outcome. */
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(metadata);
     TEST_ASSERT_EQUAL_INT64(result.offset, kafka_producer_RecordMetadata_offset(metadata));
@@ -1885,7 +1885,7 @@ void test_send_with_callback_fires_metadata_on_complete_next(void) {
     TEST_ASSERT_EQUAL_STRING(result.topic, kafka_producer_RecordMetadata_topic(metadata));
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -1894,7 +1894,7 @@ void test_send_with_callback_fires_error_on_error_next(void) {
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-err-topic", -1, -1,
         NULL, -1, NULL, -1,
         on_record, &result, &err);
@@ -1920,13 +1920,13 @@ void test_send_with_callback_fires_error_on_error_next(void) {
     /* The future reports the same failure. */
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(metadata);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(result.error_code, kafka_common_Error_code(err));
 
     kafka_common_Error_destroy(err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -1936,7 +1936,7 @@ void test_send_with_callback_future_and_callback_agree(void) {
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "agree-topic", 7, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -1945,11 +1945,11 @@ void test_send_with_callback_future_and_callback_agree(void) {
     TEST_ASSERT_NOT_NULL(future);
 
     /* auto_complete=true: the record completes during the send. */
-    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
     err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &err);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(metadata);
 
@@ -1963,7 +1963,7 @@ void test_send_with_callback_future_and_callback_agree(void) {
     TEST_ASSERT_EQUAL_INT32(7, result.partition);
 
     kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -1973,7 +1973,7 @@ void test_send_with_callback_runs_on_dispatcher_thread(void) {
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-thread-topic", -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -1986,7 +1986,7 @@ void test_send_with_callback_runs_on_dispatcher_thread(void) {
      * caller's thread. */
     TEST_ASSERT_FALSE(pthread_equal(pthread_self(), result.thread_id));
 
-    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -1998,7 +1998,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
     kafka_common_Error_t *err = NULL;
     /* NULL topic is a synchronous validation error: no future is returned,
      * out_error is set and the callback is NOT invoked. */
-    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+    kafka_common_KafkaFuture_RecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, NULL, -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,

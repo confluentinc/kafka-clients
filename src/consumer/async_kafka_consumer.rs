@@ -51,7 +51,7 @@
 //! `ClientTelemetryReporter` / `ClientTelemetryUtils` are NOT translated;
 //! the corresponding fields are `None`. Per Phase 11 PLAN.md deferral #6.
 
-#![allow(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
+#![expect(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
 use crate::consumer::CloseOptions;
 use std::collections::{HashMap, HashSet};
@@ -64,9 +64,9 @@ use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerConfig;
-use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
@@ -89,7 +89,6 @@ use crate::consumer::internals::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::PositionsValidator;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::SubscriptionState;
-use crate::consumer::internals::ThreadTime;
 use crate::consumer::internals::WakeupTrigger;
 use crate::consumer::internals::events::ApplicationEventHandler;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -97,6 +96,7 @@ use crate::consumer::internals::events::CompletableEvent;
 use crate::consumer::internals::events::CompletableEventReaper;
 use crate::consumer::internals::events::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
 ///
@@ -126,7 +126,7 @@ enum BgJoin {
 }
 
 /// A `Clone + Send + Sync` handle to a consumer that exposes
-/// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) **and** the reentrant-safe consumer operations,
 /// callable from a task or thread other than the one owning the consumer.
 ///
 /// **No Java class counterpart — it recovers a Java capability.** Java's
@@ -154,7 +154,7 @@ enum BgJoin {
 /// captures the handle into their listener struct — the Rust equivalent
 /// of Java capturing the `consumer` variable.
 ///
-/// Obtain one via [`Consumer::handle`]. Cheap to clone — clones share the
+/// Obtain one via [`Consumer::handle`](crate::consumer::Consumer::handle). Cheap to clone — clones share the
 /// same underlying state.
 ///
 /// # Operations
@@ -163,7 +163,7 @@ enum BgJoin {
 /// [`subscription`](Self::subscription), [`paused`](Self::paused).
 ///
 /// Async (reentrant-safe consumer ops): [`assign`](Self::assign),
-/// [`seek`](Self::seek), [`seek_to_beginning`](Self::seek_to_beginning),
+/// [`seek_with_offset`](Self::seek_with_offset), [`seek_to_beginning`](Self::seek_to_beginning),
 /// [`seek_to_end`](Self::seek_to_end), [`pause`](Self::pause),
 /// [`resume`](Self::resume), [`position`](Self::position),
 /// [`committed`](Self::committed),
@@ -181,7 +181,7 @@ enum BgJoin {
 ///
 /// `ConsumerHandle` is a concrete struct, so its async methods are
 /// concrete `async fn` returning an anonymous future (no
-/// `Pin<Box<dyn Future>>`), per CLAUDE.md §11. None of its methods are on
+/// `Pin<Box<dyn Future>>`), per CLAUDE.md §13. None of its methods are on
 /// a per-record hot path.
 #[derive(Clone)]
 pub struct ConsumerHandle {
@@ -206,7 +206,7 @@ pub(crate) struct AsyncConsumerHandleState {
     /// partitions (Java `fetchBuffer.retainAll`).
     fetch_buffer: Arc<FetchBuffer>,
     /// Time source for deadline computation.
-    time: Arc<dyn ThreadTime>,
+    time: Arc<dyn Time>,
     /// Cached `default.api.timeout.ms`.
     default_api_timeout_ms: i64,
 }
@@ -226,7 +226,7 @@ enum ConsumerHandleInner {
 
 impl ConsumerHandle {
     /// Fires the consumer's `wakeup()` from this handle. Equivalent to
-    /// calling [`Consumer::wakeup`] on the owning consumer, but callable
+    /// calling [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) on the owning consumer, but callable
     /// from any task / thread without holding a reference to the consumer.
     pub fn wakeup(&self) {
         match &self.inner {
@@ -242,7 +242,7 @@ impl ConsumerHandle {
 
     // ── Sync getters ───────────────────────────────────────────────────
 
-    /// [`Consumer::assignment`] via the shared `SubscriptionState`.
+    /// [`Consumer::assignment`](crate::consumer::Consumer::assignment) via the shared `SubscriptionState`.
     pub fn assignment(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
@@ -250,7 +250,7 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::subscription`] via the shared `SubscriptionState`.
+    /// [`Consumer::subscription`](crate::consumer::Consumer::subscription) via the shared `SubscriptionState`.
     pub fn subscription(&self) -> HashSet<String> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
@@ -258,7 +258,7 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::paused`] via the shared `SubscriptionState`.
+    /// [`Consumer::paused`](crate::consumer::Consumer::paused) via the shared `SubscriptionState`.
     pub fn paused(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
@@ -268,17 +268,17 @@ impl ConsumerHandle {
 
     // ── Async reentrant-safe consumer ops ───────────────────────────────
 
-    /// [`AsyncKafkaConsumer::assign`].
+    /// [`Consumer::assign`](crate::consumer::Consumer::assign).
     pub async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         self.async_state()?.assign(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::seek`].
+    /// `AsyncKafkaConsumer::seek`.
     pub async fn seek_with_offset(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         self.async_state()?.seek(partition, offset, None).await
     }
 
-    /// [`AsyncKafkaConsumer::seek_with_offset_and_metadata`].
+    /// [`Consumer::seek_with_offset_and_metadata`](crate::consumer::Consumer::seek_with_offset_and_metadata).
     pub async fn seek_with_offset_and_metadata(
         &self,
         partition: TopicPartition,
@@ -289,43 +289,43 @@ impl ConsumerHandle {
         self.async_state()?.seek(partition, offset, epoch).await
     }
 
-    /// [`AsyncKafkaConsumer::seek_to_beginning`].
+    /// [`Consumer::seek_to_beginning`](crate::consumer::Consumer::seek_to_beginning).
     pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
-    /// [`AsyncKafkaConsumer::seek_to_end`].
+    /// [`Consumer::seek_to_end`](crate::consumer::Consumer::seek_to_end).
     pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
             .await
     }
 
-    /// [`AsyncKafkaConsumer::pause`].
+    /// [`Consumer::pause`](crate::consumer::Consumer::pause).
     pub async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?.pause(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::resume`].
+    /// [`Consumer::resume`](crate::consumer::Consumer::resume).
     pub async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?.resume(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::position`].
+    /// [`Consumer::position`](crate::consumer::Consumer::position).
     pub async fn position(&self, partition: &TopicPartition) -> Result<i64, Error> {
         let state = self.async_state()?;
         let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
         state.position(partition, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::position_with_timeout`].
+    /// [`Consumer::position_with_timeout`](crate::consumer::Consumer::position_with_timeout).
     pub async fn position_with_timeout(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
         self.async_state()?.position(partition, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::committed`].
+    /// [`Consumer::committed`](crate::consumer::Consumer::committed).
     pub async fn committed(
         &self,
         partitions: &[TopicPartition],
@@ -335,7 +335,7 @@ impl ConsumerHandle {
         state.committed(partitions, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::beginning_offsets`].
+    /// [`Consumer::beginning_offsets`](crate::consumer::Consumer::beginning_offsets).
     pub async fn beginning_offsets(
         &self,
         partitions: &[TopicPartition],
@@ -346,7 +346,7 @@ impl ConsumerHandle {
         state.beginning_or_end_offsets(partitions, -2, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::end_offsets`].
+    /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets).
     pub async fn end_offsets(&self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         let state = self.async_state()?;
         let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
@@ -354,7 +354,7 @@ impl ConsumerHandle {
         state.beginning_or_end_offsets(partitions, -1, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::offsets_for_times`].
+    /// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
     pub async fn offsets_for_times(
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -364,7 +364,7 @@ impl ConsumerHandle {
         state.offsets_for_times(timestamps_to_search, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_sync`]. Commits the offsets the bg
+    /// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync). Commits the offsets the bg
     /// task has consumed (Java `commitSync()` with no offsets — commit
     /// `allConsumed`).
     pub async fn commit_sync(&self) -> Result<(), Error> {
@@ -373,7 +373,7 @@ impl ConsumerHandle {
         state.commit_sync(None, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_sync_with_offsets`].
+    /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
     pub async fn commit_sync_with_offsets(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -383,13 +383,13 @@ impl ConsumerHandle {
         state.commit_sync(Some(offsets), timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget commit of the
+    /// [`Consumer::commit_async`](crate::consumer::Consumer::commit_async). Fire-and-forget commit of the
     /// offsets the bg task has consumed.
     pub async fn commit_async(&self) -> Result<(), Error> {
         self.async_state()?.commit_async(None).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_async_offsets`].
+    /// `AsyncKafkaConsumer::commit_async_offsets`.
     pub async fn commit_async_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         self.async_state()?.commit_async(Some(offsets)).await
     }
@@ -525,7 +525,7 @@ impl AsyncConsumerHandleState {
     async fn seek_with_reset_strategy(
         &self,
         partitions: &[TopicPartition],
-        strategy: crate::consumer::AutoOffsetResetStrategy,
+        strategy: crate::consumer::internals::AutoOffsetResetStrategy,
     ) -> Result<(), Error> {
         let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let deadline_ms = self.default_api_timeout_deadline_ms();
@@ -1205,7 +1205,6 @@ where
     /// Phase M7 can expose the public `metrics()` accessor over the same
     /// registry the fetch path records into. The fetch managers hold
     /// `Arc<FetchMetricsManager>` clones that reference this same registry.
-    #[allow(dead_code)]
     metrics: Arc<Metrics>,
 
     /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
@@ -1230,7 +1229,7 @@ where
     background_event_queue_size: Arc<AtomicI64>,
 
     // ── App-side only ─────────────────────────────────────────────────
-    /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
+    /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §13.
     client_id: Arc<str>,
     /// `group.id`, if any.
     group_id: Option<String>,
@@ -1241,7 +1240,7 @@ where
     /// `MemberStateListener` registered with the membership manager
     /// (production wire-up in Phase 12; for tests, callers register
     /// [`Self::state_notifier`] directly on the membership manager).
-    group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Java: `private final AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot`
     /// (`AsyncKafkaConsumer.java:317`).
     ///
@@ -1318,7 +1317,7 @@ where
     /// inside `close`).
     config: ConsumerConfig,
     /// Time source used for `current_time_ms` arguments to events.
-    time: Arc<dyn ThreadTime>,
+    time: Arc<dyn Time>,
     /// Java: `private CompletableFuture<...> lastPendingAsyncCommit`.
     ///
     /// Tracks the most-recently-submitted async commit so that
@@ -1445,7 +1444,7 @@ pub(crate) struct ConsumerStateNotifier {
     /// [`ConsumerGroupMetadata`].
     group_instance_id: Option<String>,
     /// Shared with [`AsyncKafkaConsumer::group_metadata`].
-    group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Shared with [`AsyncKafkaConsumer::group_assignment_snapshot`].
     group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
     /// Shared with [`AsyncKafkaConsumer::has_pending_reconciliation`]
@@ -1464,7 +1463,7 @@ impl ConsumerStateNotifier {
     pub(crate) fn new(
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
-        group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+        group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
         group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
         has_pending_reconciliation: Arc<AtomicBool>,
     ) -> Self {
@@ -1494,14 +1493,13 @@ impl ConsumerStateNotifier {
             return;
         };
         let mut guard = self.group_metadata.lock().unwrap();
-        #[allow(deprecated)]
-        let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+        let next = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             self.group_id.clone(),
             epoch,
             member_id.to_string(),
             self.group_instance_id.clone(),
         );
-        *guard = Some(next);
+        *guard = Some(Arc::new(next));
     }
 
     /// Java: `private void resetGroupMetadata()`
@@ -1532,14 +1530,13 @@ impl ConsumerStateNotifier {
             // Mirror Java's `initializeConsumerGroupMetadata(oldGroupId, oldGroupInstanceId)`:
             // build fresh metadata with UNKNOWN epoch + member, preserving
             // the old group_id + group_instance_id.
-            #[allow(deprecated)]
-            let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+            let next = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
                 old.group_id().to_string(),
                 -1, // JoinGroupRequest.UNKNOWN_GENERATION_ID
                 "", // JoinGroupRequest.UNKNOWN_MEMBER_ID
                 old.group_instance_id().map(str::to_string),
             );
-            *guard = Some(next);
+            *guard = Some(Arc::new(next));
         }
         // Java's `oldGroupMetadataOptional.map(...)` short-circuits when
         // the slot is empty (assignment-only consumer never populated the
@@ -1611,8 +1608,8 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub deserializers: Arc<Deserializers<K, V>>,
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
     pub isolation_level: IsolationLevel,
-    pub time: Arc<dyn ThreadTime>,
-    /// Shared `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slot. Java has a
+    pub time: Arc<dyn Time>,
+    /// Shared `Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>` slot. Java has a
     /// **single** `AtomicReference<Optional<ConsumerGroupMetadata>>` field
     /// (`AsyncKafkaConsumer.java:289`); the same slot is referenced by
     /// the `MemberStateListener` registered on the membership manager AND
@@ -1622,7 +1619,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// through here — the same Arc is then registered on
     /// `ConsumerMembershipManager` via [`Self::state_notifier`] AND
     /// stored on the consumer struct's `group_metadata` field.
-    pub group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    pub group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Shared `Arc<Mutex<HashSet<TopicPartition>>>` slot mirroring
     /// Java's `groupAssignmentSnapshot` field
     /// (`AsyncKafkaConsumer.java:317`). Same single-source-of-truth
@@ -1748,7 +1745,7 @@ where
             // here. "Failed to construct kafka consumer" is the string users
             // match on.
             Error::KafkaError(crate::common::KafkaError::with_message_source(
-                crate::common::Errors::UnknownServerError,
+                crate::common::protocol::Errors::UnknownServerError,
                 "Failed to construct kafka consumer",
                 err,
             ))
@@ -1759,7 +1756,7 @@ where
     /// (`AsyncKafkaConsumer.java:390-508`). See [`Self::new`] for the
     /// `catch (Throwable t)` wrap applied to every error it returns.
     fn new_inner(
-        config: ConsumerConfig,
+        mut config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
     ) -> Result<Self, Error> {
@@ -1771,7 +1768,7 @@ where
         use crate::common::internals::ClusterResourceListeners;
         use crate::common::network::ChannelBuilders;
         use crate::common::network::Selector;
-        use crate::consumer::AutoOffsetResetStrategy;
+        use crate::consumer::internals::AutoOffsetResetStrategy;
         use crate::consumer::internals::CommitRequestManager;
         use crate::consumer::internals::ConsumerHeartbeatRequestManager;
         use crate::consumer::internals::ConsumerMembershipManager;
@@ -1786,6 +1783,25 @@ where
         use crate::consumer::internals::TopicMetadataRequestManager;
 
         log::debug!("Initializing the Kafka consumer");
+
+        // Java's `KafkaConsumer` passes `Time.SYSTEM`, and the constructor
+        // hands that one instance to every component it builds.
+        let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
+
+        // A config built with `ConsumerConfig::default()` and the fluent
+        // setters never went through `ConsumerConfig::new`, so it may still
+        // carry an empty `client.id`. Java's config is immutable and always
+        // finalised by `postProcessParsedConfig`; construction is the Rust
+        // equivalent point, so apply the same `maybeOverrideClientId` rule.
+        config.maybe_override_client_id()?;
+
+        // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
+        // (`AsyncKafkaConsumer.java:470-473`) validates a set
+        // `group.instance.id` (`GroupRebalanceConfig.java:68-72`) regardless of
+        // `client.id`; `ConsumerConfig` only does so when it derives the id.
+        if let Some(group_instance_id) = config.group_instance_id() {
+            crate::common::requests::JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
+        }
 
         // Java line 390 — `clientId = config.getString(CLIENT_ID_CONFIG)`.
         let client_id: Arc<str> = Arc::from(config.client_id());
@@ -1863,7 +1879,7 @@ where
         // the fetch path (FetchRequestManager / FetchCollector). The full
         // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
         // M7 over THIS same registry — no re-plumb.
-        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
 
         // M4: the consumer-level + heartbeat + offset-commit metrics managers
         // all register against the SAME `Arc<Metrics>` registry. Java
@@ -1927,13 +1943,14 @@ where
             log_context.clone(),
         )
         .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
-        let selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
             log_context.clone(),
         );
+        selector.set_time(Arc::clone(&time));
         let shared_metadata = metadata.metadata_arc();
-        let network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+        let mut network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             selector,
             shared_metadata,
             config.client_id(),
@@ -1952,6 +1969,7 @@ where
             MetadataRecoveryStrategy::None,
             log_context,
         );
+        network_client.set_time(Arc::clone(&time));
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
@@ -2068,10 +2086,7 @@ where
         // `ApplicationEventProcessor` event arms, `membership` via
         // `reconcile()`); see `consumer_network_thread.rs`.
 
-        let current_time_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let current_time_ms = time.milliseconds();
 
         let coordinator: Option<Arc<CoordinatorRequestManager>> = group_id.as_ref().map(|gid| {
             Arc::new(CoordinatorRequestManager::new(
@@ -2088,7 +2103,7 @@ where
                 Arc::clone(&subscriptions),
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::clone(&time),
                 current_time_ms,
             ))
         });
@@ -2163,7 +2178,7 @@ where
                     &metrics,
                     Arc::clone(&subscriptions),
                 ))),
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::clone(&time),
             ))),
             _ => None,
         };
@@ -2205,6 +2220,7 @@ where
             Arc::clone(&subscriptions),
             Arc::clone(&metadata),
             fetch_config.isolation_level,
+            Arc::clone(&time),
             config.retry_backoff_ms(),
             config.request_timeout_ms() as i64,
             config.default_api_timeout_ms as i64,
@@ -2319,7 +2335,7 @@ where
         // built TWO notifiers (one here, one inside `with_components`),
         // so `group_metadata` updates went to a slot the app side never
         // read. Single-notifier wiring now closes that gap.
-        let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>> = Arc::new(Mutex::new(None));
         let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
         let state_notifier = Arc::new(ConsumerStateNotifier::new(
             group_id.clone().unwrap_or_default(),
@@ -2384,10 +2400,8 @@ where
         // `ConsumerRebalanceListenerInvoker` + `ConsumerNetworkThread`
         // build + spawn. Each Java step maps line-for-line to the Rust
         // block below.
+        use crate::consumer::internals::ConsumerNetworkThread;
         use crate::consumer::internals::events::ApplicationEventProcessor;
-        use crate::consumer::internals::{ConsumerNetworkThread, SystemThreadTime, ThreadTime};
-
-        let time: Arc<dyn ThreadTime> = Arc::new(SystemThreadTime);
 
         // Java lines 466-470 — `applicationEventProcessor`.
         let application_event_reaper: Arc<std::sync::Mutex<CompletableEventReaper>> =
@@ -2397,6 +2411,7 @@ where
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             Arc::clone(&application_event_reaper),
+            Arc::clone(&time),
         );
 
         // Java lines 471-481 — `applicationEventHandler`. M6: wire the
@@ -2412,12 +2427,11 @@ where
         // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
         // wire them post-construction so the no-arg `new` stays usable in
         // tests. The metrics manager registers against the consumer's shared
-        // `Arc<Metrics>` (M3 field); the clock is `SystemTime` (the same clock
-        // the metrics registry uses), so the recorded latency durations match.
+        // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
         rebalance_listener_invoker.set_metrics(
             crate::consumer::internals::RebalanceCallbackMetricsManager::new(&metrics),
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::clone(&time),
         );
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
@@ -2430,15 +2444,13 @@ where
         let wakeup_trigger = WakeupTrigger::new();
 
         // Java lines 494-500 — `fetchCollector`.
-        let fetch_collector_time: Arc<dyn crate::consumer::internals::FetchCollectorTime> =
-            Arc::new(crate::consumer::internals::SystemFetchCollectorTime);
         let fetch_collector = Arc::new(FetchCollector::new(
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             fetch_config,
             Arc::clone(&_deserializers),
             Arc::clone(&fetch_metrics_manager),
-            fetch_collector_time,
+            Arc::clone(&time),
         ));
 
         // Java line 506 — `config.logUnused()` → `log::debug!(...)`.
@@ -2599,7 +2611,10 @@ where
     /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
     /// (kept on the consumer for M7's public accessor) and the
     /// `Arc<FetchMetricsManager>` shared into the fetch path.
-    fn create_fetch_metrics_manager(config: &ConsumerConfig) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+    fn create_fetch_metrics_manager(
+        config: &ConsumerConfig,
+        time: Arc<dyn Time>,
+    ) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
         const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
         const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
 
@@ -2613,7 +2628,7 @@ where
             .set_record_level(recording_level)
             .set_tags(tags);
 
-        let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
+        let metrics = Arc::new(Metrics::with_default_config_time(Arc::new(metric_config), time));
 
         // `client-id` is a default config tag, so it is added automatically to
         // every metric name; the registry's template tag set therefore lists
@@ -2748,7 +2763,7 @@ where
     }
 
     /// Java: `String clientId()`. Returned as a borrowed `&str` per
-    /// CLAUDE.md §12 (most general borrowed form for getters).
+    /// CLAUDE.md §14 (most general borrowed form for getters).
     ///
     /// **Returns the configured value silently when the consumer is
     /// closed** (Java throws `IllegalStateException`). The `client_id`
@@ -2783,11 +2798,11 @@ where
     /// Java's `groupMetadata()` throws `InvalidGroupIdException` when
     /// `group.id` is unset (`AsyncKafkaConsumer.java:1428-1436` calls
     /// `throwIfGroupIdNotDefined()` inside `acquireAndEnsureOpen`).
-    /// The Rust translation returns a stub
-    /// `ConsumerGroupMetadata::new("")` for groupless consumers,
+    /// The Rust translation returns a stub metadata with an empty group id
+    /// and unknown generation / member ids for groupless consumers,
     /// because:
     ///   (a) the [`Consumer`] trait surface returns
-    ///       `ConsumerGroupMetadata` with no error channel (Phase 2
+    ///       `Arc<dyn ConsumerGroupMetadata>` with no error channel (Phase 2
     ///       decision), and panicking on a pure accessor diverges
     ///       sharply from idiomatic Rust;
     ///   (b) the strict-Java behavior IS surfaced via `commit_*` /
@@ -2802,7 +2817,8 @@ where
     /// **Returns a stub value silently when the consumer is closed**
     /// (Java throws `IllegalStateException`).
     ///
-    /// The returned struct is a clone of the cached value. The cache
+    /// The returned value shares the cached `Arc`, as Java returns the cached
+    /// object. The cache
     /// is populated by [`ConsumerStateNotifier::on_member_epoch_updated`]
     /// which is the [`MemberStateListener`] registered on the
     /// `ConsumerMembershipManager` at production wire-up time
@@ -2810,18 +2826,15 @@ where
     /// receives its first heartbeat response with a member-epoch
     /// (or until tests invoke the notifier directly), the cache is
     /// empty and this method returns a fresh stub.
-    pub fn group_metadata(&self) -> ConsumerGroupMetadata {
+    pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
-            Some(meta) => meta.clone(),
+            Some(meta) => Arc::clone(meta) as Arc<dyn ConsumerGroupMetadata>,
             None => {
                 // Stub matching Java's `initializeGroupMetadata` default for
                 // groupless consumers.
-                #[allow(deprecated)]
-                {
-                    let group = self.group_id.clone().unwrap_or_default();
-                    ConsumerGroupMetadata::new(group)
-                }
+                let group = self.group_id.clone().unwrap_or_default();
+                Arc::new(ConsumerGroupMetadataImpl::new(group))
             },
         }
     }
@@ -3437,7 +3450,7 @@ where
                     let result = match listener {
                         Some(listener) => {
                             // Invoke on the caller's task — never `tokio::spawn`.
-                            use crate::consumer::ConsumerRebalanceListenerMethodName as M;
+                            use crate::consumer::internals::ConsumerRebalanceListenerMethodName as M;
                             match method_name {
                                 M::OnPartitionsRevoked => {
                                     self.rebalance_listener_invoker
@@ -3530,7 +3543,7 @@ where
                     // to the user), and the message text is byte-identical to
                     // Java's only literal for this skip.
                     let _ = ack.send(Err(Error::with_message(
-                        crate::common::Errors::UnknownServerError,
+                        crate::common::protocol::Errors::UnknownServerError,
                         "Assignment event skipped because consumer is unsubscribing",
                     )));
                     log::debug!("Skipped processing PartitionsAssigned during unsubscribe/close");
@@ -3697,7 +3710,7 @@ where
     /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
     /// flags forwarded to [`Self::process_background_events_inner`]. See that
     /// method for the close-path / unsubscribe rationale.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn process_background_events_until_inner<T: Send + 'static>(
         &mut self,
         receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
@@ -4227,7 +4240,7 @@ where
             // `hasAllFetchPositions`). Java's copy is a cheap TLAB nursery
             // allocation the GC absorbs; in Rust it was a malloc + 24 Arc
             // clones + SipHash inserts per poll (~1.3% of app-thread CPU on
-            // the cloud profile). CLAUDE.md §11: keep it off the heap
+            // the cloud profile). CLAUDE.md §13: keep it off the heap
             // (Phase 27 Fix #3).
             let needs_backoff = {
                 let subs = self.subscriptions.lock().unwrap();
@@ -4933,13 +4946,13 @@ where
 
     /// Java: `void seekToBeginning(Collection<TopicPartition>)`.
     pub async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+        self.seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
     /// Java: `void seekToEnd(Collection<TopicPartition>)`.
     pub async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+        self.seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
             .await
     }
 
@@ -4948,7 +4961,7 @@ where
     async fn seek_with_reset_strategy(
         &mut self,
         partitions: &[TopicPartition],
-        strategy: crate::consumer::AutoOffsetResetStrategy,
+        strategy: crate::consumer::internals::AutoOffsetResetStrategy,
     ) -> Result<(), Error> {
         self.ensure_open()?;
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
@@ -5595,17 +5608,6 @@ where
         .await
     }
 
-    /// Java: `@Deprecated void close(Duration timeout)`, whose body is
-    /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`).
-    #[deprecated(
-        note = "mirroring Java's @Deprecated close(Duration); use close_with_options with CloseOptions::timeout"
-    )]
-    pub async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.close_with_options(crate::consumer::CloseOptions::new_timeout(timeout))
-            .await
-    }
-
     /// Java: `void close(CloseOptions options)`.
     pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
@@ -5959,7 +5961,7 @@ where
         AsyncKafkaConsumer::paused(self)
     }
 
-    fn group_metadata(&self) -> ConsumerGroupMetadata {
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         AsyncKafkaConsumer::group_metadata(self)
     }
 
@@ -6205,11 +6207,6 @@ where
         AsyncKafkaConsumer::close(self).await
     }
 
-    #[allow(deprecated)]
-    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        AsyncKafkaConsumer::close_with_timeout(self, timeout).await
-    }
-
     async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         AsyncKafkaConsumer::close_with_options(self, options).await
     }
@@ -6239,7 +6236,7 @@ mod tests {
 
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::serialization::Deserializer;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::events::ApplicationEventEnvelope;
     use crate::consumer::internals::events::CompletableEventReaper;
 
@@ -6361,8 +6358,9 @@ mod tests {
             "",
             IsolationLevel::ReadUncommitted,
         );
+        let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
         let (metrics, fetch_metrics_manager) =
-            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config, Arc::clone(&time));
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
         let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
             Arc::clone(&metrics),
@@ -6375,7 +6373,7 @@ mod tests {
             fetch_config,
             Arc::clone(&deserializers),
             Arc::clone(&fetch_metrics_manager),
-            Arc::new(crate::consumer::internals::SystemFetchCollectorTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
 
         // Build the state-notifier + shared slots once (Phase-12
@@ -6385,7 +6383,7 @@ mod tests {
         // that need the listener registered on a membership manager
         // call `consumer.state_notifier()` and pass the Arc to
         // `AbstractMembershipManager::register_state_listener`.
-        let group_metadata_slot: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_metadata_slot: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>> = Arc::new(Mutex::new(None));
         let group_assignment_snapshot_slot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
         let state_notifier = Arc::new(ConsumerStateNotifier::new(
             "test-group".to_string(),
@@ -6421,7 +6419,7 @@ mod tests {
             deserializers,
             interceptors,
             isolation_level: IsolationLevel::ReadUncommitted,
-            time: Arc::new(crate::consumer::internals::SystemThreadTime),
+            time,
             group_metadata: group_metadata_slot,
             group_assignment_snapshot: group_assignment_snapshot_slot,
             state_notifier,
@@ -6757,6 +6755,139 @@ mod tests {
         assert!(
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
+        );
+    }
+
+    /// A config built with `ConsumerConfig::default()` and the setters skips
+    /// `ConsumerConfig::new`, so the constructor derives the `client.id` with
+    /// the same `maybeOverrideClientId` rule instead of sending an empty id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_built_config_gets_generated_client_id() {
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // A refused localhost port, so the ctor does not block on network IO.
+        let config = ConsumerConfig::default()
+            .set_bootstrap_servers(vec!["127.0.0.1:1".to_string()])
+            .set_group_id("g");
+        assert_eq!(config.client_id(), "", "precondition: the setter path leaves client.id unset");
+
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        let client_id = consumer.client_id().to_string();
+        let n = client_id
+            .strip_prefix("consumer-g-")
+            .unwrap_or_else(|| panic!("unexpected generated id {client_id:?}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
+
+        consumer.close().await.expect("close should succeed");
+    }
+
+    /// The setters trim like the `ConsumerConfig::new` parse arms, so a padded
+    /// `group.id` and a blank `client.id` on the setter path give the same
+    /// generated id as the property-map path, and a blank `group.id` gets the
+    /// same `InvalidGroupId` rejection as `""`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setter_built_config_is_trimmed_like_parsed_config() {
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+        let bootstrap = || vec!["127.0.0.1:1".to_string()];
+
+        let config = ConsumerConfig::default()
+            .set_bootstrap_servers(bootstrap())
+            .set_group_id(" g ")
+            .set_client_id(" ");
+        assert_eq!(config.group_id(), Some("g"));
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+        let client_id = consumer.client_id().to_string();
+        let n = client_id
+            .strip_prefix("consumer-g-")
+            .unwrap_or_else(|| panic!("unexpected generated id {client_id:?}"));
+        assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
+        consumer.close().await.expect("close should succeed");
+
+        let config = ConsumerConfig::default().set_bootstrap_servers(bootstrap()).set_group_id(" ");
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("a blank group.id must fail construction");
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err.source().expect("the InvalidGroupId is the cause");
+        assert_eq!(cause.error(), crate::common::protocol::Errors::InvalidGroupId);
+        assert_eq!(
+            "The configured group.id should not be an empty string or whitespace.",
+            cause.message()
+        );
+    }
+
+    /// Java validates `group.instance.id` again in the constructor
+    /// (`GroupRebalanceConfig.java:68-72`), independently of `client.id`, so an
+    /// id that `ConsumerConfig` accepted (explicit `client.id`) still fails
+    /// construction with the constructor wrap and `JoinGroupRequest`'s message
+    /// as the cause.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_group_instance_id_fails_construction_with_explicit_client_id() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("client.id".to_string(), "my-consumer".to_string()),
+            ("group.id".to_string(), "test-group".to_string()),
+            ("group.instance.id".to_string(), "bad/id".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an invalid group.instance.id must fail construction");
+
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let source = std::error::Error::source(&err).expect("the validation failure must be the cause");
+        let Some(Error::InvalidConfiguration(cause)) = err.kafka_error().and_then(|e| e.source()) else {
+            panic!("cause must be InvalidConfiguration, got: {source:?}");
+        };
+        assert_eq!(
+            "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
+             alphanumerics, '.', '_' and '-'",
+            cause.message()
         );
     }
 
@@ -7232,7 +7363,7 @@ mod tests {
     /// registration.
     #[tokio::test]
     async fn unsubscribe_keeps_the_registered_listener() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicUsize;
         use tokio::sync::oneshot;
@@ -7362,7 +7493,7 @@ mod tests {
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
     //     TRANSLATED (Phase M7) as
     //     `test_record_background_event_queue_size_and_time` (inline below).
-    //     Drains a bg event under a mock `ThreadTime` advanced by 10 ms, then
+    //     Drains a bg event under a `MockTime` advanced by 10 ms, then
     //     reads the values via the public `metrics()` accessor (M7).
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
@@ -7433,7 +7564,7 @@ mod tests {
     /// groupless consumer's `group_metadata()`.
     ///
     /// Rust divergence: Java throws `InvalidGroupIdException` from
-    /// `group_metadata()`; Rust returns a stub `ConsumerGroupMetadata::new("")`
+    /// `group_metadata()`; Rust returns a stub metadata with an empty group id
     /// for groupless consumers (see `group_metadata` doc, line 615+).
     /// The exact-message assertion is on the equivalent error surface:
     /// `commit_sync()`'s `return_error_if_group_id_not_defined` (line 758-766),
@@ -7442,7 +7573,7 @@ mod tests {
     /// the read-only `group_metadata()` accessor.
     #[tokio::test]
     async fn group_metadata_groupless_commit_sync_emits_exact_java_message() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
@@ -7595,7 +7726,7 @@ mod tests {
     /// `KafkaError` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
     async fn subscribe_subscription_pattern_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer
@@ -7744,7 +7875,7 @@ mod tests {
     /// `listener.isPresent() == false` no-op branch.
     #[tokio::test]
     async fn process_background_events_with_no_listener_acks_ok() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
         let (mut consumer, handles) = make_test_consumer_with_channels();
         // AK 4.3.1: the revoke path (`PartitionsRemoved`) exercises the same
@@ -7774,7 +7905,7 @@ mod tests {
     /// process the ApplyAssignmentEvent.)
     #[tokio::test]
     async fn process_background_events_invokes_registered_listener() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicUsize;
         use tokio::sync::oneshot;
@@ -7845,7 +7976,7 @@ mod tests {
     /// user-visible wakeup is pending afterwards.
     #[tokio::test]
     async fn process_background_events_ack_pokes_bg_notify_not_user_wakeup() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use tokio::sync::oneshot;
 
@@ -7931,7 +8062,7 @@ mod tests {
     /// missing in the other, and no test noticed.
     #[tokio::test]
     async fn process_background_events_close_arm_pokes_bg_notify() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
 
         let (mut consumer, handles) = make_test_consumer_with_channels();
@@ -8130,7 +8261,7 @@ mod tests {
     /// `canSkipUpdateFetchPositions` could not be translated.
     #[tokio::test]
     async fn collect_fetch_propagates_a_pending_validate_positions_error() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (consumer, handles) = make_test_consumer_with_channels();
         consumer
             .positions_validator
@@ -8332,32 +8463,20 @@ mod tests {
     #[tokio::test]
     async fn test_record_background_event_queue_size_and_time() {
         use crate::common::Metric;
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
-        use crate::consumer::internals::ThreadTime;
+        use crate::common::utils::MockTime;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
 
         // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
         // 10 ms, deterministically. `self.time` drives both the enqueue stamp
         // and the drain-time read in `process_background_events`.
-        struct MockThreadTime {
-            millis: std::sync::Mutex<i64>,
-        }
-        impl MockThreadTime {
-            fn sleep(&self, dur_ms: i64) {
-                *self.millis.lock().unwrap() += dur_ms;
-            }
-        }
-        impl ThreadTime for MockThreadTime {
-            fn milliseconds(&self) -> i64 {
-                *self.millis.lock().unwrap()
-            }
-        }
-
         let (mut consumer, handles) = make_test_consumer_with_channels();
 
         // Swap in the mock clock (start at an arbitrary non-zero epoch).
-        let mock_time = Arc::new(MockThreadTime { millis: std::sync::Mutex::new(1_000) });
-        consumer.time = Arc::clone(&mock_time) as Arc<dyn ThreadTime>;
+        let mock_time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000, 0,
+        ));
+        consumer.time = Arc::clone(&mock_time) as Arc<dyn Time>;
 
         // Java: `event.setEnqueuedMs(time.milliseconds()); backgroundEventQueue.add(event);`
         // A no-listener callback-needed event acks Ok(()) — the time recording
@@ -8618,7 +8737,7 @@ mod tests {
     /// the commit_sync timeout.
     #[tokio::test]
     async fn issue_10_commit_sync_drains_listener_callback_while_waiting() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicBool;
         use tokio::sync::oneshot;
@@ -8735,7 +8854,7 @@ mod tests {
     /// `process_background_events` is removed from `commit_sync`).
     #[tokio::test]
     async fn section_31_commit_sync_from_inside_revoked_callback_succeeds() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicBool;
         use tokio::sync::oneshot;
@@ -8845,7 +8964,7 @@ mod tests {
     /// the ack arrives.
     #[tokio::test]
     async fn section_31_rebalance_does_not_advance_until_listener_resolves() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use tokio::sync::oneshot;
         use tokio::time::timeout;
@@ -9212,7 +9331,7 @@ mod tests {
     /// `testCommitSyncWithoutGroupId`.
     #[tokio::test]
     async fn commit_sync_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
@@ -9328,7 +9447,7 @@ mod tests {
     /// `Error::invalid_group_id(...)` (Issue 16).
     #[tokio::test]
     async fn committed_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -10292,19 +10411,17 @@ mod tests {
         drop(drainer);
     }
 
-    /// CLAUDE.md §2 splits Java's three `close` overloads
-    /// (`Consumer.java:277,283,288`) into `close` / `close_with_timeout` /
-    /// `close_with_options`. The deprecated `close_with_timeout` must agree with the
-    /// form it forwards to: Java's `close(Duration timeout)` body is exactly
+    /// `close_with_options(CloseOptions::new_timeout(..))` is the replacement
+    /// for Java's deprecated `close(Duration timeout)`, whose body is exactly
     /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`).
+    /// (`AsyncKafkaConsumer.java:1543-1545`) and which is not translated
+    /// (CLAUDE.md §3). The user timeout must reach the close path.
     ///
-    /// Asserting `is_closed()` alone would not catch a forward that dropped
-    /// the timeout, so this compares the *deadline* carried on the
-    /// `LeaveGroupOnClose` event — the only place the timeout is observable —
-    /// between the two forms.
+    /// Asserting `is_closed()` alone would not catch a dropped timeout, so
+    /// this checks the *deadline* carried on the `LeaveGroupOnClose` event —
+    /// the only place the timeout is observable.
     #[tokio::test]
-    async fn close_timeout_agrees_with_close_options_timeout() {
+    async fn close_with_options_carries_user_timeout() {
         use crate::consumer::CloseOptions;
 
         // Well under the 30s `request.timeout.ms` cap, so the deadline
@@ -10346,20 +10463,9 @@ mod tests {
 
         let via_options =
             deadline_delta_for(async |c| c.close_with_options(CloseOptions::new_timeout(user_timeout)).await).await;
-        let via_timeout = deadline_delta_for(async |c| {
-            #[allow(deprecated)]
-            c.close_with_timeout(user_timeout).await
-        })
-        .await;
-
         assert!(
             (via_options - 7_000).abs() <= 100,
             "close_with_options must carry the user timeout (delta={via_options})"
-        );
-        assert!(
-            (via_timeout - via_options).abs() <= 100,
-            "close_with_timeout must forward to close_with_options(CloseOptions::new_timeout(..)) \
-             (via_timeout={via_timeout}, via_options={via_options})"
         );
     }
 
@@ -11722,28 +11828,32 @@ mod tests {
             }
         }
 
-        let props = HashMap::from([
-            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
-            ("group.id".to_string(), String::new()),
-        ]);
-        let config = ConsumerConfig::new(&props).expect("config itself validates");
+        // A whitespace-only id trims to "" at parse (`ConfigDef.parseType`),
+        // so it takes the same rejection.
+        for group_id in ["", " "] {
+            let props = HashMap::from([
+                ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+                ("group.id".to_string(), group_id.to_string()),
+            ]);
+            let config = ConsumerConfig::new(&props).expect("config itself validates");
 
-        let err = AsyncKafkaConsumer::<String, String>::new(
-            config,
-            Box::new(TestStringDeserializer),
-            Box::new(TestStringDeserializer),
-        )
-        .err()
-        .expect("an empty group.id must fail construction");
+            let err = AsyncKafkaConsumer::<String, String>::new(
+                config,
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("group.id {group_id:?} must fail construction"));
 
-        // Wrapped as Java wraps every constructor failure.
-        assert_eq!("Failed to construct kafka consumer", err.message());
-        let cause = err.source().expect("the InvalidGroupId is the cause");
-        assert_eq!(cause.error(), crate::common::Errors::InvalidGroupId);
-        assert_eq!(
-            "The configured group.id should not be an empty string or whitespace.",
-            cause.message()
-        );
+            // Wrapped as Java wraps every constructor failure.
+            assert_eq!("Failed to construct kafka consumer", err.message());
+            let cause = err.source().expect("the InvalidGroupId is the cause");
+            assert_eq!(cause.error(), crate::common::protocol::Errors::InvalidGroupId);
+            assert_eq!(
+                "The configured group.id should not be an empty string or whitespace.",
+                cause.message()
+            );
+        }
     }
 
     /// A `group.id` that is absent, or non-empty, still constructs — so the

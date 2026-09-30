@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.StreamsTopologyFencedException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The supplied topology epoch is outdated.
     ///
-    /// Corresponds to Java's `StreamsTopologyFencedException`, error code [`Errors::StreamsTopologyFenced`].
+    /// Corresponds to Java's `StreamsTopologyFencedException`, error code `Errors::StreamsTopologyFenced`.
     ///
     /// Java `extends` chain:
     ///    `StreamsTopologyFencedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StreamsTopologyFencedException")]
     StreamsTopologyFencedError,
     code: Errors::StreamsTopologyFenced,
     extends: [

@@ -16,6 +16,7 @@
 
 /// An upper or lower bound for metrics.
 #[derive(Clone, Copy, Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.Quota")]
 pub struct Quota {
     upper: bool,
     bound: f64,
@@ -23,31 +24,37 @@ pub struct Quota {
 
 impl Quota {
     /// Create a quota with the given bound and whether it is an upper bound.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#Quota")]
     pub fn new(bound: f64, upper: bool) -> Self {
         Self { bound, upper }
     }
 
     /// Create an upper-bound quota.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#upperBound")]
     pub fn upper_bound(upper_bound: f64) -> Self {
         Self::new(upper_bound, true)
     }
 
     /// Create a lower-bound quota.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#lowerBound")]
     pub fn lower_bound(lower_bound: f64) -> Self {
         Self::new(lower_bound, false)
     }
 
     /// Whether this quota is an upper bound.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#isUpperBound")]
     pub fn is_upper_bound(&self) -> bool {
         self.upper
     }
 
     /// The bound value.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#bound")]
     pub fn bound(&self) -> f64 {
         self.bound
     }
 
     /// Whether the given value is acceptable under this quota.
+    #[doc(alias = "org.apache.kafka.common.metrics.Quota#acceptable")]
     pub fn acceptable(&self, value: f64) -> bool {
         (self.upper && value <= self.bound) || (!self.upper && value >= self.bound)
     }

@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidFetchSessionEpochException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The fetch session epoch is invalid.
     ///
-    /// Corresponds to Java's `InvalidFetchSessionEpochException`, error code [`Errors::InvalidFetchSessionEpoch`].
+    /// Corresponds to Java's `InvalidFetchSessionEpochException`, error code `Errors::InvalidFetchSessionEpoch`.
     ///
     /// Java `extends` chain:
     ///    `InvalidFetchSessionEpochException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidFetchSessionEpochException")]
     InvalidFetchSessionEpochError,
     code: Errors::InvalidFetchSessionEpoch,
     extends: [

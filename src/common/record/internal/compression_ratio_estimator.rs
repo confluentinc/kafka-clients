@@ -17,7 +17,7 @@
 //! This class helps estimate the compression ratio for each topic and
 //! compression type combination.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionRatioEstimator`.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -39,7 +39,8 @@ static INSTANCE: LazyLock<CompressionRatioEstimator> = LazyLock::new(Compression
 /// [`estimation`](Self::estimation), etc.) which operate on the process-wide
 /// global instance, matching Java's static `CompressionRatioEstimator` methods.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionRatioEstimator`.
+#[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator")]
 pub struct CompressionRatioEstimator {
     compression_ratio: Mutex<HashMap<String, [f32; CompressionType::COUNT]>>,
 }
@@ -62,6 +63,7 @@ impl CompressionRatioEstimator {
     ///
     /// Returns the compression ratio estimation after the update.
     /// Operates on the process-wide global instance.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#updateEstimation")]
     pub fn update_estimation(topic: &str, compression_type: CompressionType, observed_ratio: f32) -> f32 {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();
         let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
@@ -86,6 +88,7 @@ impl CompressionRatioEstimator {
     /// Get the compression ratio estimation for a topic and compression type.
     ///
     /// Operates on the process-wide global instance.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#estimation")]
     pub fn estimation(topic: &str, compression_type: CompressionType) -> f32 {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();
         let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
@@ -95,7 +98,8 @@ impl CompressionRatioEstimator {
     /// Reset the compression ratio estimation to the initial values for a topic.
     ///
     /// Operates on the process-wide global instance.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#resetEstimation")]
     pub fn reset_estimation(topic: &str) {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();
         let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
@@ -108,12 +112,14 @@ impl CompressionRatioEstimator {
     ///
     /// This method is for unit test purpose.
     /// Operates on the process-wide global instance.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#setEstimation")]
     pub fn set_estimation(topic: &str, compression_type: CompressionType, ratio: f32) {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();
         let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
         ratios[compression_type.id() as usize] = ratio;
     }
 
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#initialCompressionRatio")]
     fn initial_compression_ratio() -> [f32; CompressionType::COUNT] {
         let mut ratios = [0.0f32; CompressionType::COUNT];
         for ct in CompressionType::values() {
@@ -132,6 +138,7 @@ mod tests {
     /// Each test case uses a unique topic name to avoid interference from
     /// the shared global state and parallel test execution.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimatorTest#testUpdateEstimation")]
     fn test_update_estimation() {
         struct EstimationsObservedRatios {
             current_estimation: f32,

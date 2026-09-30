@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidOffsetException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// No valid offset is available for the requested partition.
     ///
     /// The concrete base of the invalid-offset family; its coded subclass is
@@ -27,6 +27,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidOffsetException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidOffsetException")]
     InvalidOffsetError,
     extends: [
         is_kafka_error,

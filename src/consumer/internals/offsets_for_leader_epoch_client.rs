@@ -25,16 +25,16 @@
 //! `OffsetsRequestManager` calls them directly without an
 //! `AsyncClient`-style dispatch layer.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Errors;
 use crate::common::TopicPartition;
 use crate::common::errors::TopicAuthorizationError;
+use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
-use crate::common::requests::OffsetsForLeaderEpochRequestBuilder;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
+use crate::common::requests::offsets_for_leader_epoch_request;
 use crate::offset_for_leader_epoch_request_data::{OffsetForLeaderPartition, OffsetForLeaderTopic};
 use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
@@ -74,6 +74,7 @@ impl OffsetForEpochResult {
 ///
 /// Zero-sized; the Java equivalent's `client` and `logContext` fields
 /// don't carry per-request state and aren't needed in the KIP-848 wiring.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient")]
 pub(crate) struct OffsetsForLeaderEpochClient;
 
 impl OffsetsForLeaderEpochClient {
@@ -84,9 +85,10 @@ impl OffsetsForLeaderEpochClient {
     ///
     /// Entries without an `offset_epoch` are skipped, matching Java's
     /// `fetchPosition.offsetEpoch.ifPresent(...)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient#prepareRequest")]
     pub(crate) fn prepare_request(
         request_data: &HashMap<TopicPartition, FetchPosition>,
-    ) -> OffsetsForLeaderEpochRequestBuilder {
+    ) -> offsets_for_leader_epoch_request::Builder {
         let mut topics: HashMap<String, OffsetForLeaderTopic> = HashMap::new();
         for (topic_partition, fetch_position) in request_data {
             let Some(fetch_epoch) = fetch_position.offset_epoch else {
@@ -108,7 +110,7 @@ impl OffsetsForLeaderEpochClient {
             );
             topic_entry.partitions.push(partition);
         }
-        OffsetsForLeaderEpochRequestBuilder::for_consumer(topics.into_values().collect())
+        offsets_for_leader_epoch_request::Builder::for_consumer(topics.into_values().collect())
     }
 
     /// Processes an `OffsetsForLeaderEpoch` response.
@@ -123,6 +125,7 @@ impl OffsetsForLeaderEpochClient {
     /// carried `TOPIC_AUTHORIZATION_FAILED`. Mirrors Java's `throw`.
     ///
     /// Mirrors `OffsetsForLeaderEpochUtils.handleResponse(Map<TopicPartition,FetchPosition>, OffsetsForLeaderEpochResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient#handleResponse")]
     pub(crate) fn handle_response(
         request_data: &HashMap<TopicPartition, FetchPosition>,
         response: &OffsetsForLeaderEpochResponse,
@@ -238,7 +241,7 @@ mod tests {
         assert_eq!(topic_b.partitions.len(), 1);
         assert_eq!(topic_b.partitions[0].leader_epoch, 2);
         assert_eq!(topic_b.partitions[0].current_leader_epoch, 7);
-        assert_eq!(builder.api_key(), &crate::common::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
+        assert_eq!(builder.api_key(), &crate::common::protocol::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
     }
 
     /// Verifies `handle_response` returns end offsets for successful entries

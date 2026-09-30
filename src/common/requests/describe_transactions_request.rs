@@ -23,12 +23,13 @@ use crate::DescribeTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_transactions_response_data::TransactionState;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeTransactionsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeTransactionsResponse, RequestBuilder};
 
 /// A DescribeTransactions request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeTransactionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest")]
 pub struct DescribeTransactionsRequest {
     data: DescribeTransactionsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeTransactionsRequest {
 
 impl DescribeTransactionsRequest {
     /// Creates a new `DescribeTransactionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#DescribeTransactionsRequest")]
     pub fn new(data: DescribeTransactionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#data")]
     pub fn data(&self) -> &DescribeTransactionsRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl DescribeTransactionsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeTransactionsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeTransactionsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -83,6 +87,7 @@ impl DescribeTransactionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeTransactionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -99,18 +104,20 @@ impl std::fmt::Display for DescribeTransactionsRequest {
 ///
 /// Corresponds to `DescribeTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
-pub struct DescribeTransactionsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder")]
+pub struct Builder {
     data: DescribeTransactionsRequestData,
 }
 
-impl DescribeTransactionsRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder#Builder")]
     pub fn new(data: DescribeTransactionsRequestData) -> Self {
         Self { data }
     }
 }
 
-impl RequestBuilder for DescribeTransactionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_TRANSACTIONS
     }
@@ -123,8 +130,8 @@ impl RequestBuilder for DescribeTransactionsRequestBuilder {
         ApiKeys::DESCRIBE_TRANSACTIONS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeTransactions(DescribeTransactionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeTransactions(DescribeTransactionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -155,10 +162,10 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = DescribeTransactionsRequestData::new();
         data.set_transactional_ids(vec!["t1".to_string()]);
-        let mut builder = DescribeTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeTransactionsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().transactional_ids, vec!["t1".to_string()]);
     }
@@ -171,7 +178,7 @@ mod tests {
     fn serialize_known_byte_vector_v0() {
         let mut data = DescribeTransactionsRequestData::new();
         data.set_transactional_ids(vec!["t1".to_string()]);
-        let mut builder = DescribeTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

@@ -24,6 +24,7 @@ use super::ScramCredentialInfo;
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription")]
 pub struct UserScramCredentialsDescription {
     name: String,
     credential_infos: Vec<ScramCredentialInfo>,
@@ -35,17 +36,20 @@ impl UserScramCredentialsDescription {
     /// * `name` — the required user name
     /// * `credential_infos` — the required SASL/SCRAM credential representations
     ///   for the user
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription#UserScramCredentialsDescription")]
     pub fn new(name: impl Into<String>, credential_infos: Vec<ScramCredentialInfo>) -> Self {
         Self { name: name.into(), credential_infos }
     }
 
     /// Returns the user name.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Returns the always non-null list of SASL/SCRAM credential representations
     /// for the user.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription#credentialInfos")]
     pub fn credential_infos(&self) -> &[ScramCredentialInfo] {
         &self.credential_infos
     }

@@ -15,9 +15,9 @@
 //! Translated from `org.apache.kafka.clients.consumer.ConsumerConfigTest`.
 //!
 //! Skipped tests:
-//! - `testOverrideClientId`, `testOverrideEnableAutoCommit` — exercise
-//!   Java's `postProcessParsedConfig`, which is deferred to a later phase
-//!   per PLAN.md "Cross-field validation".
+//! - `testOverrideEnableAutoCommit` — exercises Java's
+//!   `postProcessParsedConfig` auto-commit override, which is deferred to a
+//!   later phase per PLAN.md "Cross-field validation".
 //! - `testAppendDeserializerToConfig`,
 //!   `testAppendDeserializerToConfigWithException` — exercise the Java
 //!   static `appendDeserializerToConfig` helper that mutates a typed
@@ -73,10 +73,20 @@ fn test_default_partition_assignor_is_accepted() {
     assert!(config.partition_assignment_strategy().is_empty());
 }
 
+/// Translated from `ConsumerConfigTest.testOverrideClientId`.
+#[test]
+fn test_override_client_id() {
+    let mut props = base_props();
+    props.insert(ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string());
+    let config = ConsumerConfig::new(&props).unwrap();
+    assert!(!config.client_id().is_empty());
+}
+
 /// Translated from `ConsumerConfigTest.testInvalidGroupInstanceId`.
 ///
 /// Asserts that the `group.instance.id` empty-string check is enforced.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidGroupInstanceId")]
 fn test_invalid_group_instance_id() {
     let mut props = base_props();
     props.insert(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG.to_string(), String::new());
@@ -90,6 +100,7 @@ fn test_invalid_group_instance_id() {
 
 /// Translated from `ConsumerConfigTest.testInvalidSecurityProtocol`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
 fn test_invalid_security_protocol() {
     let mut props = base_props();
     props.insert(ConsumerConfig::SECURITY_PROTOCOL_CONFIG.to_string(), "abc".to_string());
@@ -103,6 +114,7 @@ fn test_invalid_security_protocol() {
 
 /// Translated from `ConsumerConfigTest.testCaseInsensitiveSecurityProtocol`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testCaseInsensitiveSecurityProtocol")]
 fn test_case_insensitive_security_protocol() {
     let mut props = base_props();
     props.insert(ConsumerConfig::SECURITY_PROTOCOL_CONFIG.to_string(), "sasl_ssl".to_string());
@@ -120,6 +132,7 @@ fn test_case_insensitive_security_protocol() {
 /// `ConsumerConfig.DEFAULT_GROUP_PROTOCOL`); `group.remote.assignor` is
 /// `null`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultConsumerGroupConfig")]
 fn test_default_consumer_group_config() {
     let config = ConsumerConfig::new(&base_props()).unwrap();
     assert_eq!(config.group_protocol(), "classic");
@@ -128,6 +141,7 @@ fn test_default_consumer_group_config() {
 
 /// Translated from `ConsumerConfigTest.testRemoteAssignorConfig`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testRemoteAssignorConfig")]
 fn test_remote_assignor_config() {
     let mut props = base_props();
     let remote_assignor_name = "SomeAssignor";
@@ -144,6 +158,7 @@ fn test_remote_assignor_config() {
 
 /// Translated from `ConsumerConfigTest.testDefaultMetadataRecoveryStrategy`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultMetadataRecoveryStrategy")]
 fn test_default_metadata_recovery_strategy() {
     let config = ConsumerConfig::new(&base_props()).unwrap();
     assert_eq!(config.metadata_recovery_strategy(), "rebootstrap");
@@ -151,6 +166,7 @@ fn test_default_metadata_recovery_strategy() {
 
 /// Translated from `ConsumerConfigTest.testInvalidMetadataRecoveryStrategy`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidMetadataRecoveryStrategy")]
 fn test_invalid_metadata_recovery_strategy() {
     let mut props = base_props();
     props.insert(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(), "abc".to_string());
@@ -167,6 +183,7 @@ fn test_invalid_metadata_recovery_strategy() {
 /// Java uses `@ParameterizedTest @CsvSource(...)`; here we iterate over the
 /// same inputs.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testProtocolConfigValidation")]
 fn test_protocol_config_validation() {
     let cases: &[(&str, bool)] = &[
         ("consumer", true),

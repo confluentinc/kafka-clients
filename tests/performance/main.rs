@@ -31,6 +31,10 @@
 //! likewise excluded from the normal `pytest test/unit` run; see
 //! `make test-integration-perf-python`.
 
+// The harness is shared with the functional `integration` suite; this binary
+// uses only a small part of it.
+#[cfg_attr(feature = "integration-tests", expect(dead_code))]
+#[cfg_attr(feature = "multilanguage-tests", expect(unused_imports))]
 #[path = "../common/mod.rs"]
 mod common;
 

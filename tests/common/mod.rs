@@ -12,47 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared test helper module providing access to test-only generated message types
-//! (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage) and
-//! integration test infrastructure (cluster config, pool, context).
+//! Shared integration test infrastructure (cluster config, pool, context,
+//! multi-language backends).
 //!
-//! The generated code uses `crate::common::protocol::*` and `crate::common::Uuid`.
-//! When included from integration tests, `crate` refers to the test binary crate,
-//! so we re-export the library's `common` module here to satisfy those paths.
-
-// Re-export library types that the generated code references via `crate::common::*`.
-// In integration tests, `crate::common` resolves to this module, so we must
-// provide `protocol` and `Uuid` here to satisfy those paths.
-pub use confluent_kafka::common::Uuid;
-pub use confluent_kafka::common::protocol;
-
-#[allow(dead_code, unused_imports, clippy::all)]
-mod test_generated {
-    include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
-}
-#[allow(unused_imports)]
-pub use test_generated::*;
+//! Only public API may be used here. The generated test-only message types
+//! (`SimpleExampleMessage`, ...) and the tests exercising them live in the
+//! crate (`src/common/message/`), because the generated wire types are not
+//! public API.
 
 // Integration test infrastructure — only compiled when the feature is enabled.
-// Allow dead_code because these modules are utility libraries used by separate
+// `dead_code` is expected where a module is a utility library shared by separate
 // integration test crates, so rustc can't see the cross-crate usage.
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
 pub mod cluster_config;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
 pub mod cluster_pool;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
 pub mod kafka_cluster;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
 pub mod test_certs;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod test_context;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod test_utils;
 
 // Multilanguage integration test harness — Producer impl that tunnels over
@@ -63,17 +46,18 @@ pub mod test_utils;
 // parameterized without requiring the gRPC machinery. The gRPC-backed
 // factories (PythonGrpcFactory, CGrpcFactory) are gated below.
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
 pub mod admin_backend;
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
+// Fully used only once `multilanguage-tests` adds the gRPC backends.
+#[cfg_attr(not(feature = "multilanguage-tests"), expect(dead_code))]
 pub mod backend_factory;
 
 // Backend-agnostic observation of the user callbacks (delivery / commit /
 // rebalance). Native-only pieces work with just integration-tests; the
 // GetCallbackLog client is gated inside on multilanguage-tests.
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
+// Fully used only once `multilanguage-tests` adds the gRPC backends.
+#[cfg_attr(not(feature = "multilanguage-tests"), expect(dead_code))]
 pub mod callback_log;
 
 // Error-code constants generated from `kafka_common_ErrorCode_t`
@@ -81,20 +65,19 @@ pub mod callback_log;
 // `Error` by its code and cannot use the enum itself: `src/ffi` is behind
 // the `ffi` feature, which the multilanguage test targets do not enable.
 #[cfg(feature = "multilanguage-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod error_code;
 
 #[cfg(feature = "multilanguage-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod backend_pool;
 #[cfg(feature = "multilanguage-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod multilanguage_admin;
 #[cfg(feature = "multilanguage-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod multilanguage_consumer;
 #[cfg(feature = "multilanguage-tests")]
-#[allow(dead_code)]
 pub mod multilanguage_producer;
 #[cfg(feature = "multilanguage-tests")]
 #[macro_use]

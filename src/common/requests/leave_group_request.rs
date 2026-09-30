@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.LeaveGroupRequest`.
 //!
 //! Wraps the auto-generated [`LeaveGroupRequestData`] and exposes a
-//! [`LeaveGroupRequestBuilder`] used by the admin client's
+//! [`Builder`] used by the admin client's
 //! `removeMembersFromConsumerGroup` path.
 
 use std::io;
@@ -29,12 +29,13 @@ use crate::leave_group_request_data::MemberIdentity;
 
 use super::ConcreteResponse;
 use super::LeaveGroupResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// A `LeaveGroup` request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.LeaveGroupRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest")]
 pub struct LeaveGroupRequest {
     data: LeaveGroupRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl LeaveGroupRequest {
     /// Creates a new `LeaveGroupRequest` from data and version.
     ///
     /// Mirrors Java's constructor `LeaveGroupRequest(LeaveGroupRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#LeaveGroupRequest")]
     pub fn new(data: LeaveGroupRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#data")]
     pub fn data(&self) -> &LeaveGroupRequestData {
         &self.data
     }
@@ -71,6 +74,7 @@ impl LeaveGroupRequest {
     /// The leaving members. Before version 3, the request is single-member and
     /// the member is reconstructed from the top-level `member_id`. Mirrors
     /// Java's `LeaveGroupRequest.members()`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#members")]
     pub fn members(&self) -> Vec<MemberIdentity> {
         if self.version <= 2 {
             let mut member = MemberIdentity::new();
@@ -84,6 +88,7 @@ impl LeaveGroupRequest {
     /// Builds the canonical error response for this request, matching Java's
     /// `LeaveGroupRequest.getErrorResponse(int, Throwable)`: a top-level error
     /// code (throttle time is populated for version 1+).
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = LeaveGroupResponseData::new();
         data.set_error_code(error.code());
@@ -98,6 +103,7 @@ impl LeaveGroupRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = LeaveGroupRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -116,15 +122,17 @@ impl std::fmt::Display for LeaveGroupRequest {
 /// and the leaving member identities, then chooses the wire shape based on the
 /// negotiated version (single-member below v3, batched at v3+).
 #[derive(Debug, Clone)]
-pub struct LeaveGroupRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest$Builder")]
+pub struct Builder {
     group_id: String,
     members: Vec<MemberIdentity>,
 }
 
-impl LeaveGroupRequestBuilder {
+impl Builder {
     /// Creates a builder for the given group id and leaving members.
     ///
     /// Mirrors Java's `LeaveGroupRequest.Builder(String, List<MemberIdentity>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest$Builder#Builder")]
     pub fn new(group_id: String, members: Vec<MemberIdentity>) -> Self {
         Self { group_id, members }
     }
@@ -140,7 +148,7 @@ impl LeaveGroupRequestBuilder {
     }
 }
 
-impl RequestBuilder for LeaveGroupRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LEAVE_GROUP
     }
@@ -153,7 +161,7 @@ impl RequestBuilder for LeaveGroupRequestBuilder {
         ApiKeys::LEAVE_GROUP.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version() || version > self.latest_allowed_version() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -188,7 +196,7 @@ impl RequestBuilder for LeaveGroupRequestBuilder {
             }
             data.set_member_id(self.members[0].member_id.clone());
         }
-        Ok(ConcreteRequest::LeaveGroup(LeaveGroupRequest::new(data, version)))
+        Ok(AbstractRequest::LeaveGroup(LeaveGroupRequest::new(data, version)))
     }
 }
 
@@ -207,10 +215,10 @@ mod tests {
     /// `build_version` at v3+ carries the batched members through unchanged.
     #[test]
     fn build_version_batched_carries_members() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m1", Some("gii-1"), Some("r"))]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m1", Some("gii-1"), Some("r"))]);
         let version = ApiKeys::LEAVE_GROUP.latest_version();
         match builder.build_version(version).unwrap() {
-            ConcreteRequest::LeaveGroup(r) => {
+            AbstractRequest::LeaveGroup(r) => {
                 assert_eq!(r.version(), version);
                 assert_eq!(r.data().group_id, "g");
                 assert_eq!(r.data().members.len(), 1);
@@ -224,9 +232,9 @@ mod tests {
     /// `member_id`.
     #[test]
     fn build_version_single_member_below_v3() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m1", Some("gii-1"), None)]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m1", Some("gii-1"), None)]);
         match builder.build_version(2).unwrap() {
-            ConcreteRequest::LeaveGroup(r) => {
+            AbstractRequest::LeaveGroup(r) => {
                 assert_eq!(r.data().member_id, "m1");
                 assert!(r.data().members.is_empty());
             },
@@ -238,22 +246,21 @@ mod tests {
     /// version error (Java throws `UnsupportedVersionException`).
     #[test]
     fn build_version_below_v3_multi_member_errors() {
-        let mut builder =
-            LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m1", None, None), member("m2", None, None)]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m1", None, None), member("m2", None, None)]);
         assert!(builder.build_version(2).is_err());
     }
 
     /// Empty members is rejected at build time.
     #[test]
     fn build_version_empty_members_errors() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![]);
+        let mut builder = Builder::new("g".to_string(), vec![]);
         assert!(builder.build_version(ApiKeys::LEAVE_GROUP.latest_version()).is_err());
     }
 
     /// `build_version` rejects a version outside the supported range.
     #[test]
     fn build_version_out_of_range_returns_err() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m1", None, None)]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m1", None, None)]);
         let too_new = ApiKeys::LEAVE_GROUP.latest_version() + 1;
         assert!(builder.build_version(too_new).is_err());
     }
@@ -267,7 +274,7 @@ mod tests {
     ///     group_instance_id "i": string len 1 -> 0x00 0x01, 0x69
     #[test]
     fn serialize_known_byte_vector_v3() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m", Some("i"), None)]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m", Some("i"), None)]);
         let mut req = builder.build_version(3).unwrap();
         let expected: &[u8] = &[
             0x00, 0x01, 0x67, // group_id "g"
@@ -294,7 +301,7 @@ mod tests {
     ///   top-level tagged fields: 0x00
     #[test]
     fn serialize_known_byte_vector_v5_flexible() {
-        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m", Some("i"), Some("r"))]);
+        let mut builder = Builder::new("g".to_string(), vec![member("m", Some("i"), Some("r"))]);
         let mut req = builder.build_version(5).unwrap();
         let expected: &[u8] = &[
             0x02, 0x67, // group_id "g" (compact string, len n+1 = 2)

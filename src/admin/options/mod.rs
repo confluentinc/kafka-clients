@@ -52,10 +52,8 @@ mod describe_user_scram_credentials_options;
 mod elect_leaders_options;
 mod expire_delegation_token_options;
 mod fence_producers_options;
-mod list_client_metrics_resources_options;
 mod list_config_resources_options;
 mod list_consumer_group_offsets_options;
-mod list_consumer_groups_options;
 mod list_groups_options;
 mod list_offsets_options;
 mod list_partition_reassignments_options;
@@ -99,12 +97,8 @@ pub use describe_user_scram_credentials_options::DescribeUserScramCredentialsOpt
 pub use elect_leaders_options::ElectLeadersOptions;
 pub use expire_delegation_token_options::ExpireDelegationTokenOptions;
 pub use fence_producers_options::FenceProducersOptions;
-#[allow(deprecated)]
-pub use list_client_metrics_resources_options::ListClientMetricsResourcesOptions;
 pub use list_config_resources_options::ListConfigResourcesOptions;
 pub use list_consumer_group_offsets_options::ListConsumerGroupOffsetsOptions;
-#[allow(deprecated)]
-pub use list_consumer_groups_options::ListConsumerGroupsOptions;
 pub use list_groups_options::ListGroupsOptions;
 pub use list_offsets_options::ListOffsetsOptions;
 pub use list_partition_reassignments_options::ListPartitionReassignmentsOptions;

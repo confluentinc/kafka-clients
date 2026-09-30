@@ -35,6 +35,7 @@ use crate::common::{TopicPartitionInfo, Uuid};
 /// `internal`, `partitions` and `authorized_operations` but **not** `topic_id`
 /// — see the manual [`PartialEq`] impl below.
 #[derive(Clone, Debug, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicDescription")]
 pub struct TopicDescription {
     name: String,
     internal: bool,
@@ -59,6 +60,7 @@ impl TopicDescription {
     /// Mirrors `TopicDescription(String, boolean, List<TopicPartitionInfo>)`,
     /// which passes `Collections.emptySet()` — a reported-but-empty set, i.e.
     /// `Some(empty)` rather than `None`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn new(name: impl Into<String>, internal: bool, partitions: Vec<TopicPartitionInfo>) -> Self {
         Self::with_authorized_operations(name, internal, partitions, Some(BTreeSet::new()))
     }
@@ -75,6 +77,7 @@ impl TopicDescription {
     ///
     /// Mirrors `TopicDescription(String, boolean, List<TopicPartitionInfo>,
     /// Set<AclOperation>)`, which passes `Uuid.ZERO_UUID`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn with_authorized_operations(
         name: impl Into<String>,
         internal: bool,
@@ -94,6 +97,7 @@ impl TopicDescription {
     /// * `authorized_operations` - authorized operations for this topic, or
     ///   `None` if this is not known (Java's nullable `Set<AclOperation>`)
     /// * `topic_id` - the topic id
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn with_authorized_operations_topic_id(
         name: impl Into<String>,
         internal: bool,
@@ -105,23 +109,27 @@ impl TopicDescription {
     }
 
     /// The name of the topic.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Whether the topic is internal to Kafka. An example of an internal topic
     /// is the offsets and group management topic: `__consumer_offsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#isInternal")]
     pub fn is_internal(&self) -> bool {
         self.internal
     }
 
     /// The topic id.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
     /// A list of partitions where the index represents the partition id and the
     /// element contains leadership and replica information for that partition.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#partitions")]
     pub fn partitions(&self) -> &[TopicPartitionInfo] {
         &self.partitions
     }
@@ -129,6 +137,7 @@ impl TopicDescription {
     /// Authorized operations for this topic, or `None` if the broker did not
     /// report them (Java returns `null` in that case). `Some` holding an empty
     /// set means the broker reported that no operation is authorized.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#authorizedOperations")]
     pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
         self.authorized_operations.as_ref()
     }

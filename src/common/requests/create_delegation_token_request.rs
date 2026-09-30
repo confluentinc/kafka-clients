@@ -23,13 +23,14 @@ use crate::CreateDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::security::auth::KafkaPrincipal;
 
-use super::{ConcreteRequest, ConcreteResponse, CreateDelegationTokenResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, CreateDelegationTokenResponse, RequestBuilder};
 
 /// A CreateDelegationToken request.
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.CreateDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest")]
 pub struct CreateDelegationTokenRequest {
     data: CreateDelegationTokenRequestData,
     version: i16,
@@ -37,11 +38,13 @@ pub struct CreateDelegationTokenRequest {
 
 impl CreateDelegationTokenRequest {
     /// Creates a new `CreateDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#CreateDelegationTokenRequest")]
     pub fn new(data: CreateDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#data")]
     pub fn data(&self) -> &CreateDelegationTokenRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl CreateDelegationTokenRequest {
     ///
     /// Mirrors `CreateDelegationTokenRequest.getErrorResponse`, which prepares a
     /// response with the `ANONYMOUS` owner and requester principals.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_response(
             self.version,
@@ -80,6 +84,7 @@ impl CreateDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -100,14 +105,16 @@ impl std::fmt::Display for CreateDelegationTokenRequest {
 ///
 /// Corresponds to `CreateDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct CreateDelegationTokenRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest$Builder")]
+pub struct Builder {
     data: CreateDelegationTokenRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl CreateDelegationTokenRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: CreateDelegationTokenRequestData) -> Self {
         Self {
             data,
@@ -117,7 +124,7 @@ impl CreateDelegationTokenRequestBuilder {
     }
 }
 
-impl RequestBuilder for CreateDelegationTokenRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CREATE_DELEGATION_TOKEN
     }
@@ -130,8 +137,8 @@ impl RequestBuilder for CreateDelegationTokenRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(
             self.data.clone(),
             version,
         )))
@@ -171,9 +178,9 @@ mod tests {
     fn serialize_parse_round_trip() {
         let version = ApiKeys::CREATE_DELEGATION_TOKEN.latest_version();
         let mut request =
-            ConcreteRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(request_data(), version));
+            AbstractRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().max_lifetime_ms, 86_400_000);
         assert_eq!(parsed.data().renewers.len(), 1);
@@ -192,7 +199,7 @@ mod tests {
         renewer.principal_type = "User".to_string();
         renewer.principal_name = "bob".to_string();
         data.renewers = vec![renewer];
-        let mut request = ConcreteRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(data, 3));
+        let mut request = AbstractRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(data, 3));
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
             // owner_principal_type / owner_principal_name are nullable but have no

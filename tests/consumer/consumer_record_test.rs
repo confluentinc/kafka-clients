@@ -20,6 +20,7 @@ use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
 
 /// Translated from `ConsumerRecordTest.testShortConstructor`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecordTest#testShortConstructor")]
 fn test_short_constructor() {
     let topic = "topic";
     let partition = 0;
@@ -49,6 +50,7 @@ fn test_short_constructor() {
 
 /// Translated from `ConsumerRecordTest.testLongConstructor`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecordTest#testLongConstructor")]
 fn test_long_constructor() {
     let topic = "topic";
     let partition = 0;

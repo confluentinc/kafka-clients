@@ -30,15 +30,25 @@
 //! constructs its config.
 
 use std::collections::HashMap;
+use std::sync::atomic::{self, AtomicI32};
 
 use log::warn;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
-use crate::common::security::SecurityProtocol;
-use crate::consumer::AutoOffsetResetStrategy;
+use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::requests::JoinGroupRequest;
+use crate::common::security::auth::SecurityProtocol;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::{ClientDnsLookup, CommonClientConfigs};
+
+/// Process-wide counter for deriving a default `client.id`.
+///
+/// Corresponds to Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`
+/// (`ConsumerConfig.java:393`), which starts at 1. Crate-level (not per-config)
+/// to match Java's static scope, so successive consumers in one process get
+/// distinct ids.
+static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -47,6 +57,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---
     /// `group.id` — the consumer group identifier. `None` means no group.
@@ -159,12 +170,6 @@ pub struct ConsumerConfig {
     pub(crate) metrics_num_samples: i32,
     /// `metrics.recording.level`
     pub(crate) metrics_recording_level: String,
-    /// `metric.reporters`
-    pub(crate) metric_reporter_classes: Vec<String>,
-
-    // --- Interceptors ---
-    /// `interceptor.classes`
-    pub(crate) interceptor_classes: Vec<String>,
 
     // --- Share consumer (accepted silently per scope §20) ---
     /// `share.acknowledgement.mode`
@@ -180,10 +185,10 @@ pub struct ConsumerConfig {
     pub(crate) security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub(crate) sasl_config: SaslConfig,
+    pub(crate) sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    pub(crate) ssl_config: SslConfig,
+    pub(crate) ssl_config: SslConfigs,
 
     // --- Config providers ---
     /// `config.providers`
@@ -249,17 +254,14 @@ impl Default for ConsumerConfig {
             metrics_sample_window_ms: 30_000,
             metrics_num_samples: 2,
             metrics_recording_level: "INFO".to_string(),
-            metric_reporter_classes: Vec::new(),
-
-            interceptor_classes: Vec::new(),
 
             share_acknowledgement_mode: "implicit".to_string(),
             share_acquire_mode: "batch_optimized".to_string(),
 
             security_providers: None,
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
 
             config_providers: Vec::new(),
         }
@@ -293,9 +295,8 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup` (see
-    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ConsumerConfig.java`
-    /// declares its own public alias of the `CommonClientConfigs` constant.
+    /// Config key: `client.dns.lookup`. Java's `ConsumerConfig.java` declares it as its
+    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
@@ -386,11 +387,6 @@ impl ConsumerConfig {
     pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = "metrics.num.samples";
     /// Config key: `metrics.recording.level`.
     pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = "metrics.recording.level";
-    /// Config key: `metric.reporters`.
-    pub const METRIC_REPORTER_CLASSES_CONFIG: &'static str = "metric.reporters";
-
-    /// Config key: `interceptor.classes`.
-    pub const INTERCEPTOR_CLASSES_CONFIG: &'static str = "interceptor.classes";
 
     /// Config key: `share.acknowledgement.mode`.
     pub const SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: &'static str = "share.acknowledgement.mode";
@@ -416,7 +412,7 @@ impl ConsumerConfig {
         &self.bootstrap_servers
     }
     /// `client.dns.lookup`.
-    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+    pub(crate) fn client_dns_lookup(&self) -> ClientDnsLookup {
         self.client_dns_lookup
     }
     /// `client.id`.
@@ -503,14 +499,23 @@ impl ConsumerConfig {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
-    /// Set `client.id`.
+    /// Set `client.id`, trimmed as [`ConsumerConfig::new`] trims it (Java's
+    /// `ConfigDef.parseType`), so a blank id is generated at construction.
     pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = client_id.into();
+        self.client_id = client_id.into().trim().to_string();
         self
     }
     /// Set `group.id`.
+    ///
+    /// A `client.id` generated by [`ConsumerConfig::new`] already embeds the
+    /// group id, so after changing the group either set `client.id`
+    /// explicitly or clear it with `set_client_id("")`, which the consumer
+    /// constructor then regenerates.
+    ///
+    /// Trimmed as [`ConsumerConfig::new`] trims it (Java's
+    /// `ConfigDef.parseType`), so a blank id is rejected at construction.
     pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
-        self.group_id = Some(group_id.into());
+        self.group_id = Some(group_id.into().trim().to_string());
         self
     }
     /// Set `group.protocol`.
@@ -556,6 +561,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
@@ -607,13 +613,16 @@ impl ConsumerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    config.client_id = value.clone();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
                     config.client_rack = value.clone();
                 },
                 Self::GROUP_ID_CONFIG => {
-                    // Kept verbatim, INCLUDING the empty string. Java's
+                    // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
+                    // value (`ConfigDef.java:729-731`), so `" "` becomes `""`.
+                    // The empty string is then kept, not coerced to `None`. Java's
                     // `ConfigDef` defines `group.id` as `Type.STRING` with a
                     // `null` default and does not coerce `""` to null, so
                     // `config.getString(GROUP_ID_CONFIG)` returns `""` and
@@ -625,17 +634,20 @@ impl ConsumerConfig {
                     // configuration error into "no group", so a consumer
                     // configured with an empty `group.id` became a groupless
                     // consumer instead of failing fast.
-                    config.group_id = Some(value.clone());
+                    config.group_id = Some(value.trim().to_string());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
+                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:729-731`)
+                    // before `NonEmptyString.ensureValid` runs on it (`:1226-1231`).
+                    let value = value.trim();
                     if value.is_empty() {
                         return Err(Error::config_name_value_message(
                             Self::GROUP_INSTANCE_ID_CONFIG,
                             value,
-                            "must be non-empty",
+                            "String must be non-empty",
                         ));
                     }
-                    config.group_instance_id = Some(value.clone());
+                    config.group_instance_id = Some(value.to_string());
                 },
                 Self::GROUP_PROTOCOL_CONFIG => {
                     // Case-insensitive validation against the enum's lower-case names.
@@ -798,15 +810,6 @@ impl ConsumerConfig {
                     }
                     config.metrics_recording_level = value.clone();
                 },
-                Self::METRIC_REPORTER_CLASSES_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:576`).
-                    config.metric_reporter_classes = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
-                Self::INTERCEPTOR_CLASSES_CONFIG => {
-                    // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:618`).
-                    config.interceptor_classes = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
                 Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => {
                     // Accepted silently per scope §20.
                     config.share_acknowledgement_mode = value.clone();
@@ -834,7 +837,7 @@ impl ConsumerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
                     // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:707`).
@@ -846,10 +849,43 @@ impl ConsumerConfig {
             }
         }
 
+        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:717`),
+        // i.e. after every key has been parsed.
+        config.maybe_override_client_id()?;
+
         config
             .client_dns_lookup
             .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
+    }
+
+    /// Derives `client.id` when the user did not set one.
+    ///
+    /// Translated from `ConsumerConfig.maybeOverrideClientId`
+    /// (`ConsumerConfig.java:723-735`). The derived form is
+    /// `consumer-<group.id>-<group.instance.id>` for a static member, otherwise
+    /// `consumer-<group.id>-<n>` from a process-wide counter starting at 1 —
+    /// matching Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`. When a
+    /// `group.instance.id` is present it is validated first with
+    /// `JoinGroupRequest.validateGroupInstanceId`, exactly where Java does it.
+    ///
+    /// Java formats a missing `group.id` with `String.format("%s", null)`, which
+    /// yields the literal `null`; that is preserved here (`consumer-null-1`) so
+    /// the wire `client_id` matches a Java consumer with the same configuration.
+    pub(crate) fn maybe_override_client_id(&mut self) -> Result<(), Error> {
+        if !self.client_id.is_empty() {
+            return Ok(());
+        }
+        if let Some(group_instance_id) = &self.group_instance_id {
+            JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
+        }
+        let group_id = self.group_id.as_deref().unwrap_or("null");
+        let group_instance_id_part = match &self.group_instance_id {
+            Some(group_instance_id) => group_instance_id.clone(),
+            None => CONSUMER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed).to_string(),
+        };
+        self.client_id = format!("consumer-{group_id}-{group_instance_id_part}");
+        Ok(())
     }
 }
 
@@ -1030,6 +1066,7 @@ mod tests {
     /// Invalid `security.protocol` → `illegal_argument` with asserted message
     /// content (DoD §3): the config key, the bad value, and the valid names.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "abc".to_string());
@@ -1275,14 +1312,12 @@ mod tests {
 
     /// The consumer's other list keys use
     /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
-    /// 449, 576, 618, 707): empty elements are rejected, duplicates are
-    /// removed, and an empty list is allowed.
+    /// 449, 707): empty elements are rejected, duplicates are removed, and an
+    /// empty list is allowed.
     #[test]
     fn test_other_list_configs_valid_list() {
         for key in [
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
-            ConsumerConfig::METRIC_REPORTER_CLASSES_CONFIG,
-            ConsumerConfig::INTERCEPTOR_CLASSES_CONFIG,
             ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
         ] {
             let with = |value: &str| {
@@ -1305,5 +1340,145 @@ mod tests {
             // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
             assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
         }
+    }
+
+    /// Props with `bootstrap.servers` plus the given extra keys.
+    fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut props = base_props();
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        props
+    }
+
+    /// Parses the `<n>` suffix of a generated `consumer-<group>-<n>` id.
+    fn sequence_suffix<'a>(client_id: &'a str, prefix: &str) -> &'a str {
+        client_id
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("{client_id:?} does not start with {prefix:?}"))
+    }
+
+    /// Without `client.id`, the id is `consumer-<group.id>-<n>` and every
+    /// config draws a fresh `<n>` from the process-wide sequence.
+    #[test]
+    fn test_generated_client_id_uses_group_id_and_sequence() {
+        let props = props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")]);
+        let first = ConsumerConfig::new(&props).unwrap();
+        let second = ConsumerConfig::new(&props).unwrap();
+        let n1: i32 = sequence_suffix(first.client_id(), "consumer-test-group-").parse().unwrap();
+        let n2: i32 = sequence_suffix(second.client_id(), "consumer-test-group-").parse().unwrap();
+        assert!(n1 >= 1, "{}", first.client_id());
+        assert_ne!(first.client_id(), second.client_id());
+        // Other tests may draw from the shared sequence concurrently, so only
+        // the direction is fixed, not the gap.
+        assert!(n2 > n1, "{} then {}", first.client_id(), second.client_id());
+    }
+
+    /// A static member uses its `group.instance.id` instead of the sequence.
+    #[test]
+    fn test_generated_client_id_uses_group_instance_id() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "inst"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "consumer-test-group-inst");
+    }
+
+    /// An explicit `client.id` is never overridden.
+    #[test]
+    fn test_explicit_client_id_preserved() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::CLIENT_ID_CONFIG, "my-consumer"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "my-consumer");
+    }
+
+    /// Java formats a missing `group.id` with `String.format("%s", null)`,
+    /// yielding the literal `null`.
+    #[test]
+    fn test_generated_client_id_without_group_id() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        let n: i32 = sequence_suffix(config.client_id(), "consumer-null-").parse().unwrap();
+        assert!(n >= 1, "{}", config.client_id());
+    }
+
+    /// A `group.instance.id` that breaks the topic-name rules is rejected
+    /// while deriving the client id, with `JoinGroupRequest`'s message.
+    #[test]
+    fn test_generated_client_id_rejects_invalid_group_instance_id() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "bad/id"),
+        ]);
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::InvalidConfiguration(_)), "got {err:?}");
+        assert!(err.is_kafka_error(), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
+             alphanumerics, '.', '_' and '-'"
+        );
+    }
+
+    /// With an explicit `client.id`, `ConsumerConfig` does not validate
+    /// `group.instance.id` here; the consumer constructor does (Java
+    /// `GroupRebalanceConfig`, see `AsyncKafkaConsumer::new`).
+    #[test]
+    fn test_explicit_client_id_skips_group_instance_id_validation() {
+        let props = props_with(&[
+            (ConsumerConfig::CLIENT_ID_CONFIG, "my-consumer"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, "bad/id"),
+        ]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `ConfigDef.parseType` trims `client.id`, so a blank one generates an id
+    /// and a padded one is kept without its padding.
+    #[test]
+    fn test_client_id_is_trimmed() {
+        let blank = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::CLIENT_ID_CONFIG, " "),
+        ]);
+        let config = ConsumerConfig::new(&blank).unwrap();
+        sequence_suffix(config.client_id(), "consumer-test-group-");
+        let padded = props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, " my-consumer ")]);
+        assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `group.instance.id` is trimmed before Java's `NonEmptyString` check, so
+    /// a blank one is a config error for that key, not the instance-id
+    /// validator's `InvalidConfiguration`.
+    #[test]
+    fn test_blank_group_instance_id_is_config_error() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "test-group"),
+            (ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, " "),
+        ]);
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert!(
+            err.message().contains(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("String must be non-empty"), "{}", err.message());
+
+        let padded = props_with(&[(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG, " inst ")]);
+        assert_eq!(ConsumerConfig::new(&padded).unwrap().group_instance_id(), Some("inst"));
+    }
+
+    /// `ConfigDef.parseType` trims `group.id`, so the padding reaches neither
+    /// the group id nor the generated `client.id` embedding it.
+    #[test]
+    fn test_group_id_is_trimmed() {
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, " g ")])).unwrap();
+        assert_eq!(config.group_id(), Some("g"));
+        sequence_suffix(config.client_id(), "consumer-g-");
+        // A whitespace-only id trims to the empty string, kept as `Some("")`
+        // so the consumer constructor rejects it as Java does.
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, " ")])).unwrap();
+        assert_eq!(config.group_id(), Some(""));
     }
 }

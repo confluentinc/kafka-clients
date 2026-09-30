@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.ReplicaNotAvailableException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The replica is not available for the requested topic-partition.
     ///
-    /// Corresponds to Java's `ReplicaNotAvailableException`, error code [`Errors::ReplicaNotAvailable`].
+    /// Corresponds to Java's `ReplicaNotAvailableException`, error code `Errors::ReplicaNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `ReplicaNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ReplicaNotAvailableException")]
     ReplicaNotAvailableError,
     code: Errors::ReplicaNotAvailable,
     extends: [

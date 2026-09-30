@@ -14,14 +14,14 @@
 
 //! Translated from `org.apache.kafka.common.errors.SslAuthenticationException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The TLS handshake failed.
     ///
     /// Raised client-side, so it never arrives from a broker — but Java still
-    /// reports a code for it, by inheritance: [`Errors::InvalidConfig`].
+    /// reports a code for it, by inheritance: `Errors::InvalidConfig`.
     ///
     /// Corresponds to Java's `SslAuthenticationException`.
     ///
@@ -36,6 +36,7 @@ kafka_error_class! {
     /// class itself has no entry of its own. `InvalidConfigurationError` remains
     /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
     /// one.
+    #[doc(alias = "org.apache.kafka.common.errors.SslAuthenticationException")]
     SslAuthenticationError,
     code: Errors::InvalidConfig,
     extends: [

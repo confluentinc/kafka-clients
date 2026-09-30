@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod check_bindings;
+mod java;
+mod lint_custom;
 
 use std::env;
 use std::fs;
@@ -27,6 +29,9 @@ fn main() -> anyhow::Result<()> {
         Some("check-generated") => check_generated()?,
         Some("generate-error-codes") => generate_error_codes()?,
         Some("check-bindings") => check_bindings_task()?,
+        Some("java-deprecated") => java_deprecated()?,
+        Some("fetch-java-refs") => fetch_java_refs()?,
+        Some("lint-custom") => lint_custom::lint_custom()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -191,7 +196,7 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 //     test targets do not enable.
 //
 // `check-generated` re-runs the generation and fails on any difference, so a
-// stale copy breaks the build rather than a test (CLAUDE.md #6: xtask programs
+// stale copy breaks the build rather than a test (CLAUDE.md #8: xtask programs
 // rather than shell scripts).
 
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
@@ -268,7 +273,7 @@ error classes, so the code alone identifies the class.
     out
 }
 
-fn error_codes_rust(codes: &[(String, i32)]) -> String {
+fn error_codes_rust(codes: &[(String, i32)], classes: &[(String, String)]) -> anyhow::Result<String> {
     let mut out = String::new();
     out.push_str(
         r#"// Copyright 2025 Confluent Inc.
@@ -302,8 +307,176 @@ fn error_codes_rust(codes: &[(String, i32)]) -> String {
 
 "#,
     );
+    out.push_str("use std::collections::HashSet;\n\n");
+    for import in parse_error_class_imports()? {
+        out.push_str(&format!("use {import};\n"));
+    }
+    out.push('\n');
     for (name, value) in codes {
         out.push_str(&format!("pub const {name}: i32 = {value};\n"));
+    }
+    out.push_str(
+        r#"
+/// Rebuild the error class that owns the protocol error `code`, carrying
+/// `message` -- the table of `Errors::error_with_message` (Java's
+/// `Errors.exception(String)`), spelled with the classes' public constructors
+/// because `Errors` itself is not public API.
+///
+/// `None` for a code no broker-side class owns: `NONE`, and the negatives of
+/// the classes only the client raises.
+pub fn error_with_message(code: i32, message: String) -> Option<Error> {
+    match code {
+"#,
+    );
+    for (name, expr) in classes {
+        out.push_str(&format!("        {name} => Some({expr}),\n"));
+    }
+    out.push_str("        _ => None,\n    }\n}\n");
+    rustfmt(&out)
+}
+
+/// Format generated Rust source with the repository's `rustfmt.toml`, so the
+/// generated file also passes `cargo xtask format-check`.
+///
+/// `cargo fmt` passes the crate's edition to rustfmt, overriding the
+/// `edition = "2021"` of `rustfmt.toml`; so must we. The 2024 style edition
+/// sorts imports differently (`Error` before `errors::*`), and without it the
+/// output `format-check` accepts would never match the generator's.
+fn rustfmt(source: &str) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let edition = crate_edition()?;
+    let mut child = Command::new("rustfmt")
+        .args([
+            "--emit",
+            "stdout",
+            "--config-path",
+            "rustfmt.toml",
+            "--edition",
+            &edition,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().expect("piped stdin").write_all(source.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("rustfmt failed on the generated error-code table");
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+/// The `edition` of the root crate's `[package]`, as `cargo fmt` reads it.
+fn crate_edition() -> anyhow::Result<String> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    manifest
+        .lines()
+        .skip_while(|l| l.trim() != "[package]")
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            (key.trim() == "edition").then(|| value.trim().trim_matches('"').to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no `edition` in the `[package]` of Cargo.toml"))
+}
+
+const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
+
+/// Extract `(C enumerator name, constructor expression)` for every arm of
+/// `Errors::error_with_message` that yields an error.
+///
+/// Each arm is `Self::<Variant> => Some(<expr>)`; the enumerator name is the
+/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_t`
+/// spells Java's `Errors` constants. An arm naming no enumerator is an error, so
+/// the two tables cannot drift apart silently.
+fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, String)>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    let body = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .find_map(|item| match item {
+            syn::ImplItem::Fn(f) if f.sig.ident == "error_with_message" => Some(&f.block),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: Errors::error_with_message not found"))?;
+    let arms = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(&m.arms),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: error_with_message has no match"))?;
+
+    let known: std::collections::HashSet<&str> = codes.iter().map(|(name, _)| name.as_str()).collect();
+    let mut classes = Vec::new();
+    for arm in arms {
+        let syn::Pat::Path(path) = &arm.pat else {
+            anyhow::bail!("{ERRORS_SOURCE}: unexpected error_with_message arm pattern");
+        };
+        let variant = path.path.segments.last().expect("non-empty path").ident.to_string();
+        let mut expr = &*arm.body;
+        if let syn::Expr::Block(block) = expr {
+            match block.block.stmts.as_slice() {
+                [syn::Stmt::Expr(inner, None)] => expr = inner,
+                _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is not a single expression"),
+            }
+        }
+        let inner = match expr {
+            syn::Expr::Path(p) if p.path.is_ident("None") => continue,
+            syn::Expr::Call(call) if matches!(&*call.func, syn::Expr::Path(p) if p.path.is_ident("Some")) => {
+                &call.args[0]
+            },
+            _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is neither `Some(..)` nor `None`"),
+        };
+        let name = screaming_snake(&variant);
+        if !known.contains(name.as_str()) {
+            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_{name}` enumerator");
+        }
+        classes.push((name, inner.to_token_stream().to_string()));
+    }
+    Ok(classes)
+}
+
+/// The `use crate::common::…` imports of [`ERRORS_SOURCE`], re-rooted at
+/// `confluent_kafka`, so the constructor expressions copied out of
+/// `error_with_message` resolve the same way in the generated file. Only the
+/// `common` imports are copied: the arms name error classes, which live there.
+fn parse_error_class_imports() -> anyhow::Result<Vec<String>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    Ok(file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Use(item) => Some(item.tree.to_token_stream().to_string().replace(' ', "")),
+            _ => None,
+        })
+        .filter_map(|tree| {
+            tree.strip_prefix("crate::common::")
+                .map(|rest| format!("confluent_kafka::common::{rest}"))
+        })
+        .collect())
+}
+
+/// `UnknownTopicOrPartition` -> `UNKNOWN_TOPIC_OR_PARTITION`.
+fn screaming_snake(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
     }
     out
 }
@@ -312,8 +485,9 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
 
     let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
     fs::write(ERROR_CODE_PY, error_codes_python(&codes))?;
-    fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
+    fs::write(ERROR_CODE_RS, error_codes_rust(&codes, &classes)?)?;
 
     println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
     Ok(())
@@ -324,10 +498,11 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     println!("🔍 Checking generated error-code constants...");
 
     let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
     let mut stale = Vec::new();
     for (path, expected) in [
         (ERROR_CODE_PY, error_codes_python(&codes)),
-        (ERROR_CODE_RS, error_codes_rust(&codes)),
+        (ERROR_CODE_RS, error_codes_rust(&codes, &classes)?),
     ] {
         match fs::read_to_string(path) {
             Ok(actual) if actual == expected => {},
@@ -346,6 +521,12 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 }
 
 fn lint() -> anyhow::Result<()> {
+    // Runs first: it is a fast source-only scan, so a violation is reported
+    // before paying for three full clippy passes. It covers what clippy cannot:
+    // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
+    // of its variants and the visibility of public structs' fields.
+    lint_custom::lint_custom()?;
+
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
     // failures are always real.
@@ -563,7 +744,7 @@ fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
 ///
 /// Shape 1's check was shipped for Phase 8 as an ad-hoc script and could not see
 /// shape 2 — an attribute-free stack. Both live here now, and in `lint`, because
-/// CLAUDE.md §6 puts repeatable checks in xtask rather than in shell scripts, and
+/// CLAUDE.md §8 puts repeatable checks in xtask rather than in shell scripts, and
 /// because a check nobody is obliged to run is a check that finds the next instance
 /// one review round late.
 ///
@@ -842,6 +1023,54 @@ fn rust_sources(root: &str) -> anyhow::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Writes [`java::DEPRECATED_LIST`]: the union of the deprecated items of each
+/// ref given (default [`java::DEPRECATION_REFS`]).
+fn java_deprecated() -> anyhow::Result<()> {
+    let args: Vec<String> = env::args().skip(2).collect();
+    let refs: Vec<&str> = if args.is_empty() {
+        java::DEPRECATION_REFS.to_vec()
+    } else {
+        args.iter().map(String::as_str).collect()
+    };
+    let mut items = std::collections::BTreeSet::new();
+    for reference in &refs {
+        let classes = java::load_ref(reference).ok_or_else(|| {
+            anyhow::anyhow!("ref `{reference}` is not in the `kafka` submodule (run `git -C kafka fetch --tags`)")
+        })?;
+        items.extend(java::deprecated_items(&classes));
+    }
+    let mut out = format!(
+        "# Java client API marked @Deprecated in Apache Kafka {}.\n\
+         # Generated by `cargo xtask java-deprecated`; read by `cargo xtask lint-custom`.\n\
+         # CLAUDE.md §3: deprecated API MUST NOT be translated.\n\
+         # A class covers its members and nested classes; `#name(T1,T2)` is one overload, `#NAME` a field.\n",
+        refs.join(" + ")
+    );
+    for item in &items {
+        out.push_str(item);
+        out.push('\n');
+    }
+    fs::write(java::DEPRECATED_LIST, out)?;
+    println!("✅ Wrote {} deprecated items to {}", items.len(), java::DEPRECATED_LIST);
+    Ok(())
+}
+
+/// Fetches the tags of [`java::lint_refs`] into the `kafka` submodule, one
+/// commit deep each, so a shallow clone (CI's) can run `lint-custom`, which
+/// reads those refs and fails without them.
+fn fetch_java_refs() -> anyhow::Result<()> {
+    let refs = java::lint_refs();
+    let mut args = vec!["-C", "kafka", "fetch", "--depth=1", "--no-tags", "origin"];
+    let specs: Vec<String> = refs.iter().map(|r| format!("+refs/tags/{r}:refs/tags/{r}")).collect();
+    args.extend(specs.iter().map(String::as_str));
+    let status = Command::new("git").args(&args).status()?;
+    if !status.success() {
+        anyhow::bail!("fetching {} into `kafka` failed", refs.join(", "));
+    }
+    println!("✅ Fetched {} into `kafka`", refs.join(", "));
+    Ok(())
+}
+
 fn print_help() {
     eprintln!(
         "Tasks:
@@ -850,6 +1079,12 @@ fn print_help() {
   check-generated Check generated code formatting and error-code staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for Python and the test harness
   check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
+  java-deprecated List the Java client's @Deprecated API in design/current/java-deprecated.txt
+  fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
+  lint-custom     Run the source-level rules clippy cannot express
+                  (also runs as the first step of `lint`):
+                    check-no-data-carrying-enum-variants  public enum variants hold no data inline
+                    check-no-public-field                 public structs have no `pub` field
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -865,6 +1100,8 @@ Usage:
   cargo xtask check-generated
   cargo xtask generate-error-codes
   cargo xtask check-bindings [path/to/file.c]
+  cargo xtask java-deprecated [kafka-ref ...]
+  cargo xtask lint-custom
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix

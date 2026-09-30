@@ -44,6 +44,7 @@ fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, St
 /// - `history()` contains the record
 /// - `clear()` empties the history
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testAutoCompleteMock")]
 async fn test_auto_complete_mock() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
     let record1 = make_record("topic", "key1", "value1");
@@ -76,6 +77,7 @@ async fn test_auto_complete_mock() {
 /// - `complete_next()` returns `false` when there are no more pending requests
 /// - `flush()` completes remaining pending sends
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testManualCompletion")]
 async fn test_manual_completion() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
     let record1 = make_record("topic", "key1", "value1");

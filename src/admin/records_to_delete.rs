@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.RecordsToDelete`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete")]
 pub struct RecordsToDelete {
     offset: i64,
 }
@@ -28,13 +29,19 @@ impl RecordsToDelete {
     /// Delete all the records before the given `offset`.
     ///
     /// Use `-1` to truncate to the high watermark.
-    pub fn with_before_offset(offset: i64) -> Self {
+    ///
+    /// Java's static `beforeOffset(long)` shares its name with the getter
+    /// [`before_offset`](Self::before_offset), so it takes the `_with_offset`
+    /// suffix of its parameter (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset(long)")]
+    pub fn before_offset_with_offset(offset: i64) -> Self {
         Self { offset }
     }
 
     /// The offset before which all records will be deleted.
     ///
     /// Use `-1` to truncate to the high watermark.
+    #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset()")]
     pub fn before_offset(&self) -> i64 {
         self.offset
     }
@@ -52,13 +59,19 @@ mod tests {
 
     #[test]
     fn before_offset_round_trip() {
-        let r = RecordsToDelete::with_before_offset(10);
+        let r = RecordsToDelete::before_offset_with_offset(10);
         assert_eq!(r.before_offset(), 10);
     }
 
     #[test]
     fn equality_and_hash_match_on_offset() {
-        assert_eq!(RecordsToDelete::with_before_offset(5), RecordsToDelete::with_before_offset(5));
-        assert_ne!(RecordsToDelete::with_before_offset(5), RecordsToDelete::with_before_offset(6));
+        assert_eq!(
+            RecordsToDelete::before_offset_with_offset(5),
+            RecordsToDelete::before_offset_with_offset(5)
+        );
+        assert_ne!(
+            RecordsToDelete::before_offset_with_offset(5),
+            RecordsToDelete::before_offset_with_offset(6)
+        );
     }
 }

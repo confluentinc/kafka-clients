@@ -22,6 +22,7 @@ use crate::common::quota::ClientQuotaFilterComponent;
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaFilter`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter")]
 pub struct ClientQuotaFilter {
     components: Vec<ClientQuotaFilterComponent>,
     strict: bool,
@@ -32,6 +33,7 @@ impl ClientQuotaFilter {
     ///
     /// Mirrors the private `ClientQuotaFilter(Collection, boolean)`
     /// constructor.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#ClientQuotaFilter")]
     fn new(components: Vec<ClientQuotaFilterComponent>, strict: bool) -> Self {
         Self { components, strict }
     }
@@ -41,6 +43,7 @@ impl ClientQuotaFilter {
     /// a component will also be included in the result.
     ///
     /// Mirrors `ClientQuotaFilter.contains`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#contains")]
     pub fn contains(components: Vec<ClientQuotaFilterComponent>) -> Self {
         Self::new(components, false)
     }
@@ -50,6 +53,7 @@ impl ClientQuotaFilter {
     /// a component will *not* be included in the result.
     ///
     /// Mirrors `ClientQuotaFilter.containsOnly`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#containsOnly")]
     pub fn contains_only(components: Vec<ClientQuotaFilterComponent>) -> Self {
         Self::new(components, true)
     }
@@ -58,6 +62,7 @@ impl ClientQuotaFilter {
     /// entities.
     ///
     /// Mirrors `ClientQuotaFilter.all`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#all")]
     pub fn all() -> Self {
         Self::new(Vec::new(), false)
     }
@@ -65,6 +70,7 @@ impl ClientQuotaFilter {
     /// Returns the filter's components.
     ///
     /// Mirrors `ClientQuotaFilter.components()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#components")]
     pub fn components(&self) -> &[ClientQuotaFilterComponent] {
         &self.components
     }
@@ -73,6 +79,7 @@ impl ClientQuotaFilter {
     /// components.
     ///
     /// Mirrors `ClientQuotaFilter.strict()`.
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#strict")]
     pub fn strict(&self) -> bool {
         self.strict
     }

@@ -28,6 +28,7 @@ use crate::common::metrics::{Metrics, RecordingLevel, Sensor};
 /// sensor with the given name already exists it is reused untouched
 /// (`preexisting == true`), otherwise it is created and the `withXxx` calls add
 /// stats to it.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder")]
 pub(crate) struct SensorBuilder {
     metrics: Arc<Metrics>,
     sensor: Arc<Sensor>,
@@ -49,6 +50,7 @@ impl SensorBuilder {
     /// partition-level sensors were created "at DEBUG (off by default) per the
     /// consumer perf constraint"; they never were, and asserting otherwise hid
     /// the real per-poll cost of that path.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#SensorBuilder")]
     pub(crate) fn new(metrics: &Arc<Metrics>, name: &str, recording_level: RecordingLevel) -> Result<Self, Error> {
         Self::with_tags(metrics, name, recording_level, BTreeMap::new)
     }
@@ -67,6 +69,7 @@ impl SensorBuilder {
     /// and it was then discarded whenever the sensor already existed. At 200
     /// partitions and 100 polls/sec that is tens of thousands of wasted
     /// allocations per second that Java does not make.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#SensorBuilder")]
     pub(crate) fn with_tags<F>(
         metrics: &Arc<Metrics>,
         name: &str,
@@ -86,6 +89,7 @@ impl SensorBuilder {
     }
 
     /// Add an [`Avg`] stat under the given template (if newly created).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#withAvg")]
     pub(crate) fn with_avg(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
@@ -95,6 +99,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Min`] stat under the given template (if newly created).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#withMin")]
     pub(crate) fn with_min(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
@@ -104,6 +109,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Max`] stat under the given template (if newly created).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#withMax")]
     pub(crate) fn with_max(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
@@ -113,6 +119,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Value`] stat under the given template (if newly created).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#withValue")]
     pub(crate) fn with_value(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
@@ -123,6 +130,7 @@ impl SensorBuilder {
 
     /// Add a default (`WindowedSum`-backed) [`Meter`] producing the given rate
     /// and total metrics (if newly created).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#withMeter")]
     pub(crate) fn with_meter(
         self,
         rate_name: &MetricNameTemplate,
@@ -139,6 +147,7 @@ impl SensorBuilder {
     /// Add a [`Meter`] backed by the supplied rate [`SampledStat`] producing the
     /// given rate and total metrics (if newly created). Translates Java's
     /// `withMeter(SampledStat, MetricNameTemplate, MetricNameTemplate)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#SensorBuilder")]
     pub(crate) fn with_meter_stat(
         self,
         sampled_stat: SampledStat,
@@ -158,6 +167,7 @@ impl SensorBuilder {
     }
 
     /// Returns the built sensor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SensorBuilder#build")]
     pub(crate) fn build(self) -> Arc<Sensor> {
         self.sensor
     }
@@ -166,7 +176,8 @@ impl SensorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::{MetricConfig, SystemTime};
+    use crate::common::metrics::MetricConfig;
+    use crate::common::utils::SystemTime;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn metrics() -> Arc<Metrics> {

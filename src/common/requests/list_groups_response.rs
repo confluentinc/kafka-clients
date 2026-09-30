@@ -28,12 +28,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListGroupsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse")]
 pub struct ListGroupsResponse {
     data: ListGroupsResponseData,
 }
 
 impl ListGroupsResponse {
     /// Creates a new `ListGroupsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#ListGroupsResponse")]
     pub fn new(data: ListGroupsResponseData) -> Self {
         Self { data }
     }
@@ -44,6 +46,7 @@ impl ListGroupsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#data")]
     pub fn data(&self) -> &ListGroupsResponseData {
         &self.data
     }
@@ -54,11 +57,13 @@ impl ListGroupsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -66,6 +71,7 @@ impl ListGroupsResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v2+.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 2
     }
@@ -74,6 +80,7 @@ impl ListGroupsResponse {
     ///
     /// Mirrors `ListGroupsResponse.errorCounts` — the single top-level error
     /// code.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -86,6 +93,7 @@ impl ListGroupsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListGroupsResponseData::read(readable, version)?;
         Ok(Self::new(data))

@@ -30,6 +30,7 @@ use crate::create_topics_request_data::{CreatableReplicaAssignment, CreatableTop
 /// iterates its `Map` in unspecified order, but a stable order simplifies
 /// wire-byte comparison and testing.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
 pub struct NewTopic {
     name: String,
     num_partitions: Option<i32>,
@@ -57,6 +58,7 @@ impl NewTopic {
     /// `{name, replicas_assignments}`, whose intersection is `{name}`. No
     /// constructor takes `name` alone, so under §2 nobody keeps the plain
     /// `new` and both carry a parameter-name suffix.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#NewTopic")]
     pub fn with_num_partitions_replication_factor(
         name: impl Into<String>,
         num_partitions: Option<i32>,
@@ -76,6 +78,7 @@ impl NewTopic {
     /// * `name` - the topic name
     /// * `replicas_assignments` - a map from partition id to replica ids (i.e.
     ///   broker ids). The first replica is treated as the preferred leader.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#NewTopic")]
     pub fn with_replicas_assignments(name: impl Into<String>, replicas_assignments: BTreeMap<i32, Vec<i32>>) -> Self {
         Self {
             name: name.into(),
@@ -87,24 +90,28 @@ impl NewTopic {
     }
 
     /// The name of the topic to be created.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The number of partitions for the new topic or -1 if a replica assignment
     /// has been specified.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#numPartitions")]
     pub fn num_partitions(&self) -> i32 {
         self.num_partitions.unwrap_or(CreateTopicsRequest::NO_NUM_PARTITIONS)
     }
 
     /// The replication factor for the new topic or -1 if a replica assignment
     /// has been specified.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#replicationFactor")]
     pub fn replication_factor(&self) -> i16 {
         self.replication_factor.unwrap_or(CreateTopicsRequest::NO_REPLICATION_FACTOR)
     }
 
     /// A map from partition id to replica ids (i.e. broker ids) or `None` if the
     /// number of partitions and replication factor have been specified instead.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#replicasAssignments")]
     pub fn replicas_assignments(&self) -> Option<&BTreeMap<i32, Vec<i32>>> {
         self.replicas_assignments.as_ref()
     }
@@ -119,6 +126,7 @@ impl NewTopic {
 
     /// The configuration for the new topic or `None` if no configs were ever
     /// specified.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
     pub fn configs(&self) -> Option<&BTreeMap<String, String>> {
         self.configs.as_ref()
     }
@@ -127,6 +135,7 @@ impl NewTopic {
     ///
     /// Mirrors `NewTopic.convertToCreatableTopic`. Used by
     /// `KafkaAdminClient::create_topics`.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#convertToCreatableTopic")]
     pub(crate) fn convert_to_creatable_topic(&self) -> CreatableTopic {
         let mut creatable = CreatableTopic::new();
         creatable.set_name(self.name.clone());

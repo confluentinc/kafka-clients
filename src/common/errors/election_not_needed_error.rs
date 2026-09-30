@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.ElectionNotNeededException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Leader election not needed for topic partition.
     ///
-    /// Corresponds to Java's `ElectionNotNeededException`, error code [`Errors::ElectionNotNeeded`].
+    /// Corresponds to Java's `ElectionNotNeededException`, error code `Errors::ElectionNotNeeded`.
     ///
     /// Java `extends` chain:
     ///    `ElectionNotNeededException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ElectionNotNeededException")]
     ElectionNotNeededError,
     code: Errors::ElectionNotNeeded,
     extends: [

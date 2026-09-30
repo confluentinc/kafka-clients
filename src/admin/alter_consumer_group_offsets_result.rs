@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition commit errors carried by the underlying future.
@@ -28,12 +28,14 @@ type PartitionErrors = HashMap<TopicPartition, Errors>;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult")]
 pub struct AlterConsumerGroupOffsetsResult {
     future: KafkaFuture<PartitionErrors>,
 }
 
 impl AlterConsumerGroupOffsetsResult {
     /// Creates a result wrapping the single group's per-partition-error future.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#AlterConsumerGroupOffsetsResult")]
     pub(crate) fn new(future: KafkaFuture<PartitionErrors>) -> Self {
         Self { future }
     }
@@ -45,6 +47,7 @@ impl AlterConsumerGroupOffsetsResult {
     /// (Java's `IllegalArgumentException`) if the partition was not part of the
     /// alter request, and otherwise fails with the partition's error if it was
     /// not `NONE`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> KafkaFuture<()> {
         let partition = partition.clone();
         self.future
@@ -60,6 +63,7 @@ impl AlterConsumerGroupOffsetsResult {
     /// Returns a future which succeeds if all the alter offsets succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.future.then_apply_try(|topic_partition_errors| {
             let mut partitions_failed: Vec<&TopicPartition> = topic_partition_errors

@@ -26,6 +26,7 @@ use super::{AccessControlEntryFilter, AclOperation, AclPermissionType};
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AccessControlEntry`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry")]
 pub struct AccessControlEntry {
     pub(crate) data: AccessControlEntryData,
 }
@@ -45,6 +46,7 @@ impl AccessControlEntry {
     /// Returns [`Error::LocalIllegalArgument`] if `operation` is
     /// [`AclOperation::Any`] or `permission_type` is
     /// [`AclPermissionType::Any`] (mirrors Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#AccessControlEntry")]
     pub fn new(
         principal: impl Into<String>,
         host: impl Into<String>,
@@ -63,6 +65,7 @@ impl AccessControlEntry {
     }
 
     /// Return the principal for this entry.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#principal")]
     pub fn principal(&self) -> &str {
         // Invariant: a public `AccessControlEntry` always has a non-null
         // principal (set by `new`).
@@ -70,28 +73,33 @@ impl AccessControlEntry {
     }
 
     /// Return the host, or `*` for all hosts.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#host")]
     pub fn host(&self) -> &str {
         self.data.host().expect("AccessControlEntry host is always set")
     }
 
     /// Return the `AclOperation`. This method will never return
     /// [`AclOperation::Any`].
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#operation")]
     pub fn operation(&self) -> AclOperation {
         self.data.operation()
     }
 
     /// Return the `AclPermissionType`. This method will never return
     /// [`AclPermissionType::Any`].
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#permissionType")]
     pub fn permission_type(&self) -> AclPermissionType {
         self.data.permission_type()
     }
 
     /// Create a filter which matches only this `AccessControlEntry`.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#toFilter")]
     pub fn to_filter(&self) -> AccessControlEntryFilter {
         AccessControlEntryFilter::with_data(self.data.clone())
     }
 
     /// Return true if this ACE has any UNKNOWN components.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntry#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.data.is_unknown()
     }

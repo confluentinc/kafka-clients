@@ -23,12 +23,13 @@ use crate::CreateTopicsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::create_topics_response_data::CreatableTopicResult;
 
-use super::{ConcreteRequest, ConcreteResponse, CreateTopicsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, CreateTopicsResponse, RequestBuilder};
 
 /// A CreateTopics request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.CreateTopicsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest")]
 pub struct CreateTopicsRequest {
     data: CreateTopicsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl CreateTopicsRequest {
     pub const NO_REPLICATION_FACTOR: i16 = -1;
 
     /// Creates a new `CreateTopicsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#CreateTopicsRequest")]
     pub fn new(data: CreateTopicsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#data")]
     pub fn data(&self) -> &CreateTopicsRequestData {
         &self.data
     }
@@ -74,6 +77,7 @@ impl CreateTopicsRequest {
     /// Mirrors `CreateTopicsRequest.getErrorResponse` (which uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = CreateTopicsResponseData::new();
         if self.version >= 2 {
@@ -97,6 +101,7 @@ impl CreateTopicsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateTopicsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -113,14 +118,16 @@ impl std::fmt::Display for CreateTopicsRequest {
 ///
 /// Corresponds to `CreateTopicsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct CreateTopicsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest$Builder")]
+pub struct Builder {
     data: CreateTopicsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl CreateTopicsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest$Builder#Builder")]
     pub fn new(data: CreateTopicsRequestData) -> Self {
         Self {
             data,
@@ -130,7 +137,7 @@ impl CreateTopicsRequestBuilder {
     }
 }
 
-impl RequestBuilder for CreateTopicsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CREATE_TOPICS
     }
@@ -143,7 +150,7 @@ impl RequestBuilder for CreateTopicsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if self.data.validate_only && version == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -172,7 +179,7 @@ impl RequestBuilder for CreateTopicsRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::CreateTopics(CreateTopicsRequest::new(
+        Ok(AbstractRequest::CreateTopics(CreateTopicsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -196,7 +203,7 @@ mod tests {
     fn build_rejects_validate_only_v0() {
         let mut data = CreateTopicsRequestData::new();
         data.set_validate_only(true);
-        let mut builder = CreateTopicsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
@@ -208,7 +215,7 @@ mod tests {
             CreateTopicsRequest::NO_NUM_PARTITIONS,
             CreateTopicsRequest::NO_REPLICATION_FACTOR,
         )]);
-        let mut builder = CreateTopicsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(3).unwrap_err();
         assert!(err.to_string().contains("version 4+"), "{err}");
         // v4 accepts defaults.
@@ -232,16 +239,16 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("round-trip-topic", 3, 2)]);
         data.set_timeout_ms(30000);
-        let mut request = ConcreteRequest::CreateTopics(CreateTopicsRequest::new(data, 7));
+        let mut request = AbstractRequest::CreateTopics(CreateTopicsRequest::new(data, 7));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateTopicsRequest::parse(&mut readable, 7).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

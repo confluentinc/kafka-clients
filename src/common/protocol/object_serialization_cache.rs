@@ -47,12 +47,14 @@ enum CachedValue {
 /// This avoids recalculating and recomputing the same values during the second pass.
 /// Uses object identity (pointer address) as keys, matching Java's IdentityHashMap.
 #[derive(Debug, Default)]
+#[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache")]
 pub struct ObjectSerializationCache {
     map: HashMap<IdentityKey, CachedValue>,
 }
 
 impl ObjectSerializationCache {
     /// Creates a new empty cache.
+    #[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache#ObjectSerializationCache")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -61,6 +63,7 @@ impl ObjectSerializationCache {
     ///
     /// The object is identified by its memory address. The caller must ensure
     /// the object is not moved between `set` and `get` calls.
+    #[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache#setArraySizeInBytes")]
     pub fn set_array_size_in_bytes<T: ?Sized>(&mut self, obj: &T, size: i32) {
         let key = obj as *const T as *const () as usize;
         self.map.insert(key, CachedValue::Size(size));
@@ -69,6 +72,7 @@ impl ObjectSerializationCache {
     /// Retrieve the cached serialized size in bytes for a given object.
     ///
     /// Returns `None` if no size was cached for this object.
+    #[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache#getArraySizeInBytes")]
     pub fn get_array_size_in_bytes<T: ?Sized>(&self, obj: &T) -> Option<i32> {
         let key = obj as *const T as *const () as usize;
         match self.map.get(&key) {
@@ -78,6 +82,7 @@ impl ObjectSerializationCache {
     }
 
     /// Cache a serialized byte representation for a given object.
+    #[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache#cacheSerializedValue")]
     pub fn cache_serialized_value<T: ?Sized>(&mut self, obj: &T, val: Vec<u8>) {
         let key = obj as *const T as *const () as usize;
         self.map.insert(key, CachedValue::Bytes(val));
@@ -86,6 +91,7 @@ impl ObjectSerializationCache {
     /// Retrieve a cached serialized byte representation for a given object.
     ///
     /// Returns `None` if no value was cached for this object.
+    #[doc(alias = "org.apache.kafka.common.protocol.ObjectSerializationCache#getSerializedValue")]
     pub fn get_serialized_value<T: ?Sized>(&self, obj: &T) -> Option<&[u8]> {
         let key = obj as *const T as *const () as usize;
         match self.map.get(&key) {

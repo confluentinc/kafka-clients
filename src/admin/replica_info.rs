@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ReplicaInfo`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo")]
 pub struct ReplicaInfo {
     size: i64,
     offset_lag: i64,
@@ -28,6 +29,7 @@ pub struct ReplicaInfo {
 
 impl ReplicaInfo {
     /// Creates a new `ReplicaInfo`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#ReplicaInfo")]
     pub fn new(size: i64, offset_lag: i64, is_future: bool) -> Self {
         Self { size, offset_lag, is_future }
     }
@@ -35,6 +37,7 @@ impl ReplicaInfo {
     /// The total size of the log segments in this replica in bytes.
     ///
     /// This value does not include the size of data stored in remote storage.
+    #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#size")]
     pub fn size(&self) -> i64 {
         self.size
     }
@@ -42,12 +45,14 @@ impl ReplicaInfo {
     /// The lag of the log's LEO with respect to the partition's high watermark
     /// (if it is the current log for the partition) or the current replica's LEO
     /// (if it is the future log for the partition).
+    #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#offsetLag")]
     pub fn offset_lag(&self) -> i64 {
         self.offset_lag
     }
 
     /// Whether this replica has been created by an `AlterReplicaLogDirsRequest`
     /// but has not yet replaced the current replica on the broker.
+    #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#isFuture")]
     pub fn is_future(&self) -> bool {
         self.is_future
     }
