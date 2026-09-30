@@ -89,11 +89,17 @@ import datetime as _dt
 import threading
 
 import _confluentkafka as _lib
-from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-offset types
-# `OffsetAndMetadata` is `org.apache.kafka.clients.consumer` in Java, so the
-# consumer module owns it and the admin group-offset RPCs reuse it, exactly as
-# they already reuse `Node`.
-from producer import KafkaError  # shared error type
+# The admin binding is PAUSED (its public surface, including the flat
+# ``KafkaError`` values it returns per-key and its positional ``Node`` /
+# ``OffsetAndMetadata`` value types, must not change until it is ported to the
+# new spec). The retired top-level ``producer.py`` / ``consumer.py`` modules used
+# to provide these; they now live in a private package shim so those modules
+# could be deleted without touching admin's frozen contract.
+from confluent_kafka._legacy_compat import (  # noqa: E402
+    KafkaError,      # flat admin error type (code / is_retriable / is_fatal)
+    Node,            # positional broker-node value type
+    OffsetAndMetadata,  # positional committed-offset value type
+)
 
 
 # --------------------------------------------------------------------------
