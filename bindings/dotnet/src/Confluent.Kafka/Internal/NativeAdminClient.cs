@@ -1286,8 +1286,10 @@ internal sealed class NativeAdminClient : IDisposable
             if (options.PartitionSizeLimitPerResponse < 0)
             {
                 // The ABI reads a negative as "keep Java's 2000 default"
-                // (src/ffi/admin.rs:3712), so a negative would be silently reinterpreted
-                // rather than honoured — the same reasoning as the timeout guard.
+                // (describe_topics_options in src/ffi/admin.rs), so a negative would be
+                // silently reinterpreted as that default — the same reasoning as the
+                // timeout guard. See DescribeTopicsOptions.PartitionSizeLimitPerResponse
+                // for why the value currently has no effect on any request.
                 throw new ArgumentOutOfRangeException(
                     nameof(options),
                     options.PartitionSizeLimitPerResponse,
