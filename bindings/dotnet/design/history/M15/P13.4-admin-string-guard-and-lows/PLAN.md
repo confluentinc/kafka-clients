@@ -4,6 +4,23 @@
 > recommended in §8: D1 (a), D2, D3 out, D4 in, D5 (a), D6 as in §4.7, D7 (a), D8 all 13
 > files, D9 cadence (no user gate between S1 and S2; one `dotnet-critic` 87 pass after
 > S2; the Critic re-checks only the fixup commits). Written by the Manager on 2026-09-30.
+>
+> **Superseded on user direction, 2026-09-30 — D8 widened from 13 to 20 result types.**
+> Before G1-5 was edited, the Manager re-swept by the phrase itself (`timing independence`)
+> and found the same stale paragraph on **7 more** public result types than this plan
+> counted: `AlterConfigsResult`, `AlterPartitionReassignmentsResult`,
+> `AlterReplicaLogDirsResult`, `AlterUserScramCredentialsResult`,
+> `DescribeReplicaLogDirsResult`, `DescribeTopicsResult` and `ListOffsetsResult`. Each binds
+> a per-key `*_async` entry point whose header callback fires once per key as that key's own
+> future resolves, and each is completed per key by `KeyedAdminOperation` /
+> `VoidKeyedAdminOperation`. Six of the seven cross-reference `CreatePartitionsResult`'s or
+> `CreateTopicsResult`'s paragraph, which D8 deletes. The original count missed them because it
+> followed only the cross-references to `CreateTopicsResult` / `CreateAclsResult`. G1-5 was
+> held out of S2 and escalated. The user ruled **option (a): "delete the paragraph from all 20
+> files. It's still a doc-only change."** So D8 now reads **all 20**, and this note supersedes
+> the "13" wherever §0, §2, §4.2 and §8 say it. `Internal/AdminOperation.cs`'s sentence, which
+> says per-key granularity **and** timing independence are both preserved, is correct and
+> stays. `Internal/ListenerRegistration.cs`'s unrelated "same instant" stays too.
 
 **N = 87** (highest used in the binding is 86, M15/P13.3; nothing ≥ 87 exists under
 `bindings/dotnet/`, `design/` or `.claude/agent-memory/`). Branch
@@ -32,7 +49,7 @@ low ones.
 | **G7-1** | med | ForceTerminateTransaction id, AbortTransaction topic, ListTransactions pattern unchecked | S1 |
 | **X12** | med | Alter/DeleteConsumerGroupOffsets, RemoveMembers, CreateDelegationToken strings unchecked | S1 |
 | **G1-3** | low | `PartitionSizeLimitPerResponse` doc implies an effect; stale `admin.rs` cite | S2 (docs) |
-| **G1-5** | low | Stale "all Tasks complete at the same instant" remark (4 named; 13 at HEAD — D8) | S2 (docs) |
+| **G1-5** | low | Stale "all Tasks complete at the same instant" remark (4 named; 13 at HEAD — D8; **20** per the user's 2026-09-30 ruling, see the header note) | S2 (docs, own commit after the ruling) |
 | **G1-6** | low | `TopicMetadataAndConfig.EnsureSuccess` wraps → top-level `Code` 0 | S2 |
 | **G1-7** | low | Its doc says Java wraps; Java rethrows | S2 (with G1-6) |
 | **G1-8** | low | Null topic name throws synchronously; Java fails that key only | S2 (docs, per D1) |
@@ -309,7 +326,13 @@ Code changes come first (4.3–4.9). Doc-only changes come last (4.1, 4.2, 4.5b,
     `DescribeClassicGroupsResult`, `DeleteConsumerGroupsResult` and
     `ListConsumerGroupOffsetsResult`.
 
-  All 13 bind a per-key `*_async` entry point (verified in `NativeMethods.Admin.cs`).
+  **Superseded (user ruling 2026-09-30, header note): also on `AlterConfigsResult`,
+  `AlterPartitionReassignmentsResult`, `AlterReplicaLogDirsResult`,
+  `AlterUserScramCredentialsResult`, `DescribeReplicaLogDirsResult`, `DescribeTopicsResult`
+  and `ListOffsetsResult` — 20 in all.**
+
+  All 13 bind a per-key `*_async` entry point (verified in `NativeMethods.Admin.cs`); so do
+  the 7 added by the ruling.
   Before editing, the Actor re-greps `same instant\|resolves every key together\|timing independence`
   over `src/` and reports the count. `Internal/ListenerRegistration.cs:72` is an
   unrelated use of "same instant" and stays.
@@ -602,7 +625,7 @@ No type, member or signature is removed. The extern count stays **697**.
 | **D5** | **G2-8: config `ToString`** | (a) render Java constant names and `null`; (b) drop the "matching Java" claim | **(a).** N=82 already made these same `ToString`s Java-faithful (lowercase bools), and `ConsumerGroupListing` prints Java names, so (a) completes an established direction. The cost is 4 private switch methods and 6 updated assertions. Choose (b) if you would rather not grow the Java-name pattern before the other ~60 types are decided. |
 | **D6** | **G2-5: `Config` equality semantics** | as §4.7 vs variants (keep duplicates in `Entries`; order-sensitive equality; add `IEquatable<Config>`) | **As §4.7.** Map semantics: last wins, first position kept; `Get(null)` → null; order-insensitive `Equals`/`GetHashCode` over (name, entry), mirroring `AbstractMap`; `Config(entries=[…])`; overrides only (the `NewTopic` precedent). Java's `HashMap` order is unspecified, so the rendered order is .NET's own `Entries` order; that is documented. |
 | **D7** | **G1-6: rethrow shape** | (a) a fresh `KafkaException(code, message, isRetriable, inner: stored)`; (b) `throw _exception;` (Java's identity); (c) `ExceptionDispatchInfo.Capture(_exception).Throw()` | **(a).** It keeps `Code`, `IsRetriable` and `Message` (the finding's substance), keeps the stored error as `InnerException`, and gives each accessor call its own stack trace, which the current doc already promises. (b) and (c) rethrow one shared instance, so concurrent accessor calls race on its `StackTrace`, and (b) overwrites it on every call. Java identity is not a .NET contract anyone can observe usefully. |
-| **D8** | **G1-5 scope** | the 4 named result types vs all 13 | **All 13.** It is the same sentence with the same stale claim. Seven of the nine siblings cross-reference `CreateTopicsResult`'s paragraph, which the named fix deletes, and the other two point at `CreateAclsResult`'s. The M15 N=82 lesson applies: fixing only what a narrower review named leaves the rest behind green tests. Doc-only. |
+| **D8** | **G1-5 scope** | the 4 named result types vs all 13 | **All 13.** It is the same sentence with the same stale claim. Seven of the nine siblings cross-reference `CreateTopicsResult`'s paragraph, which the named fix deletes, and the other two point at `CreateAclsResult`'s. The M15 N=82 lesson applies: fixing only what a narrower review named leaves the rest behind green tests. Doc-only. **Superseded 2026-09-30: the user widened D8 to all 20 (header note).** |
 | **D9** | **Cadence** | as §1.1 vs a user gate between S1 and S2, or you adjudicate Critic findings before any fix | **As §1.1.** The PM checks the gates between sub-stages, one Critic pass runs at the end, and the Critic re-checks only the fixups. This is the P13.3 shape that worked. |
 
 ---
