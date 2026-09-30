@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Produces a batch of records in a single transaction.
+//!
+//! Error handling follows the KIP-1050 error categories.
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 
@@ -52,23 +56,40 @@ async fn produce_transactionally(producer: &KafkaProducer<String, String>) -> Re
     producer.init_transactions().await?;
     println!("Transactions initialized for transactional.id={TRANSACTIONAL_ID}");
 
-    match produce_in_transaction(producer).await {
+    let result = match produce_in_transaction(producer).await {
+        // Abortable: abort so the caller may retry. A failed abort replaces `e`.
+        Err(e) if matches!(e, Error::TransactionAbortable(_)) => {
+            eprintln!("Aborting transaction: {e}");
+            producer.abort_transaction().await.and(Err(e))
+        },
+        other => other,
+    };
+
+    match result {
         Ok(()) => {
             println!("Committed a transaction of {NUM_RECORDS} records to topic {TOPIC_NAME}");
             Ok(())
         },
-        Err(e) if is_unrecoverable(&e) => {
-            // We can't recover from these errors, so close the producer and exit.
-            eprintln!("Unrecoverable error, closing the producer: {e}");
+        // Fatal: fix the configuration before restarting.
+        Err(e) if e.is_invalid_configuration_error() => {
+            eprintln!("Invalid configuration, shutting down: {e}");
             Err(e)
         },
-        Err(e) if e.is_kafka_error() => {
-            // For all other Kafka errors, just abort the transaction.
-            eprintln!("Aborting transaction: {e}");
-            producer.abort_transaction().await.and(Err(e))
+        // Recoverable by closing this producer and creating a new one.
+        Err(e) if e.is_application_recoverable_error() => {
+            eprintln!("Application-recoverable error, closing the producer: {e}");
+            Err(e)
         },
-        // Not a Kafka error: nothing to abort, so it propagates unchanged.
-        Err(e) => Err(e),
+        // Includes a timed-out commit: it may still complete on the broker, so
+        // retry it or close the producer, never abort.
+        Err(e) if e.is_kafka_error() => {
+            eprintln!("Kafka error, closing the producer: {e}");
+            Err(e)
+        },
+        Err(e) => {
+            eprintln!("Unhandled error: {e}");
+            Err(e)
+        },
     }
 }
 
@@ -88,12 +109,6 @@ async fn produce_in_transaction(producer: &KafkaProducer<String, String>) -> Res
     println!("Sent {NUM_RECORDS} records, committing the transaction.");
 
     producer.commit_transaction().await
-}
-
-fn is_unrecoverable(error: &Error) -> bool {
-    matches!(error, Error::ProducerFenced(_))
-        || error.is_out_of_order_sequence_error()
-        || error.is_authorization_error()
 }
 
 fn bootstrap_servers() -> String {
