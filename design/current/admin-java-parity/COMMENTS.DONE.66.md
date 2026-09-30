@@ -1,6 +1,6 @@
 # Critic 66 — resolved comments
 
-## Review of `36dc7704` (Phase 1, A1)
+## Review of `36dc7704` (Phase 1: a call submitted just before `close()`)
 
 ### Issue 1: Stale 4.2-era Java line citations and `run_once` references remain beside the lines this commit corrected
 
@@ -46,7 +46,7 @@
 
 - **Resolution**: Fixed in `fixup! 36dc7704`. Each citation was checked against 4.3.1 `kafka/`: the try/finally is `1469-1493` (runnable) and the `finally` alone is `1473-1492` (test doc); the clamp is `1512-1515` at both sites. `run_once` → `process_pending_calls` at the two named sites and at three more production-describing comments found by grep (`:6890`, `:6899`, `:6998`), plus the injected-panic text at `:6915`.
 
-## Review of `7a2f7ab2` (Phase 2, A2)
+## Review of `7a2f7ab2` (Phase 2: the closing gate for every submitted call)
 
 ### Issue 2: Quota-retry follow-ups (`HandleResult::NewCall`) still bypass the `runnable.call` gate
 
@@ -95,7 +95,7 @@
 
 - **Resolution**: Fixed in `fixup! admin: route every call through Java's runnable.call gate` (7a2f7ab2). The rejection half of Java's `AdminClientRunnable.call` is now `ShutdownSignal::admit_new_call` (`admin_client_runnable.rs`): the hard-shutdown deadline check plus the bootstrap-controllers check, each written once. `runnable_call` (user, driver and listGroups calls) uses it, and so does the `HandleResult::NewCall` arm, so quota retries pass the same gate. The `enqueue` half always accepts in that arm, because response hooks only run inside the loop, before `admin_rx.close()`. New test `a_quota_retry_during_close_is_rejected_by_the_closing_gate` fails with the raw `pending_calls.push` and passes with the gate. All 7 quota-retry tests stay green.
 
-### Issue 3: The N2 test asserts the error messages by prefix, not exactly
+### Issue 3: The post-panic shutdown test asserts the error messages by prefix, not exactly
 
 - **Severity**: Low (test fidelity; plan DoD "error messages asserted exactly")
 - **File**: `src/admin/kafka_admin_client.rs:13796`
@@ -117,13 +117,13 @@
 - **Failure scenario**: A regression that re-routes the tail follow-up through
   `pending_calls` and `fail_all_remaining` would still resolve both keys with the
   same prefix, so the test would stay green.
-- **Expected fix**: Do what the A2 test does: collect both messages, sort them,
+- **Expected fix**: Do what the unresolved-driver-key test does: collect both messages, sort them,
   and `assert_eq!` against `["The AdminClient thread has exited.", "The AdminClient
   thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)"]`.
 
-- **Resolution**: Fixed in the same fixup. The N2 test now collects both messages, sorts them, and `assert_eq!`s the exact pair: `"The AdminClient thread has exited."` and `"The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)"`.
+- **Resolution**: Fixed in the same fixup. The post-panic shutdown test now collects both messages, sorts them, and `assert_eq!`s the exact pair: `"The AdminClient thread has exited."` and `"The AdminClient thread has exited. Call: fenceProducer(api=INIT_PRODUCER_ID)"`.
 
-## Review of `f67cd7e8` (Phase 5, M-03)
+## Review of `f67cd7e8` (Phase 5: `MockAdminClient` Builder)
 
 ### Issue 4: `MockAdminClient.create()` is not translated
 
@@ -144,7 +144,7 @@
     a method the Rust API lacks.
   - The rest of Java's construction surface is covered: `Builder` with all
     setters, `build()`, and the private constructor. The two public constructors
-    (M-04) are excluded by decision.
+    are excluded by decision.
 - **Failure scenario**: A user porting `MockAdminClient.create().numBrokers(3).build()`
   finds no `MockAdminClient::create()`.
 - **Expected fix**: Add `pub fn create() -> Builder { Builder::new() }` to
@@ -182,24 +182,24 @@
 
 - **Resolution**: Fixed in the same fixup. `set_brokers` now uses `i32::try_from(brokers.len()).unwrap_or(i32::MAX)`, like `Collection.size()` saturating at `Integer.MAX_VALUE`, so its only errors are those of `set_num_brokers` (Java's `numBrokers`). The `Result` return type stays. No test asserted the removed message.
 
-## Review of Phase 6 (D1): `f23f233b`, `dad0004a`, `5e0ca485`
+## Review of Phase 6 (`describeTopics` by name via `DescribeTopicPartitions`): `f23f233b`, `dad0004a`, `5e0ca485`
 
 ### Issue 6: a `describeTopics` by name that hits `UnsupportedVersion` after `close()` has begun never completes
 
 - **Severity**: Medium (Bug: a future that never resolves; CLAUDE.md §5 says this is worse than an explicit error)
 - **File**: `src/admin/kafka_admin_client.rs:5350-5360` (the `describeTopicPartitions` `handle_failure`), together with `src/admin/internals/admin_client_runnable.rs:788-791` (`fail_call`'s closing branch)
 - **Java Reference**: `KafkaAdminClient.java:904-913` (`Call.fail`: the `runnable.closing` check comes before `handleUnsupportedVersionException`), `:1132` / `:1474` (`closing` is written only in `run()`'s `finally`), `:2311-2323` (the fallback and `handleFailure`), `:1598-1601` (`call()` rejects with IllegalState)
-- **What is wrong**: The new `handle_failure` ignores a code-35 error because it assumes `handle_unsupported_version` has already issued the Metadata fallback, which will complete the futures. That only holds if `fail_call` actually calls the hook. In Rust `fail_call` goes straight to `handle_failure` whenever `ShutdownSignal::closing` is set, and `close()` sets that flag at once (`kafka_admin_client.rs:5028`). Java's `runnable.closing` is set only when the I/O thread exits. So during the grace period of `close(timeout)`, Rust skips the fallback, and the one hook left to complete the futures swallows the error. Nothing else holds them: the call has left every queue, so `fail_all_remaining` never sees it. This is the known A5 divergence, which the plan leaves out of scope. Before D1 it made a call fail early; D1's code-35 skip turns it into a hang.
+- **What is wrong**: The new `handle_failure` ignores a code-35 error because it assumes `handle_unsupported_version` has already issued the Metadata fallback, which will complete the futures. That only holds if `fail_call` actually calls the hook. In Rust `fail_call` goes straight to `handle_failure` whenever `ShutdownSignal::closing` is set, and `close()` sets that flag at once (`kafka_admin_client.rs:5028`). Java's `runnable.closing` is set only when the I/O thread exits. So during the grace period of `close(timeout)`, Rust skips the fallback, and the one hook left to complete the futures swallows the error. Nothing else holds them: the call has left every queue, so `fail_all_remaining` never sees it. This is the known early stop of retries once `close()` starts, which the plan leaves out of scope. Before this phase it made a call fail early; this phase's code-35 skip turns it into a hang.
 - **Failure scenario**: The broker is older than 3.8, so ApiVersions has no `DescribeTopicPartitions`. The user calls `describe_topics_with_topic_names(["t"])`; `describeCluster` answers and `describeTopicPartitions` is queued. The user then calls `close(30s)`. The send produces a version-mismatch response, `fail_call` sees `closing` and calls `handle_failure(UnsupportedVersion)`, which returns without completing anything. The future for `"t"` never resolves. With no active external call left, the loop exits and `close()` returns, but a caller waiting on the future hangs forever.
   - Java in the same case: `closing` is false, so `handleUnsupportedVersionException` calls `runnable.call(metadataCall)`. The hard-shutdown deadline is set, so that call's `handleFailure` fails every topic future with `IllegalStateException("Cannot accept new calls when AdminClient is closing.")`.
   - Reproduced with a scratch unit test on HEAD. I prepared the describeCluster response, pumped until it was handled, then stored `closing = true` and `hard_shutdown_deadline_ms = now + 30_000` (what `close(30s)` stores), prepared `prepare_unsupported_version_response()` and pumped 10 times. Result: the future is not done, the UVE response was consumed, and `has_active_external_calls` is false.
 - **Expected fix**: Either option works:
-  1. Make the skip depend on the fallback having actually been issued. `handle_uv` sets a flag in `DescribeTopicPartitionsState`, and `handle_failure` ignores the error only when the error is code 35 **and** the flag is set. Otherwise it fails the futures with the error. This keeps A5 out of scope and never leaves a future pending. Java can only reach `handleFailure(UVE)` after the fallback was issued, because `closing` is only true once the thread has exited and no more responses are handled.
-  2. Fix A5: `fail_call` checks a flag that mirrors Java's `runnable.closing`, set only by `run()`'s `finally`. The fallback then runs, and the gate fails it with Java's IllegalState. This changes retry behaviour during the grace period for every call, so it needs the Manager's decision.
+  1. Make the skip depend on the fallback having actually been issued. `handle_uv` sets a flag in `DescribeTopicPartitionsState`, and `handle_failure` ignores the error only when the error is code 35 **and** the flag is set. Otherwise it fails the futures with the error. This keeps the early stop of retries out of scope and never leaves a future pending. Java can only reach `handleFailure(UVE)` after the fallback was issued, because `closing` is only true once the thread has exited and no more responses are handled.
+  2. Remove the early stop of retries: `fail_call` checks a flag that mirrors Java's `runnable.closing`, set only by `run()`'s `finally`. The fallback then runs, and the gate fails it with Java's IllegalState. This changes retry behaviour during the grace period for every call, so it needs the Manager's decision.
 
   Add a regression test like the scratch probe above. It should assert the future resolves; with option 2 it resolves with the exact IllegalState message.
 
-- **Resolution**: Fixed in a fixup of `dad0004a`, per the Manager's decision (A5 and `fail_call` untouched). `DescribeTopicPartitionsState` now records `metadata_fallback_issued`, set by the one shared `issue_metadata_fallback` closure that `handle_uv` calls. `handle_failure` skips a code-35 error only if that flag is set. Otherwise (the close grace period, where `fail_call` skipped `handle_uv`) it issues the fallback itself through `DriverContext::call` → `runnable_call` → `admit_new_call`, which rejects it, so every topic future fails with "Cannot accept new calls when AdminClient is closing.", as in Java. Outside close nothing changes (the flag is always set before `handle_failure` sees code 35). Regression test `an_unsupported_version_during_close_fails_the_by_name_describe` (uses `close_with_timeout(30s)` and `run_once` via `pump`). It fails with `Elapsed` (the future never completes) when the `!issued` branch is removed.
+- **Resolution**: Fixed in a fixup of `dad0004a`, per the Manager's decision (the early stop of retries and `fail_call` untouched). `DescribeTopicPartitionsState` now records `metadata_fallback_issued`, set by the one shared `issue_metadata_fallback` closure that `handle_uv` calls. `handle_failure` skips a code-35 error only if that flag is set. Otherwise (the close grace period, where `fail_call` skipped `handle_uv`) it issues the fallback itself through `DriverContext::call` → `runnable_call` → `admit_new_call`, which rejects it, so every topic future fails with "Cannot accept new calls when AdminClient is closing.", as in Java. Outside close nothing changes (the flag is always set before `handle_failure` sees code 35). Regression test `an_unsupported_version_during_close_fails_the_by_name_describe` (uses `close_with_timeout(30s)` and `run_once` via `pump`). It fails with `Elapsed` (the future never completes) when the `!issued` branch is removed.
 
 ### Issue 7: the rustdoc of `describe_cluster_with_nodes_handle` is attached to the wrong function
 
