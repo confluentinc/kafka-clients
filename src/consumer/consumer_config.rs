@@ -739,8 +739,15 @@ impl ConsumerConfig {
                 },
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`.
-                    config.metadata_recovery_strategy =
-                        MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
+                    // Java's `CaseInsensitiveValidString` joins a `HashSet` of the upper-cased
+                    // names, which iterates REBOOTSTRAP before NONE.
+                    config.metadata_recovery_strategy = MetadataRecoveryStrategy::for_name(value).map_err(|_| {
+                        Error::config_name_value_message(
+                            key,
+                            value,
+                            "String must be one of (case insensitive): REBOOTSTRAP, NONE",
+                        )
+                    })?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ConsumerConfig` (`:686-689`):

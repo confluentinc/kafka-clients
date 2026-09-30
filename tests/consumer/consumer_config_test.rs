@@ -155,10 +155,10 @@ fn test_invalid_metadata_recovery_strategy() {
     let mut props = base_props();
     props.insert(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(), "abc".to_string());
     let err = ConsumerConfig::new(&props).unwrap_err();
-    assert!(
-        err.message().contains(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG),
-        "error message should mention the failing config key, got: {}",
-        err.message()
+    assert_eq!(
+        err.message(),
+        "Invalid value abc for configuration metadata.recovery.strategy: \
+         String must be one of (case insensitive): REBOOTSTRAP, NONE"
     );
 }
 

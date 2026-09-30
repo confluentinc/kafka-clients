@@ -556,8 +556,15 @@ impl ProducerConfig {
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
                     // (`ProducerConfig.java:551`).
-                    config.metadata_recovery_strategy =
-                        MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
+                    // Java's `CaseInsensitiveValidString` joins a `HashSet` of the upper-cased
+                    // names, which iterates REBOOTSTRAP before NONE.
+                    config.metadata_recovery_strategy = MetadataRecoveryStrategy::for_name(value).map_err(|_| {
+                        Error::config_name_value_message(
+                            key,
+                            value,
+                            "String must be one of (case insensitive): REBOOTSTRAP, NONE",
+                        )
+                    })?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ProducerConfig` (`:555-558`):
@@ -975,9 +982,13 @@ mod tests {
         let mut props = base_props();
         props.insert("metadata.recovery.strategy".to_string(), "bogus".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
         assert_eq!(
-            err.to_string(),
-            Error::config_name_value("metadata.recovery.strategy", "bogus").to_string()
+            config_error.message(),
+            "Invalid value bogus for configuration metadata.recovery.strategy: \
+             String must be one of (case insensitive): REBOOTSTRAP, NONE"
         );
     }
 
