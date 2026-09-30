@@ -53,7 +53,8 @@ RUN cd /workspace/bindings/python && \
     pip install --no-cache-dir setuptools wheel && \
     python setup.py build_ext --inplace
 
-RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
+COPY bindings/python/requirements-grpc.txt bindings/python/requirements-grpc-tools.txt /workspace/bindings/python/
+RUN pip install --no-cache-dir -r /workspace/bindings/python/requirements-grpc-tools.txt && \
     cd /workspace && \
     python -m grpc_tools.protoc \
         -Iproto \
@@ -67,7 +68,8 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
-RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
+COPY bindings/python/requirements-grpc.txt /tmp/requirements-grpc.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-grpc.txt
 
 WORKDIR /app
 
@@ -91,6 +93,9 @@ COPY bindings/python/_error_code.py /app/_error_code.py
 COPY bindings/python/grpc_server_async.py /app/grpc_server_async.py
 
 ENV LD_LIBRARY_PATH=/app
+# The server defaults to 127.0.0.1; bind all interfaces so it is reachable
+# through the container's published port.
+ENV GRPC_HOST=0.0.0.0
 
 EXPOSE 50051
 
