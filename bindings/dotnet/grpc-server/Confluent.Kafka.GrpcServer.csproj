@@ -13,9 +13,17 @@
     design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md and
     design/history/M12/P1-producer-grpc-backend/PLAN.md.
 
-    Framework choice (PLAN item B): Grpc.AspNetCore (Kestrel) on net8.0 — the
-    supported, pure-managed HTTP/2 server path (Grpc.Core is EOL). Serves h2c
-    (cleartext HTTP/2, no TLS) because the Rust client dials http:// (Program.cs).
+    Framework choice (PLAN item B): Grpc.AspNetCore (Kestrel) — the supported,
+    pure-managed HTTP/2 server path (Grpc.Core is EOL). Serves h2c (cleartext
+    HTTP/2, no TLS) because the Rust client dials http:// (Program.cs).
+
+    Target frameworks (M17/P1 D3): net8.0 AND net10.0. The Docker images publish
+    the net8.0 leg (-f net8.0) onto the aspnet:8.0 runtime, unchanged. The native
+    (host-process) build uses the net10.0 leg (bindings/dotnet `make grpc-native`,
+    -f net10.0), because the SDK 10 installs locally and in CI bring the
+    ASP.NET Core 10 runtime but no ASP.NET Core 8 one, which a net8.0 build of a
+    Microsoft.NET.Sdk.Web app needs to run. That native leg also gives the
+    library's net10.0 asset broker-level coverage.
 
     Directory.Build.props (at bindings/dotnet/) auto-applies: #nullable enable,
     the dotnet/runtime code style, TreatWarningsAsErrors, and strong-name
@@ -26,7 +34,7 @@
   -->
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.GrpcServer</RootNamespace>
     <AssemblyName>Confluent.Kafka.GrpcServer</AssemblyName>
     <Nullable>enable</Nullable>

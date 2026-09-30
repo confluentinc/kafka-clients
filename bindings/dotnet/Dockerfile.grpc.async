@@ -56,10 +56,11 @@ COPY multilanguage-test-server/proto /src/multilanguage-test-server/proto
 # clean, so this is a no-op there.
 RUN find /src/bindings/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
 
-# Publish the server (net8.0). Grpc.Tools generates the proto stubs during this
-# build; the ProjectReference builds only the net8.0 leg of Confluent.Kafka.
+# Publish the server's net8.0 leg (the project also targets net10.0 for the
+# native build, M17/P1). Grpc.Tools generates the proto stubs during this build;
+# the ProjectReference builds only the net8.0 leg of Confluent.Kafka.
 RUN dotnet publish /src/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
-        -c Release -o /app
+        -c Release -f net8.0 -o /app
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — the ASP.NET Core 8.0 runtime (Grpc.AspNetCore) +
@@ -89,6 +90,10 @@ ENV LD_LIBRARY_PATH=/app
 # from Dockerfile.grpc. Program.cs's CONSUMER_FLAVOR selector then hosts
 # AsyncConsumerServiceImpl (AsyncKafkaConsumer). Mirrors python_async.
 ENV CONSUMER_FLAVOR=async
+
+# The server defaults to 127.0.0.1; bind all interfaces so it is reachable
+# through the container's published port.
+ENV GRPC_HOST=0.0.0.0
 
 EXPOSE 50053
 

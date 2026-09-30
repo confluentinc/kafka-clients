@@ -13,6 +13,9 @@
 // limitations under the License.
 
 using System;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Net;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -28,23 +31,52 @@ namespace Confluent.Kafka.GrpcServer;
 /// cleartext, no TLS) — the Rust client dials <c>http://</c>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <b>Flavor selector (M8/P2; producer M12/P1).</b> <c>CONSUMER_FLAVOR=async</c> hosts the
 /// asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c>
 /// + <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c>); anything else
 /// (including unset, the sync default) hosts the synchronous servicers
 /// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/>). Each image bakes its
 /// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
-/// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair — the harness
-/// injects no env. One server per flavor hosts both services (Python-parity — <c>grpc_server.py</c>
-/// registers both); the env name stays <c>CONSUMER_FLAVOR</c> to avoid Dockerfile churn.
+/// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
+/// the harness sets it explicitly for each backend kind instead (backend_pool.rs
+/// <c>native_command</c>). One server per flavor hosts both services (Python-parity —
+/// <c>grpc_server.py</c> registers both); the env name stays <c>CONSUMER_FLAVOR</c> to avoid
+/// Dockerfile churn.
+/// </para>
+/// <para>
+/// <b>Listen address and readiness line (M17/P1)</b> — the same contract as the Python and C
+/// servers. The server binds <c>GRPC_HOST:GRPC_PORT</c>. <c>GRPC_HOST</c> defaults to
+/// <c>127.0.0.1</c> because the server is unauthenticated; it accepts an IP literal
+/// (<c>0.0.0.0</c> binds every IPv4 interface) or <c>localhost</c> (the IPv4 loopback). Both
+/// images set <c>GRPC_HOST=0.0.0.0</c> so the server is reachable through the container's
+/// published port. <c>GRPC_PORT</c> defaults to 50053 and must be an integer in 0–65535; 0 binds
+/// an ephemeral port, which is how the harness's native mode starts it. An invalid value of
+/// either is reported on STDERR and the process exits non-zero before binding. After startup the
+/// server writes <c>listening on {host}:{port}</c> to STDERR, where <c>port</c> is the port
+/// Kestrel actually bound (not the requested 0). The harness waits for that line and parses the
+/// port from its last <c>:</c>-separated field (backend_pool.rs <c>parse_listening_port</c>),
+/// so keep its format and stream stable.
+/// </para>
 /// </remarks>
 internal static class Program
 {
+    private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 50053;
 
-    internal static void Main(string[] args)
+    /// <summary>
+    /// Validates <c>GRPC_HOST</c> / <c>GRPC_PORT</c>, binds, reports the bound port on STDERR
+    /// (see the type remarks for the contract), then serves until shutdown.
+    /// </summary>
+    /// <returns>0 after a clean shutdown; 1 when <c>GRPC_HOST</c> or <c>GRPC_PORT</c> is
+    /// invalid, or when the bound port cannot be read after startup.</returns>
+    internal static int Main(string[] args)
     {
-        int port = ResolvePort();
+        if (!TryResolveHost(out string host, out IPAddress? address) || !TryResolvePort(out int port))
+        {
+            return 1;
+        }
+
         bool useAsync = ResolveAsyncFlavor();
 
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -54,7 +86,7 @@ internal static class Program
         // plaintext http:// dial (backend_pool.rs Endpoint::from_shared).
         builder.WebHost.ConfigureKestrel(options =>
         {
-            options.ListenAnyIP(port, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
+            options.Listen(address, port, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
         });
 
         builder.Services.AddGrpc();
@@ -97,12 +129,27 @@ internal static class Program
 
         app.Start();
 
-        // The Rust BackendPool waits for the substring "listening" on STDERR before
-        // connecting (backend_pool.rs WaitFor::message_on_stderr). Kestrel logs its own
-        // "Now listening on ..." to STDOUT via ILogger, which the harness does not watch —
-        // so emit our own line to STDERR after startup. Keep this line + stream stable.
-        Console.Error.WriteLine($"listening on 0.0.0.0:{port}");
-        Console.Error.Flush();
+        // The Rust BackendPool waits for a "listening" line on STDERR and parses the bound port
+        // from its last ':'-separated field (backend_pool.rs start_native / parse_listening_port;
+        // the container mode waits for the same substring). Kestrel logs its own
+        // "Now listening on ..." to STDOUT via ILogger, which the harness does not use, so emit
+        // our own line to STDERR after startup. The port is read back from the server rather
+        // than echoed from GRPC_PORT, because GRPC_PORT=0 asks Kestrel for an ephemeral port.
+        // Keep this line + stream stable.
+        int boundPort = ResolveBoundPort(app);
+        if (boundPort == 0)
+        {
+            // Unreachable while Kestrel reports its bound endpoints: a failed bind makes Start()
+            // throw instead. Shut down cleanly (the drain below still runs) and fail, as the C
+            // server does when its selected port stays 0.
+            Console.Error.WriteLine($"dotnet server: could not determine the port bound for {host}:{port}");
+            app.Lifetime.StopApplication();
+        }
+        else
+        {
+            Console.Error.WriteLine($"listening on {host}:{boundPort}");
+            Console.Error.Flush();
+        }
 
         try
         {
@@ -124,6 +171,8 @@ internal static class Program
             // still runs if WaitForShutdown throws.
             DrainServicer(app, useAsync);
         }
+
+        return boundPort == 0 ? 1 : 0;
     }
 
     /// <summary>
@@ -164,15 +213,73 @@ internal static class Program
         }
     }
 
-    private static int ResolvePort()
+    /// <summary>
+    /// Reads <c>GRPC_HOST</c>: unset selects <see cref="DefaultHost"/>; <c>localhost</c> selects
+    /// the IPv4 loopback; anything else must be an IP literal. An invalid value is reported on
+    /// STDERR and returns <see langword="false"/>, so the server exits non-zero before binding
+    /// (the C server's GRPC_PORT check, applied to the host too).
+    /// </summary>
+    private static bool TryResolveHost(out string host, [NotNullWhen(true)] out IPAddress? address)
     {
-        string? value = Environment.GetEnvironmentVariable("GRPC_PORT");
-        if (!string.IsNullOrEmpty(value) && int.TryParse(value, out int parsed))
+        host = Environment.GetEnvironmentVariable("GRPC_HOST") ?? DefaultHost;
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
         {
-            return parsed;
+            address = IPAddress.Loopback;
+            return true;
         }
 
-        return DefaultPort;
+        if (IPAddress.TryParse(host, out address))
+        {
+            return true;
+        }
+
+        Console.Error.WriteLine(
+            $"dotnet server: invalid GRPC_HOST '{host}': expected an IP literal (0.0.0.0 for every interface) or 'localhost'");
+        return false;
+    }
+
+    /// <summary>
+    /// Reads <c>GRPC_PORT</c>: unset selects <see cref="DefaultPort"/>; otherwise it must be a
+    /// plain decimal integer in 0–65535, where 0 asks for an ephemeral port. An invalid value
+    /// (including an empty one) is reported on STDERR and returns <see langword="false"/>, so the
+    /// server exits non-zero instead of silently binding the default — the C server's
+    /// <c>strtol</c> check and the Python server's <c>int()</c>.
+    /// </summary>
+    private static bool TryResolvePort(out int port)
+    {
+        string? value = Environment.GetEnvironmentVariable("GRPC_PORT");
+        if (value is null)
+        {
+            port = DefaultPort;
+            return true;
+        }
+
+        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out port)
+            && port <= IPEndPoint.MaxPort)
+        {
+            return true;
+        }
+
+        Console.Error.WriteLine($"dotnet server: invalid GRPC_PORT '{value}': expected an integer in 0-65535");
+        return false;
+    }
+
+    /// <summary>
+    /// The port Kestrel actually bound, read from the server's addresses feature
+    /// (<see cref="WebApplication.Urls"/>) after <c>Start()</c>; 0 when none is reported. With
+    /// <c>GRPC_PORT=0</c> this is the ephemeral port the OS assigned.
+    /// </summary>
+    private static int ResolveBoundPort(WebApplication app)
+    {
+        foreach (string url in app.Urls)
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) && uri.Port > 0)
+            {
+                return uri.Port;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>
