@@ -170,6 +170,13 @@ from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-o
 # they already reuse `Node`.
 from producer import KafkaError  # shared error type
 
+# The error an absent per-key result resolves with (see
+# `_keyed_replica_value_cb`): the code and message the native layer used to
+# synthesise for it before it reported the key as absent instead. -4 is
+# `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` (`_error_code.LOCAL_ILLEGAL_STATE`).
+_ABSENT_KEY_ERROR_CODE = -4
+_ABSENT_KEY_ERROR_MESSAGE = "the requested key was not present in the admin RPC's response"
+
 
 # --------------------------------------------------------------------------
 # Supporting value types (mirror the Java admin types).
@@ -1743,12 +1750,43 @@ class AclBindingFilter:
                 f"operation={self.operation}, permission_type={self.permission_type})")
 
 
+def _defined_codes(enum_cls):
+    """The wire codes an ACL enum class defines (its upper-case int members)."""
+    return frozenset(v for k, v in vars(enum_cls).items() if k.isupper() and isinstance(v, int))
+
+
+_ACL_ENUM_CODES = (
+    _defined_codes(ResourceType), _defined_codes(PatternType),
+    _defined_codes(AclOperation), _defined_codes(AclPermissionType))
+
+
+def _normalized_acl_key(key):
+    """``key`` (an :class:`AclBinding` or :class:`AclBindingFilter`) with each
+    enum code Java does not define replaced by ``UNKNOWN`` (0).
+
+    This is what Java's ``ResourceType`` / ``PatternType`` / ``AclOperation`` /
+    ``AclPermissionType`` ``fromCode`` do, and what the native layer applies
+    before building the Java-shaped binding or filter, so it is the form the
+    native per-key callbacks deliver their key in. The per-key futures stay
+    keyed by the caller's own objects; this is only the lookup form."""
+    rt, name, pt, principal, host, op, perm = key._as_tuple()
+    rt_codes, pt_codes, op_codes, perm_codes = _ACL_ENUM_CODES
+    return type(key)(rt if rt in rt_codes else 0, name, pt if pt in pt_codes else 0,
+                     principal, host, op if op in op_codes else 0,
+                     perm if perm in perm_codes else 0)
+
+
 class DeletedAcl:
     """One ACL a :meth:`Admin.delete_acls` filter matched (Java
     ``DeleteAclsResult.FilterResult``).
 
-    Exactly one of the two is set: ``binding`` when the ACL was deleted,
-    ``error`` when the filter matched it but deleting it failed.
+    ``binding`` is the ACL the filter matched, and ``error`` is set when
+    deleting it failed. The two are **not** exclusive: Java builds each entry
+    as ``new FilterResult(aclBinding, aclError.exception(message))``
+    (``KafkaAdminClient.java:2705-2708``), so a failed deletion carries both
+    the matched binding and the error. Test ``error``, not ``binding``, to
+    tell a deleted ACL from a failed one. ``binding`` is ``None`` only if the
+    broker's binding could not be decoded.
     """
 
     __slots__ = ("binding", "error")
@@ -2702,11 +2740,25 @@ class _AdminBase:
     def _keyed_replica_value_cb(self, futures, convert, loop=None):
         """Builds the `cb(topic, partition, broker_id, value, error)` native
         callback for `describe_replica_log_dirs` (Phase C), whose key is a
-        `TopicPartitionReplica`."""
+        `TopicPartitionReplica`.
+
+        A null `value` AND a null `error` is the native layer reporting the
+        replica ABSENT from the result (Java's ``values().get(replica) ==
+        null``; only the mock does it, for a replica of an unknown topic). The
+        replica's Future already exists, so it is resolved with an explicit
+        ``LocalIllegalState`` error rather than left pending."""
+        def resolve(fut, value, error):
+            if not value and not error:
+                if not (fut.cancelled() or fut.done()):
+                    fut.set_exception(KafkaError._from_parts(
+                        _ABSENT_KEY_ERROR_CODE, _ABSENT_KEY_ERROR_MESSAGE, 0, 0))
+                return
+            self._resolve_keyed_value(fut, value, error, convert)
+
         if loop is None:
             def cb(topic, partition, broker_id, value, error):
                 key = TopicPartitionReplica(topic, partition, broker_id)
-                self._resolve_keyed_value(futures[key], value, error, convert)
+                resolve(futures[key], value, error)
             return cb
 
         def cb(topic, partition, broker_id, value, error):
@@ -2714,8 +2766,7 @@ class _AdminBase:
             if loop.is_closed():
                 self._free_keyed_value(value, error, convert)
                 return
-            loop.call_soon_threadsafe(
-                self._resolve_keyed_value, futures[key], value, error, convert)
+            loop.call_soon_threadsafe(resolve, futures[key], value, error)
         return cb
 
     def _keyed_topic_partition_void_cb(self, futures, loop=None):
@@ -2757,44 +2808,96 @@ class _AdminBase:
                 self._resolve_keyed_value, futures[(topic, partition)], value, error, convert)
         return cb
 
+    @staticmethod
+    def _futures_by_normalized_acl_key(futures):
+        """``{normalized key: [Future]}`` over ``futures`` (see
+        `_normalized_acl_key`): the native callback delivers the normalised
+        key, and two of the caller's keys that differ only in undefined enum
+        codes are one key to Java, so both of their Futures take its outcome."""
+        groups = {}
+        for key, fut in futures.items():
+            groups.setdefault(_normalized_acl_key(key), []).append(fut)
+        return groups
+
+    @staticmethod
+    def _resolve_keyed_void_group(futs, error):
+        """`_resolve_keyed_void` for every Future in ``futs``, converting (and
+        so destroying) the owned ``error`` handle once."""
+        exc = KafkaError._from_c(error) if error else None
+        for fut in futs:
+            if fut.cancelled() or fut.done():
+                continue
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(None)
+
     def _keyed_acl_binding_void_cb(self, futures, loop=None):
         """Builds the `cb(key_tuple, error)` native callback for `create_acls`
         (Phase F), whose key is an `AclBinding` delivered as its seven-field
         tuple - mirrors `_keyed_config_resource_void_cb`'s pattern of
-        rebuilding a compound key from the native callback's raw fields."""
+        rebuilding a compound key from the native callback's raw fields.
+
+        The key arrives normalised (an undefined enum code is UNKNOWN), so it
+        is looked up through `_futures_by_normalized_acl_key`; a direct
+        ``futures[key]`` lookup would miss the caller's un-normalised key and
+        leave its Future pending forever."""
+        groups = self._futures_by_normalized_acl_key(futures)
         if loop is None:
             def cb(key_tuple, error):
-                self._resolve_keyed_void(futures[_to_acl_binding(key_tuple)], error)
+                futs = groups.get(_normalized_acl_key(_to_acl_binding(key_tuple)), [])
+                self._resolve_keyed_void_group(futs, error)
             return cb
 
         def cb(key_tuple, error):
-            key = _to_acl_binding(key_tuple)
+            futs = groups.get(_normalized_acl_key(_to_acl_binding(key_tuple)), [])
             if loop.is_closed():
                 self._free_keyed_void(error)
                 return
-            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+            loop.call_soon_threadsafe(self._resolve_keyed_void_group, futs, error)
         return cb
+
+    @staticmethod
+    def _resolve_keyed_value_group(futs, value, error, convert):
+        """`_resolve_keyed_value` for every Future in ``futs``, draining the
+        owned ``value`` / ``error`` handle once."""
+        if error:
+            exc, result = KafkaError._from_c(error), None
+        else:
+            exc, result = None, convert(value)
+        for fut in futs:
+            if fut.cancelled() or fut.done():
+                continue
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
 
     def _keyed_acl_binding_filter_value_cb(self, futures, loop=None):
         """Builds the `cb(key_tuple, value, error)` native callback for
         `delete_acls` (Phase F), whose key is an `AclBindingFilter` delivered
         as its seven-field tuple and whose value, when present, is an owned
         `DeleteAclsFilterResults` handle drained by
-        `_drain_delete_acls_filter_results`."""
+        `_drain_delete_acls_filter_results`.
+
+        The key arrives normalised (an undefined enum code is UNKNOWN), so it
+        is looked up through `_futures_by_normalized_acl_key`, as for
+        `create_acls`; a direct ``futures[key]`` lookup would leave a filter
+        with an undefined code pending forever."""
+        groups = self._futures_by_normalized_acl_key(futures)
+        convert = _drain_delete_acls_filter_results
         if loop is None:
             def cb(key_tuple, value, error):
-                self._resolve_keyed_value(futures[_to_acl_binding_filter(key_tuple)], value, error,
-                                          _drain_delete_acls_filter_results)
+                futs = groups.get(_normalized_acl_key(_to_acl_binding_filter(key_tuple)), [])
+                self._resolve_keyed_value_group(futs, value, error, convert)
             return cb
 
         def cb(key_tuple, value, error):
-            key = _to_acl_binding_filter(key_tuple)
+            futs = groups.get(_normalized_acl_key(_to_acl_binding_filter(key_tuple)), [])
             if loop.is_closed():
-                self._free_keyed_value(value, error, _drain_delete_acls_filter_results)
+                self._free_keyed_value(value, error, convert)
                 return
-            loop.call_soon_threadsafe(
-                self._resolve_keyed_value, futures[key], value, error,
-                _drain_delete_acls_filter_results)
+            loop.call_soon_threadsafe(self._resolve_keyed_value_group, futs, value, error, convert)
         return cb
 
     def _keyed_client_quota_entity_void_cb(self, futures, loop=None):
@@ -3254,9 +3357,16 @@ class _AdminBase:
         avoids the raw C per-key fan-out's generic fallback for a repeated
         key (`admin_async_per_key_op`'s claimed-entries mask), mirroring the
         Rust core's own `Entry::Vacant`-based dedup in
-        `KafkaAdminClient::create_acls`."""
+        `KafkaAdminClient::create_acls`.
+
+        The rows sent are the distinct NORMALISED bindings
+        (`_normalized_acl_key`), which the native layer would have built
+        anyway: that keeps the C extension's distinct-row incref count equal to
+        the number of callbacks the native layer fires (one per distinct
+        normalised binding) when two keys differ only in undefined codes."""
         deduped = list(dict.fromkeys(acls))
-        return deduped, self._acl_binding_rows(deduped)
+        normalized = list(dict.fromkeys(_normalized_acl_key(a) for a in deduped))
+        return deduped, self._acl_binding_rows(normalized)
 
     def _describe_acls_spec(self, acl_filter, timeout):
         row = self._acl_filter_rows([acl_filter])[0]
@@ -3269,9 +3379,11 @@ class _AdminBase:
 
     def _delete_acls_keys_and_spec(self, filters):
         """Same reasoning as `_create_acls_keys_and_spec`, for
-        `AclBindingFilter`."""
+        `AclBindingFilter`, including sending the distinct normalised filters
+        so the C incref count matches the native layer's callbacks."""
         deduped = list(dict.fromkeys(filters))
-        return deduped, self._acl_filter_rows(deduped)
+        normalized = list(dict.fromkeys(_normalized_acl_key(f) for f in deduped))
+        return deduped, self._acl_filter_rows(normalized)
 
     @staticmethod
     def _quota_filter_rows(quota_filter):
@@ -3322,10 +3434,9 @@ class _AdminBase:
         alteration's entity IS its key, but its `ops` are per-row, non-key
         data that a dedup must not silently drop. Unlike
         `_create_acls_keys_and_spec` this does NOT deduplicate the spec sent
-        to the native layer: a genuinely repeated entity across `entries`
-        must still reach `read_client_quota_alterations` so it is rejected
-        with its real per-row message (`admin-client.md`'s "the C layer is
-        stricter" deviation), rather than being silently coalesced here.
+        to the native layer: a repeated entity across `entries` is sent
+        twice, as Java sends it, and only the futures (keyed by entity)
+        collapse.
 
         ``entries`` is materialized to a ``list`` once up front: it is iterated
         twice below (to build ``keys`` and again for the native rows), so a
@@ -3530,8 +3641,10 @@ class _AdminBase:
         Java's mock fails the whole ``listTransactions`` call, so none of these
         is observable end to end -- hence the dedicated unit test. ``None`` and
         ``[]`` collapse for the two collections (Java's own default is an empty
-        set, meaning "no filter"), but ``None`` and ``""`` do **not** collapse
-        for the pattern: an empty pattern is a legal value the broker evaluates.
+        set, meaning "no filter"), but ``None`` and ``""`` are passed on as
+        given for the pattern, as Java's option stores them (Java's
+        ``ListTransactionsHandler`` then drops an empty pattern from the
+        request, so neither filters anything).
         A negative ``duration_ms`` is Java's own -1 "no duration filter".
         """
         return ([TransactionState.parse(str(s)) for s in (states or [])],
@@ -3881,10 +3994,9 @@ class Admin(_AdminBase):
         rather than a :class:`ReplicaLogDirInfo`: the mock itself silently
         omits such a replica from its own internal result map (mirroring
         Java's ``MockAdminClient``, which does the same:
-        ``if (topicMetadata != null)``), but the native per-key delivery layer
-        (``admin_async_per_key_op``) detects the missing key and resolves its
-        ``Future`` with an explicit error instead of leaving it pending
-        forever. Against a real broker this case does not arise the same
+        ``if (topicMetadata != null)``), the native layer reports that key as
+        absent, and this binding resolves its already-created ``Future`` with
+        an explicit error instead of leaving it pending forever. Against a real broker this case does not arise the same
         way: ``KafkaAdminClient`` seeds and completes a future for every
         requested replica, reporting an unknown topic as *present* with a
         null ``current_replica_log_dir`` instead of an error.
@@ -4189,12 +4301,9 @@ class Admin(_AdminBase):
         entity's ``Future`` resolves independently.
 
         An op whose ``value`` is ``None`` removes that quota. Two alterations
-        of the same entity make every entity's ``Future`` in this call raise
-        the *same* error: the request is rejected before it reaches the
-        broker at all (`read_client_quota_alterations` in the Rust core).
-        Java accepts them -- it sends both and only the future map collapses
-        -- but the result crosses as a flat array, so the caller could not
-        tell which alteration the surviving outcome describes.
+        of the same entity are both sent, as Java sends them, and share that
+        entity's one ``Future`` (Java's per-entity future map collapses them,
+        ``KafkaAdminClient.java:4314-4342``).
         """
         self._check_closed()
         keys, rows = self._alter_client_quotas_keys_and_spec(entries)

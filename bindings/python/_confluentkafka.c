@@ -4662,7 +4662,11 @@ static PyObject* py_DescribeClusterResult_drain(PyObject* self, PyObject* args) 
         kafka_admin_DescribeClusterResult_destroy(r); return NULL;
     }
 
-    PyObject* out = Py_BuildValue("(sNNN)", kafka_admin_DescribeClusterResult_cluster_id(r),
+    // The FFI returns NULL for Java's null cluster id (the Metadata fallback).
+    // Python's ClusterDescription.cluster_id keeps its "" for that case in this
+    // round; surfacing Java's None is deferred to the Python Java-shape plan.
+    const char* cluster_id = kafka_admin_DescribeClusterResult_cluster_id(r);
+    PyObject* out = Py_BuildValue("(sNNN)", cluster_id != NULL ? cluster_id : "",
                                   nodes, controller, operations);
     kafka_admin_DescribeClusterResult_destroy(r);
     return out;
@@ -6720,6 +6724,26 @@ static PyObject* py_Admin_describe_client_quotas_async(PyObject* self, PyObject*
     Py_RETURN_NONE;
 }
 
+// Distinct entities across alter_client_quotas `entries` rows ((pairs, ops)),
+// compared as Java's ClientQuotaEntity compares them -- as a map, so the order
+// of a row's (type, name) pairs does not matter. The Rust FFI fires one
+// callback per distinct entity. Returns -1 with an exception set on failure.
+static Py_ssize_t count_distinct_quota_entities(PyObject* entries, Py_ssize_t n) {
+    PyObject* seen = PySet_New(NULL);
+    if (seen == NULL) return -1;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(entries, i);  // new ref
+        PyObject* pairs = item ? PySequence_GetItem(item, 0) : NULL;  // new ref
+        PyObject* entity = pairs ? PyFrozenSet_New(pairs) : NULL;
+        int added = entity ? PySet_Add(seen, entity) : -1;
+        Py_XDECREF(entity); Py_XDECREF(pairs); Py_XDECREF(item);
+        if (added < 0) { Py_DECREF(seen); return -1; }
+    }
+    Py_ssize_t distinct = PySet_Size(seen);
+    Py_DECREF(seen);
+    return distinct;
+}
+
 static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* entries; int timeout_ms; int validate_only; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KOipO", &h, &entries, &timeout_ms, &validate_only, &cb))
@@ -6822,15 +6846,14 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
         if (!ok) { failed = 1; built++; break; }
     }
 
+    // One callback invocation per DISTINCT entity: Java's per-entity future
+    // map collapses a repeated entity, and admin_async_per_key_op fires once
+    // per distinct key. admin.py sends every row (a repeated entity is sent
+    // twice, as in Java), so the row count `n` can exceed the callback count.
+    Py_ssize_t distinct = failed ? 0 : count_distinct_quota_entities(entries, n);
+    if (distinct < 0) failed = 1;
     if (!failed) {
-        // One callback invocation per requested row - Java's per-entity
-        // future map collapses a duplicate entity, but the native `keys` for
-        // the fan-out is built from these raw rows, not deduplicated by
-        // entity (see admin_async_per_key_op / read_client_quota_entity_keys
-        // in src/ffi/admin.rs), so the increment count is the row count `n`,
-        // not the (possibly smaller) distinct-entity count the Python
-        // `futures` dict holds.
-        admin_incref_n(cb, n);
+        admin_incref_n(cb, distinct);
         kafka_admin_AdminClient_alter_client_quotas_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h,
             (const char* const* const*)entity_types, (const char* const* const*)entity_names,
@@ -7316,10 +7339,21 @@ static PyObject* py_Admin_update_features_async(PyObject* self, PyObject* args) 
         // not one for the whole batch - see admin_update_features_trampoline.
         // `rows` comes from a Python dict's keys, already unique.
         admin_incref_n(cb, n);
-        kafka_admin_AdminClient_update_features_async(
+        kafka_common_Error_t* submit_err = kafka_admin_AdminClient_update_features_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, features, max_version_levels, upgrade_types,
             (int32_t)n, timeout_ms, validate_only ? true : false, admin_update_features_trampoline,
             cb);
+        if (submit_err != NULL) {
+            // The FFI returns a submission error (Java throws it from
+            // updateFeatures itself) and fires no callback. admin.py already
+            // built one Future per feature and expects each to resolve, so the
+            // error is fanned out to every feature here, as the FFI used to:
+            // one owned copy per invocation, each balancing one incref above.
+            for (Py_ssize_t i = 0; i < n; i++) {
+                admin_update_features_trampoline(features[i], kafka_common_Error_clone(submit_err), cb);
+            }
+            kafka_common_Error_destroy(submit_err);
+        }
     }
     PyMem_Free((void*)features); PyMem_Free(max_version_levels); PyMem_Free(upgrade_types);
     if (failed) return NULL;
@@ -7614,10 +7648,12 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
 // describeProducers / describeTransactions / fenceProducers now fire once PER
 // KEY (Java's per-key KafkaFuture): the per-key value is the flattened result
 // handle carrying a single key, drained at index 0 by the same *_drain +
-// `_to_*` unpacker admin.py already had, then destroyed. listTransactions stays
-// JOINED (one fire_handle_cb): Java's ListTransactionsResult is a single
-// KafkaFuture<Map<broker, KafkaFuture>> with no per-transactional-id future
-// map, like listTopics/listGroups.
+// `_to_*` unpacker admin.py already had, then destroyed. listTransactions is
+// delivered by the FFI in Java's byBrokerId() shape (a broker-discovery
+// callback, then one callback per broker); admin.py's list_transactions keeps
+// its one joined {broker: listings | error} result, so this module joins the
+// per-broker callbacks back into one Python completion (list_transactions_join_t
+// below).
 //
 // `abortTransaction` and `forceTerminateTransaction` have no result handle at
 // all (Java's AbortTransactionResult exposes only all(), and
@@ -7627,7 +7663,7 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
 
 // describeProducers / describeTransactions / fenceProducers fire once PER KEY
 // (Java's per-key KafkaFuture), independently as that key's future resolves --
-// unlike list_transactions below, which stays joined (Java's
+// unlike list_transactions below, which admin.py consumes joined (Java's
 // ListTransactionsResult has no per-transactional-id future map). `value` is an
 // owned single-key result handle Python drains at index 0 via the matching
 // *_drain function; the Python wrappers Py_INCREF(cb) once per distinct key
@@ -7662,8 +7698,104 @@ static void admin_fence_producers_trampoline(const char* key,
     Py_DECREF(cb);
     PyGILState_Release(g);
 }
-static void admin_list_transactions_trampoline(kafka_admin_ListTransactionsResult_t* r,
-                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+// The per-broker outcomes of one list_transactions call, joined for admin.py.
+//
+// The FFI fires a broker-discovery callback once, then one callback per
+// discovered broker (Java's byBrokerId()). admin.py's list_transactions resolves
+// ONE Future with {broker_id: listings | KafkaError} once every broker is in, so
+// this struct collects each broker's single-broker result handle (or error) and
+// fires the Python callback once, with this struct as the "handle" that
+// ListTransactionsResult_drain reads and frees. It owns the one reference to
+// `cb` taken by py_Admin_list_transactions_async. Every field is touched only
+// with the GIL held, which serialises the callbacks even when they arrive on
+// different threads.
+typedef struct {
+    PyObject* cb;
+    int32_t count;       // brokers discovered
+    int32_t remaining;   // per-broker callbacks still to come
+    int32_t* broker_ids;
+    kafka_admin_ListTransactionsResult_t** values;  // per broker: owned single-broker handle, or NULL
+    kafka_common_Error_t** errors;                   // per broker: owned error, or NULL
+} list_transactions_join_t;
+
+static void list_transactions_join_free(list_transactions_join_t* j) {
+    for (int32_t i = 0; i < j->count; i++) {
+        if (j->values[i] != NULL) kafka_admin_ListTransactionsResult_destroy(j->values[i]);
+        if (j->errors[i] != NULL) kafka_common_Error_destroy(j->errors[i]);
+    }
+    PyMem_RawFree(j->broker_ids); PyMem_RawFree(j->values); PyMem_RawFree(j->errors);
+    PyMem_RawFree(j);
+}
+
+// Fires the Python callback once with (join-or-0, error-or-0) and releases the
+// struct's reference to it. Called with the GIL held.
+static void list_transactions_join_complete(list_transactions_join_t* j, kafka_common_Error_t* error) {
+    PyObject* cb = j->cb;
+    if (error != NULL) list_transactions_join_free(j);
+    PyObject* r = PyObject_CallFunction(cb, "KK",
+        (unsigned long long)(uintptr_t)(error != NULL ? NULL : j),
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+}
+
+static void admin_list_transactions_by_broker_id_trampoline(const int32_t* broker_ids,
+    int32_t broker_count, kafka_common_Error_t* error, void* user_data) {
+    list_transactions_join_t* j = (list_transactions_join_t*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    if (error != NULL) {
+        // Java: byBrokerId(), all() and allByBrokerId() all fail; no per-broker
+        // callback follows.
+        list_transactions_join_complete(j, error);
+        PyGILState_Release(g);
+        return;
+    }
+    size_t slots = (size_t)(broker_count > 0 ? broker_count : 1);
+    j->broker_ids = PyMem_RawMalloc(slots * sizeof(int32_t));
+    j->values = PyMem_RawCalloc(slots, sizeof(kafka_admin_ListTransactionsResult_t*));
+    j->errors = PyMem_RawCalloc(slots, sizeof(kafka_common_Error_t*));
+    if (j->broker_ids == NULL || j->values == NULL || j->errors == NULL) {
+        // Out of memory: the per-broker callbacks still arrive and must find
+        // `remaining` > 0 with no slot, so they free their payload and the last
+        // one reports the failure.
+        PyMem_RawFree(j->broker_ids); PyMem_RawFree(j->values); PyMem_RawFree(j->errors);
+        j->broker_ids = NULL; j->values = NULL; j->errors = NULL;
+        j->count = 0;
+    } else {
+        memcpy(j->broker_ids, broker_ids, (size_t)broker_count * sizeof(int32_t));
+        j->count = broker_count;
+    }
+    j->remaining = broker_count;
+    if (broker_count == 0) list_transactions_join_complete(j, NULL);
+    PyGILState_Release(g);
+}
+
+static void admin_list_transactions_trampoline(int32_t broker_id,
+    kafka_admin_ListTransactionsResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    list_transactions_join_t* j = (list_transactions_join_t*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    int32_t slot = -1;
+    for (int32_t i = 0; i < j->count; i++) {
+        if (j->broker_ids[i] == broker_id) { slot = i; break; }
+    }
+    if (slot >= 0) {
+        j->values[slot] = value;
+        j->errors[slot] = error;
+    } else {
+        if (value != NULL) kafka_admin_ListTransactionsResult_destroy(value);
+        if (error != NULL) kafka_common_Error_destroy(error);
+    }
+    if (--j->remaining == 0) {
+        if (j->values == NULL) {
+            // The discovery callback could not allocate the slots.
+            list_transactions_join_complete(
+                j, kafka_common_Error_new(-1, "out of memory joining the listTransactions results"));
+        } else {
+            list_transactions_join_complete(j, NULL);
+        }
+    }
+    PyGILState_Release(g);
+}
 
 static PyObject* py_Admin_describe_producers_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int has_broker_id; int broker_id; int timeout_ms;
@@ -7759,11 +7891,15 @@ static PyObject* py_Admin_list_transactions_async(PyObject* self, PyObject* args
         producer_ids[i] = (int64_t)value;
     }
 
+    list_transactions_join_t* join = PyMem_RawCalloc(1, sizeof(list_transactions_join_t));
+    if (join == NULL) { PyMem_Free(states); PyMem_Free(producer_ids); PyErr_NoMemory(); return NULL; }
+    // One reference, owned by `join` and released after the single Python call.
     Py_INCREF(cb);
+    join->cb = cb;
     kafka_admin_AdminClient_list_transactions_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, states, (int32_t)state_count, producer_ids,
         (int32_t)id_count, (int64_t)duration_ms, pattern, timeout_ms,
-        admin_list_transactions_trampoline, cb);
+        admin_list_transactions_by_broker_id_trampoline, admin_list_transactions_trampoline, join);
     PyMem_Free(states); PyMem_Free(producer_ids);
     Py_RETURN_NONE;
 }
@@ -7947,36 +8083,48 @@ static PyObject* py_FenceProducersResult_drain(PyObject* self, PyObject* args) {
 }
 
 // {broker_id: (error_or_None, [(transactional_id, producer_id, state_name)])}
+//
+// `ptr` is the list_transactions_join_t the Python callback received (not a
+// Rust handle): each broker's single-broker result handle is read at index 0,
+// a failed broker contributes its owned error. The join and everything in it
+// is freed here, on success and on failure alike.
 static PyObject* py_ListTransactionsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_ListTransactionsResult_t* r = (kafka_admin_ListTransactionsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_ListTransactionsResult_count(r);
+    list_transactions_join_t* j = (list_transactions_join_t*)(uintptr_t)ptr;
     PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_ListTransactionsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        int32_t listings = kafka_admin_ListTransactionsResult_get_listing_count(r, i);
-        PyObject* rows = PyList_New(listings < 0 ? 0 : listings);
-        if (rows == NULL) { Py_DECREF(d); kafka_admin_ListTransactionsResult_destroy(r); return NULL; }
-        for (int32_t j = 0; j < listings; j++) {
-            PyObject* row = Py_BuildValue(
-                "(sLs)", kafka_admin_ListTransactionsResult_get_transactional_id(r, i, j),
-                (long long)kafka_admin_ListTransactionsResult_get_producer_id(r, i, j),
-                kafka_admin_ListTransactionsResult_get_state(r, i, j));
-            if (row == NULL) { break; }
-            PyList_SET_ITEM(rows, j, row);
+    if (d == NULL) { list_transactions_join_free(j); return NULL; }
+    for (int32_t b = 0; b < j->count; b++) {
+        kafka_admin_ListTransactionsResult_t* r = j->values[b];
+        PyObject* rows;
+        PyObject* error;
+        if (r != NULL) {
+            int32_t listings = kafka_admin_ListTransactionsResult_get_listing_count(r, 0);
+            rows = PyList_New(listings < 0 ? 0 : listings);
+            if (rows == NULL) { Py_DECREF(d); list_transactions_join_free(j); return NULL; }
+            for (int32_t k = 0; k < listings; k++) {
+                PyObject* row = Py_BuildValue(
+                    "(sLs)", kafka_admin_ListTransactionsResult_get_transactional_id(r, 0, k),
+                    (long long)kafka_admin_ListTransactionsResult_get_producer_id(r, 0, k),
+                    kafka_admin_ListTransactionsResult_get_state(r, 0, k));
+                if (row == NULL) { break; }
+                PyList_SET_ITEM(rows, k, row);
+            }
+            error = borrowed_error_to_py(kafka_admin_ListTransactionsResult_get_error(r, 0));
+        } else {
+            rows = PyList_New(0);
+            if (rows == NULL) { Py_DECREF(d); list_transactions_join_free(j); return NULL; }
+            error = borrowed_error_to_py(j->errors[b]);
         }
-        PyObject* key =
-            PyLong_FromLong((long)kafka_admin_ListTransactionsResult_get_broker_id(r, i));
-        PyObject* value = error_value_pair(
-            borrowed_error_to_py(kafka_admin_ListTransactionsResult_get_error(r, i)), rows);
+        PyObject* key = PyLong_FromLong((long)j->broker_ids[b]);
+        PyObject* value = error_value_pair(error, rows);
         if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
             Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
-            kafka_admin_ListTransactionsResult_destroy(r); return NULL;
+            list_transactions_join_free(j); return NULL;
         }
         Py_DECREF(key); Py_DECREF(value);
     }
-    kafka_admin_ListTransactionsResult_destroy(r);
+    list_transactions_join_free(j);
     return d;
 }
 

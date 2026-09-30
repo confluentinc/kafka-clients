@@ -46,8 +46,9 @@ use crate::common::error::{ambassador_impl_ErrorCode, ambassador_impl_ErrorMessa
 pub struct GroupAuthorizationError {
     /// Base error fields.
     kafka_error: KafkaError,
-    /// The group ID that failed authorization.
-    group_id: String,
+    /// The group ID that failed authorization, or `None` where Java's
+    /// `groupId` is null (it is not known where the error was raised).
+    group_id: Option<String>,
 }
 
 impl GroupAuthorizationError {
@@ -61,7 +62,7 @@ impl GroupAuthorizationError {
         let message = format!("Not authorized to access group: {group_id}");
         Self {
             kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
-            group_id,
+            group_id: Some(group_id),
         }
     }
 
@@ -72,27 +73,26 @@ impl GroupAuthorizationError {
     /// the `Errors.GROUP_AUTHORIZATION_FAILED` builder (`exception()`), where the
     /// message is the default constant and `groupId` is null.
     pub fn with_default_message() -> Self {
-        Self {
-            kafka_error: KafkaError::new(Errors::GroupAuthorizationFailed),
-            group_id: String::new(),
-        }
+        Self { kafka_error: KafkaError::new(Errors::GroupAuthorizationFailed), group_id: None }
     }
 
     /// Create a group authorization error carrying a custom message.
     ///
     /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`
     /// (`GroupAuthorizationException.java:22`), where the error message is
-    /// caller-supplied rather than the default error text.
+    /// caller-supplied rather than the default error text. `groupId` is
+    /// nullable in Java — `GroupAuthorizationException(String message)` is
+    /// `this(message, null)` — so `group_id` is an `Option`, `None` for null.
     ///
     /// It is the only Java constructor this struct translates as a constructor —
     /// [`for_group_id`](Self::for_group_id) translates the `forGroupId` static
     /// factory and [`with_default_message`](Self::with_default_message) the
     /// `Errors` one — so the intersection is its own parameter list and it keeps
     /// the plain name (CLAUDE.md §2).
-    pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(group_id: Option<String>, message: impl Into<String>) -> Self {
         Self {
             kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
-            group_id: group_id.into(),
+            group_id,
         }
     }
 
@@ -101,10 +101,11 @@ impl GroupAuthorizationError {
         &self.kafka_error
     }
 
-    /// The group ID that failed authorization. Mirrors Java's
-    /// `GroupAuthorizationException.groupId()`.
-    pub fn group_id(&self) -> &str {
-        &self.group_id
+    /// The group ID that failed authorization, or `None` if it is not known in
+    /// the context the error was raised in. Mirrors Java's
+    /// `GroupAuthorizationException.groupId()` ("May be null").
+    pub fn group_id(&self) -> Option<&str> {
+        self.group_id.as_deref()
     }
 }
 

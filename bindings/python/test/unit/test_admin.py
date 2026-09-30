@@ -1065,10 +1065,10 @@ def test_describe_replica_log_dirs_resolves_unknown_topics_with_an_explicit_erro
     mock behavior" as an excuse: Java's own mock never promises a ``Future``
     per key in the first place - a Java caller sees the key simply absent
     from the returned `Map`, not a hanging `Future`. The fix belongs in, and
-    was made in, the per-key delivery layer itself
-    (`admin_async_per_key_op` in `src/ffi/admin.rs`): any key present in the
-    request but absent from the admin core's response now resolves with an
-    explicit synthetic error instead of never firing at all.
+    was made in the per-key delivery: the native layer fires the key's
+    callback once, reporting it absent (Java's absent map key: no value and no
+    error), and the binding resolves the key's ``Future`` with an explicit
+    ``LocalIllegalState`` error instead of leaving it pending.
 
     This is mock-only in the sense that the *scenario* (an unknown-topic
     replica) only arises this way against `MockAdminClient` - KafkaAdminClient
@@ -1097,6 +1097,12 @@ def test_describe_replica_log_dirs_resolves_unknown_topics_with_an_explicit_erro
         # regression back to that state into a fast, explicit failure.
         error = futures[unknown].exception(timeout=5.0)
         assert isinstance(error, KafkaError)
+        assert error.code == -4  # LOCAL_ILLEGAL_STATE, unchanged
+        assert str(error) == "the requested key was not present in the admin RPC's response"
+        # Every KafkaError attribute is readable, as on one built by `_from_c`.
+        assert error.is_retriable is False
+        assert error.is_fatal is False
+        assert error.txn_requires_abort is False
 
 
 def test_config_resource_and_replica_are_usable_dict_keys():
@@ -2277,6 +2283,66 @@ def test_create_acls_rejects_what_javas_constructors_reject(acl, message):
         assert str(exc.value) == message
 
 
+def test_create_acls_resolves_a_binding_with_an_undefined_enum_code():
+    """Java's `AclOperation.fromCode` maps an undefined code (99) to UNKNOWN,
+    and the native callback is keyed by that normalised binding. The caller's
+    own Future -- keyed with 99 -- must still resolve (it used to hang), and so
+    must a second binding that differs only in another undefined code, which
+    Java treats as the same binding."""
+    with MockAdminClient(1) as admin:
+        a = AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*", 99,
+                       AclPermissionType.ALLOW)
+        b = AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*", 98,
+                       AclPermissionType.ALLOW)
+        defined = _acl("t2", "User:b")
+        futures = admin.create_acls([a, b, defined])
+        assert set(futures) == {a, b, defined}
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
+
+
+@pytest.mark.asyncio
+async def test_create_acls_resolves_an_undefined_enum_code_async():
+    async with AsyncMockAdminClient(1) as admin:
+        acl = AclBinding(99, "t", PatternType.LITERAL, "User:a", "*", AclOperation.READ,
+                         AclPermissionType.ALLOW)
+        (future,) = (await admin.create_acls([acl])).values()
+        with pytest.raises(KafkaError) as exc:
+            await asyncio.wait_for(future, timeout=5)
+        assert str(exc.value) == "Not implemented yet"
+
+
+def test_delete_acls_resolves_a_filter_with_an_undefined_enum_code():
+    """The native `delete_acls` callback is keyed by the Java-normalised
+    filter (an undefined code is UNKNOWN), so a filter with operation 99 used
+    to leave its Future pending forever. It must resolve, as must a filter
+    differing only in another undefined code (the same filter to Java)."""
+    with MockAdminClient(1) as admin:
+        a = AclBindingFilter(ResourceType.TOPIC, "t", PatternType.LITERAL, None, None, 99,
+                             AclPermissionType.ANY)
+        b = AclBindingFilter(ResourceType.TOPIC, "t", PatternType.LITERAL, None, None, 98,
+                             AclPermissionType.ANY)
+        futures = admin.delete_acls([a, b, AclBindingFilter()])
+        assert len(futures) == 3
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
+
+
+@pytest.mark.asyncio
+async def test_delete_acls_resolves_an_undefined_enum_code_async():
+    async with AsyncMockAdminClient(1) as admin:
+        f = AclBindingFilter(ResourceType.TOPIC, "t", 99, None, None, AclOperation.ANY,
+                             AclPermissionType.ANY)
+        (future,) = (await admin.delete_acls([f])).values()
+        with pytest.raises(KafkaError) as exc:
+            await asyncio.wait_for(future, timeout=5)
+        assert str(exc.value) == "Not implemented yet"
+
+
 def test_describe_acls_raises_because_it_has_one_future_for_the_whole_call():
     with MockAdminClient(1) as admin:
         with pytest.raises(KafkaError) as exc:
@@ -2441,17 +2507,15 @@ def test_alter_client_quotas_keeps_the_default_entity_distinct():
         assert by_name["alice"].entries == {ClientQuotaEntity.USER: "alice"}
 
 
-def test_alter_client_quotas_rejects_a_duplicate_entity():
-    """A deliberate deviation: Java accepts a duplicate entity -- both
-    alterations are sent and only the future map collapses
-    (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
-    built from that map, so the surviving outcome could not be attributed to
-    either row.
+def test_alter_client_quotas_sends_a_repeated_entity_like_java():
+    """Java sends both alterations of a repeated entity and only its future
+    map collapses (`KafkaAdminClient.java:4314-4342`), so the one distinct
+    entity's one Future carries the RPC's own outcome -- here the mock's
+    "Not implement yet", as Java's `MockAdminClient.alterClientQuotas` throws.
 
-    Phase F: the whole submission fails, so the one distinct entity's own
-    Future -- `_alter_client_quotas_keys_and_spec` still only makes one dict
-    entry for the (deduplicated) repeated entity -- raises rather than the
-    call raising synchronously."""
+    (This used to assert a C-layer rejection, "quota alteration at index 1
+    repeats an entity already altered by an earlier entry", a deliberate
+    deviation from Java that the FFI no longer makes.)"""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
         (future,) = admin.alter_client_quotas([
@@ -2460,8 +2524,7 @@ def test_alter_client_quotas_rejects_a_duplicate_entity():
         ]).values()
         with pytest.raises(KafkaError) as exc:
             future.result(timeout=5)
-        assert str(exc.value) == (
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry")
+        assert str(exc.value) == "Not implement yet"
 
 
 def test_client_quota_op_none_value_means_remove():

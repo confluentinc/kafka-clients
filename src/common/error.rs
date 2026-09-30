@@ -1338,7 +1338,7 @@ impl Error {
     /// Create a group authorization error carrying a custom message
     /// (Java: `new GroupAuthorizationException(message, groupId)`).
     pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::new(group_id, message))
+        Self::GroupAuthorization(GroupAuthorizationError::new(Some(group_id.into()), message))
     }
 
     /// Create an invalid group ID error.

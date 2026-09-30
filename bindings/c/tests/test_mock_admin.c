@@ -226,6 +226,29 @@ static void test_admin_client_new_rejects_empty_bootstrap(void) {
     kafka_admin_AdminClientProperties_destroy(props);
 }
 
+/* Java wraps a construction failure as `new KafkaException("Failed to create
+ * new KafkaAdminClient", exc)`; `kafka_common_Error_cause` hands back `exc`, an
+ * owned handle that outlives its parent, and a cause-less error yields NULL. */
+static void test_admin_client_new_failure_exposes_its_cause(void) {
+    kafka_admin_AdminClientProperties_t *props = kafka_admin_AdminClientProperties_new();
+    kafka_admin_AdminClientProperties_put(props, "bootstrap.servers", "not-a-host-port");
+    kafka_common_Error_t *err = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_new(props, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Failed to create new KafkaAdminClient", kafka_common_Error_message(err));
+    kafka_common_Error_t *cause = kafka_common_Error_cause(err);
+    TEST_ASSERT_NOT_NULL(cause);
+    kafka_common_Error_destroy(err);
+    /* Owned: still readable after the parent is gone. */
+    TEST_ASSERT_NOT_NULL(kafka_common_Error_message(cause));
+    kafka_common_Error_destroy(cause);
+    kafka_admin_AdminClientProperties_destroy(props);
+
+    kafka_common_Error_t *leaf = kafka_common_Error_new(-1, "no cause");
+    TEST_ASSERT_NULL(kafka_common_Error_cause(leaf));
+    kafka_common_Error_destroy(leaf);
+}
+
 static void test_admin_client_new_null_props(void) {
     kafka_common_Error_t *err = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_new(NULL, &err));
@@ -273,6 +296,18 @@ static void test_mock_admin_create_topics_sync(void) {
     TEST_ASSERT_NULL(kafka_admin_TopicMetadataAndConfig_config_name(mc, 1));
     TEST_ASSERT_NULL(kafka_admin_TopicMetadataAndConfig_config_name(mc, -1));
     TEST_ASSERT_FALSE(kafka_admin_TopicMetadataAndConfig_config_is_sensitive(mc, 7));
+    /* The same entries as full ConfigEntry handles (Java's config()). The mock
+     * builds them with Java's `new ConfigEntry(name, value)`, so source and type
+     * are both UNKNOWN (the real client's type is null instead). */
+    const kafka_admin_Config_t *config = kafka_admin_TopicMetadataAndConfig_config(mc);
+    TEST_ASSERT_NOT_NULL(config);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_Config_entry_count(config));
+    const kafka_admin_ConfigEntry_t *entry = kafka_admin_Config_find_entry(config, "cleanup.policy");
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_STRING("compact", kafka_admin_ConfigEntry_value(entry));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", kafka_admin_ConfigEntry_source(entry));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", kafka_admin_ConfigEntry_type(entry));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ConfigEntry_synonym_count(entry));
 
     /* Out-of-range result index is null, not a crash. */
     TEST_ASSERT_NULL(kafka_admin_CreateTopicsResult_get_key(result, 1));
@@ -499,6 +534,38 @@ static void test_mock_admin_create_topics_async_partial_failure(void) {
 
     kafka_admin_NewTopic_destroy(a);
     kafka_admin_NewTopic_destroy(b);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A topic named twice is ONE key: one callback, never a second, synthetic
+ * "not present" error. Which outcome it carries is the RPC's own: Java's
+ * MockAdminClient.createTopics creates the topic from the first spec, then
+ * `put`s the second spec's TopicExistsException future over the first in its
+ * result map (MockAdminClient.java:382-386), and the Rust mock mirrors that. */
+static void test_mock_admin_create_topics_async_duplicate_name_fires_once(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+    kafka_admin_NewTopic_t *first = kafka_admin_NewTopic_new("existing", 3, 1);
+    kafka_admin_NewTopic_t *second = kafka_admin_NewTopic_new("existing", 5, 1);
+    const kafka_admin_NewTopic_t *topics[2] = {first, second};
+
+    create_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_create_topics_async(admin, topics, 2, -1, false, false,
+                                                on_create, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    /* Give a (wrong) second callback the chance to arrive before asserting. */
+    struct timespec ts = {0, 100000000}; /* 100ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+    TEST_ASSERT_TRUE(r.had_error_for_existing);
+    TEST_ASSERT_EQUAL_INT32(TOPIC_ALREADY_EXISTS_CODE, r.error_code_for_existing);
+
+    kafka_admin_NewTopic_destroy(first);
+    kafka_admin_NewTopic_destroy(second);
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -1397,6 +1464,8 @@ static void test_mock_admin_describe_cluster_sync(void) {
     TEST_ASSERT_EQUAL_INT32(9, host_len);
     TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(node));
+    /* The mock's brokers are never fenced (Java's `Node(id, host, port)`). */
+    TEST_ASSERT_FALSE(kafka_common_Node_is_fenced(node));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, 3));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, -1));
 
@@ -1587,6 +1656,136 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
 }
 
 /* A NULL resource name skips that row rather than drifting the two arrays. */
+/* The three mock drivers Java's MockAdminClient offers for seeding topics
+ * and log dirs: addTopic (with Java's validation messages),
+ * markTopicForDeletion and the Builder's brokerLogDirs. */
+static void test_mock_admin_add_topic_mark_for_deletion_and_log_dirs(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(2);
+
+    /* A broker's log dirs, set before the topic: its partitions start there. */
+    const char *dirs[2] = {"/data/a", "/data/b"};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_set_broker_log_dirs(admin, 1, dirs, 2));
+    kafka_common_Error_t *err = kafka_admin_MockAdminClient_set_broker_log_dirs(admin, 9, dirs, 2);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Broker 9 does not exist.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    const int32_t partitions[1] = {0};
+    const int32_t leaders[1] = {1};
+    const int32_t replicas_0[2] = {1, 0};
+    const int32_t isr_0[1] = {1};
+    const int32_t *const replicas[1] = {replicas_0};
+    const int32_t replica_counts[1] = {2};
+    const int32_t *const isrs[1] = {isr_0};
+    const int32_t isr_counts[1] = {1};
+    const char *keys[1] = {"cleanup.policy"};
+    const char *values[1] = {"compact"};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_add_topic(admin, false, "added", partitions,
+                                                           leaders, replicas, replica_counts, isrs,
+                                                           isr_counts, 1, keys, values, 1));
+
+    /* Java's IllegalArgumentException messages. */
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "added", partitions, leaders,
+                                                replicas, replica_counts, isrs, isr_counts, 1,
+                                                NULL, NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Topic added was already added.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    const int32_t unknown_leader[1] = {5};
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "other", partitions, unknown_leader,
+                                                replicas, replica_counts, isrs, isr_counts, 1,
+                                                NULL, NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Leader broker unknown", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    const int32_t bad_replicas_0[1] = {7};
+    const int32_t *const bad_replicas[1] = {bad_replicas_0};
+    const int32_t one[1] = {1};
+    err = kafka_admin_MockAdminClient_add_topic(admin, false, "other", partitions, leaders,
+                                                bad_replicas, one, isrs, isr_counts, 1, NULL,
+                                                NULL, 0);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Unknown brokers in replica list", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    /* The added topic is described with its partition layout and config. */
+    const char *names[1] = {"added"};
+    kafka_admin_DescribeTopicsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_topics(admin, names, 1, -1, false, -1,
+                                                             &described));
+    const kafka_admin_TopicDescription_t *description =
+        kafka_admin_DescribeTopicsResult_get_value(described, 0);
+    TEST_ASSERT_NOT_NULL(description);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicDescription_partition_count(description));
+    const kafka_admin_TopicPartitionInfo_t *info = kafka_admin_TopicDescription_partition(description, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(kafka_admin_TopicPartitionInfo_leader(info)));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_TopicPartitionInfo_replica_count(info));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicPartitionInfo_isr_count(info));
+    kafka_admin_DescribeTopicsResult_destroy(described);
+
+    /* Its partition starts on the leader's first log dir, the only dir the
+     * mock's describeLogDirs reports (it lists the dirs holding replicas). */
+    const int32_t brokers[1] = {1};
+    kafka_admin_DescribeLogDirsResult_t *log_dirs = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_log_dirs(admin, brokers, 1, -1, &log_dirs));
+    const kafka_admin_LogDirDescriptionMap_t *map = kafka_admin_DescribeLogDirsResult_get_value(log_dirs, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_LogDirDescriptionMap_count(map));
+    TEST_ASSERT_EQUAL_STRING("/data/a", kafka_admin_LogDirDescriptionMap_get_key(map, 0));
+    kafka_admin_DescribeLogDirsResult_destroy(log_dirs);
+
+    /* markTopicForDeletion: the topic is no longer described. */
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_mark_topic_for_deletion(admin, "added"));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_topics(admin, names, 1, -1, false, -1,
+                                                             &described));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_get_value(described, 0));
+    TEST_ASSERT_NOT_NULL(kafka_admin_DescribeTopicsResult_get_error(described, 0));
+    kafka_admin_DescribeTopicsResult_destroy(described);
+    err = kafka_admin_MockAdminClient_mark_topic_for_deletion(admin, "missing");
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Topic missing did not exist.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A NULL config value is Java's null map value in NewTopic.configs(Map): it
+ * is kept (not dropped) and stays distinct from "". The mock echoes it on the
+ * created topic's config and in describeConfigs, as Java's mock does
+ * (`new ConfigEntry(name, null)`). */
+static void test_mock_admin_new_topic_null_config_value(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    kafka_admin_NewTopic_t *t = kafka_admin_NewTopic_new("null-cfg-topic", 1, 1);
+    kafka_admin_NewTopic_put_config(t, "retention.ms", NULL);
+    kafka_admin_NewTopic_put_config(t, "cleanup.policy", "");
+    const kafka_admin_NewTopic_t *topics[1] = {t};
+    kafka_admin_CreateTopicsResult_t *created = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_topics(admin, topics, 1, -1, false, false,
+                                                           &created));
+    const kafka_admin_Config_t *config =
+        kafka_admin_TopicMetadataAndConfig_config(kafka_admin_CreateTopicsResult_get_value(created, 0));
+    TEST_ASSERT_NOT_NULL(config);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_Config_entry_count(config));
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(kafka_admin_Config_find_entry(config, "retention.ms")));
+    TEST_ASSERT_EQUAL_STRING("",
+        kafka_admin_ConfigEntry_value(kafka_admin_Config_find_entry(config, "cleanup.policy")));
+    kafka_admin_CreateTopicsResult_destroy(created);
+
+    const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"null-cfg-topic"};
+    kafka_admin_DescribeConfigsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_configs(admin, types, names, 1, -1, false,
+                                                              false, &described));
+    const kafka_admin_Config_t *topic_config = kafka_admin_DescribeConfigsResult_get_value(described, 0);
+    TEST_ASSERT_NOT_NULL(topic_config);
+    const kafka_admin_ConfigEntry_t *retention = kafka_admin_Config_find_entry(topic_config, "retention.ms");
+    TEST_ASSERT_NOT_NULL(retention);
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(retention));
+    kafka_admin_DescribeConfigsResult_destroy(described);
+
+    kafka_admin_NewTopic_destroy(t);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_describe_configs_null_row_skipped(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const int32_t types[2] = {RESOURCE_TYPE_BROKER, RESOURCE_TYPE_BROKER};
@@ -2602,13 +2801,13 @@ static void test_mock_admin_describe_replica_log_dirs_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
-/* COMMENTS.67 fixup: a replica of a topic the mock does not know is skipped
- * entirely by `MockAdminClient::describe_replica_log_dirs` (no future is ever
- * created for it - MockAdminClient.java:1112), so its callback must still
- * fire exactly once, with an explicit error, rather than never firing at all
- * (which, before the fix in `admin_async_per_key_op`, would have hung this
- * test until the harness's own timeout). */
-static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error(void) {
+/* A replica of a topic the mock does not know is skipped entirely by
+ * `MockAdminClient::describe_replica_log_dirs` (no future is ever created for
+ * it - MockAdminClient.java:1112), so a Java caller finds the key absent from
+ * the result map. Its callback still fires exactly once (never firing would
+ * hang a caller holding a per-key future, COMMENTS.67), carrying neither a
+ * value nor an error: Java's absent key. */
+static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_is_absent(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "drld-known-async", 1, 1);
 
@@ -2628,7 +2827,7 @@ static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolv
     TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -2637,8 +2836,7 @@ static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolv
  * TopicPartitionReplica), so the callback must fire exactly ONCE with the real
  * outcome - never a spurious "not present" error for the second occurrence.
  * This is distinct from the unknown-topic case above (a genuinely-omitted key,
- * which still gets its explicit error): a duplicate of a KNOWN replica must NOT
- * error. */
+ * reported absent): a duplicate of a KNOWN replica must NOT error. */
 static void test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "drld-dup-async", 1, 1);
@@ -5715,7 +5913,7 @@ static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(v
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void) {
+static void test_mock_admin_alter_client_quotas_repeated_type_rejected_repeated_entity_sent(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *dup_types[2] = {"user", "user"};
     const char *dup_names[2] = {"alice", "bob"};
@@ -5733,11 +5931,10 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 
-    /* The same entity in two alterations. Java accepts this -- it sends both
-     * and only the future map collapses (KafkaAdminClient.java:4301-4313) --
-     * but the C result is a flat array built from that map, so the caller
-     * could not tell which of its two rows the surviving outcome describes.
-     * Rejected at the exact row instead; see read_client_quota_alterations. */
+    /* The same entity in two alterations: sent as Java sends it (both reach
+     * the broker) and, as Java's per-entity future map collapses it
+     * (KafkaAdminClient.java:4314-4342), the result has one entry for it. The
+     * mock fails every entity like Java's mock throws. */
     const char *types[1] = {"user"};
     const char *names[1] = {"alice"};
     const char *const *const two_types[2] = {types, types};
@@ -5745,11 +5942,13 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
     const int32_t ones[2] = {1, 1};
     error = kafka_admin_AdminClient_alter_client_quotas(admin, two_types, two_names, ones, NULL,
                                                         NULL, NULL, NULL, 2, -1, false, &result);
-    TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_EQUAL_STRING(
-        "quota alteration at index 1 repeats an entity already altered by an earlier entry",
-        kafka_common_Error_message(error));
-    kafka_common_Error_destroy(error);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterClientQuotasResult_count(result));
+    TEST_ASSERT_NOT_NULL(kafka_admin_AlterClientQuotasResult_get_error(result, 0));
+    TEST_ASSERT_EQUAL_STRING("Not implement yet",
+                             kafka_common_Error_message(kafka_admin_AlterClientQuotasResult_get_error(result, 0)));
+    kafka_admin_AlterClientQuotasResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5812,6 +6011,24 @@ static void test_mock_admin_alter_client_quotas_async(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.ok_count));
     TEST_ASSERT_EQUAL_STRING("Not implement yet", r.message);
     TEST_ASSERT_EQUAL_STRING("async-user", r.entity_name_for_error);
+
+    /* The same entity in two alterations is sent as Java sends it and is ONE
+     * key (Java's per-entity future map): one callback, not two. */
+    const char *const *const two_types[2] = {types, types};
+    const char *const *const two_names[2] = {names, names};
+    const int32_t ones[2] = {1, 1};
+    alter_client_quotas_async_result_t dup = {0};
+    atomic_init(&dup.fired, 0);
+    atomic_init(&dup.error_count, 0);
+    atomic_init(&dup.ok_count, 0);
+    kafka_admin_AdminClient_alter_client_quotas_async(admin, two_types, two_names, ones, NULL,
+                                                      NULL, NULL, NULL, 2, -1, true,
+                                                      on_alter_client_quotas, &dup);
+    TEST_ASSERT_TRUE(wait_for(&dup.fired, 1));
+    struct timespec ts = {0, 100000000}; /* 100ms: let a wrong second callback land */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&dup.fired));
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", dup.message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6641,11 +6858,28 @@ static void test_mock_admin_b5b_token_and_feature_async(void) {
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(admin, seed, targets, upgrade, 1, -1, false,
-                                                  on_update_features, &u);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features_async(
+        admin, seed, targets, upgrade, 1, -1, false, on_update_features, &u));
     TEST_ASSERT_TRUE(wait_for(&u.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.ok_count));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.error_count));
+
+    /* An update Java's FeatureUpdate constructor rejects is a submission error,
+     * returned as Java throws it, and the callback never fires. */
+    const int16_t zero[1] = {0};
+    update_features_async_result_t bad = {0};
+    atomic_init(&bad.fired, 0);
+    atomic_init(&bad.error_count, 0);
+    atomic_init(&bad.ok_count, 0);
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        admin, seed, zero, upgrade, 1, -1, false, on_update_features, &bad);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    TEST_ASSERT_EQUAL_STRING(
+        "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or "
+        "UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.",
+        kafka_common_Error_message(submit_err));
+    kafka_common_Error_destroy(submit_err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&bad.fired));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6689,11 +6923,13 @@ static void test_mock_admin_b5b_async_null_handle(void) {
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(NULL, NULL, NULL, NULL, 0, -1, false,
-                                                  on_update_features, &u);
-    /* Zero requested features -> zero keys -> the callback never fires, even
-     * with a NULL handle - there is no per-call callback slot to report a
-     * whole-call failure through when zero keys were requested. */
+    /* A NULL handle is a submission error, returned rather than delivered
+     * through the callback, which never fires. */
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        NULL, NULL, NULL, NULL, 0, -1, false, on_update_features, &u);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    TEST_ASSERT_EQUAL_STRING("admin handle must not be null", kafka_common_Error_message(submit_err));
+    kafka_common_Error_destroy(submit_err);
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.fired));
 }
 
@@ -6706,10 +6942,11 @@ static void test_mock_admin_update_features_async_null_handle_with_features(void
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(NULL, seed, targets, upgrade, 1, -1, false,
-                                                  on_update_features, &u);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.fired));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.error_count));
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        NULL, seed, targets, upgrade, 1, -1, false, on_update_features, &u);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    kafka_common_Error_destroy(submit_err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.fired));
 }
 
 static void test_mock_admin_b5b_null_out_result(void) {
@@ -7052,16 +7289,31 @@ static void on_fence_producers(const char *id,
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_list_transactions(kafka_admin_ListTransactionsResult_t *result,
-                                 kafka_common_Error_t *error, void *user_data) {
+/* listTransactions_async has Java's byBrokerId() shape: one broker-discovery
+ * callback, then one callback per discovered broker. `had_result` / `count`
+ * record the discovery outcome; `broker_fired` counts per-broker callbacks. */
+static atomic_int list_transactions_broker_fired;
+
+static void on_list_transactions_by_broker_id(const int32_t *broker_ids, int32_t broker_count,
+                                              kafka_common_Error_t *error, void *user_data) {
     acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_ListTransactionsResult_count(result);
-        kafka_admin_ListTransactionsResult_destroy(result);
+    r->had_result = error == NULL;
+    r->count = broker_count;
+    if (error != NULL) {
+        TEST_ASSERT_NULL(broker_ids);
+        TEST_ASSERT_EQUAL_INT32(0, broker_count);
     }
     record_async_error(r, error);
     atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_list_transactions(int32_t broker_id, kafka_admin_ListTransactionsResult_t *value,
+                                 kafka_common_Error_t *error, void *user_data) {
+    (void)broker_id;
+    (void)user_data;
+    if (value != NULL) kafka_admin_ListTransactionsResult_destroy(value);
+    if (error != NULL) kafka_common_Error_destroy(error);
+    atomic_fetch_add(&list_transactions_broker_fired, 1);
 }
 
 /* The two void-result RPCs share the result-less callback shape, so one handler
@@ -7125,16 +7377,22 @@ static void test_mock_admin_b6_async_fires_per_key(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&dedup.error_count));
     TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, dedup.last_error_code);
 
-    /* listTransactions fails wholesale on the mock, so the callback gets the
-     * error rather than a result. */
+    /* listTransactions fails wholesale on the mock (its byBrokerId() future
+     * fails), so the discovery callback gets the error and no per-broker
+     * callback follows. */
     acl_async_result_t l = {0};
     atomic_init(&l.fired, 0);
+    atomic_store(&list_transactions_broker_fired, 0);
     kafka_admin_AdminClient_list_transactions_async(admin, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions_by_broker_id,
                                                     on_list_transactions, &l);
     TEST_ASSERT_TRUE(wait_for(&l.fired, 1));
     TEST_ASSERT_EQUAL_INT(0, l.had_result);
     TEST_ASSERT_EQUAL_INT(1, l.had_error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", l.message);
+    struct timespec lt_ts = {0, 100000000}; /* 100ms */
+    nanosleep(&lt_ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&list_transactions_broker_fired));
 
     acl_async_result_t a = {0};
     atomic_init(&a.fired, 0);
@@ -7211,6 +7469,7 @@ static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
     acl_async_result_t l = {0};
     atomic_init(&l.fired, 0);
     kafka_admin_AdminClient_list_transactions_async(NULL, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions_by_broker_id,
                                                     on_list_transactions, &l);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&l.fired));
     TEST_ASSERT_EQUAL_INT(1, l.had_error);
@@ -7290,6 +7549,7 @@ int main(void) {
     RUN_TEST(test_admin_properties_from_configs);
     RUN_TEST(test_admin_client_new_rejects_empty_bootstrap);
     RUN_TEST(test_admin_client_new_null_props);
+    RUN_TEST(test_admin_client_new_failure_exposes_its_cause);
     RUN_TEST(test_mock_admin_create_topics_sync);
     RUN_TEST(test_mock_admin_create_topics_partial_failure);
     RUN_TEST(test_mock_admin_create_topics_broker_defaults);
@@ -7297,6 +7557,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_new_topic_null_handling);
     RUN_TEST(test_mock_admin_create_topics_async_partial_failure);
     RUN_TEST(test_mock_admin_create_topics_async_null_handle);
+    RUN_TEST(test_mock_admin_create_topics_async_duplicate_name_fires_once);
     RUN_TEST(test_mock_admin_list_topics_sync);
     RUN_TEST(test_mock_admin_list_topics_async);
     RUN_TEST(test_mock_admin_list_topics_call_error);
@@ -7324,6 +7585,8 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_cluster_async_null_handle);
     RUN_TEST(test_mock_admin_describe_configs_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_null_row_skipped);
+    RUN_TEST(test_mock_admin_new_topic_null_config_value);
+    RUN_TEST(test_mock_admin_add_topic_mark_for_deletion_and_log_dirs);
     RUN_TEST(test_mock_admin_describe_configs_async_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_async_null_handle);
     RUN_TEST(test_mock_admin_incremental_alter_configs_set_then_delete);
@@ -7350,7 +7613,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async);
-    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error);
+    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_is_absent);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_b2_null_out_result);
@@ -7438,7 +7701,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_client_quotas_async);
     RUN_TEST(test_mock_admin_describe_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_alter_client_quotas_reports_unsupported_per_entity);
-    RUN_TEST(test_mock_admin_alter_client_quotas_rejects_duplicate_entities);
+    RUN_TEST(test_mock_admin_alter_client_quotas_repeated_type_rejected_repeated_entity_sent);
     RUN_TEST(test_mock_admin_alter_client_quotas_async);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle_with_entities);
