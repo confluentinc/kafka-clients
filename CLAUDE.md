@@ -203,6 +203,10 @@ Use LSP plugins when available and working, notify when it's not working, avoid 
 ## Source Reference
 Java source in `kafka/` directory (Apache Kafka 4.3.1)
 
+The public-API and deprecation rules are checked against a later release: `@InterfaceAudience.Public`
+(§2) against Kafka 4.4, and deprecations (§3) against 4.3.1 plus 4.4. The exact tags are
+`AUDIENCE_REF` and `DEPRECATION_REFS` in `xtask/src/java.rs`; `cargo xtask fetch-java-refs` fetches them.
+
 ## Development Workflow
 - **Build**: `cargo build`
 - **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
