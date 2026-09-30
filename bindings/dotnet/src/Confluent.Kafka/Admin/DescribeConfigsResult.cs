@@ -32,7 +32,8 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// A resource that fails faults only <em>its own</em> <see cref="Task"/> — the header says
 /// so: "a per-resource failure is not a call failure". The per-resource error is
-/// <b>borrowed</b> from the result root and is never destroyed.
+/// <b>owned</b>: it arrives with that resource's own callback and is freed once it has
+/// been copied into the <see cref="KafkaException"/>.
 /// </para>
 /// </remarks>
 public sealed class DescribeConfigsResult

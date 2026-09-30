@@ -32,8 +32,11 @@ namespace Confluent.Kafka.Admin;
 /// query failed faults <em>its own</em> awaitable (the header: "a per-broker failure is not
 /// a call failure"). A <em>log directory</em> that is offline does <b>not</b> fault
 /// anything — the awaitable succeeds and the offending
-/// <see cref="LogDirDescription.Error"/> is non-null. Both underlying errors are
-/// <b>borrowed</b> from the result root and neither is ever destroyed.
+/// <see cref="LogDirDescription.Error"/> is non-null. The two are also owned differently.
+/// The per-broker error is <b>owned</b>: it arrives with that broker's own callback and is
+/// freed once it has been copied into the <see cref="KafkaException"/>. The per-directory
+/// error is <b>borrowed</b> from that broker's log-dir map and is never destroyed on its
+/// own; it is copied out before the map is.
 /// </para>
 /// </remarks>
 public sealed class DescribeLogDirsResult

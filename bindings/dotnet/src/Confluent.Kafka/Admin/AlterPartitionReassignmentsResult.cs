@@ -40,7 +40,8 @@ namespace Confluent.Kafka.Admin;
 /// <em>initiated</em> and hands back nothing — Java's per-partition future is
 /// <c>KafkaFuture&lt;Void&gt;</c>, and its javadoc lists the per-partition error codes
 /// (<c>INVALID_REPLICA_ASSIGNMENT</c>, <c>NO_REASSIGNMENT_IN_PROGRESS</c>, …). The
-/// per-partition error is <b>borrowed</b> from the result root and is never destroyed.
+/// per-partition error is <b>owned</b>: it arrives with that partition's own callback and is
+/// freed once it has been copied into the <see cref="KafkaException"/>.
 /// </para>
 /// </remarks>
 public sealed class AlterPartitionReassignmentsResult

@@ -39,7 +39,8 @@ namespace Confluent.Kafka.Admin;
 /// Java publishes <c>Map&lt;ConfigResource, KafkaFuture&lt;Void&gt;&gt; values()</c>, so
 /// awaiting one of these tells you whether that resource was altered and hands back
 /// nothing; a resource that fails faults only <em>its own</em> <see cref="Task"/>. The
-/// per-resource error is <b>borrowed</b> from the result root and is never destroyed.
+/// per-resource error is <b>owned</b>: it arrives with that resource's own callback and is
+/// freed once it has been copied into the <see cref="KafkaException"/>.
 /// </para>
 /// </remarks>
 public sealed class AlterConfigsResult

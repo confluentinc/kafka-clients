@@ -31,7 +31,8 @@ namespace Confluent.Kafka.Admin;
 /// <c>(result, index)</c> rather than a single string.
 /// </para>
 /// <para>
-/// The per-replica error is <b>borrowed</b> from the result root and is never destroyed.
+/// The per-replica error is <b>owned</b>: it arrives with that replica's own callback and is
+/// freed once it has been copied into the <see cref="KafkaException"/>.
 /// </para>
 /// </remarks>
 public sealed class DescribeReplicaLogDirsResult

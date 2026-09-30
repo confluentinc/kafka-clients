@@ -31,10 +31,10 @@ namespace Confluent.Kafka.Admin;
 /// not exist on the broker, a disk error.
 /// </para>
 /// <para>
-/// The per-replica error is <b>borrowed</b> from the result root and is never destroyed;
-/// there is no <c>_get_value</c>, which the header states outright — "Java's per-replica
-/// future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value"
-/// (result shape 2).
+/// The per-replica error is <b>owned</b>: it arrives with that replica's own callback and is
+/// freed once it has been copied into the <see cref="KafkaException"/>. The callback
+/// carries no value, which the header states outright — "Java's per-replica future is
+/// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value".
 /// </para>
 /// </remarks>
 public sealed class AlterReplicaLogDirsResult
