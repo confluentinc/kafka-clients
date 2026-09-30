@@ -55,7 +55,8 @@ internal static class OffsetMapMarshal
     /// even if the copy-out throws. The <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/>
     /// twin, for the <b>callback-owned</b> shape: use this wherever the ABI hands a map
     /// <em>to</em> a callback ("callbacks own the handles delivered to them",
-    /// <c>confluent_kafka.h:243-248</c>), which is ffi-marshalling.md §B2's Category 3.
+    /// header, <c>kafka_consumer_Consumer_commit_async_callback_t</c>), which is ffi-marshalling.md
+    /// §B2's Category 3.
     /// </summary>
     /// <remarks>
     /// <b>Why this exists (M9/P7 review).</b> Before it, <see cref="CopyOut"/> was the only

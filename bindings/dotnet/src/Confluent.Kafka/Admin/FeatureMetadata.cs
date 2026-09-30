@@ -25,8 +25,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// ⚠ The two maps are <b>independent</b>: they can differ in both size and key set
-/// (<c>confluent_kafka.h:9682-9684</c>). Java's constructor is package-private (<c>:38</c>), so
-/// this one is <c>internal</c>.
+/// (header, <c>kafka_admin_DescribeFeaturesResult_supported_count</c>). Java's constructor is
+/// package-private (<c>:38</c>), so this one is <c>internal</c>.
 /// </remarks>
 public sealed class FeatureMetadata
 {

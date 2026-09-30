@@ -3275,7 +3275,8 @@ internal static partial class NativeMethods
     // The filter twin of the seven AclBinding accessors above, and NOT interchangeable with
     // them: the three string accessors return null when the filter matches any value, and
     // "null is distinct from a pointer to the empty string, which filters on the name ''"
-    // (confluent_kafka.h:7528-7530). The enums may also carry ANY=1 / MATCH=2.
+    // (header, kafka_common_AclBindingFilter_resource_name). The enums may also carry ANY=1 /
+    // MATCH=2.
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_resource_type</c> —
@@ -3333,8 +3334,8 @@ internal static partial class NativeMethods
     /// <c>deleteAcls(Collection&lt;AclBindingFilter&gt;, DeleteAclsOptions)</c>. The signature
     /// is byte-identical to <see cref="AdminClientCreateAclsAsync"/>, but the contract is the
     /// opposite: a NULL string entry means "match any" and no enum combination is rejected
-    /// (<c>confluent_kafka.h:8121-8125</c>), which is why the filters have their own row
-    /// projector overload.
+    /// (header, <c>kafka_admin_AdminClient_delete_acls</c>), which is why the filters have their
+    /// own row projector overload.
     /// </summary>
     /// <remarks>
     /// The <c>_async</c> form is driven rather than the sync twin, which blocks until every
@@ -3379,7 +3380,7 @@ internal static partial class NativeMethods
     /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>FAULT</b> channel: it
     /// faults that filter's <c>Task</c>. An individual matched ACL that could not be deleted
     /// is reported by <see cref="DeleteAclsResultGetResultError"/> instead and leaves this
-    /// null (<c>confluent_kafka.h:7744-7747</c>).
+    /// null (header, <c>kafka_admin_DeleteAclsResult_get_error</c>).
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
@@ -3402,8 +3403,8 @@ internal static partial class NativeMethods
     /// ACL whose delete failed carries both, as Java's entries do
     /// (<c>KafkaAdminClient.java:2705-2708</c>; M15/P13.2 G4-1). The header's "null when that
     /// entry carries an exception instead" and "complementary" wording
-    /// (<c>confluent_kafka.h:8789-8795</c>) is a known inaccuracy the reader does not rely
-    /// on (PLAN D3) — see <c>DeleteAclsResultMarshal</c>.
+    /// (header, <c>kafka_admin_DeleteAclsResult_get_binding</c>) is a known inaccuracy the reader
+    /// does not rely on (PLAN D3) — see <c>DeleteAclsResultMarshal</c>.
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
@@ -3416,10 +3417,11 @@ internal static partial class NativeMethods
     /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
     /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>VALUE</b> channel: it
     /// is stored inside a successfully completed <c>FilterResults</c> and is independent of
-    /// <see cref="DeleteAclsResultGetError"/> (<c>confluent_kafka.h:8811-8814</c>). It is
-    /// <b>not</b> complementary to <see cref="DeleteAclsResultGetBinding"/>, whatever the
-    /// header's <c>get_binding</c> text says: an entry whose delete failed carries this
-    /// error <b>and</b> its binding (M15/P13.2 G4-1, PLAN D3).
+    /// <see cref="DeleteAclsResultGetError"/> (header,
+    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). It is <b>not</b> complementary to
+    /// <see cref="DeleteAclsResultGetBinding"/>, whatever the header's <c>get_binding</c> text
+    /// says: an entry whose delete failed carries this error <b>and</b> its binding
+    /// (M15/P13.2 G4-1, PLAN D3).
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_error", CallingConvention = CallingConvention.Cdecl)]
@@ -3434,12 +3436,12 @@ internal static partial class NativeMethods
     /// <c>kafka_admin_AdminClient_describe_acls_async</c> — Java's
     /// <c>describeAcls(AclBindingFilter, DescribeAclsOptions)</c>. Java takes a
     /// <b>single</b> filter, so the seven fields cross as scalars rather than arrays
-    /// (<c>confluent_kafka.h:8040-8041</c>).
+    /// (header, <c>kafka_admin_AdminClient_describe_acls</c>).
     /// </summary>
     /// <remarks>
     /// A NULL string means "match any" and is distinct from a pointer to <c>""</c>; no enum
-    /// combination is rejected (<c>confluent_kafka.h:8052-8063</c>). The <c>_async</c> form
-    /// is driven rather than the sync twin.
+    /// combination is rejected (header, <c>kafka_admin_AdminClient_describe_acls</c>). The
+    /// <c>_async</c> form is driven rather than the sync twin.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_acls_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientDescribeAclsAsync(
@@ -3466,7 +3468,7 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_admin_DescribeAclsResult_get_binding</c> — the binding at
     /// <paramref name="index"/>, <b>borrowed</b>, in the order the broker reported
-    /// (<c>confluent_kafka.h:7696-7697</c>).
+    /// (header, <c>kafka_admin_DescribeAclsResult_get_binding</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeAclsResultGetBinding(IntPtr result, int index);
@@ -3493,7 +3495,7 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_common_ClientQuotaEntity_get_entry_name</c> — borrowed, or null out of range
     /// <b>or when the entry names the built-in default entity</b>
-    /// (<c>confluent_kafka.h:7622-7628</c>).
+    /// (header, <c>kafka_common_ClientQuotaEntity_get_entry_name</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_get_entry_name", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ClientQuotaEntityGetEntryName(IntPtr entity, int index);
@@ -3505,7 +3507,8 @@ internal static partial class NativeMethods
     /// <c>describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)</c>. The
     /// filter's components cross as three parallel arrays plus <c>strict</c>
     /// (<c>containsOnly</c> vs <c>contains</c>); <c>count == 0</c> with <c>strict == false</c>
-    /// is Java's <c>ClientQuotaFilter.all()</c> (<c>confluent_kafka.h:8204-8218</c>).
+    /// is Java's <c>ClientQuotaFilter.all()</c> (header,
+    /// <c>kafka_admin_AdminClient_describe_client_quotas</c>).
     /// </summary>
     /// <remarks>
     /// ⚠ <c>strict</c> carries <see cref="UnmanagedType.I1"/>: C's <c>bool</c> is one byte,
@@ -3548,7 +3551,8 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_key</c> — the key at
     /// <c>(index, quotaIndex)</c>, borrowed and sorted. Opaque broker-defined strings in
-    /// Java too; there is no enum (<c>confluent_kafka.h:7857</c>).
+    /// Java too; there is no enum (header,
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_key</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_quota_key", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeClientQuotasResultGetQuotaKey(IntPtr result, int index, int quotaIndex);
@@ -3560,8 +3564,9 @@ internal static partial class NativeMethods
     /// <remarks>
     /// ⚠ <b>Presence is the return value, never a sentinel:</b> every <c>double</c>,
     /// including every negative one and <c>0</c>, is a legal quota value
-    /// (<c>confluent_kafka.h:7868-7876</c>). The <see cref="UnmanagedType.I1"/> is
-    /// load-bearing for the same reason as on <c>strict</c> above.
+    /// (header, <c>kafka_admin_DescribeClientQuotasResult_get_quota_value</c>). The
+    /// <see cref="UnmanagedType.I1"/> is load-bearing for the same reason as on <c>strict</c>
+    /// above.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_quota_value", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
@@ -3577,7 +3582,7 @@ internal static partial class NativeMethods
     /// <c>kafka_admin_AdminClient_alter_client_quotas_async</c> — Java's
     /// <c>alterClientQuotas(Collection&lt;ClientQuotaAlteration&gt;, AlterClientQuotasOptions)</c>.
     /// Each alteration is an entity plus a list of ops, so <b>both</b> levels cross as arrays
-    /// of arrays with per-row counts (<c>confluent_kafka.h:8321-8332</c>).
+    /// of arrays with per-row counts (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -3702,8 +3707,8 @@ internal static partial class NativeMethods
     /// length written to <paramref name="outLength"/>.
     /// <para>
     /// ⚠⚠ <b>LENGTH-DELIMITED, the first such slice on the admin surface</b>
-    /// (<c>confluent_kafka.h:8740-8746</c>): the bytes are <b>not</b> NUL-terminated and may
-    /// contain NUL, so <paramref name="outLength"/> is the only way to know how many there
+    /// (header, <c>kafka_common_DelegationToken_hmac</c>): the bytes are <b>not</b> NUL-terminated
+    /// and may contain NUL, so <paramref name="outLength"/> is the only way to know how many there
     /// are. A NUL-scan truncates roughly one MAC in eight at its first zero byte, and the
     /// truncation round-trips into a broker-side rejection rather than a local failure.
     /// </para>
@@ -3809,7 +3814,8 @@ internal static partial class NativeMethods
     /// ⚠ <paramref name="hasSalts"/> is an <b>explicit discriminant</b>: cleared selects
     /// Java's three-argument upsertion constructor, which <em>generates</em> a random salt;
     /// set takes the supplied salt verbatim, including a zero-length one
-    /// (<c>confluent_kafka.h:8865-8872</c>). A length of 0 cannot carry that distinction.
+    /// (header, <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>). A length of 0 cannot
+    /// carry that distinction.
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_user_scram_credentials_async", CallingConvention = CallingConvention.Cdecl)]
@@ -3902,8 +3908,8 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// ⚠ <paramref name="hasOwnersFilter"/> is an <b>explicit discriminant</b>
-    /// (<c>confluent_kafka.h:9177-9181</c>): cleared is Java's null <c>owners</c> — "every
-    /// token I may see" — while set with a count of 0 filters by nothing.
+    /// (header, <c>kafka_admin_AdminClient_describe_delegation_token</c>): cleared is Java's null
+    /// <c>owners</c> — "every token I may see" — while set with a count of 0 filters by nothing.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_delegation_token_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientDescribeDelegationTokenAsync(
@@ -3930,7 +3936,8 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// ⚠ <paramref name="hasNodeId"/> is an <b>explicit discriminant</b>: <c>0</c> is a legal
-    /// broker id, so no sentinel could spell "unset" (<c>confluent_kafka.h:9261-9262</c>).
+    /// broker id, so no sentinel could spell "unset" (header,
+    /// <c>kafka_admin_AdminClient_describe_features</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_features_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientDescribeFeaturesAsync(
@@ -3957,7 +3964,8 @@ internal static partial class NativeMethods
     /// Writes the finalized-features epoch and returns whether there is one.
     /// <para>
     /// ⚠ <b>Presence is the return value, never a sentinel:</b> every <c>int64_t</c>, <c>0</c>
-    /// and <c>-1</c> included, is a legal epoch (<c>confluent_kafka.h:9666-9669</c>).
+    /// and <c>-1</c> included, is a legal epoch (header,
+    /// <c>kafka_admin_DescribeFeaturesResult_finalized_features_epoch</c>).
     /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_finalized_features_epoch", CallingConvention = CallingConvention.Cdecl)]
@@ -3966,8 +3974,8 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// The supported-feature count. ⚠ The two tables are <b>not co-indexed</b> and can differ
-    /// in both size and contents (<c>confluent_kafka.h:9682-9684</c>) — walk each by its own
-    /// count.
+    /// in both size and contents (header,
+    /// <c>kafka_admin_DescribeFeaturesResult_supported_count</c>) — walk each by its own count.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_supported_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int DescribeFeaturesResultSupportedCount(IntPtr result);
@@ -4037,7 +4045,8 @@ internal static partial class NativeMethods
     /// <summary>
     /// ⚠ No result handle — the callback is <c>(error, user_data)</c>. A NULL
     /// <paramref name="topic"/> or a <paramref name="producerEpoch"/> outside 16 bits fires
-    /// the callback <b>synchronously on the calling thread</b> (<c>h:10474-10486</c>).
+    /// the callback <b>synchronously on the calling thread</b> (header,
+    /// <c>kafka_admin_AdminClient_abort_transaction_async</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_abort_transaction_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientAbortTransactionAsync(
@@ -4053,7 +4062,8 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// ⚠ No result handle. A NULL <paramref name="transactionalId"/> fires the callback
-    /// <b>synchronously on the calling thread</b> (<c>h:10535-10546</c>).
+    /// <b>synchronously on the calling thread</b> (header,
+    /// <c>kafka_admin_AdminClient_force_terminate_transaction_async</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_force_terminate_transaction_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientForceTerminateTransactionAsync(
@@ -4167,7 +4177,7 @@ internal static partial class NativeMethods
     /// ⚠ The partitions cross as <b>parallel arrays</b>: entry <c>i</c> is
     /// <c>(topics[i], partitions[i])</c>. <paramref name="hasBrokerId"/> is Java's
     /// <c>OptionalInt brokerId</c> discriminant — the setter accepts any <c>int</c>, so no
-    /// sentinel is free (<c>h:10310-10315</c>).
+    /// sentinel is free (header, <c>kafka_admin_AdminClient_describe_producers</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_producers_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientDescribeProducersAsync(

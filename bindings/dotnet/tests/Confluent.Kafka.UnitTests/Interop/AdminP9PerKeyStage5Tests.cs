@@ -305,8 +305,9 @@ public sealed class AdminP9PerKeyStage5Tests
     /// <summary>
     /// ⚠⚠ <b>The one key count that is neither the row count nor the map size.</b>
     /// <c>alterUserScramCredentials</c> sends one row per alteration but the ABI fires once
-    /// per <b>distinct user</b> (<c>h:8875-8886</c>), so three rows over two users must
-    /// settle both keys — no more, no fewer.
+    /// per <b>distinct user</b> (header,
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_async</c>), so three rows over two
+    /// users must settle both keys — no more, no fewer.
     /// </summary>
     /// <remarks>
     /// An <c>n</c> taken from the row count would leave the countdown one short: both keys

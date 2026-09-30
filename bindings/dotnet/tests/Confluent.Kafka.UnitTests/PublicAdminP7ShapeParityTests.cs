@@ -103,7 +103,8 @@ public sealed class PublicAdminP7ShapeParityTests
         }
 
         // ⚠ describeUserScramCredentials' users are OPTIONAL and nullable: absent means
-        // "every user" (h:8784-8785), which Java spells as a second zero-arg overload.
+        // "every user" (header, kafka_admin_AdminClient_describe_user_scram_credentials), which
+        // Java spells as a second zero-arg overload.
         ParameterInfo users = typeof(IAdmin)
             .GetMethod(nameof(IAdmin.DescribeUserScramCredentials))!.GetParameters()[0];
         Assert.Equal(typeof(IReadOnlyCollection<string>), users.ParameterType);

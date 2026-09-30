@@ -461,7 +461,8 @@ public sealed class AdminP6ResultMarshalTests
         IReadOnlyCollection<AclBinding> bindings =
             await TestTimeout.Run(() => operation.Task, s_deadline);
 
-        // Order is the ABI's own (h:7696-7697) — neither shuffled nor re-sorted.
+        // Order is the ABI's own (header, kafka_admin_DescribeAclsResult_get_binding) — neither
+        // shuffled nor re-sorted.
         Assert.Equal(submitted, bindings);
     }
 
@@ -594,7 +595,7 @@ public sealed class AdminP6ResultMarshalTests
     /// <summary>
     /// ⚠⚠ <b>Presence comes from the returned <c>bool</c>, never from a sentinel.</b> A quota
     /// of <c>0.0</c> and a negative one are both legal values and must read back as
-    /// <b>present</b> (<c>confluent_kafka.h:7868-7876</c>).
+    /// <b>present</b> (header, <c>kafka_admin_DescribeClientQuotasResult_get_quota_value</c>).
     /// </summary>
     [Fact]
     public async Task QuotaWalk_ZeroAndNegativeValues_ArePresentNotMissing()
@@ -619,7 +620,8 @@ public sealed class AdminP6ResultMarshalTests
 
     /// <summary>
     /// An entity with no quota values resolves to an <b>empty</b> inner map, not a fault —
-    /// "a quota type the entity has no value for is simply absent" (<c>h:7841</c>).
+    /// "a quota type the entity has no value for is simply absent" (header,
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_count</c>).
     /// </summary>
     [Fact]
     public async Task QuotaWalk_AnEntityWithNoQuotas_IsAnEmptyMap()

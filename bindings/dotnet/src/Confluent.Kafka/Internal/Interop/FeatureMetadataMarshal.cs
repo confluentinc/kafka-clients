@@ -26,9 +26,9 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 /// <remarks>
 /// ⚠⚠ <b>The two tables are NOT co-indexed</b> — "the two maps can differ in both size and
-/// contents" (<c>confluent_kafka.h:9682-9684</c>) — so each is walked by <b>its own</b> count.
-/// Driving the supported walk from <c>finalized_count</c> compiles, reads naturally, and both
-/// truncates and over-reads depending on which table is longer.
+/// contents" (header, <c>kafka_admin_DescribeFeaturesResult_supported_count</c>) — so each is
+/// walked by <b>its own</b> count. Driving the supported walk from <c>finalized_count</c> compiles,
+/// reads naturally, and both truncates and over-reads depending on which table is longer.
 /// </remarks>
 internal static class FeatureMetadataMarshal
 {

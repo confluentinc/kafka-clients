@@ -32,8 +32,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// only place that rule is implemented.</b> On a <em>filter</em> row a null name means
 /// "match any resource name" and travels as <see cref="IntPtr.Zero"/>, while <c>""</c> is
 /// a filter on the literal empty name and must travel as a <b>non-null</b> pointer to a
-/// NUL byte (<c>confluent_kafka.h:7528-7530</c>). Collapsing the two turns a filter on
-/// <c>""</c> into match-everything, which on <c>delete_acls</c> deletes ACLs the caller
+/// NUL byte (header, <c>kafka_common_AclBindingFilter_resource_name</c>). Collapsing the two turns
+/// a filter on <c>""</c> into match-everything, which on <c>delete_acls</c> deletes ACLs the caller
 /// never asked to delete. Concrete rows never carry a null (the value types reject one at
 /// construction), so both paths go through <see cref="PinName"/> and cannot diverge.
 /// </para>
@@ -219,7 +219,7 @@ internal static class AclRowMarshal
     /// ⚠ The three strings are read <b>without</b> a null guard, unlike
     /// <see cref="ReadBinding"/>'s: on a filter a null pointer means "match any" and must
     /// come back as <see langword="null"/>, distinct from a pointer to the empty string
-    /// (<c>confluent_kafka.h:7528-7530</c>).
+    /// (header, <c>kafka_common_AclBindingFilter_resource_name</c>).
     /// </remarks>
     internal static AclBindingFilter ReadFilter(IntPtr filter) =>
         ReadFilter(filter, NativeFilterAccessors);

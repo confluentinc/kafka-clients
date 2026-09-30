@@ -515,7 +515,9 @@ internal static class ConsumerCallbacks
     //
     // The other three differences from the completion trampolines, all forced by the ABI:
     //   * they RETURN a value — NULL for success, or an owned Error* whose ownership
-    //     transfers to the core (confluent_kafka.h:200-207), so it must NOT be destroyed;
+    //     transfers to the core (header,
+    //     kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t), so it must
+    //     NOT be destroyed;
     //   * the delivered TopicPartitionList_t is owned by the callback and destroyed by
     //     TopicPartitionListMarshal.CopyOutAndDestroy (which frees it in a finally, so the
     //     handle is released exactly once even when the copy-out throws);
@@ -538,7 +540,7 @@ internal static class ConsumerCallbacks
     /// <c>kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t</c>:
     /// <c>void (*)(void* user_data)</c> — the release hook, fired <b>exactly once</b> when
     /// the core drops its last reference to the registration, and it "may run on any thread"
-    /// (<c>confluent_kafka.h:553-560</c>).
+    /// (header, <c>kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t</c>).
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ListenerUserDataDestroyCallback(IntPtr userData);
@@ -598,7 +600,8 @@ internal static class ConsumerCallbacks
     /// </para>
     /// <para>
     /// <b>The delivered list is owned by the callback</b> ("callbacks own the handles
-    /// delivered to them", <c>confluent_kafka.h:193-197</c>).
+    /// delivered to them", header,
+    /// <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>).
     /// <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/> copies every element out and
     /// destroys the borrow-root in a <c>finally</c> — so it is freed exactly once even if the
     /// copy-out itself throws, and no borrowed pointer escapes into the managed snapshot
@@ -645,7 +648,7 @@ internal static class ConsumerCallbacks
     /// Converts a listener's exception into the owned <c>kafka_common_Error_t</c> the
     /// core expects back — the C equivalent of a Java listener throwing. <b>Ownership
     /// transfers to the core: the handle must not be destroyed here</b>
-    /// (<c>confluent_kafka.h:200-207</c>).
+    /// (header, <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>).
     /// </summary>
     /// <remarks>
     /// Itself no-throw, because it runs from the <c>catch</c> of a no-throw boundary: if
@@ -703,8 +706,9 @@ internal static class ConsumerCallbacks
     // ---- Offset-commit callback registration (ffi §B6) — M9/P7 ----
     //
     // The THIRD callback family: a ONE-SHOT completion (it fires "exactly once per successful
-    // call", confluent_kafka.h:2466-2467) whose GCHandle is freed by a RELEASE HOOK, not by
-    // the callback. It is neither of the two families above, and copying either one is wrong:
+    // call", header, kafka_consumer_Consumer_commit_async_with_callback) whose GCHandle is freed by
+    // a RELEASE HOOK, not by the callback. It is neither of the two families above, and copying
+    // either one is wrong:
     //
     //   * the ~8 one-shot completions free the per-op GCHandle in the trampoline's `finally`.
     //     Doing that here LEAKS, because this callback is NOT invoked when the call fails:
@@ -719,9 +723,9 @@ internal static class ConsumerCallbacks
     // Arc, which is disproved) live on CommitCallbackRegistration.
     //
     // The header also pins the ORDERING that rules the trampoline out on the SUCCESS path,
-    // not just the failure one (confluent_kafka.h:524-528): the hook fires "after the commit
-    // completed and the callback returned". So a trampoline-side free would release a GCHandle
-    // the core is still about to hand to the hook.
+    // not just the failure one (header, kafka_consumer_Consumer_commit_async_user_data_destroy_t):
+    // the hook fires "after the commit completed and the callback returned". So a trampoline-side
+    // free would release a GCHandle the core is still about to hand to the hook.
     //
     // Two further differences from the completion trampolines, both forced by the ABI:
     //   * there is NO TaskCompletionSource and NO Task — this is fire-and-forget, so a managed
@@ -738,7 +742,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_commit_async_callback_t</c>:
     /// <c>void (*)(kafka_consumer_OffsetMap_t* offsets, kafka_common_Error_t* error,
-    /// void* user_data)</c> (<c>confluent_kafka.h:264</c>). It shares the
+    /// void* user_data)</c> (header). It shares the
     /// <c>(handle*, error*, ud)</c> layout of <see cref="OffsetMapCallback"/> but is a
     /// distinct ABI typedef with a completely different contract — <c>offsets</c> is
     /// <b>always non-null</b> (it is the map the commit applied to, not a query result), the
@@ -755,7 +759,9 @@ internal static class ConsumerCallbacks
     /// <c>kafka_consumer_Consumer_commit_async_user_data_destroy_t</c>:
     /// <c>void (*)(void* user_data)</c> — the release hook, fired <b>exactly once</b> after
     /// the registration is dropped, on <b>any</b> thread, and fired <b>even when the
-    /// submitting call returns an error</b> (<c>confluent_kafka.h:515-537</c>).
+    /// submitting call returns an error</b> (header,
+    /// <c>kafka_consumer_Consumer_commit_async_user_data_destroy_t</c> and
+    /// <c>kafka_consumer_Consumer_commit_async_with_callback</c>).
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void CommitUserDataDestroyCallback(IntPtr userData);
@@ -785,7 +791,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The commit-completion trampoline. Runs on the core's callback-dispatcher thread — or
     /// <b>inline on the caller's thread</b> during the commit call when the consumer is a
-    /// <c>MockConsumer</c> (<c>confluent_kafka.h:2482-2485</c>).
+    /// <c>MockConsumer</c> (header, <c>kafka_consumer_Consumer_commit_async_with_callback</c>).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -801,9 +807,9 @@ internal static class ConsumerCallbacks
     /// </para>
     /// <para>
     /// <b>Both delivered handles are owned by the callback</b>
-    /// (<c>confluent_kafka.h:243-248</c>). The <c>Error_t</c> is consumed by
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, which frees it exactly once in its own
-    /// <c>finally</c> and returns <see langword="null"/> on success — so it is called
+    /// (header, <c>kafka_consumer_Consumer_commit_async_callback_t</c>). The <c>Error_t</c> is
+    /// consumed by <see cref="KafkaException.FromHandle(IntPtr)"/>, which frees it exactly once in
+    /// its own <c>finally</c> and returns <see langword="null"/> on success — so it is called
     /// <b>first</b>, before anything that can fail. The <c>OffsetMap_t</c> is then handed to
     /// <see cref="OffsetMapMarshal.CopyOutAndDestroy"/>, which copies out and destroys the root
     /// in its own <c>finally</c> — leaving nothing native-backed in the snapshot handed to the
@@ -833,9 +839,10 @@ internal static class ConsumerCallbacks
             KafkaException? exception = KafkaException.FromHandle(error);
 
             // The map is always non-null here and is a Category-3 handle the callback OWNS
-            // (confluent_kafka.h:243-248): copy every key/value out on THIS thread, then
-            // destroy the root — both done by the helper, which is the OffsetMap twin of the
-            // TopicPartitionListMarshal.CopyOutAndDestroy the listener trampolines use.
+            // (header, kafka_consumer_Consumer_commit_async_callback_t): copy every key/value out
+            // on THIS thread, then destroy the root — both done by the helper, which is the
+            // OffsetMap twin of the TopicPartitionListMarshal.CopyOutAndDestroy the listener
+            // trampolines use.
             unhandedMap = IntPtr.Zero;
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> delivered =
                 OffsetMapMarshal.CopyOutAndDestroy(offsets);

@@ -37,11 +37,11 @@ namespace Confluent.Kafka.Internal;
 /// </para>
 /// <para>
 /// <b>The single sanctioned free site is the ABI's <c>user_data_destroy</c> hook</b>
-/// (P6-D3 option (a), <c>confluent_kafka.h:553-605</c>). The core fires that hook
-/// <b>exactly once</b>, on every one of its five release triggers — including the two the
-/// binding could never infer from a return code (a subscribe rejected <em>before</em>
-/// registration versus one rejected <em>after</em> it, and an empty-topic-list subscribe
-/// that returns <b>success</b> while releasing the listener). Letting the core say when a
+/// (P6-D3 option (a), header, <c>kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t</c>).
+/// The core fires that hook <b>exactly once</b>, on every one of its five release triggers —
+/// including the two the binding could never infer from a return code (a subscribe rejected
+/// <em>before</em> registration versus one rejected <em>after</em> it, and an empty-topic-list
+/// subscribe that returns <b>success</b> while releasing the listener). Letting the core say when a
 /// registration is dead is the whole reason the hook exists; the alternative (retain every
 /// superseded registration until consumer teardown) trades a bounded, core-driven free for
 /// a managed guess the header explicitly warns against.
@@ -126,10 +126,10 @@ internal sealed class ListenerRegistration
     private GCHandle _gcHandle;
 
     // 0 = rooted, 1 = released. Interlocked because the release hook "may run on any
-    // thread" (confluent_kafka.h:557) — including the thread calling a replacing
-    // Subscribe, and the finalizer thread when SafeConsumerHandle.ReleaseHandle runs
-    // without an explicit Dispose. A second GCHandle.Free() is a hard failure, so the
-    // exchange is what makes the single free site idempotent-safe.
+    // thread" (header, kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t) — including
+    // the thread calling a replacing Subscribe, and the finalizer thread when
+    // SafeConsumerHandle.ReleaseHandle runs without an explicit Dispose. A second GCHandle.Free()
+    // is a hard failure, so the exchange is what makes the single free site idempotent-safe.
     private int _released;
 
     internal ListenerRegistration(IConsumerRebalanceListener listener)

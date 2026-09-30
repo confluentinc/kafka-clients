@@ -28,11 +28,11 @@ namespace Confluent.Kafka;
 /// <b>The methods are synchronous, not <see cref="System.Threading.Tasks.Task"/>-returning
 /// (declared divergence D1).</b> The ABI callback is a synchronous C function pointer
 /// returning <c>kafka_common_Error_t*</c>, and the rebalance blocks until it returns
-/// (<c>confluent_kafka.h:209-213</c>). <c>bindings/dotnet/CLAUDE.md</c> §3's "(async)" row
-/// describes the <em>Rust core's</em> trait, which the C ABI flattens
-/// (<c>bindings/CLAUDE.md</c> §1.2); restoring "blocks until it returns" faithfully in C#
-/// means a sync method. Settled as roadmap Q6. An async listener would have to be blocked
-/// on from the dispatcher thread, which is the documented deadlock source both Python
+/// (header, <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>).
+/// <c>bindings/dotnet/CLAUDE.md</c> §3's "(async)" row describes the <em>Rust core's</em> trait,
+/// which the C ABI flattens (<c>bindings/CLAUDE.md</c> §1.2); restoring "blocks until it returns"
+/// faithfully in C# means a sync method. Settled as roadmap Q6. An async listener would have to be
+/// blocked on from the dispatcher thread, which is the documented deadlock source both Python
 /// reference servers avoid by using plain sync methods.
 /// </para>
 /// <para>

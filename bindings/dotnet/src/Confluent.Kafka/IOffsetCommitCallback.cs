@@ -26,9 +26,9 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>The method is synchronous, not <see cref="System.Threading.Tasks.Task"/>-returning
 /// (declared divergence D4 / the §4 commit-callback divergence).</b> The ABI callback typedef
-/// returns <c>void</c> (<c>confluent_kafka.h:264</c>), so there is no completion for the core
-/// to await; restoring Java's <c>void onComplete(Map, Exception)</c> faithfully in C# means a
-/// sync method. This is the same divergence, for the same reason, as
+/// returns <c>void</c> (header, <c>kafka_consumer_Consumer_commit_async_callback_t</c>), so there
+/// is no completion for the core to await; restoring Java's <c>void onComplete(Map, Exception)</c>
+/// faithfully in C# means a sync method. This is the same divergence, for the same reason, as
 /// <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// <para>
@@ -43,7 +43,8 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Do not block on consumer progress from inside it.</b> A callback that waits for another
 /// thread's <c>Poll</c> to return deadlocks the single dispatcher queue that must also deliver
-/// every other callback of this consumer (<c>confluent_kafka.h:2478-2481</c>).
+/// every other callback of this consumer (header,
+/// <c>kafka_consumer_Consumer_commit_async_with_callback</c>).
 /// </para>
 /// <para>
 /// <b>It must not call back into its own consumer.</b> The plain consumer API is rejected with

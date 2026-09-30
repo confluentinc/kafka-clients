@@ -416,7 +416,8 @@ public sealed class AdminP8ResultMarshalTests : IDisposable
 
     /// <summary>
     /// ⚠⚠ A broker whose count is <c>0</c> yields no listings — the failed-broker shape
-    /// (<c>h:10225-10228</c>) — rather than being driven by the outer count.
+    /// (header, <c>kafka_admin_ListTransactionsResult_get_listing_count</c>) — rather than being
+    /// driven by the outer count.
     /// </summary>
     [Fact]
     public void TransactionListings_ZeroListingCount_YieldsNoListings() =>

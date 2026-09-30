@@ -28,10 +28,10 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>This is a ONE-SHOT completion with a MULTI-SHOT free site — a third family, not either
 /// of the two already in the binding.</b> The callback fires <em>exactly once per successful
-/// call</em> (<c>confluent_kafka.h:2466-2467</c>), so it belongs to the one-shot family with
-/// <see cref="OperationCompletionSource"/> and the seven other async ops. But the one-shot
-/// rule's <em>free site</em> — "the callback frees the <see cref="GCHandle"/>" — is
-/// <b>wrong here</b>, and using it would leak. See below; ffi-marshalling.md §B6 now carries
+/// call</em> (header, <c>kafka_consumer_Consumer_commit_async_with_callback</c>), so it belongs to
+/// the one-shot family with <see cref="OperationCompletionSource"/> and the seven other async ops.
+/// But the one-shot rule's <em>free site</em> — "the callback frees the <see cref="GCHandle"/>" —
+/// is <b>wrong here</b>, and using it would leak. See below; ffi-marshalling.md §B6 now carries
 /// this as its own Rule.
 /// </para>
 /// <para>
@@ -86,10 +86,10 @@ internal sealed class CommitCallbackRegistration
     private GCHandle _gcHandle;
 
     // 0 = rooted, 1 = released. Interlocked because the release hook "may run on any thread"
-    // (confluent_kafka.h:521-537) — the app thread making the call when the marshal fails, a
-    // consumer worker, or the dispatcher thread. A second GCHandle.Free() is a hard failure,
-    // so the exchange is what makes the single free site idempotent-safe alongside the
-    // "native never ran" abandon path.
+    // (header, kafka_consumer_Consumer_commit_async_user_data_destroy_t) — the app thread making
+    // the call when the marshal fails, a consumer worker, or the dispatcher thread. A second
+    // GCHandle.Free() is a hard failure, so the exchange is what makes the single free site
+    // idempotent-safe alongside the "native never ran" abandon path.
     private int _released;
 
     private CommitCallbackRegistration(IOffsetCommitCallback callback)

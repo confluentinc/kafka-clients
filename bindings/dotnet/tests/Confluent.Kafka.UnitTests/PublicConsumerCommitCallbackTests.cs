@@ -33,8 +33,8 @@ namespace Confluent.Kafka.UnitTests;
 /// <para>
 /// <b>Mock determinism.</b> On a <c>MockConsumer</c> the core invokes the callback
 /// <b>inline during the commit call</b> with a null error
-/// (<c>confluent_kafka.h:2482-2485</c>), so every assertion below is synchronous — no polling,
-/// no <c>wait_for</c>.
+/// (header, <c>kafka_consumer_Consumer_commit_async_with_callback</c>), so every assertion below is
+/// synchronous — no polling, no <c>wait_for</c>.
 /// </para>
 /// <para>
 /// <b>Reachability limit, stated rather than asserted weakly.</b> Because that mock error is

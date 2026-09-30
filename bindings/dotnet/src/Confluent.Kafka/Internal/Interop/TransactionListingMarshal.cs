@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// ⚠⚠ <b>The inner walk is bounded by <c>get_listing_count(i)</c>, never by the outer
 /// <c>count</c>.</b> The outer count is the number of <em>brokers</em>; the inner is that one
 /// broker's listings, and is <c>0</c> for a broker whose listing failed
-/// (<c>confluent_kafka.h:10225-10228</c>).
+/// (header, <c>kafka_admin_ListTransactionsResult_get_listing_count</c>).
 /// </para>
 /// <para>
 /// ⚠ The state crosses as Java's <c>toString()</c> spelling and is decoded by

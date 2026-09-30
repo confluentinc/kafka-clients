@@ -100,8 +100,8 @@ public sealed class PublicAdminDescribeAclsTests
 
     /// <summary>
     /// A wildcard filter — nulls and ANY everywhere — is accepted rather than screened out:
-    /// the ABI rejects no combination (<c>confluent_kafka.h:8052-8063</c>), as Java's filter
-    /// constructors do not.
+    /// the ABI rejects no combination (header, <c>kafka_admin_AdminClient_describe_acls</c>), as
+    /// Java's filter constructors do not.
     /// </summary>
     [Fact]
     public async Task WildcardFilter_IsAccepted_NotRejected()

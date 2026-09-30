@@ -680,7 +680,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// Four of the seven arrays are arrays-of-arrays: row <c>i</c>'s entity is
     /// <c>entityCounts[i]</c> <c>(type, name)</c> pairs and its ops are <c>opCounts[i]</c>
     /// triples, with the two lengths independent of each other
-    /// (<c>confluent_kafka.h:8321-8332</c>).
+    /// (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
     /// </para>
     /// <para>
     /// ⚠ <paramref name="opHasValues"/> is a <c>bool**</c> whose inner buffers are pinned
@@ -3614,7 +3614,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// No ANY/NULL screening happens here, and unlike <c>createAcls</c> none is warranted:
     /// the ABI rejects no enum combination and reads a NULL name as "match any"
-    /// (<c>confluent_kafka.h:8121-8125</c>), exactly as Java's filter constructors do.
+    /// (header, <c>kafka_admin_AdminClient_delete_acls</c>), exactly as Java's filter constructors
+    /// do.
     /// </para>
     /// <para>
     /// ⚠ The ABI keys each callback by the filter as Java's <c>fromCode</c> reads it, so an
@@ -3713,12 +3714,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// <para>
     /// ⚠ The filter's seven fields cross as <b>scalars</b>, not arrays — Java takes one
-    /// filter, not a collection (<c>confluent_kafka.h:8040-8041</c>).
+    /// filter, not a collection (header, <c>kafka_admin_AdminClient_describe_acls</c>).
     /// </para>
     /// <para>
     /// No ANY/NULL screening happens here, as on <c>deleteAcls</c>: a NULL string means
     /// "match any", distinct from a pointer to <c>""</c>, and no enum combination is
-    /// rejected (<c>confluent_kafka.h:8052-8063</c>).
+    /// rejected (header, <c>kafka_admin_AdminClient_describe_acls</c>).
     /// </para>
     /// </remarks>
     internal DescribeAclsResult DescribeAcls(
@@ -3800,7 +3801,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ The component's match type is the ABI's own discriminant — 0 EXACT, 1 DEFAULT,
     /// 2 SPECIFIED — and DEFAULT and SPECIFIED both carry no name, so a <c>string?</c> model
-    /// would collapse them (<c>confluent_kafka.h:8204-8216</c>, PLAN D37).
+    /// would collapse them (header,
+    /// <c>kafka_admin_AdminClient_describe_client_quotas</c>, PLAN D37).
     /// </para>
     /// <para>
     /// ⚠ An empty component list with <c>Strict</c> false is Java's
@@ -4037,17 +4039,19 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     /// <remarks>
     /// ⚠ A <see langword="null"/> or empty <paramref name="users"/> describes <b>every</b> user
-    /// (<c>confluent_kafka.h:8784-8785</c>), which is why this cannot use a per-key bridge: the
-    /// keys are discovered from the response. That matches Java, whose stored field is one
-    /// future over raw response data — see <see cref="DescribeUserScramCredentialsViews"/>.
+    /// (header, <c>kafka_admin_AdminClient_describe_user_scram_credentials</c>), which is why this
+    /// cannot use a per-key bridge: the keys are discovered from the response. That matches Java,
+    /// whose stored field is one future over raw response data — see
+    /// <see cref="DescribeUserScramCredentialsViews"/>.
     /// <para>
     /// ⚠ <b>A repeated user is passed through verbatim, in request order</b> — not
     /// de-duplicated (M15/P13.2 G4-2). Java copies the list as given into the request
     /// (<c>KafkaAdminClient.java:4354-4363</c>), and so does Python
     /// (<c>admin.py:3396-3397</c>); the ABI reads the <c>count</c> names as given — its
     /// only precondition is that <c>users</c> "must be null or have <c>count</c> entries,
-    /// each NULL or a valid C string" (<c>confluent_kafka.h:9833-9834</c>). The broker
-    /// answers a repeat itself, with one <c>DUPLICATE_RESOURCE</c> row for that user
+    /// each NULL or a valid C string" (header,
+    /// <c>kafka_admin_AdminClient_describe_user_scram_credentials_async</c>). The broker answers a
+    /// repeat itself, with one <c>DUPLICATE_RESOURCE</c> row for that user
     /// (<c>ScramImage.java:126-128</c>), so the response still has one row per distinct user
     /// and the views' keys stay unique. The null-element rejection is unchanged by this: it
     /// is stricter than Java, which skips a null user (<c>:4358</c>), and is a separate
@@ -4134,8 +4138,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// ⚠ <b>A repeated user is passed through, not rejected</b> — two rows naming the same user
     /// (a <c>SCRAM_SHA_256</c> deletion plus a <c>SCRAM_SHA_512</c> upsertion, say) both reach
     /// the broker, and Java keys one future per user so they collapse to one outcome row
-    /// (<c>confluent_kafka.h:8875-8886</c>). Hence <b>every</b> alteration is marshalled while
-    /// the bridge's key set is de-duplicated.
+    /// (header, <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>). Hence <b>every</b>
+    /// alteration is marshalled while the bridge's key set is de-duplicated.
     /// <see cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions?)"/>
     /// has had the same shape since PR #201 round 70 (M15/P13.3 F7); it used to reject a
     /// repeated entity instead.
@@ -5196,9 +5200,9 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// <para>
     /// ⚠ <b>The ABI fires the completion callback synchronously on this thread for a rejected
-    /// input</b> (a NULL topic, or an epoch outside 16 bits — <c>h:10474-10486</c>), so the
-    /// <c>GCHandle</c> and the operation are published before the P/Invoke, exactly as for
-    /// every other admin submit.
+    /// input</b> (a NULL topic, or an epoch outside 16 bits — header,
+    /// <c>kafka_admin_AdminClient_abort_transaction_async</c>), so the <c>GCHandle</c> and the
+    /// operation are published before the P/Invoke, exactly as for every other admin submit.
     /// </para>
     /// <para>
     /// Of those two ABI rejections only the NULL topic is reachable from C#, and it is
@@ -5280,7 +5284,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     /// <remarks>
     /// ⚠ A NULL transactional id fires the callback synchronously on this thread
-    /// (<c>h:10535-10546</c>); it is rejected here first, before any pin.
+    /// (header, <c>kafka_admin_AdminClient_force_terminate_transaction_async</c>); it is rejected
+    /// here first, before any pin.
     /// </remarks>
     internal TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId,

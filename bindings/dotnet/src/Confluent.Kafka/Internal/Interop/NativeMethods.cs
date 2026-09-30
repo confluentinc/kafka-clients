@@ -146,8 +146,9 @@ internal static partial class NativeMethods
     /// <para>
     /// <b>Ownership.</b> The returned handle is owned by the caller — but a handle
     /// <em>returned to a listener callback</em> transfers to the core, so the trampoline
-    /// must <b>not</b> destroy it (<c>confluent_kafka.h:200-207</c>). This is the one
-    /// declaration here whose result is deliberately never passed to
+    /// must <b>not</b> destroy it (header,
+    /// <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>). This is
+    /// the one declaration here whose result is deliberately never passed to
     /// <see cref="ErrorDestroy"/>.
     /// </para>
     /// </summary>
@@ -923,8 +924,8 @@ internal static partial class NativeMethods
     /// a <c>TopicPartitionList_t</c>. Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success), including <c>illegal_state</c> for a real consumer.
     /// <para>
-    /// Semantics the core pins (<c>confluent_kafka.h:1228-1250</c>): it requires a
-    /// <b>topic subscription</b> (a manually assigned consumer fails with "manual assignment
+    /// Semantics the core pins (header, <c>kafka_consumer_MockConsumer_rebalance</c>): it requires
+    /// a <b>topic subscription</b> (a manually assigned consumer fails with "manual assignment
     /// in use"); it fires <c>on_partitions_revoked</c> only when something is removed, and
     /// <c>on_partitions_assigned</c> unconditionally with the <em>added</em> list (possibly
     /// empty) while a listener is registered; it <b>never</b> fires
@@ -977,8 +978,9 @@ internal static partial class NativeMethods
     /// hook). Null-safe.
     /// <para>
     /// <b>A listener handed to either subscribe has already been consumed — destroying it
-    /// afterwards is a double free</b> (<c>confluent_kafka.h:2081-2094</c>), and consumption
-    /// is <b>unconditional, including on the error path</b>. The only sanctioned call site is
+    /// afterwards is a double free</b> (header,
+    /// <c>kafka_consumer_ConsumerRebalanceListener_destroy</c>), and consumption is
+    /// <b>unconditional, including on the error path</b>. The only sanctioned call site is
     /// therefore the narrow "the subscribe P/Invoke itself threw, so native never ran" catch.
     /// </para>
     /// </summary>

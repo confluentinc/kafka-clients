@@ -31,10 +31,10 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </para>
 /// <para>
 /// ⚠⚠ <b>The MAC is length-delimited, not NUL-terminated</b>
-/// (<c>confluent_kafka.h:8740-8746</c>) — the only such slice on the admin surface. It is read
-/// through <c>out_len</c>; a NUL-scan would truncate at the first interior zero byte, which a
-/// uniformly random 32-byte MAC contains roughly one time in eight, and the truncated MAC then
-/// round-trips into a broker-side rejection rather than a local failure (ffi §B3).
+/// (header, <c>kafka_common_DelegationToken_hmac</c>) — the only such slice on the admin surface.
+/// It is read through <c>out_len</c>; a NUL-scan would truncate at the first interior zero byte,
+/// which a uniformly random 32-byte MAC contains roughly one time in eight, and the truncated MAC
+/// then round-trips into a broker-side rejection rather than a local failure (ffi §B3).
 /// </para>
 /// </remarks>
 internal static class DelegationTokenMarshal

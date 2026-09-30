@@ -157,8 +157,9 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     /// <summary>
-    /// ⚠ Duplicate users are <b>passed through</b> as rows (<c>h:8875-8886</c>) while the
-    /// awaitable key set collapses — Java keys one future per user.
+    /// ⚠ Duplicate users are <b>passed through</b> as rows (header,
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>) while the awaitable key set
+    /// collapses — Java keys one future per user.
     /// </summary>
     [Fact]
     public void DuplicateUsers_SendTwoRows_ButOneAwaitable()
@@ -387,7 +388,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     /// <summary>
     /// A null or empty user list sends <c>count == 0</c>, which the ABI reads as "describe
-    /// every user" (<c>h:8784-8785</c>); a populated one sends the names in order.
+    /// every user" (header, <c>kafka_admin_AdminClient_describe_user_scram_credentials</c>); a
+    /// populated one sends the names in order.
     /// </summary>
     [Fact]
     public void DescribeUsers_NullAndEmpty_BothRequestEveryUser()
@@ -511,7 +513,8 @@ public sealed class AdminP7SubmitArgumentTests
     /// <summary>
     /// Releases an <c>alterUserScramCredentials</c> operation by firing the production
     /// trampoline once per <b>distinct</b> user the submit carried — the ABI's own key
-    /// count, which deliberately differs from the row count (<c>h:8875-8886</c>).
+    /// count, which deliberately differs from the row count (header,
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_async</c>).
     /// </summary>
     private static void CompleteDistinctUsers(Captured captured)
     {

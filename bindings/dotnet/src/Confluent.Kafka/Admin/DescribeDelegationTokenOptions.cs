@@ -37,7 +37,7 @@ public sealed class DescribeDelegationTokenOptions
     /// it really is null when unset — unlike
     /// <see cref="CreateDelegationTokenOptions.Renewers"/>, which defaults to empty. The ABI
     /// carries the distinction in <c>has_owners_filter</c>
-    /// (<c>confluent_kafka.h:9177-9181</c>), never in the count.
+    /// (header, <c>kafka_admin_AdminClient_describe_delegation_token</c>), never in the count.
     /// </para>
     /// </summary>
     public IReadOnlyList<KafkaPrincipal>? Owners { get; set; }

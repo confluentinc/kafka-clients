@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>get_entry_name</c> returns null both out of range and when the entry names the
 /// built-in default entity; inside <c>0..entry_count-1</c> a null therefore means "default
 /// entity" — Java's null map value — never a skipped entry and never <c>""</c>
-/// (<c>confluent_kafka.h:7622-7628</c>).
+/// (header, <c>kafka_common_ClientQuotaEntity_get_entry_name</c>).
 /// </para>
 /// <para>
 /// The string pins are <b>call-scoped</b> (ffi §A4): the ABI copies the filter out during
@@ -67,7 +67,8 @@ internal static class ClientQuotaMarshal
     /// <param name="filter">The filter to submit; its components keep request order.</param>
     /// <exception cref="ArgumentException">
     /// An <see cref="ClientQuotaMatchType.Exact"/> component carries no match name — the ABI
-    /// rejects it (<c>confluent_kafka.h:8213-8214</c>), so it is caught before any pin.
+    /// rejects it (header, <c>kafka_admin_AdminClient_describe_client_quotas</c>), so it is caught
+    /// before any pin.
     /// </exception>
     internal static FilterRows Pin(ClientQuotaFilter filter)
     {
@@ -179,7 +180,8 @@ internal static class ClientQuotaMarshal
                     "The admin result produced no entity type for a client-quota entity entry.");
 
             // ⚠ Inside the count a null name is Java's null map value — the built-in default
-            // entity for the type — never a skip and never "" (h:7622-7628).
+            // entity for the type — never a skip and never "" (header,
+            // kafka_common_ClientQuotaEntity_get_entry_name).
             entries.Add(type, Utf8Marshal.PtrToString(accessors.GetEntryName(entity, index)));
         }
 
@@ -214,7 +216,8 @@ internal static class ClientQuotaMarshal
                         "The admin result produced no quota key for an index within its own count.");
 
                 // ⚠ Presence is the RETURN VALUE — 0 and every negative are legal values, so
-                // no sentinel could carry the distinction (h:7868-7876).
+                // no sentinel could carry the distinction (header,
+                // kafka_admin_DescribeClientQuotasResult_get_quota_value).
                 if (!getQuotaValue(result, index, quotaIndex, out double value))
                 {
                     throw new KafkaException(
@@ -390,7 +393,8 @@ internal static class ClientQuotaMarshal
                 types[entry] = AclRowMarshal.PinName(pair.Key, _pinned);
 
                 // ⚠ A null name is Java's null map value — the built-in DEFAULT entity for the
-                // type — which is neither omitting the type nor the name "" (h:8287-8290).
+                // type — which is neither omitting the type nor the name "" (header,
+                // kafka_admin_AdminClient_alter_client_quotas).
                 names[entry] = AclRowMarshal.PinName(pair.Value, _pinned);
                 entry++;
             }
@@ -421,7 +425,8 @@ internal static class ClientQuotaMarshal
                 // ⚠⚠ THE WRITE PATH'S SILENT-CORRUPTION POINT. A cleared flag is Java's
                 // Op(key, null) — REMOVE this quota — while a set flag with value 0 SETS it to
                 // 0. Every double, 0 included, is a legal quota value, so no sentinel could
-                // carry the distinction (h:8291-8295): the flag is the only channel.
+                // carry the distinction (header, kafka_admin_AdminClient_alter_client_quotas): the
+                // flag is the only channel.
                 hasValues[op] = alterationOp.Value.HasValue ? (byte)1 : (byte)0;
                 values[op] = alterationOp.Value ?? 0d;
                 op++;

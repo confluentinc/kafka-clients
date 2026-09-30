@@ -36,9 +36,10 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>Task</c> — it is read by <see cref="KeyedResultMarshal"/>, not here. The inner
 /// <c>get_result_error(i, j)</c> is Java's <c>FilterResult.error()</c> and is a stored
 /// <b>value</b> inside a successfully completed <c>FilterResults</c>
-/// (<c>confluent_kafka.h:8762-8765</c>, <c>:8811-8814</c>). Both are <c>const</c>, so both
-/// are read with <see cref="KafkaException.FromBorrowedHandle"/> and neither is destroyed:
-/// const-ness answers ownership, and the Java return type answers fault-versus-value.
+/// (header, <c>kafka_admin_DeleteAclsResult_get_error</c>,
+/// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). Both are <c>const</c>, so both are read
+/// with <see cref="KafkaException.FromBorrowedHandle"/> and neither is destroyed: const-ness
+/// answers ownership, and the Java return type answers fault-versus-value.
 /// </para>
 /// </remarks>
 internal static class DeleteAclsResultMarshal

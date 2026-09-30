@@ -37,13 +37,14 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </para>
 /// <para>
 /// <b>Why some tests invoke a trampoline directly.</b> On a <c>MockConsumer</c> the core always
-/// delivers a <b>null</b> error (<c>confluent_kafka.h:2482-2485</c>), so a broker-originated
-/// commit failure has no broker-free vehicle. The only way to exercise the delivered-error
-/// channel and the no-throw boundary is to call the trampoline the way the core would, with a
-/// genuine owned <c>OffsetMap_t</c> (obtained from <c>Consumer_committed</c>) and a genuine
-/// owned <c>Error_t</c> (from <c>Error_new</c>) — so the callback-owns-both-handles
-/// contract is exercised for real rather than simulated. P6's listener bridge tests do the
-/// same, as does the Rust side in its own <c>#[cfg(test)]</c> coverage.
+/// delivers a <b>null</b> error (header,
+/// <c>kafka_consumer_Consumer_commit_async_with_callback</c>), so a broker-originated commit
+/// failure has no broker-free vehicle. The only way to exercise the delivered-error channel and the
+/// no-throw boundary is to call the trampoline the way the core would, with a genuine owned
+/// <c>OffsetMap_t</c> (obtained from <c>Consumer_committed</c>) and a genuine owned <c>Error_t</c>
+/// (from <c>Error_new</c>) — so the callback-owns-both-handles contract is exercised for real
+/// rather than simulated. P6's listener bridge tests do the same, as does the Rust side in its own
+/// <c>#[cfg(test)]</c> coverage.
 /// </para>
 /// <para>
 /// <b>What this suite provably catches, and what it cannot (measured, not asserted).</b> Each
@@ -176,7 +177,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         //
         // On a mock the callback runs INLINE during the call and the registration is dropped
         // before it returns, so this is fully deterministic: no polling, no wait
-        // (confluent_kafka.h:2482-2485).
+        // (header, kafka_consumer_Consumer_commit_async_with_callback).
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         RecordingCommitCallback callback = new RecordingCommitCallback();
         CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);

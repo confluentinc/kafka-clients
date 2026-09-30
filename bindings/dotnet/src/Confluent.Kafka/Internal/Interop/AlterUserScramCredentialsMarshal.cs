@@ -30,9 +30,9 @@ namespace Confluent.Kafka.Internal.Interop;
 /// ⚠⚠ <b><c>has_salts[i]</c> is set from <c>Salt is not null</c>, at this one site</b>, so the
 /// discriminant cannot diverge between construction and marshalling. A cleared flag asks the
 /// core to <em>generate</em> a salt; a set flag uses the supplied bytes verbatim, including a
-/// zero-length salt (<c>confluent_kafka.h:8864-8872</c>). Deriving the flag from the salt's
-/// <em>length</em> would silently upgrade an explicit empty salt into a generated one, and the
-/// inverse would store a credential with no salt at all.
+/// zero-length salt (header, <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>). Deriving
+/// the flag from the salt's <em>length</em> would silently upgrade an explicit empty salt into a
+/// generated one, and the inverse would store a credential with no salt at all.
 /// </para>
 /// <para>
 /// ⚠ <b>Secret material.</b> <c>passwords[i]</c> carries a raw SCRAM password. Nothing here
@@ -40,7 +40,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// message this file or its callers produce.
 /// </para>
 /// <para>
-/// ⚠ <b>An empty password is deliberately NOT rejected</b> (<c>h:8858-8863</c>): Java records
+/// ⚠ <b>An empty password is deliberately NOT rejected</b> (header,
+/// <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>): Java records
 /// <c>UnacceptableCredentialException</c> against that user and still sends every other user's
 /// alteration, so the failure arrives per-user through <c>get_error</c>. A managed
 /// precondition would convert a per-key failure into a whole-call throw and drop the other

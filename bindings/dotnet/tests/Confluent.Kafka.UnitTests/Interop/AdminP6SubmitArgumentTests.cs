@@ -42,7 +42,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <c>""</c>.</b> On a filter row a null name means "match any resource name" and must
 /// travel as <see cref="IntPtr.Zero"/>; <c>""</c> is a filter on the literal empty name and
 /// must travel as a <b>non-null</b> pointer to a NUL byte
-/// (<c>confluent_kafka.h:7528-7530</c>). A helper mapping both to
+/// (header, <c>kafka_common_AclBindingFilter_resource_name</c>). A helper mapping both to
 /// <see cref="IntPtr.Zero"/> turns a filter on <c>""</c> into match-everything, which on
 /// <c>delete_acls</c> deletes ACLs the caller never named. It is asserted here, on the
 /// <b>pointer</b>, where it is a fact rather than an inference — twice: once on the projector
@@ -56,10 +56,11 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <para>
 /// ⚠⚠ <b>The quota family carries the same class of defect on two more axes.</b> An entity
 /// name of <see langword="null"/> is the built-in <em>default</em> entity rather than the name
-/// <c>""</c> (<c>confluent_kafka.h:8287-8290</c>), and a cleared
+/// <c>""</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>), and a cleared
 /// <c>op_has_values[i][j]</c> is Java's <c>Op(key, null)</c> — <em>remove</em> the quota
-/// rather than set it to <c>0</c> (<c>h:8291-8295</c>). Both are asserted on the submitted
-/// bytes for the same reason the ACL rule is: neither is visible end to end.
+/// rather than set it to <c>0</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
+/// Both are asserted on the submitted bytes for the same reason the ACL rule is: neither is visible
+/// end to end.
 /// </para>
 /// <para>
 /// ⚠ <b>Everything is decoded inside the submit, never after it.</b> Production unpins every
@@ -390,7 +391,8 @@ public sealed class AdminP6SubmitArgumentTests
     // delete_acls_async — the same seven arrays, but the NULLABLE half of the rule.
     //
     // ⚠ Byte-identical signature to create_acls_async, opposite contract: here a NULL string
-    // entry means "match any" and no enum combination is rejected (confluent_kafka.h:8121-8125).
+    // entry means "match any" and no enum combination is rejected (header,
+    // kafka_admin_AdminClient_delete_acls).
     // ------------------------------------------------------------------------------------
 
     /// <summary>
@@ -834,8 +836,8 @@ public sealed class AdminP6SubmitArgumentTests
     /// </summary>
     /// <remarks>
     /// Every <c>double</c>, <c>0</c> included, is a legal quota value, so no sentinel could
-    /// carry the distinction (<c>confluent_kafka.h:8291-8295</c>) — a sentinel-based encoding
-    /// silently turns "set this quota to zero" into "delete it".
+    /// carry the distinction (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>) — a
+    /// sentinel-based encoding silently turns "set this quota to zero" into "delete it".
     /// </remarks>
     [Fact]
     public void AlterSubmit_ANullOpValueRemoves_AndZeroSets()
@@ -898,7 +900,7 @@ public sealed class AdminP6SubmitArgumentTests
     /// </summary>
     /// <remarks>
     /// A null name is Java's null map value, which is neither omitting the type nor the name
-    /// <c>""</c> (<c>confluent_kafka.h:8287-8290</c>).
+    /// <c>""</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
     /// </remarks>
     [Fact]
     public void AlterSubmit_TheEntityNameTernary_ProducesThreeDistinctRows()

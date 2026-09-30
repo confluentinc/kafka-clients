@@ -27,14 +27,16 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <para>
 /// ⚠⚠ <b>The inner walk is bounded by <c>get_producer_count(i)</c>, never by the outer
 /// <c>count</c>.</b> The two are unrelated, and the inner count is <c>0</c> for a partition
-/// the call failed to describe (<c>confluent_kafka.h:9828-9831</c>).
+/// the call failed to describe (header,
+/// <c>kafka_admin_DescribeProducersResult_get_producer_count</c>).
 /// </para>
 /// <para>
 /// ⚠ Both optionals spell their discriminant as the <b>return value</b>
-/// (<c>h:9896-9911</c>, <c>:9915-9928</c>) rather than as a sentinel, because every
-/// <c>long</c> is a legal start offset — so the out-param must not be read when the accessor
-/// returns false. The four plain scalars beside them <em>do</em> use <c>-1</c>, as Java's own
-/// <c>RecordBatch.NO_PRODUCER_ID</c> / <c>NO_SEQUENCE</c> / <c>NO_TIMESTAMP</c>; the two
+/// (header, <c>kafka_admin_DescribeProducersResult_get_current_transaction_start_offset</c>,
+/// <c>kafka_admin_DescribeProducersResult_get_coordinator_epoch</c>) rather than as a sentinel,
+/// because every <c>long</c> is a legal start offset — so the out-param must not be read when the
+/// accessor returns false. The four plain scalars beside them <em>do</em> use <c>-1</c>, as Java's
+/// own <c>RecordBatch.NO_PRODUCER_ID</c> / <c>NO_SEQUENCE</c> / <c>NO_TIMESTAMP</c>; the two
 /// encodings must not be conflated.
 /// </para>
 /// <para>

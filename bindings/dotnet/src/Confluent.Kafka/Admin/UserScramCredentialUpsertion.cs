@@ -28,7 +28,8 @@ namespace Confluent.Kafka.Admin;
 /// <c>:54</c>) and the core generates a random salt; a non-null salt — <b>including a
 /// zero-length one</b>, which Java's <c>requireNonNull</c> accepts — is used verbatim. A model
 /// that maps empty to "generate" silently upgrades an explicit empty salt, and the reverse
-/// stores a credential with no salt at all (<c>confluent_kafka.h:8865-8872</c>).
+/// stores a credential with no salt at all (header,
+/// <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>).
 /// </para>
 /// <para>
 /// ⚠ <b>D42 — the binding does not generate a salt.</b> Java's three-argument constructors call

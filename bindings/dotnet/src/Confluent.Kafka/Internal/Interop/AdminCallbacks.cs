@@ -503,7 +503,7 @@ internal static class AdminCallbacks
     /// The C signature for <c>kafka_admin_AdminClient_describe_acls_callback_t</c>.
     /// ⚠ <c>describeAcls</c> has a <b>single</b> future for the whole call, so <em>any</em>
     /// failure arrives as <paramref name="error"/>, <b>owned</b>; the result declares no
-    /// <c>get_error</c> at all (<c>confluent_kafka.h:1085-1092</c>).
+    /// <c>get_error</c> at all (header, <c>kafka_admin_AdminClient_describe_acls_callback_t</c>).
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DescribeAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
@@ -512,7 +512,8 @@ internal static class AdminCallbacks
     /// The C signature for <c>kafka_admin_AdminClient_describe_client_quotas_callback_t</c>.
     /// ⚠ <c>describeClientQuotas</c> has a <b>single</b> future for the whole call, so
     /// <em>any</em> failure arrives as <paramref name="error"/>, <b>owned</b>; the result
-    /// declares no <c>get_error</c> at all (<c>confluent_kafka.h:1110-1117</c>).
+    /// declares no <c>get_error</c> at all (header,
+    /// <c>kafka_admin_AdminClient_describe_client_quotas_callback_t</c>).
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void DescribeClientQuotasCallback(IntPtr result, IntPtr error, IntPtr userData);
@@ -1455,7 +1456,7 @@ internal static class AdminCallbacks
     // ---- M15/P8: producers & transactions ----
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_abort_transaction_callback_t</c> (<c>h:1390</c>). ⚠ There is
+    /// <c>kafka_admin_AdminClient_abort_transaction_callback_t</c> (header). ⚠ There is
     /// <b>no result handle</b> — Java's <c>AbortTransactionResult</c> carries nothing but the
     /// future's success — so the signature is <c>(error, user_data)</c> and
     /// <paramref name="error"/> is <b>owned</b>.
@@ -1464,7 +1465,7 @@ internal static class AdminCallbacks
     internal delegate void AbortTransactionCallback(IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_force_terminate_transaction_callback_t</c> (<c>h:1403</c>).
+    /// <c>kafka_admin_AdminClient_force_terminate_transaction_callback_t</c> (header).
     /// Its own delegate type although the signature matches
     /// <see cref="AbortTransactionCallback"/>, for the reason stated on
     /// <see cref="ListConsumerGroupsCallback"/>.
@@ -1487,8 +1488,10 @@ internal static class AdminCallbacks
     /// <remarks>
     /// ⚠ This can run <b>synchronously on the submitting thread</b> — the ABI unwraps its
     /// marshalling result inside the submit closure, so a rejected input completes inline
-    /// before the entry point returns (<c>h:10474-10486</c>). The context is therefore already
-    /// published by the submitter before the P/Invoke, and the source's
+    /// before the entry point returns (header,
+    /// <c>kafka_admin_AdminClient_abort_transaction_async</c> and
+    /// <c>kafka_admin_AdminClient_force_terminate_transaction_async</c>). The context is therefore
+    /// already published by the submitter before the P/Invoke, and the source's
     /// <c>RunContinuationsAsynchronously</c> keeps the awaiter's continuation off that thread.
     /// </remarks>
     /// <param name="error">The operation's failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
@@ -1622,7 +1625,8 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// ⚠ The inner walk is bounded by <c>get_topic_partition_count(i)</c> — <b>never</b> by the
-    /// outer <c>count</c>, which is <c>0</c> for a failed row (<c>h:10062-10065</c>).
+    /// outer <c>count</c>, which is <c>0</c> for a failed row (header,
+    /// <c>kafka_admin_DescribeTransactionsResult_get_topic_partition_count</c>).
     /// </remarks>
     internal static readonly Func<IntPtr, int, TransactionDescription> DescribeTransactionsValue =
         TransactionDescriptionMarshal.ReadDescription;
@@ -1676,7 +1680,8 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// ⚠ The inner walk is bounded by <c>get_producer_count(i)</c> — <b>never</b> by the outer
-    /// <c>count</c>, which is <c>0</c> for a failed partition (<c>h:9828-9831</c>).
+    /// <c>count</c>, which is <c>0</c> for a failed partition (header,
+    /// <c>kafka_admin_DescribeProducersResult_get_producer_count</c>).
     /// </remarks>
     internal static readonly Func<IntPtr, int, DescribeProducersResult.PartitionProducerState>
         DescribeProducersValue = PartitionProducerStateMarshal.ReadPartitionProducerState;

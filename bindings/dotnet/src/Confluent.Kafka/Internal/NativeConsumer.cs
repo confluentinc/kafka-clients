@@ -162,9 +162,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // (ListenerRegistration). Nothing here clears or replaces the field on a later subscribe:
     // whether a given subscribe actually replaced the previous registration is a rule the
     // header explicitly warns cannot be inferred from a return code
-    // (confluent_kafka.h:2105-2130 — a subscribe rejected AFTER registration keeps the
-    // registration, and an empty-topic-list subscribe releases the listener while returning
-    // SUCCESS). ListenerRegistration.IsReleased, set by the hook, is the authoritative signal.
+    // (header, kafka_consumer_Consumer_subscribe_with_listener — a subscribe rejected AFTER
+    // registration keeps the registration, and an empty-topic-list subscribe releases the listener
+    // while returning SUCCESS). ListenerRegistration.IsReleased, set by the hook, is the
+    // authoritative signal.
     private ListenerRegistration? _listenerRegistration;
 
     // The registration created by the most recent callback-taking CommitAsync (M9/P7). Like
@@ -474,10 +475,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <b>The listener handle is consumed unconditionally</b>, success or failure
-    /// (<c>confluent_kafka.h:2104-2113</c>) — it is never destroyed after the submit. The one
-    /// exception is a submit that <em>threw</em>, where native never ran, so the handle was
-    /// never consumed and must be destroyed (which fires the release hook and frees the
-    /// registration).
+    /// (header, <c>kafka_consumer_Consumer_subscribe_with_listener</c>) — it is never destroyed
+    /// after the submit. The one exception is a submit that <em>threw</em>, where native never ran,
+    /// so the handle was never consumed and must be destroyed (which fires the release hook and
+    /// frees the registration).
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
     /// <exception cref="ArgumentException">A topic name is null.</exception>
@@ -1309,7 +1310,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         // Deliberately NOT released on a non-null error: the transfer is unconditional and the
-        // hook fires anyway (confluent_kafka.h:2488-2494). Releasing here would double-free.
+        // hook fires anyway (header, kafka_consumer_Consumer_commit_async_with_callback). Releasing
+        // here would double-free.
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
         {
@@ -1546,10 +1548,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </para>
     /// <para>
     /// <b>The listener handle is consumed unconditionally</b>, success or failure
-    /// (<c>confluent_kafka.h:2104-2113</c>) — never destroy it after this call returns. The
-    /// narrow exception is the P/Invoke itself throwing (the <see cref="SafeConsumerHandle"/>
-    /// marshaller can throw <see cref="ObjectDisposedException"/> against a concurrent
-    /// teardown), where native never ran and the handle must be destroyed.
+    /// (header, <c>kafka_consumer_Consumer_subscribe_with_listener</c>) — never destroy it after
+    /// this call returns. The narrow exception is the P/Invoke itself throwing (the
+    /// <see cref="SafeConsumerHandle"/> marshaller can throw <see cref="ObjectDisposedException"/>
+    /// against a concurrent teardown), where native never ran and the handle must be destroyed.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>

@@ -27,12 +27,14 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <para>
 /// ⚠⚠ <b>The inner walk is bounded by <c>get_topic_partition_count(i)</c>, never by the
 /// outer <c>count</c>.</b> The two are unrelated, and the inner count is <c>0</c> for a row
-/// the call failed to describe (<c>confluent_kafka.h:10062-10065</c>).
+/// the call failed to describe (header,
+/// <c>kafka_admin_DescribeTransactionsResult_get_topic_partition_count</c>).
 /// </para>
 /// <para>
 /// ⚠ <c>transaction_start_time_ms</c> is Java's <c>OptionalLong</c> and the ABI spells the
-/// discriminant as the <b>return value</b> (<c>h:10046-10060</c>): when it returns false the
-/// out-param is left untouched, so the value must not be read on that branch.
+/// discriminant as the <b>return value</b> (header,
+/// <c>kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms</c>): when it returns
+/// false the out-param is left untouched, so the value must not be read on that branch.
 /// </para>
 /// <para>
 /// The accessor set is a <b>parameter</b> for the <see cref="UserScramCredentialMarshal"/>

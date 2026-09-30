@@ -566,7 +566,8 @@ public sealed class AdminP4ReaderWiringTests
     /// <c>ResourceType</c>/<c>PatternType</c>, or any two of
     /// <c>ResourceName</c>/<c>Principal</c>/<c>Host</c> — moves a symbol to the wrong row
     /// and fails here. The expected symbols are the header's own accessor order
-    /// (<c>confluent_kafka.h:7525/7537/7550/7561/7572/7584/7596</c>).
+    /// (header, <c>kafka_common_AclBindingFilter_resource_type</c> through
+    /// <c>kafka_common_AclBindingFilter_permission_type</c>).
     /// </remarks>
     [Fact]
     public void NativeFilterAccessors_BindEveryMemberToItsOwnAbiSymbol()
