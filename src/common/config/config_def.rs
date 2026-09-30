@@ -40,6 +40,7 @@ use crate::common::Error;
 /// them). The rest of `ConfigDef` (`define`, most validators, documentation)
 /// has no counterpart: the configs validate in their own constructors, using
 /// the nested [`ValidList`] for their list-typed keys.
+#[doc(alias = "org.apache.kafka.common.config.ConfigDef")]
 pub(crate) struct ConfigDef;
 
 impl ConfigDef {
@@ -104,6 +105,7 @@ impl ConfigDef {
 /// single-message `ConfigException(String)`. So the errors are
 /// [`Error::config_message`], with no `Invalid value ... for configuration`
 /// prefix.
+#[doc(alias = "org.apache.kafka.common.config.ConfigDef$ValidList")]
 pub(crate) struct ValidList {
     is_empty_allowed: bool,
     is_null_allowed: bool,

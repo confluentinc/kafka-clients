@@ -143,7 +143,7 @@ Two hard rules for the Sender task, both extending
   1. No `MutexGuard` on `TransactionManager` may be held across any `.await`.
   2. The network poll MUST NOT be raced in a `tokio::select!`.
 
-**Why:** Rule 1 is CLAUDE.md §9.6.2 — holding a guard across an await deadlocks
+**Why:** Rule 1 is CLAUDE.md §11.6.2 — holding a guard across an await deadlocks
 the runtime. `Sender.java:459-518`
 (`maybeSendAndPollTransactionalRequest`) calls roughly ten
 `TransactionManager` methods interleaved with three `client.poll(...)` calls
@@ -292,7 +292,7 @@ batches from their owner instead.
 **Why:** Storing `ProducerBatch` by value in the entry would require a second
 owner of a non-`Clone` type, which does not compile. The alternative —
 `Arc<Mutex<ProducerBatch>>` throughout the accumulator and Sender — would add a
-per-batch lock acquisition to the drain path, which CLAUDE.md §11 names as a hot
+per-batch lock acquisition to the drain path, which CLAUDE.md §13 names as a hot
 path, and would be a large refactor of the crate's most load-bearing code for no
 behavioral gain.
 
@@ -360,7 +360,7 @@ than a clean local error.
   - `increment_sequence` → reuse
     `crate::common::record::default_record_batch::increment_sequence`.
   - `decrement_sequence` → plain subtraction, and return
-    `Err(KafkaError)` (per CLAUDE.md §10.2, not `panic!`) when negative,
+    `Err(KafkaError)` (per CLAUDE.md §12.2, not `panic!`) when negative,
     preserving Java's message text. A test MUST assert the message.
 
 ## 9. Flat error codes lose Java's exception hierarchy — two relations matter

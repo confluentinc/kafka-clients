@@ -28,6 +28,7 @@ use super::ReplicaInfo;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.LogDirDescription`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription")]
 pub struct LogDirDescription {
     error: Option<Error>,
     replica_infos: HashMap<TopicPartition, ReplicaInfo>,
@@ -41,6 +42,7 @@ impl LogDirDescription {
     ///
     /// Corresponds to the two-argument `LogDirDescription(ApiException, Map)`
     /// constructor.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn new(error: Option<Error>, replica_infos: HashMap<TopicPartition, ReplicaInfo>) -> Self {
         Self::with_total_bytes_usable_bytes_is_cordoned(
             error,
@@ -56,6 +58,7 @@ impl LogDirDescription {
     ///
     /// Corresponds to the four-argument
     /// `LogDirDescription(ApiException, Map, long, long)` constructor.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn with_total_bytes_usable_bytes(
         error: Option<Error>,
         replica_infos: HashMap<TopicPartition, ReplicaInfo>,
@@ -72,6 +75,7 @@ impl LogDirDescription {
     /// Corresponds to the five-argument
     /// `LogDirDescription(ApiException, Map, long, long, boolean)` constructor
     /// (KIP-1066).
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn with_total_bytes_usable_bytes_is_cordoned(
         error: Option<Error>,
         replica_infos: HashMap<TopicPartition, ReplicaInfo>,
@@ -93,29 +97,34 @@ impl LogDirDescription {
     ///
     /// - `KafkaStorageError` — the log directory is offline.
     /// - `UnknownServerError` — the server experienced an unexpected error.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#error")]
     pub fn error(&self) -> Option<&Error> {
         self.error.as_ref()
     }
 
     /// A map from topic partition to replica information for that partition in
     /// this log directory.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#replicaInfos")]
     pub fn replica_infos(&self) -> &HashMap<TopicPartition, ReplicaInfo> {
         &self.replica_infos
     }
 
     /// The total size in bytes of the volume this log directory is on, or `None`
     /// if the broker did not return a value.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#totalBytes")]
     pub fn total_bytes(&self) -> Option<i64> {
         self.total_bytes
     }
 
     /// The usable size in bytes of the volume this log directory is on, or
     /// `None` if the broker did not return a value.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#usableBytes")]
     pub fn usable_bytes(&self) -> Option<i64> {
         self.usable_bytes
     }
 
     /// Whether this log directory is cordoned or not.
+    #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#isCordoned")]
     pub fn is_cordoned(&self) -> bool {
         self.is_cordoned
     }
@@ -134,7 +143,7 @@ impl std::fmt::Display for LogDirDescription {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     #[test]
     fn unknown_volume_bytes_maps_to_none() {

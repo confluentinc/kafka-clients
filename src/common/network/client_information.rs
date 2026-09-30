@@ -22,6 +22,7 @@ use std::fmt;
 ///
 /// Empty names and versions are replaced with [`ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.network.ClientInformation")]
 pub struct ClientInformation {
     software_name: String,
     software_version: String,
@@ -34,6 +35,7 @@ impl ClientInformation {
     /// Creates a new `ClientInformation` with the given software name and version.
     ///
     /// Empty strings are replaced with [`Self::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
+    #[doc(alias = "org.apache.kafka.common.network.ClientInformation#ClientInformation")]
     pub fn new(software_name: &str, software_version: &str) -> Self {
         Self {
             software_name: if software_name.is_empty() {
@@ -58,11 +60,13 @@ impl ClientInformation {
     }
 
     /// Returns the software name.
+    #[doc(alias = "org.apache.kafka.common.network.ClientInformation#softwareName")]
     pub fn software_name(&self) -> &str {
         &self.software_name
     }
 
     /// Returns the software version.
+    #[doc(alias = "org.apache.kafka.common.network.ClientInformation#softwareVersion")]
     pub fn software_version(&self) -> &str {
         &self.software_version
     }

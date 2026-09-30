@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Utility functions for record batch operations.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.AbstractRecords`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.AbstractRecords`.
 
 use crate::common::header::RecordHeader;
 use crate::common::record::internal::CompressionType;
@@ -27,6 +27,7 @@ use crate::common::record::internal::SimpleRecord;
 /// Translates the Java static-utility class `org.apache.kafka.common.record.internal.AbstractRecords`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords")]
 pub(crate) struct AbstractRecords;
 
 impl AbstractRecords {
@@ -47,6 +48,7 @@ impl AbstractRecords {
     /// For older versions, this is not supported (would require LegacyRecord).
     ///
     /// Corresponds to Java's `AbstractRecords.estimateSizeInBytes(byte, CompressionType, Iterable<SimpleRecord>)`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords#estimateSizeInBytes")]
     pub fn estimate_size_in_bytes(magic: i8, compression_type: CompressionType, records: &[SimpleRecord]) -> usize {
         let size = if magic <= RecordBatch::MAGIC_VALUE_V1 {
             // Legacy records not supported in this implementation
@@ -63,6 +65,7 @@ impl AbstractRecords {
     /// account overhead from the compression algorithm.
     ///
     /// Corresponds to Java's `AbstractRecords.estimateSizeInBytesUpperBound`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords#estimateSizeInBytesUpperBound")]
     pub fn estimate_size_in_bytes_upper_bound(
         magic: i8,
         _compression_type: CompressionType,
@@ -85,6 +88,7 @@ impl AbstractRecords {
     /// For older versions with compression, would return LOG_OVERHEAD + LegacyRecord overhead.
     ///
     /// Corresponds to Java's `AbstractRecords.recordBatchHeaderSizeInBytes`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords#recordBatchHeaderSizeInBytes")]
     pub fn record_batch_header_size_in_bytes(magic: i8, compression_type: CompressionType) -> usize {
         if magic > RecordBatch::MAGIC_VALUE_V1 {
             RecordBatch::RECORD_BATCH_OVERHEAD
@@ -103,6 +107,7 @@ impl AbstractRecords {
     /// For compression, returns `min(max(size / 2, 1024), 1 << 16)`.
     ///
     /// Corresponds to Java's `AbstractRecords.estimateCompressedSizeInBytes`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords#estimateCompressedSizeInBytes")]
     fn estimate_compressed_size_in_bytes(size: usize, compression_type: CompressionType) -> usize {
         if compression_type == CompressionType::None {
             size

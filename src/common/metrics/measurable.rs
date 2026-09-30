@@ -23,11 +23,13 @@ use crate::common::metrics::MetricConfig;
 /// delegates to `measure(...)`; here the [`crate::common::metrics::MetricValueProvider`]
 /// enum performs that delegation, so a `Measurable` only needs to provide
 /// `measure`.
+#[doc(alias = "org.apache.kafka.common.metrics.Measurable")]
 pub trait Measurable: Send + Sync {
     /// Measure this quantity and return the result as an `f64`.
     ///
     /// * `config` - The configuration for this metric
     /// * `now` - The POSIX time in milliseconds the measurement is being taken
+    #[doc(alias = "org.apache.kafka.common.metrics.Measurable#measure")]
     fn measure(&self, config: &MetricConfig, now: i64) -> f64;
 }
 

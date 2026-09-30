@@ -23,6 +23,8 @@ use crate::common::Error;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType")]
 pub enum UpgradeType {
     /// Unknown upgrade type.
     Unknown,
@@ -39,6 +41,7 @@ impl UpgradeType {
     /// Returns the wire-protocol code for this upgrade type.
     ///
     /// Mirrors `UpgradeType.code()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code")]
     pub fn code(&self) -> i8 {
         match self {
             UpgradeType::Unknown => 0,
@@ -52,6 +55,7 @@ impl UpgradeType {
     /// to [`UpgradeType::Unknown`] for unrecognized codes.
     ///
     /// Mirrors `UpgradeType.fromCode(int)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#fromCode")]
     pub fn from_code(code: i32) -> UpgradeType {
         match code {
             1 => UpgradeType::Upgrade,
@@ -66,6 +70,7 @@ impl UpgradeType {
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate")]
 pub struct FeatureUpdate {
     max_version_level: i16,
     upgrade_type: UpgradeType,
@@ -85,6 +90,7 @@ impl FeatureUpdate {
     /// `IllegalArgumentException`) if `max_version_level` is zero while
     /// `upgrade_type` is [`UpgradeType::Upgrade`], or if `max_version_level` is
     /// negative.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate#FeatureUpdate")]
     pub fn new(max_version_level: i16, upgrade_type: UpgradeType) -> Result<Self, Error> {
         if max_version_level == 0 && upgrade_type == UpgradeType::Upgrade {
             return Err(Error::local_illegal_argument(format!(
@@ -99,11 +105,13 @@ impl FeatureUpdate {
     }
 
     /// Returns the new maximum version level for the finalized feature.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate#maxVersionLevel")]
     pub fn max_version_level(&self) -> i16 {
         self.max_version_level
     }
 
     /// Returns the upgrade type for this update.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate#upgradeType")]
     pub fn upgrade_type(&self) -> UpgradeType {
         self.upgrade_type
     }

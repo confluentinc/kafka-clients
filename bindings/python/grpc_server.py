@@ -68,6 +68,7 @@ LOG = logging.getLogger("grpc_server")
 # (grpc_server_async.py) and live in grpc_translate.py.
 from grpc_translate import (  # noqa: E402
     CallbackLog,
+    GroupMetadataStore,
     LoggingRebalanceListener,
     _admin_abort_transaction_spec,
     _admin_acl_bindings,
@@ -102,10 +103,8 @@ from grpc_translate import (  # noqa: E402
     _admin_fence_producers_response,
     _admin_group_offset_commits,
     _admin_group_offset_specs,
-    _admin_list_client_metrics_resources_response,
     _admin_list_config_resources_response,
     _admin_list_consumer_group_offsets_response,
-    _admin_list_consumer_groups_response,
     _admin_list_groups_response,
     _admin_list_offsets_response,
     _admin_list_partition_reassignments_response,
@@ -135,6 +134,7 @@ from grpc_translate import (  # noqa: E402
     _admin_transaction_id_pattern,
     _admin_transaction_states,
     _admin_void_response,
+    _group_metadata_to_proto,
     _kafka_error_to_proto,
     _metric_to_proto,
     _node_to_proto,
@@ -142,7 +142,6 @@ from grpc_translate import (  # noqa: E402
     _partition_info_to_proto,
     _proto_offset_entries_to_dict,
     _proto_offsets_to_dict,
-    _proto_to_group_metadata,
     _proto_to_producer_record,
     _record_metadata_to_proto,
     _record_to_proto,
@@ -158,8 +157,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     next id to hand out. Both are protected by a single lock since
     CreateProducer / Close / Send may all race."""
 
-    def __init__(self):
+    def __init__(self, group_metadata):
         self._producers = {}
+        # GroupMetadataStore shared with the other service.
+        self._group_metadata = group_metadata
         self._next_id = 1
         self._lock = threading.Lock()
         # Delivery-callback log, keyed by producer_id. Has its own lock inside
@@ -237,8 +238,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     # ---- Transactions (Milestone 11) ----
     # Each maps to the same-named KafkaProducer method; the Flush handler below
     # is the template. A raised KafkaError becomes a StatusResponse error.
-    # send_offsets_to_transaction additionally carries offsets + the consumer's
-    # ConsumerGroupMetadata, translated below (SendOffsetsToTransaction).
+    # send_offsets_to_transaction additionally carries offsets + the id of a
+    # stored group-metadata object (SendOffsetsToTransaction).
 
     def InitTransactions(self, request, context):
         producer = self._take_producer(request.producer_id)
@@ -294,11 +295,15 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.StatusResponse(error=pb.KafkaError(
                 code=ec.LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
-        # Rebuild the consumer's group-metadata handle from the wire fields and
-        # translate the flat OffsetEntry list; the producer stages the offsets in
-        # the ongoing transaction (they commit only if the transaction commits).
+        group_metadata = self._group_metadata.get(request.group_metadata_id)
+        if group_metadata is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown group_metadata_id {request.group_metadata_id}"))
+        # Translate the flat OffsetEntry list and pass the consumer's stored
+        # group-metadata object; the producer stages the offsets in the ongoing
+        # transaction (they commit only if the transaction commits).
         offsets = _proto_offset_entries_to_dict(request.offsets)
-        group_metadata = _proto_to_group_metadata(request.group_metadata)
         try:
             producer.send_offsets_to_transaction(offsets, group_metadata)
         except kp.KafkaError as e:
@@ -379,8 +384,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     consumer API blocks the gRPC worker thread on its threading.Event, which
     is fine in the thread-pool server."""
 
-    def __init__(self):
+    def __init__(self, group_metadata):
         self._consumers = {}
+        # GroupMetadataStore shared with the other service.
+        self._group_metadata = group_metadata
         self._next_id = 1
         self._lock = threading.Lock()
         # Rebalance-listener / commit-callback log, keyed by consumer_id. Both
@@ -657,6 +664,25 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
 
+    def GroupMetadata(self, request, context):
+        # Java groupMetadata(): store the object and return its id and fields.
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.GroupMetadataResponse(error=pb.KafkaError(
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown consumer_id {request.consumer_id}"))
+        try:
+            group_metadata = consumer.group_metadata()
+        except Exception as e:  # noqa: BLE001
+            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(e))
+        return cpb.GroupMetadataResponse(
+            group_metadata_id=self._group_metadata.add(group_metadata),
+            group_metadata=_group_metadata_to_proto(group_metadata))
+
+    def ReleaseGroupMetadata(self, request, context):
+        self._group_metadata.release(request.group_metadata_id)
+        return pb.StatusResponse()
+
     def Wakeup(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is not None:
@@ -840,10 +866,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # -- Cluster, configs & log dirs (slice G2) -------------------------------
     #
     # Same three steps as the G1 handlers. Note the split in what "failure"
-    # means: describe_cluster / list_config_resources /
-    # list_client_metrics_resources have one Java future each, so admin.py
-    # *raises* and the failure lands in the top-level error; the per-key RPCs
-    # never raise for a single key, its KafkaError arrives inside the dict.
+    # means: describe_cluster / list_config_resources have one Java future
+    # each, so admin.py *raises* and the failure lands in the top-level error;
+    # the per-key RPCs never raise for a single key, its KafkaError arrives
+    # inside the dict.
 
     def DescribeCluster(self, request, context):
         client = self._get(request.admin_id)
@@ -903,18 +929,6 @@ class AdminService(apb_grpc.AdminServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_config_resources raised")
             return apb.ListConfigResourcesResponse(error=_kafka_error_to_proto(e))
-
-    def ListClientMetricsResources(self, request, context):
-        client = self._get(request.admin_id)
-        if client is None:
-            return apb.ListClientMetricsResourcesResponse(
-                error=self._unknown_admin(request.admin_id))
-        try:
-            resources = client.list_client_metrics_resources(timeout=_admin_timeout(request))
-            return _admin_list_client_metrics_resources_response(resources)
-        except Exception as e:  # noqa: BLE001
-            LOG.exception("list_client_metrics_resources raised")
-            return apb.ListClientMetricsResourcesResponse(error=_kafka_error_to_proto(e))
 
     def DescribeLogDirs(self, request, context):
         client = self._get(request.admin_id)
@@ -1035,7 +1049,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # Three levels of error, and which one an RPC uses follows its Java future
     # shape rather than a template:
     #
-    #   - list_groups / list_consumer_groups: admin.py returns a *pair* of lists.
+    #   - list_groups: admin.py returns a *pair* of lists.
     #     A raise is the whole-call error; a per-broker listing failure is inside
     #     the second list, unkeyed.
     #   - describe_consumer_groups / describe_classic_groups /
@@ -1065,20 +1079,6 @@ class AdminService(apb_grpc.AdminServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_groups raised")
             return apb.ListGroupsResponse(error=_kafka_error_to_proto(e))
-
-    def ListConsumerGroups(self, request, context):
-        client = self._get(request.admin_id)
-        if client is None:
-            return apb.ListConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
-        try:
-            outcome = client.list_consumer_groups(
-                group_states=list(request.group_states),
-                types=list(request.types),
-                timeout=_admin_timeout(request))
-            return _admin_list_consumer_groups_response(outcome)
-        except Exception as e:  # noqa: BLE001
-            LOG.exception("list_consumer_groups raised")
-            return apb.ListConsumerGroupsResponse(error=_kafka_error_to_proto(e))
 
     def DescribeConsumerGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -1509,8 +1509,11 @@ def main():
     # container. GRPC_PORT=0 binds an ephemeral port.
     host = os.environ.get("GRPC_HOST", "127.0.0.1")
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
-    pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
-    cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
+    # One store, shared: a producer takes the group metadata its consumers
+    # handed out.
+    group_metadata = GroupMetadataStore()
+    pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
+    cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
     bound_port = server.add_insecure_port(f"{host}:{port}")
     server.start()

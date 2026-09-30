@@ -22,10 +22,12 @@ use std::net::IpAddr;
 /// A trait for resolving hostnames to IP addresses.
 ///
 /// This is the async equivalent of Java's `HostResolver` interface.
+#[doc(alias = "org.apache.kafka.clients.HostResolver")]
 pub trait HostResolver: Send + Sync {
     /// Resolves the given hostname to a list of IP addresses.
     ///
     /// # Errors
     /// Returns an `io::Error` if the hostname cannot be resolved.
+    #[doc(alias = "org.apache.kafka.clients.HostResolver#resolve")]
     fn resolve(&self, host: &str) -> impl std::future::Future<Output = io::Result<Vec<IpAddr>>> + Send;
 }

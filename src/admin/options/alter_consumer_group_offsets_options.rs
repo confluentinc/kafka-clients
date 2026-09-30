@@ -21,6 +21,7 @@
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions`.
 /// Java's class adds no fields beyond `AbstractOptions` (only `timeoutMs`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions")]
 pub struct AlterConsumerGroupOffsetsOptions {
     timeout_ms: Option<i32>,
 }

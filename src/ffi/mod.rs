@@ -28,7 +28,7 @@
 //! on the C side, so an in-band sentinel there would be a memory-safety hazard.
 //! Where a Java collection is nullable and null must stay distinct from empty,
 //! the count reports 0 and a separate `*_has_<field>` predicate carries the
-//! presence bit — see the "Counts are never negative" section of [`admin`].
+//! presence bit — see the "Counts are never negative" section of `admin`.
 //!
 //! # Feature Gate
 //!

@@ -20,6 +20,7 @@ use std::fmt;
 ///
 /// Corresponds to `org.apache.kafka.common.TopicPartitionReplica`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionReplica")]
 pub struct TopicPartitionReplica {
     broker_id: i32,
     partition: i32,
@@ -28,21 +29,25 @@ pub struct TopicPartitionReplica {
 
 impl TopicPartitionReplica {
     /// Creates a new `TopicPartitionReplica`.
+    #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica#TopicPartitionReplica")]
     pub fn new(topic: impl Into<String>, partition: i32, broker_id: i32) -> Self {
         Self { broker_id, partition, topic: topic.into() }
     }
 
     /// Returns the topic name.
+    #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
     /// Returns the partition number.
+    #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
     /// Returns the broker id.
+    #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica#brokerId")]
     pub fn broker_id(&self) -> i32 {
         self.broker_id
     }

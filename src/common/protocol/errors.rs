@@ -32,6 +32,8 @@ use crate::common::errors::*;
 /// the newly-added error code.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(i16)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.protocol.Errors")]
 pub enum Errors {
     UnknownServerError = -1,
     None = 0,
@@ -172,6 +174,7 @@ pub enum Errors {
 
 impl Errors {
     /// The error code for this error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#code")]
     pub fn code(&self) -> i16 {
         *self as i16
     }
@@ -340,6 +343,7 @@ impl Errors {
     }
 
     /// Get a friendly description of the error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#message")]
     pub fn message(&self) -> &'static str {
         match self {
             Self::UnknownServerError => "The server experienced an unexpected error when processing the request.",
@@ -575,6 +579,7 @@ impl Errors {
     ///
     /// `None` for [`Errors::None`], which Java declares as
     /// `NONE(0, null, message -> null)`.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error(&self) -> Option<Error> {
         match self {
             Self::None => None,
@@ -691,9 +696,9 @@ impl Errors {
             Self::InvalidRegistration => {
                 Some(Error::InvalidRegistration(InvalidRegistrationError::with_default_message()))
             },
-            Self::InvalidRegularExpression => Some(Error::InvalidRegularExpression(
-                InvalidRegularExpressionError::with_default_message(),
-            )),
+            Self::InvalidRegularExpression => {
+                Some(Error::InvalidRegularExpression(InvalidRegularExpression::with_default_message()))
+            },
             Self::InvalidReplicationFactor => Some(Error::InvalidReplicationFactor(
                 InvalidReplicationFactorError::with_default_message(),
             )),
@@ -746,9 +751,9 @@ impl Errors {
             Self::NoReassignmentInProgress => Some(Error::NoReassignmentInProgress(
                 NoReassignmentInProgressError::with_default_message(),
             )),
-            Self::OffsetMetadataTooLarge => Some(Error::OffsetMetadataTooLarge(
-                OffsetMetadataTooLargeError::with_default_message(),
-            )),
+            Self::OffsetMetadataTooLarge => {
+                Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLarge::with_default_message()))
+            },
             Self::OffsetMovedToTieredStorage => Some(Error::OffsetMovedToTieredStorage(
                 OffsetMovedToTieredStorageError::with_default_message(),
             )),
@@ -899,6 +904,7 @@ impl Errors {
     /// (`log.debug("Error in fetch for partition {}: {}", tp,
     /// error.exceptionName())`), which names the class when a fetch response
     /// carries an error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exceptionName")]
     pub fn error_name(&self) -> Option<&'static str> {
         // `ErrorName` is the per-class answer, so this does not repeat
         // `error()`'s 135-arm match — the class it resolves to answers for
@@ -919,6 +925,7 @@ impl Errors {
     /// Translates Java's `Errors.exception(String)`. Java returns the cached
     /// default instance when `message` is null; Rust expresses "no message" by
     /// calling [`error`](Self::error) instead, so this always builds a fresh one.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error_with_message(&self, message: impl Into<String>) -> Option<Error> {
         let message = message.into();
         match self {
@@ -1009,7 +1016,7 @@ impl Errors {
             Self::InvalidRecordState => Some(Error::InvalidRecordState(InvalidRecordStateError::new(message))),
             Self::InvalidRegistration => Some(Error::InvalidRegistration(InvalidRegistrationError::new(message))),
             Self::InvalidRegularExpression => {
-                Some(Error::InvalidRegularExpression(InvalidRegularExpressionError::new(message)))
+                Some(Error::InvalidRegularExpression(InvalidRegularExpression::new(message)))
             },
             Self::InvalidReplicationFactor => {
                 Some(Error::InvalidReplicationFactor(InvalidReplicationFactorError::new(message)))
@@ -1053,9 +1060,7 @@ impl Errors {
             Self::NoReassignmentInProgress => {
                 Some(Error::NoReassignmentInProgress(NoReassignmentInProgressError::new(message)))
             },
-            Self::OffsetMetadataTooLarge => {
-                Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLargeError::new(message)))
-            },
+            Self::OffsetMetadataTooLarge => Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLarge::new(message))),
             Self::OffsetMovedToTieredStorage => {
                 Some(Error::OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError::new(message)))
             },
@@ -1185,6 +1190,7 @@ impl Errors {
     /// that one code. Callers reach this from a response's error field, where
     /// they have already established the code is not `NONE` and want an
     /// [`Error`] rather than an `Option` to hand to a failed future.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error_with_optional_message(&self, message: Option<&str>) -> Error {
         match message {
             Some(message) => Error::with_message(*self, message),
@@ -1193,6 +1199,7 @@ impl Errors {
     }
 
     /// Look up an error by its code. Returns `UnknownServerError` for unknown codes.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#forCode")]
     pub fn for_code(code: i16) -> Self {
         match code {
             -1 => Self::UnknownServerError,
@@ -1737,7 +1744,7 @@ mod tests {
         assert!(Errors::UnknownTopicOrPartition.error().is_some_and(|x| x.is_retriable_error()));
     }
 
-    /// Each hierarchy predicate (CLAUDE.md §10.4) must be `true` for **exactly** the
+    /// Each hierarchy predicate (CLAUDE.md §12.4) must be `true` for **exactly** the
     /// error codes whose Java exception class extends the corresponding class.
     ///
     /// Sets derived from the Apache Kafka 4.2 source in `kafka/` by taking the
@@ -1951,7 +1958,7 @@ mod tests {
     /// The four intermediate classes added alongside the `ErrorHierarchy`
     /// refactor must cover **exactly** the codes whose Java class transitively
     /// extends them — checked in both directions over every code, per
-    /// CLAUDE.md §10.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
+    /// CLAUDE.md §12.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
     #[test]
     fn test_new_intermediate_predicates_match_java_hierarchy() {
         let invalid_configuration: HashSet<Errors> = [
@@ -1996,7 +2003,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let families: &[(&str, &HashSet<Errors>, fn(&Errors) -> bool)] = &[
             ("is_invalid_configuration_error", &invalid_configuration, |e| {
                 e.error().is_some_and(|x| x.is_invalid_configuration_error())
@@ -2035,7 +2042,7 @@ mod tests {
     /// recording fatal errors that Java records, or starts recording ones it
     /// does not.
     ///
-    /// Fatality is deliberately NOT exported to C (CLAUDE.md §10.4, and the note
+    /// Fatality is deliberately NOT exported to C (CLAUDE.md §12.4, and the note
     /// at `ffi/common.rs:161`): a C caller composes the classification from the
     /// exported predicates, so this table is also what keeps that composition
     /// answering what Java answers.

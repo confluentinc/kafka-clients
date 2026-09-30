@@ -42,6 +42,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetDeleteResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse")]
 pub struct OffsetDeleteResponse {
     data: OffsetDeleteResponseData,
 }
@@ -50,6 +51,7 @@ impl OffsetDeleteResponse {
     /// Creates a new `OffsetDeleteResponse` from the underlying data.
     ///
     /// Mirrors Java's constructor `OffsetDeleteResponse(OffsetDeleteResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#OffsetDeleteResponse")]
     pub fn new(data: OffsetDeleteResponseData) -> Self {
         Self { data }
     }
@@ -60,6 +62,7 @@ impl OffsetDeleteResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#data")]
     pub fn data(&self) -> &OffsetDeleteResponseData {
         &self.data
     }
@@ -70,17 +73,20 @@ impl OffsetDeleteResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the error counts aggregated across the top-level error and all
     /// partition responses. Mirrors Java's `errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -98,12 +104,14 @@ impl OffsetDeleteResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetDeleteResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (all versions).
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 0
     }
@@ -163,7 +171,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // partition_index 0
             0x00, 0x00, // error_code 0
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = OffsetDeleteResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(response.data().error_code, Errors::CoordinatorNotAvailable.code());
         assert_eq!(response.data().topics.len(), 1);

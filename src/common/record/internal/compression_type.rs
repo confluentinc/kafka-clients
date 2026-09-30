@@ -14,7 +14,7 @@
 
 //! The compression type to use for record batches.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionType`.
 
 use crate::common::Error;
 
@@ -23,8 +23,9 @@ use crate::common::Error;
 /// Compression type is represented by two bits in the attributes field of the
 /// record batch header, so a byte is large enough.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.record.internal.CompressionType")]
 pub enum CompressionType {
     /// No compression.
     None = 0,
@@ -87,6 +88,7 @@ impl CompressionType {
     ///
     /// Returns a `Error` if the ID is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forId()`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#forId")]
     pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::None),
@@ -111,6 +113,7 @@ impl CompressionType {
     ///
     /// Returns a `Error` if the name is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forName()`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#forName")]
     pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
             "none" => Ok(Self::None),
@@ -129,6 +132,7 @@ impl CompressionType {
     ///
     /// Returns `None` for types that do not support compression levels
     /// (`None`, `Snappy`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#defaultLevel")]
     pub fn default_level(self) -> Option<i32> {
         match self {
             Self::Gzip => Some(-1), // Deflater.DEFAULT_COMPRESSION
@@ -141,6 +145,7 @@ impl CompressionType {
     /// Returns the minimum compression level for this type.
     ///
     /// Returns `None` for types that do not support compression levels.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#minLevel")]
     pub fn min_level(self) -> Option<i32> {
         match self {
             Self::Gzip => Some(1), // Deflater.BEST_SPEED
@@ -153,6 +158,7 @@ impl CompressionType {
     /// Returns the maximum compression level for this type.
     ///
     /// Returns `None` for types that do not support compression levels.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#maxLevel")]
     pub fn max_level(self) -> Option<i32> {
         match self {
             Self::Gzip => Some(9), // Deflater.BEST_COMPRESSION

@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClassicGroupsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsOptions")]
 pub struct DescribeClassicGroupsOptions {
     timeout_ms: Option<i32>,
     include_authorized_operations: bool,

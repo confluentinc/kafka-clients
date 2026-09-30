@@ -27,6 +27,8 @@ use crate::common::{KafkaFuture, Uuid};
 /// constructor; the Rust port makes the "exactly one keying" invariant a closed
 /// enum so it is unrepresentable to have both or neither.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult")]
 pub enum DeleteTopicsResult {
     /// Result keyed by topic id (the request used a `TopicIdCollection`).
     ByTopicId(HashMap<Uuid, KafkaFuture<()>>),
@@ -36,17 +38,20 @@ pub enum DeleteTopicsResult {
 
 impl DeleteTopicsResult {
     /// Creates a result keyed by topic id.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#ofTopicIds")]
     pub(crate) fn of_topic_ids(topic_id_futures: HashMap<Uuid, KafkaFuture<()>>) -> Self {
         DeleteTopicsResult::ByTopicId(topic_id_futures)
     }
 
     /// Creates a result keyed by topic name.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#ofTopicNames")]
     pub(crate) fn of_topic_names(name_futures: HashMap<String, KafkaFuture<()>>) -> Self {
         DeleteTopicsResult::ByTopicName(name_futures)
     }
 
     /// A map from topic IDs to futures if the deletion used topic IDs, otherwise
     /// `None`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#topicIdValues")]
     pub fn topic_id_values(&self) -> Option<&HashMap<Uuid, KafkaFuture<()>>> {
         match self {
             DeleteTopicsResult::ByTopicId(futures) => Some(futures),
@@ -56,6 +61,7 @@ impl DeleteTopicsResult {
 
     /// A map from topic names to futures if the deletion used topic names,
     /// otherwise `None`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#topicNameValues")]
     pub fn topic_name_values(&self) -> Option<&HashMap<String, KafkaFuture<()>>> {
         match self {
             DeleteTopicsResult::ByTopicName(futures) => Some(futures),
@@ -64,6 +70,7 @@ impl DeleteTopicsResult {
     }
 
     /// A future which succeeds only if all the topic deletions succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         match self {
             DeleteTopicsResult::ByTopicId(futures) => KafkaFuture::all_of(futures.values().cloned().collect()),

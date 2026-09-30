@@ -30,6 +30,7 @@ pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult")]
 pub struct ListConsumerGroupOffsetsResult {
     futures: HashMap<String, KafkaFuture<GroupOffsets>>,
 }
@@ -41,6 +42,7 @@ impl ListConsumerGroupOffsetsResult {
     /// re-keys it by group id; the caller (the admin client) performs the
     /// `CoordinatorKey` → id conversion before calling this, so the map is
     /// already keyed by group id here.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#ListConsumerGroupOffsetsResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<GroupOffsets>>) -> Self {
         Self { futures }
     }
@@ -57,6 +59,7 @@ impl ListConsumerGroupOffsetsResult {
     /// multiple groups were requested — use
     /// [`partitions_to_offset_and_metadata_for_group`](Self::partitions_to_offset_and_metadata_for_group)
     /// instead.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata")]
     pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, Error> {
         if self.futures.len() != 1 {
             return Err(Error::local_illegal_state(
@@ -90,6 +93,7 @@ impl ListConsumerGroupOffsetsResult {
     /// groups succeed.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, GroupOffsets>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }

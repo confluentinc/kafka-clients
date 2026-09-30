@@ -760,7 +760,7 @@ impl KafkaCluster {
     }
 
     /// The config this cluster was started with.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn config(&self) -> &ClusterConfig {
         &self.config
     }

@@ -27,6 +27,7 @@ use crate::common::utils::Utils;
 /// Translates the Java static-utility class
 /// `org.apache.kafka.clients.admin.internals.AdminUtils`, which has no instance
 /// state, so it becomes a unit struct hosting its statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminUtils")]
 pub(crate) struct AdminUtils;
 
 impl AdminUtils {
@@ -37,6 +38,7 @@ impl AdminUtils {
     /// Java returns `null` when the field is [`AUTHORIZED_OPERATIONS_OMITTED`] —
     /// meaning "the broker did not report them" — which is distinct from a broker
     /// reporting an empty set. `None` is that `null`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminUtils#validAclOperations")]
     pub(crate) fn valid_acl_operations(authorized_operations: i32) -> Option<BTreeSet<AclOperation>> {
         if authorized_operations == MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED {
             return None;

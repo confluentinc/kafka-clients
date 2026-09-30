@@ -27,12 +27,14 @@ use crate::common::{KafkaFuture, TopicPartition};
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.ListPartitionReassignmentsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult")]
 pub struct ListPartitionReassignmentsResult {
     future: KafkaFuture<HashMap<TopicPartition, PartitionReassignment>>,
 }
 
 impl ListPartitionReassignmentsResult {
     /// Creates a result wrapping the reassignments future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult#ListPartitionReassignmentsResult")]
     pub(crate) fn new(future: KafkaFuture<HashMap<TopicPartition, PartitionReassignment>>) -> Self {
         Self { future }
     }
@@ -41,6 +43,7 @@ impl ListPartitionReassignmentsResult {
     /// reassignments.
     ///
     /// Mirrors `reassignments()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult#reassignments")]
     pub fn reassignments(&self) -> KafkaFuture<HashMap<TopicPartition, PartitionReassignment>> {
         self.future.clone()
     }

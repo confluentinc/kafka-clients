@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnstableOffsetCommitException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// There are unstable offsets that need to be cleared.
     ///
-    /// Corresponds to Java's `UnstableOffsetCommitException`, error code [`Errors::UnstableOffsetCommit`].
+    /// Corresponds to Java's `UnstableOffsetCommitException`, error code `Errors::UnstableOffsetCommit`.
     ///
     /// Java `extends` chain:
     ///    `UnstableOffsetCommitException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnstableOffsetCommitException")]
     UnstableOffsetCommitError,
     code: Errors::UnstableOffsetCommit,
     extends: [

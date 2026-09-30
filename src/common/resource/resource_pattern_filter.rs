@@ -22,6 +22,7 @@ use super::{PatternType, ResourcePattern, ResourceType};
 ///
 /// Corresponds to `org.apache.kafka.common.resource.ResourcePatternFilter`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter")]
 pub struct ResourcePatternFilter {
     resource_type: ResourceType,
     name: Option<String>,
@@ -44,6 +45,7 @@ impl ResourcePatternFilter {
     ///   the supplied `name`, including matching prefixed and wildcard patterns.
     ///   If any other resource pattern type, the filter will match only patterns
     ///   with the same type.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#ResourcePatternFilter")]
     pub fn new(resource_type: ResourceType, name: Option<String>, pattern_type: PatternType) -> ResourcePatternFilter {
         ResourcePatternFilter { resource_type, name, pattern_type }
     }
@@ -54,26 +56,31 @@ impl ResourcePatternFilter {
     }
 
     /// Return `true` if this filter has any UNKNOWN components.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.resource_type.is_unknown() || self.pattern_type.is_unknown()
     }
 
     /// Return the specific resource type this pattern matches.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#resourceType")]
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
     /// Return the resource name, or `None` to match any name.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#name")]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
     /// Return the resource pattern type.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#patternType")]
     pub fn pattern_type(&self) -> PatternType {
         self.pattern_type
     }
 
     /// Return `true` if this filter matches the given pattern.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matches")]
     pub fn matches(&self, pattern: &ResourcePattern) -> bool {
         if self.resource_type != ResourceType::Any && self.resource_type != pattern.resource_type() {
             return false;
@@ -106,12 +113,14 @@ impl ResourcePatternFilter {
 
     /// Return `true` if this filter could only match one pattern. In other
     /// words, if there are no ANY or UNKNOWN fields.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matchesAtMostOne")]
     pub fn matches_at_most_one(&self) -> bool {
         self.find_indefinite_field().is_none()
     }
 
     /// Return a string describing any ANY or UNKNOWN field, or `None` if there is
     /// no such field.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#findIndefiniteField")]
     pub fn find_indefinite_field(&self) -> Option<String> {
         if self.resource_type == ResourceType::Any {
             return Some("Resource type is ANY.".to_string());

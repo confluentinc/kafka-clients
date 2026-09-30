@@ -20,6 +20,8 @@
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AclPermissionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.acl.AclPermissionType")]
 pub enum AclPermissionType {
     /// Represents any `AclPermissionType` which this client cannot understand,
     /// perhaps because this client is too old.
@@ -34,6 +36,7 @@ pub enum AclPermissionType {
 
 impl AclPermissionType {
     /// Return the code of this permission type.
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#code")]
     pub fn code(&self) -> i8 {
         match self {
             AclPermissionType::Unknown => 0,
@@ -45,6 +48,7 @@ impl AclPermissionType {
 
     /// Return the `AclPermissionType` with the provided code or
     /// [`AclPermissionType::Unknown`] if one cannot be found.
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#fromCode")]
     pub fn from_code(code: i8) -> AclPermissionType {
         match code {
             0 => AclPermissionType::Unknown,
@@ -59,6 +63,7 @@ impl AclPermissionType {
     ///
     /// Returns the `AclPermissionType`, or [`AclPermissionType::Unknown`] if the
     /// string could not be matched (case-insensitive).
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#fromString")]
     pub fn from_string(str: &str) -> AclPermissionType {
         match str.to_uppercase().as_str() {
             "UNKNOWN" => AclPermissionType::Unknown,
@@ -70,6 +75,7 @@ impl AclPermissionType {
     }
 
     /// Return true if this permission type is [`AclPermissionType::Unknown`].
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == AclPermissionType::Unknown
     }
@@ -117,6 +123,7 @@ mod tests {
 
     /// Mirrors `AclPermissionTypeTest.testIsUnknown`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testIsUnknown")]
     fn test_is_unknown() {
         for info in &INFOS {
             assert_eq!(
@@ -131,6 +138,7 @@ mod tests {
 
     /// Mirrors `AclPermissionTypeTest.testCode`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testCode")]
     fn test_code() {
         assert_eq!(VALUES.len(), INFOS.len());
         for info in &INFOS {
@@ -154,6 +162,7 @@ mod tests {
 
     /// Mirrors `AclPermissionTypeTest.testName`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testName")]
     fn test_name() {
         for info in &INFOS {
             assert_eq!(
@@ -169,6 +178,7 @@ mod tests {
 
     /// Mirrors `AclPermissionTypeTest.testExhaustive`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testExhaustive")]
     fn test_exhaustive() {
         assert_eq!(INFOS.len(), VALUES.len());
         for (i, info) in INFOS.iter().enumerate() {

@@ -159,8 +159,9 @@ impl HeartbeatMetricsManager {
 mod tests {
     use super::*;
     use crate::common::Metric;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::{Metrics, Time};
+    use crate::common::metrics::Metrics;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     /// Java: `HeartbeatMetricsManagerTest.testHeartbeatMetrics`.
     ///
@@ -171,7 +172,7 @@ mod tests {
     fn test_heartbeat_metrics() {
         for random_sleep_s in 1..=10i64 {
             let time = Arc::new(MockTime::new());
-            let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn crate::common::metrics::Time>));
+            let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn crate::common::utils::Time>));
             let manager = HeartbeatMetricsManager::new(&metrics);
 
             // Assert the existence of metrics.

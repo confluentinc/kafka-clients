@@ -44,7 +44,7 @@ use crate::common::record::internal::RecordBatch;
 use crate::txn_offset_commit_request_data::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic};
 use crate::txn_offset_commit_response_data::{TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 use super::RequestUtils;
@@ -54,19 +54,43 @@ use super::TxnOffsetCommitResponse;
 ///
 /// Corresponds to the nested `TxnOffsetCommitRequest.CommittedOffset`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$CommittedOffset")]
 pub struct CommittedOffset {
     /// The offset to commit.
-    pub offset: i64,
+    pub(crate) offset: i64,
     /// Optional metadata to store alongside the offset.
-    pub metadata: Option<String>,
+    pub(crate) metadata: Option<String>,
     /// The leader epoch of the partition when the offset was read, if known.
-    pub leader_epoch: Option<i32>,
+    pub(crate) leader_epoch: Option<i32>,
 }
 
 impl CommittedOffset {
     /// Creates a committed offset.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$CommittedOffset#CommittedOffset")]
     pub fn new(offset: i64, metadata: Option<String>, leader_epoch: Option<i32>) -> Self {
         Self { offset, metadata, leader_epoch }
+    }
+
+    /// The offset to commit.
+    ///
+    /// Java's public `CommittedOffset.offset`.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// Optional metadata to store alongside the offset.
+    ///
+    /// Java's public `CommittedOffset.metadata`.
+    pub fn metadata(&self) -> Option<&str> {
+        self.metadata.as_deref()
+    }
+
+    /// The leader epoch of the partition when the offset was read, if known.
+    ///
+    /// Java's public `CommittedOffset.leaderEpoch`.
+    pub fn leader_epoch(&self) -> Option<i32> {
+        self.leader_epoch
     }
 }
 
@@ -91,6 +115,7 @@ impl fmt::Display for CommittedOffset {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.TxnOffsetCommitRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest")]
 pub struct TxnOffsetCommitRequest {
     data: TxnOffsetCommitRequestData,
     version: i16,
@@ -117,11 +142,13 @@ impl TxnOffsetCommitRequest {
     pub const UNKNOWN_GENERATION_ID: i32 = -1;
 
     /// Creates a new `TxnOffsetCommitRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#TxnOffsetCommitRequest")]
     pub fn new(data: TxnOffsetCommitRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#data")]
     pub fn data(&self) -> &TxnOffsetCommitRequestData {
         &self.data
     }
@@ -146,6 +173,7 @@ impl TxnOffsetCommitRequest {
     /// Corresponds to Java's `offsets()`. The leader epoch goes through
     /// [`RequestUtils::get_leader_epoch`], which maps the
     /// `NO_PARTITION_LEADER_EPOCH` sentinel to `None`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#offsets")]
     pub fn offsets(&self) -> HashMap<TopicPartition, CommittedOffset> {
         let mut offset_map = HashMap::new();
         for topic in &self.data.topics {
@@ -169,6 +197,7 @@ impl TxnOffsetCommitRequest {
     /// and so has unspecified order; this sorts by topic name and then partition
     /// index for a deterministic encoding — see
     /// `.claude/rules/producer-transactions.md` §10.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getTopics")]
     pub fn get_topics(
         pending_txn_offset_commits: &HashMap<TopicPartition, CommittedOffset>,
     ) -> Vec<TxnOffsetCommitRequestTopic> {
@@ -215,6 +244,7 @@ impl TxnOffsetCommitRequest {
     /// partition.
     ///
     /// Corresponds to Java's static `getErrorResponseTopics`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponseTopics")]
     pub fn get_error_response_topics(
         request_topics: &[TxnOffsetCommitRequestTopic],
         error: &Errors,
@@ -245,6 +275,7 @@ impl TxnOffsetCommitRequest {
     ///
     /// The error is reported per partition — this response has no top-level error
     /// code at any version.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = TxnOffsetCommitResponseData::new();
         response
@@ -259,6 +290,7 @@ impl TxnOffsetCommitRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = TxnOffsetCommitRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -275,7 +307,8 @@ impl fmt::Display for TxnOffsetCommitRequest {
 ///
 /// Corresponds to `TxnOffsetCommitRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct TxnOffsetCommitRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder")]
+pub struct Builder {
     data: TxnOffsetCommitRequestData,
     is_transaction_v2_enabled: bool,
     oldest_allowed_version: i16,
@@ -310,24 +343,24 @@ pub struct TxnOffsetCommitRequestBuilder {
 #[non_exhaustive]
 pub struct TxnOffsetCommitRequestBuilderOptions<'a> {
     /// Java's `transactionalId`.
-    pub transactional_id: String,
+    pub(crate) transactional_id: String,
     /// Java's `consumerGroupId`.
-    pub consumer_group_id: String,
+    pub(crate) consumer_group_id: String,
     /// Java's `producerId`.
-    pub producer_id: i64,
+    pub(crate) producer_id: i64,
     /// Java's `producerEpoch`.
-    pub producer_epoch: i16,
+    pub(crate) producer_epoch: i16,
     /// Java's `pendingTxnOffsetCommits`.
-    pub pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
+    pub(crate) pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
     /// Java's `memberId`. Starts as [`TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID`], as in `:50`.
-    pub member_id: String,
+    pub(crate) member_id: String,
     /// Java's `generationId`. Starts as [`TxnOffsetCommitRequest::UNKNOWN_GENERATION_ID`], as in `:50`.
-    pub generation_id: i32,
+    pub(crate) generation_id: i32,
     /// Java's `groupInstanceId`. Starts as `None`, as in `:50`'s
     /// `Optional.empty()`.
-    pub group_instance_id: Option<String>,
+    pub(crate) group_instance_id: Option<String>,
     /// Java's `isTransactionV2Enabled`.
-    pub is_transaction_v2_enabled: bool,
+    pub(crate) is_transaction_v2_enabled: bool,
 }
 
 /// Fluent builder for [`TxnOffsetCommitRequestBuilderOptions`].
@@ -466,7 +499,7 @@ impl<'a> TxnOffsetCommitRequestBuilderOptionsBuilder<'a> {
     }
 }
 
-impl TxnOffsetCommitRequestBuilder {
+impl Builder {
     /// Creates a builder carrying consumer-group metadata.
     ///
     /// This is the form the producer uses (`TransactionManager.java:1232`).
@@ -476,6 +509,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// `:50`'s behaviour leave the options' `member_id`, `generation_id` and
     /// `group_instance_id` at their initial values — exactly what its Java body
     /// forwards.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#Builder")]
     pub fn with_options(options: TxnOffsetCommitRequestBuilderOptions<'_>) -> Self {
         let TxnOffsetCommitRequestBuilderOptions {
             transactional_id,
@@ -513,6 +547,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// Corresponds to Java's single-argument `Builder(TxnOffsetCommitRequestData)`
     /// (`TxnOffsetCommitRequest.java:89`), which hardcodes
     /// `isTransactionV2Enabled = true`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#Builder")]
     pub fn with_data(data: TxnOffsetCommitRequestData) -> Self {
         Self {
             data,
@@ -538,6 +573,7 @@ impl TxnOffsetCommitRequestBuilder {
     ///
     /// Corresponds to Java's private `groupMetadataSet()`. Note it is an **OR**
     /// across all three fields, so setting any one of them requires v3+.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#groupMetadataSet")]
     fn group_metadata_set(&self) -> bool {
         self.data.member_id != TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID
             || self.data.generation_id != TxnOffsetCommitRequest::UNKNOWN_GENERATION_ID
@@ -545,7 +581,7 @@ impl TxnOffsetCommitRequestBuilder {
     }
 }
 
-impl RequestBuilder for TxnOffsetCommitRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::TXN_OFFSET_COMMIT
     }
@@ -564,9 +600,9 @@ impl RequestBuilder for TxnOffsetCommitRequestBuilder {
     /// Mirrors Java's `Builder.build(short)`. Order matters: the group-metadata
     /// check runs against the **requested** version, before any clamping, so a
     /// clamp cannot mask an unsupported-version error.
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < 3 && self.group_metadata_set() {
-            // Java throws UnsupportedVersionException; per CLAUDE.md §10.2 this
+            // Java throws UnsupportedVersionException; per CLAUDE.md §12.2 this
             // is a Result. Message text preserved.
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -584,7 +620,7 @@ impl RequestBuilder for TxnOffsetCommitRequestBuilder {
             version.min(TxnOffsetCommitRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2)
         };
 
-        Ok(ConcreteRequest::TxnOffsetCommit(TxnOffsetCommitRequest::new(
+        Ok(AbstractRequest::TxnOffsetCommit(TxnOffsetCommitRequest::new(
             self.data.clone(),
             version,
         )))
@@ -606,8 +642,8 @@ mod tests {
         ])
     }
 
-    fn builder_with_metadata() -> TxnOffsetCommitRequestBuilder {
-        TxnOffsetCommitRequestBuilder::with_options(
+    fn builder_with_metadata() -> Builder {
+        Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -638,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_without_group_metadata_uses_sentinels() {
-        let builder = TxnOffsetCommitRequestBuilder::with_options(
+        let builder = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -658,7 +694,7 @@ mod tests {
     /// `group_metadata_set` is an OR: **any** of the three fields triggers it.
     #[test]
     fn test_group_metadata_set_is_an_or_across_all_three_fields() {
-        let none = TxnOffsetCommitRequestBuilder::with_options(
+        let none = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -671,7 +707,7 @@ mod tests {
         );
         assert!(!none.group_metadata_set());
 
-        let member_only = TxnOffsetCommitRequestBuilder::with_options(
+        let member_only = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -685,7 +721,7 @@ mod tests {
         );
         assert!(member_only.group_metadata_set(), "member id alone must count");
 
-        let generation_only = TxnOffsetCommitRequestBuilder::with_options(
+        let generation_only = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -699,7 +735,7 @@ mod tests {
         );
         assert!(generation_only.group_metadata_set(), "generation id alone must count");
 
-        let instance_only = TxnOffsetCommitRequestBuilder::with_options(
+        let instance_only = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -736,7 +772,7 @@ mod tests {
     #[test]
     fn test_build_allows_low_versions_without_group_metadata() {
         for version in 0..3 {
-            let mut builder = TxnOffsetCommitRequestBuilder::with_options(
+            let mut builder = Builder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")
@@ -758,7 +794,7 @@ mod tests {
     #[test]
     fn test_group_metadata_check_precedes_the_version_clamp() {
         // `is_transaction_v2_enabled` is false, so clamping stays active.
-        let mut builder = TxnOffsetCommitRequestBuilder::with_options(
+        let mut builder = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -783,7 +819,7 @@ mod tests {
             "the clamp is only meaningful if the API supports higher versions"
         );
 
-        let mut builder = TxnOffsetCommitRequestBuilder::with_options(
+        let mut builder = Builder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -797,7 +833,7 @@ mod tests {
                 .unwrap(),
         );
         match builder.build_version(latest).expect("build") {
-            ConcreteRequest::TxnOffsetCommit(request) => {
+            AbstractRequest::TxnOffsetCommit(request) => {
                 assert_eq!(
                     request.version(),
                     TxnOffsetCommitRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
@@ -809,7 +845,7 @@ mod tests {
         // With TV2 the requested version passes through.
         let mut builder = builder_with_metadata();
         match builder.build_version(latest).expect("build") {
-            ConcreteRequest::TxnOffsetCommit(request) => assert_eq!(request.version(), latest),
+            AbstractRequest::TxnOffsetCommit(request) => assert_eq!(request.version(), latest),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -872,7 +908,7 @@ mod tests {
     fn test_get_error_response_is_per_partition() {
         let mut builder = builder_with_metadata();
         let request = match builder.build_version(3).expect("build") {
-            ConcreteRequest::TxnOffsetCommit(request) => request,
+            AbstractRequest::TxnOffsetCommit(request) => request,
             other => panic!("unexpected {other:?}"),
         };
 
@@ -916,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_from_data_defaults_transaction_v2_to_enabled() {
-        let builder = TxnOffsetCommitRequestBuilder::with_data(TxnOffsetCommitRequestData::new());
+        let builder = Builder::with_data(TxnOffsetCommitRequestData::new());
         assert!(builder.is_transaction_v2_enabled(), "Java hardcodes true in this constructor");
     }
 
@@ -924,7 +960,7 @@ mod tests {
     fn test_serialization_round_trip_all_versions() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             // No group metadata, so every version including 0-2 is legal.
-            let mut builder = TxnOffsetCommitRequestBuilder::with_options(
+            let mut builder = Builder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")
@@ -981,6 +1017,7 @@ mod tests {
     /// `test_serialization_round_trip_all_versions`). `build_version` wraps the
     /// data with a version, it does not encode it.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequestTest#testConstructor")]
     fn test_constructor() {
         const THROTTLE_TIME_MS: i32 = 10;
         let offsets_map = HashMap::from([
@@ -995,7 +1032,7 @@ mod tests {
 
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             let mut builder = if version < 3 {
-                TxnOffsetCommitRequestBuilder::with_options(
+                Builder::with_options(
                     TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                         .set_transactional_id("transactionalId")
                         .set_consumer_group_id("group-1")
@@ -1007,7 +1044,7 @@ mod tests {
                         .unwrap(),
                 )
             } else {
-                TxnOffsetCommitRequestBuilder::with_options(
+                Builder::with_options(
                     TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                         .set_transactional_id("transactionalId")
                         .set_consumer_group_id("group-1")
@@ -1023,7 +1060,7 @@ mod tests {
                 )
             };
             let request = match builder.build_version(version).expect("build") {
-                ConcreteRequest::TxnOffsetCommit(request) => request,
+                AbstractRequest::TxnOffsetCommit(request) => request,
                 other => panic!("unexpected {other:?}"),
             };
 
@@ -1054,9 +1091,10 @@ mod tests {
     /// The metadata-free builder works at every version; the metadata-carrying one
     /// only from v3, with the exact message asserted below that.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequestTest#testVersionSupportForGroupMetadata")]
     fn test_version_support_for_group_metadata() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-            TxnOffsetCommitRequestBuilder::with_options(
+            Builder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")

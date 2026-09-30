@@ -31,7 +31,7 @@
 //! kafka_warn!(ctx, "Error connecting to node {}: {}", node_id, err);
 //! ```
 
-/// Log at ERROR level with a [`LogContext`](super::LogContext) prefix.
+/// Log at ERROR level with a `LogContext` prefix.
 #[macro_export]
 macro_rules! kafka_error {
     ($ctx:expr, $($arg:tt)*) => {
@@ -39,7 +39,7 @@ macro_rules! kafka_error {
     };
 }
 
-/// Log at WARN level with a [`LogContext`](super::LogContext) prefix.
+/// Log at WARN level with a `LogContext` prefix.
 #[macro_export]
 macro_rules! kafka_warn {
     ($ctx:expr, $($arg:tt)*) => {
@@ -47,7 +47,7 @@ macro_rules! kafka_warn {
     };
 }
 
-/// Log at INFO level with a [`LogContext`](super::LogContext) prefix.
+/// Log at INFO level with a `LogContext` prefix.
 #[macro_export]
 macro_rules! kafka_info {
     ($ctx:expr, $($arg:tt)*) => {
@@ -55,7 +55,7 @@ macro_rules! kafka_info {
     };
 }
 
-/// Log at DEBUG level with a [`LogContext`](super::LogContext) prefix.
+/// Log at DEBUG level with a `LogContext` prefix.
 #[macro_export]
 macro_rules! kafka_debug {
     ($ctx:expr, $($arg:tt)*) => {
@@ -63,7 +63,7 @@ macro_rules! kafka_debug {
     };
 }
 
-/// Log at TRACE level with a [`LogContext`](super::LogContext) prefix.
+/// Log at TRACE level with a `LogContext` prefix.
 #[macro_export]
 macro_rules! kafka_trace {
     ($ctx:expr, $($arg:tt)*) => {

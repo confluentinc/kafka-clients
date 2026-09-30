@@ -19,8 +19,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, LeaveGroupRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, leave_group_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::kafka_debug;
@@ -38,6 +38,7 @@ type MemberErrors = HashMap<MemberIdentity, Errors>;
 /// The `removeMembersFromConsumerGroup` handler.
 ///
 /// Corresponds to `RemoveMembersFromConsumerGroupHandler`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler")]
 pub(crate) struct RemoveMembersFromConsumerGroupHandler {
     group_id: CoordinatorKey,
     members: Vec<MemberIdentity>,
@@ -47,6 +48,9 @@ pub(crate) struct RemoveMembersFromConsumerGroupHandler {
 
 impl RemoveMembersFromConsumerGroupHandler {
     /// Creates a handler for removing `members` from `group_id`.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#RemoveMembersFromConsumerGroupHandler"
+    )]
     pub(crate) fn new(group_id: &str, members: Vec<MemberIdentity>, log_context: LogContext) -> Self {
         Self {
             group_id: CoordinatorKey::by_group_id(group_id),
@@ -59,12 +63,14 @@ impl RemoveMembersFromConsumerGroupHandler {
     /// Creates the future bundle for the given group id.
     ///
     /// Mirrors `RemoveMembersFromConsumerGroupHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#newFuture")]
     pub(crate) fn new_future(group_id: &str) -> SimpleAdminApiFuture<CoordinatorKey, MemberErrors> {
         SimpleAdminApiFuture::for_keys(HashSet::from([CoordinatorKey::by_group_id(group_id)]))
     }
 
     /// Mirrors `validateKeys`: the requested keys must be exactly the single
     /// group id owned by this handler.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#validateKeys")]
     fn validate_keys(&self, group_ids: &HashSet<CoordinatorKey>) {
         let expected = HashSet::from([self.group_id.clone()]);
         assert!(
@@ -75,15 +81,17 @@ impl RemoveMembersFromConsumerGroupHandler {
 
     /// Builds the single batched `LeaveGroup` request. Mirrors
     /// `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> LeaveGroupRequestBuilder {
+    ) -> leave_group_request::Builder {
         self.validate_keys(group_ids);
-        LeaveGroupRequestBuilder::new(self.group_id.id_value.clone(), self.members.clone())
+        leave_group_request::Builder::new(self.group_id.id_value.clone(), self.members.clone())
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#handleGroupError")]
     fn handle_group_error(
         &self,
         group_id: CoordinatorKey,
@@ -295,11 +303,14 @@ mod tests {
 
     /// Translated from `testBuildRequest`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testBuildRequest"
+    )]
     fn test_build_request() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
         let mut builder = handler().build_batched_request(1, &keys());
         match builder.build().unwrap() {
-            ConcreteRequest::LeaveGroup(r) => {
+            AbstractRequest::LeaveGroup(r) => {
                 assert_eq!(r.data().group_id, GROUP_ID);
                 assert_eq!(r.data().members.len(), 2);
             },
@@ -309,6 +320,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testSuccessfulHandleResponse"
+    )]
     fn test_successful_handle_response() {
         let expected = MemberErrors::from([(m("m1", "m1-gii"), Errors::None)]);
         assert_completed(&handle_with_group_error(Errors::None), &expected);
@@ -316,6 +330,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testUnmappedHandleResponse"
+    )]
     fn test_unmapped_handle_response() {
         assert_unmapped(&handle_with_group_error(Errors::CoordinatorNotAvailable));
         assert_unmapped(&handle_with_group_error(Errors::NotCoordinator));
@@ -323,12 +340,18 @@ mod tests {
 
     /// Translated from `testRetriableHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testRetriableHandleResponse"
+    )]
     fn test_retriable_handle_response() {
         assert_retriable(&handle_with_group_error(Errors::CoordinatorLoadInProgress));
     }
 
     /// Translated from `testFailedHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testFailedHandleResponse"
+    )]
     fn test_failed_handle_response() {
         assert_failed(
             Errors::GroupAuthorizationFailed,
@@ -339,6 +362,9 @@ mod tests {
 
     /// Translated from `testFailedHandleResponseInMemberLevel`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testFailedHandleResponseInMemberLevel"
+    )]
     fn test_failed_handle_response_in_member_level() {
         for error in [Errors::FencedInstanceId, Errors::UnknownMemberId] {
             let expected = MemberErrors::from([(m("m1", "m1-gii"), error)]);

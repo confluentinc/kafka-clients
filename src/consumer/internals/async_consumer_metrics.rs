@@ -30,7 +30,7 @@ use crate::common::metrics::{Metrics, Sensor};
 /// so the Rust translation keeps them INFO too (they are on by default).
 ///
 /// These record points fire per-bg-poll / per-event-batch / per-unsent-request
-/// — never per-record (CLAUDE.md §11) — so the per-fetch / per-record hot path
+/// — never per-record (CLAUDE.md §13) — so the per-fetch / per-record hot path
 /// is untouched. `Sensor::record` short-circuits on `should_record()`
 /// internally.
 pub(crate) struct AsyncConsumerMetrics {

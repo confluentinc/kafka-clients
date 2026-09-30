@@ -38,7 +38,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::MetricName;
 use confluent_kafka::common::MetricValue;
@@ -54,8 +53,7 @@ use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
-use confluent_kafka::common::network::InvalidReceiveError;
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -70,6 +68,8 @@ use multilanguage_test_server::proto::{
     SendOffsetsToTransactionRequest, SendRequest, TransactionRequest,
 };
 use tonic::transport::Channel;
+
+use crate::common::multilanguage_consumer::remote_group_metadata_id;
 
 /// gRPC-backed `Producer` whose calls are executed by an out-of-process
 /// server in another language (Python or C++) that ultimately drives the
@@ -161,16 +161,19 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     /// Java `sendOffsetsToTransaction(offsets, groupMetadata)` tunneled over
-    /// gRPC — the producer half of consume-transform-produce. The offsets and
-    /// the consuming group's metadata are marshaled onto the wire; the server
-    /// rebuilds a `ConsumerGroupMetadata` handle and drives its own binding's
-    /// `send_offsets_to_transaction`. See [`Self::init_transactions`] for the
-    /// `StatusResponse` convention.
+    /// gRPC — the producer half of consume-transform-produce. The offsets are
+    /// marshaled onto the wire. The group metadata must come from a consumer on
+    /// the same backend: it travels as the id of the server-side handle that
+    /// consumer handed out, and the server passes that handle to its own
+    /// binding's `send_offsets_to_transaction`. Other metadata returns an
+    /// `illegal_state` error without an RPC. See [`Self::init_transactions`] for
+    /// the `StatusResponse` convention.
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
+        let group_metadata_id = remote_group_metadata_id(group_metadata, self.backend)?;
         let mut client = self.client.clone();
         // The offsets reach the wire, so impose a deterministic order before
         // encoding (producer-transactions.md §10): a `HashMap` iterates
@@ -189,16 +192,8 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
             })
             .collect();
         entries.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
-        let request = SendOffsetsToTransactionRequest {
-            producer_id: self.producer_id,
-            offsets: entries,
-            group_metadata: Some(proto::ConsumerGroupMetadata {
-                group_id: group_metadata.group_id().to_string(),
-                generation_id: group_metadata.generation_id(),
-                member_id: group_metadata.member_id().to_string(),
-                group_instance_id: group_metadata.group_instance_id().map(str::to_string),
-            }),
-        };
+        let request =
+            SendOffsetsToTransactionRequest { producer_id: self.producer_id, offsets: entries, group_metadata_id };
         let response = client
             .send_offsets_to_transaction(request)
             .await
@@ -389,13 +384,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         None => MetricValue::Double(0.0),
     };
     let gauge = ClosureGauge::new(move |_config, _now| value.clone());
-    let metric = KafkaMetric::new(
-        name.clone(),
-        MetricValueProvider::Gauge(Box::new(gauge)),
-        Arc::new(MetricConfig::new()),
-        Arc::new(SystemTime),
-    );
-    (name, Arc::new(metric))
+    // A standalone registry mints the `KafkaMetric`, as Java code obtains one
+    // (its constructor is public only "for testing"); the metric outlives it.
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    (name, metric)
 }
 
 fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
@@ -480,45 +472,30 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         CONSUMER_RETRIABLE_COMMIT_FAILED => {
             Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(p.message))
         },
-        INVALID_RECEIVE => Error::InvalidReceive(InvalidReceiveError::new(p.message)),
+        INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
 
         // Everything else is a class that owns its protocol code, which is
-        // exactly what `Errors::error_with_message` reconstructs — including
-        // `REQUEST_TIMED_OUT` -> `Error::Timeout` and `MESSAGE_TOO_LARGE` ->
-        // `Error::RecordTooLarge`, the two the C++ server used to guess at from
-        // the message text.
+        // exactly what the generated `error_with_message` table (a copy of
+        // `Errors::error_with_message`, Java's `Errors.exception(String)`)
+        // reconstructs — including `REQUEST_TIMED_OUT` -> `Error::Timeout` and
+        // `MESSAGE_TOO_LARGE` -> `Error::RecordTooLarge`, the two the C++ server
+        // used to guess at from the message text.
         //
-        // Six negatives also fall here, deliberately, as
-        // `Error::KafkaError(UnknownServerError)` carrying the message. They
-        // are exactly the client-side classes that hold structured payload the
-        // proto does not transport — `CorrelationIdMismatch`'s two correlation
-        // ids, `QuotaViolation`'s metric and bounds,
-        // `RecordDeserialization`'s partition and offset, and
+        // A code the table has no class for falls back to `UNKNOWN_SERVER_ERROR`,
+        // as `Errors.forCode` does in Java. Six negatives land there,
+        // deliberately, carrying the message. They are exactly the client-side
+        // classes that hold structured payload the proto does not transport —
+        // `CorrelationIdMismatch`'s two correlation ids, `QuotaViolation`'s
+        // metric and bounds, `RecordDeserialization`'s partition and offset, and
         // `ConsumerLogTruncation` / `ConsumerNoOffsetForPartition` /
         // `ConsumerOffsetOutOfRange`'s partition maps — so an arm above could
         // only reconstruct the class by fabricating that payload. Widening the
         // proto is the fix if a test ever needs to assert on one of them.
-        code => Error::with_message(errors_from_code(code), p.message),
-    }
-}
-
-/// Best-effort `i32` → `Errors` mapping. Falls back to `UnknownServerError`
-/// when the code is out of `i16` range — which is also what
-/// [`Errors::for_code`] answers for an unrecognised in-range code, so the
-/// negatives that reach this function (the client-side classes with no
-/// `Errors` entry) resolve there too.
-///
-/// The code is *not* informational — it is the only type-level information on
-/// the wire — and this is where the coded classes are reconstructed:
-/// [`Errors::error_with_message`] turns a code its class owns straight back
-/// into that class. The client-side classes, which `Errors` has no code for,
-/// are handled by the explicit arms in [`kafka_error_from_proto`] instead and
-/// reach this function only for the six the proto cannot carry.
-fn errors_from_code(code: i32) -> Errors {
-    match i16::try_from(code) {
-        Ok(c) => Errors::for_code(c),
-        Err(_) => Errors::UnknownServerError,
+        code => match error_with_message(code, p.message.clone()) {
+            Some(error) => error,
+            None => error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class"),
+        },
     }
 }
 

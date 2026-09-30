@@ -37,12 +37,13 @@ use crate::consumer::OffsetAndMetadata;
 /// [`ConsumerOffsetOutOfRangeError`](super::ConsumerOffsetOutOfRangeError) too —
 /// which is why it carries the same `offset_out_of_range_partitions` map.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException")]
 pub struct ConsumerLogTruncationError {
     message: String,
     /// The out-of-range offset per partition, inherited from the parent class.
-    pub offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
+    pub(crate) offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
     /// The divergent offset per partition.
-    pub divergent_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    pub(crate) divergent_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
 }
 
 impl ConsumerLogTruncationError {
@@ -50,6 +51,7 @@ impl ConsumerLogTruncationError {
     /// `LogTruncationException(Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`,
     /// which composes the message from the divergent offsets:
     /// `"Truncated partitions detected with divergent offsets " + divergentOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#LogTruncationException")]
     pub fn new(
         offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
         divergent_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -62,6 +64,7 @@ impl ConsumerLogTruncationError {
 
     /// Mirrors Java's three-argument
     /// `LogTruncationException(String, Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#LogTruncationException")]
     pub fn with_message(
         message: impl Into<String>,
         offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
@@ -76,6 +79,7 @@ impl ConsumerLogTruncationError {
     }
 
     /// The divergent offset per partition.
+    #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#divergentOffsets")]
     pub fn divergent_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
         &self.divergent_offsets
     }

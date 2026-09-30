@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.NewLeaderElectedException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The AlterPartition request successfully updated the partition state but
     /// the leader has changed.
     ///
-    /// Corresponds to Java's `NewLeaderElectedException`, error code [`Errors::NewLeaderElected`].
+    /// Corresponds to Java's `NewLeaderElectedException`, error code `Errors::NewLeaderElected`.
     ///
     /// Java `extends` chain:
     ///    `NewLeaderElectedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NewLeaderElectedException")]
     NewLeaderElectedError,
     code: Errors::NewLeaderElected,
     extends: [

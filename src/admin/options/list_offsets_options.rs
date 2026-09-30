@@ -24,6 +24,7 @@ use crate::common::IsolationLevel;
 /// extends `AbstractOptions` (a `timeout_ms` field) and adds an isolation
 /// level (defaulting to `READ_UNCOMMITTED`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsOptions")]
 pub struct ListOffsetsOptions {
     timeout_ms: Option<i32>,
     isolation_level: IsolationLevel,

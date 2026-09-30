@@ -44,6 +44,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AddPartitionsToTxnResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse")]
 pub struct AddPartitionsToTxnResponse {
     data: AddPartitionsToTxnResponseData,
 }
@@ -58,6 +59,7 @@ impl AddPartitionsToTxnResponse {
     pub const V3_AND_BELOW_TXN_ID: &str = "";
 
     /// Creates a new `AddPartitionsToTxnResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#AddPartitionsToTxnResponse")]
     pub fn new(data: AddPartitionsToTxnResponseData) -> Self {
         Self { data }
     }
@@ -68,6 +70,7 @@ impl AddPartitionsToTxnResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#data")]
     pub fn data(&self) -> &AddPartitionsToTxnResponseData {
         &self.data
     }
@@ -78,11 +81,13 @@ impl AddPartitionsToTxnResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -90,6 +95,7 @@ impl AddPartitionsToTxnResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v1+.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
@@ -100,6 +106,7 @@ impl AddPartitionsToTxnResponse {
     /// entry keyed by [`Self::V3_AND_BELOW_TXN_ID`]; a v4+ response contributes one
     /// entry per transaction. The producer reads the former — it is the only
     /// shape it ever sends.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#errors")]
     pub fn errors(&self) -> HashMap<String, HashMap<TopicPartition, Errors>> {
         let mut errors_map = HashMap::new();
 
@@ -123,6 +130,7 @@ impl AddPartitionsToTxnResponse {
     /// Flattens a topic-result collection into per-partition errors.
     ///
     /// Corresponds to Java's static `errorsForTransaction`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#errorsForTransaction")]
     pub fn errors_for_transaction(topic_results: &[AddPartitionsToTxnTopicResult]) -> HashMap<TopicPartition, Errors> {
         let mut results = HashMap::new();
         for topic_result in topic_results {
@@ -141,6 +149,7 @@ impl AddPartitionsToTxnResponse {
     /// Corresponds to Java's `getTransactionTopicResults(String)`. Java calls
     /// `find(..)` and dereferences it, which throws on a missing id; this returns
     /// `None` instead, since a Rust caller cannot catch that.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#getTransactionTopicResults")]
     pub fn get_transaction_topic_results(&self, transactional_id: &str) -> Option<&[AddPartitionsToTxnTopicResult]> {
         self.data
             .results_by_transaction
@@ -152,6 +161,7 @@ impl AddPartitionsToTxnResponse {
     /// Builds a per-transaction result from a map of partition errors.
     ///
     /// Corresponds to Java's static `resultForTransaction`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#resultForTransaction")]
     pub fn result_for_transaction(
         transactional_id: impl Into<String>,
         errors: &HashMap<TopicPartition, Errors>,
@@ -168,6 +178,7 @@ impl AddPartitionsToTxnResponse {
     /// Corresponds to Java's private static `topicCollectionForErrors`. Java uses
     /// a `HashMap` and so has unspecified ordering; this sorts by topic name and
     /// then partition index so the encoding is deterministic.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#topicCollectionForErrors")]
     fn topic_collection_for_errors(errors: &HashMap<TopicPartition, Errors>) -> Vec<AddPartitionsToTxnTopicResult> {
         let mut by_topic: HashMap<&str, Vec<(i32, Errors)>> = HashMap::new();
         for (topic_partition, error) in errors {
@@ -212,6 +223,7 @@ impl AddPartitionsToTxnResponse {
     /// `results_by_topic_v3_and_below` is empty the response must be v4+, so the
     /// top-level `error_code` is counted. Otherwise only the per-partition errors
     /// are counted — a v3-and-below response has no meaningful top-level code.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
 
@@ -233,6 +245,7 @@ impl AddPartitionsToTxnResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AddPartitionsToTxnResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -416,6 +429,7 @@ mod tests {
     /// test, both branches are in scope here — a response is something a client
     /// *receives*, and every method used is translated.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponseTest#testParse")]
     fn test_parse() {
         use super::super::ConcreteResponse;
 
@@ -505,6 +519,7 @@ mod tests {
 
     /// Translated from `AddPartitionsToTxnResponseTest.testBatchedErrors`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnResponseTest#testBatchedErrors")]
     fn test_batched_errors() {
         let tp1 = tp("topic1", 1);
         let error_one = Errors::CoordinatorNotAvailable;

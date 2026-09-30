@@ -31,14 +31,16 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AlterClientQuotasResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse")]
 pub struct AlterClientQuotasResponse {
     data: AlterClientQuotasResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 
 impl AlterClientQuotasResponse {
     /// Creates a new `AlterClientQuotasResponse` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#AlterClientQuotasResponse")]
     pub fn new(data: AlterClientQuotasResponseData, version: i16) -> Self {
         Self { data, version }
     }
@@ -49,6 +51,7 @@ impl AlterClientQuotasResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#data")]
     pub fn data(&self) -> &AlterClientQuotasResponseData {
         &self.data
     }
@@ -59,11 +62,13 @@ impl AlterClientQuotasResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -106,6 +111,7 @@ impl AlterClientQuotasResponse {
     }
 
     /// Returns the error counts aggregated across all entries.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for entry in &self.data.entries {
@@ -120,6 +126,7 @@ impl AlterClientQuotasResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterClientQuotasResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -140,6 +147,7 @@ impl AlterClientQuotasResponse {
     /// type, so each result is decomposed into its `(Errors, message)` pair,
     /// matching the `api_error(code, message)` convention used elsewhere in the
     /// admin client.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse#fromQuotaEntities")]
     pub fn from_quota_entities(result: &[(ClientQuotaEntity, Errors, Option<String>)], throttle_time_ms: i32) -> Self {
         let mut entries = Vec::with_capacity(result.len());
         for (entity, error, message) in result {

@@ -30,7 +30,7 @@
 //! lives behind a `Mutex` so the two sides can interact without
 //! `Arc<Mutex<&mut Self>>`-style ownership pretzels. The mutex is acquired
 //! only for short critical sections and **never held across an `.await`**
-//! per CLAUDE.md §9.6.
+//! per CLAUDE.md §11.6.
 //!
 //! # Deferred wiring
 //!
@@ -50,7 +50,7 @@
 
 // Phase 9 lands the manager; Phase 10 wires it into the bg task and
 // Phase 11 wires the public API. Suppress dead-code warnings until then.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,11 +60,11 @@ use tokio::sync::oneshot;
 
 use crate::OffsetCommitRequestData;
 use crate::OffsetFetchRequestData;
-use crate::common::Errors;
-use crate::common::metrics::Time;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
-    OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
+    OffsetCommitResponse, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH, offset_commit_request, offset_fetch_request,
 };
+use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
@@ -93,6 +93,7 @@ use super::{PollResult, UnsentRequest};
 /// Translated from `CommitRequestManager.MemberInfo`. `member_epoch` is
 /// `None` when no epoch is known (e.g. the member has left the group).
 #[derive(Clone, Debug, Default)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$MemberInfo")]
 pub(crate) struct MemberInfo {
     pub(crate) member_id: String,
     pub(crate) member_epoch: Option<i32>,
@@ -111,6 +112,7 @@ impl std::fmt::Display for MemberInfo {
 ///
 /// Translated from `CommitRequestManager.AutoCommitState`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState")]
 struct AutoCommitState {
     auto_commit_interval_ms: i64,
     /// Absolute wall-clock millisecond timestamp at which the timer expires
@@ -120,6 +122,7 @@ struct AutoCommitState {
 }
 
 impl AutoCommitState {
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#AutoCommitState")]
     fn new(now_ms: i64, auto_commit_interval_ms: i64) -> Self {
         Self {
             auto_commit_interval_ms,
@@ -130,6 +133,7 @@ impl AutoCommitState {
 
     /// Java: `shouldAutoCommit()`. Returns `true` if the timer has expired
     /// AND no commit is currently in flight.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#shouldAutoCommit")]
     fn should_auto_commit(&self, current_time_ms: i64) -> bool {
         if current_time_ms < self.expiration_ms {
             return false;
@@ -143,23 +147,29 @@ impl AutoCommitState {
 
     /// Java: `resetTimer()`. Reset to the configured auto-commit interval
     /// from `now_ms`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#resetTimer")]
     fn reset_timer(&mut self, now_ms: i64) {
         self.expiration_ms = now_ms.saturating_add(self.auto_commit_interval_ms);
     }
 
     /// Java: `resetTimer(long retryBackoffMs)`. Reset to a caller-supplied
     /// backoff from `now_ms` (used when a retriable auto-commit failed).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#resetTimer")]
     fn reset_timer_with_backoff(&mut self, now_ms: i64, retry_backoff_ms: i64) {
         self.expiration_ms = now_ms.saturating_add(retry_backoff_ms);
     }
 
     /// Java: `remainingMs(currentTimeMs)`. Returns 0 when the timer has
     /// already expired (no negative values).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#remainingMs")]
     fn remaining_ms(&self, current_time_ms: i64) -> i64 {
         (self.expiration_ms - current_time_ms).max(0)
     }
 
     /// Java: `setInflightCommitStatus(boolean)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#setInflightCommitStatus"
+    )]
     fn set_inflight_commit_status(&mut self, inflight: bool) {
         self.has_inflight_commit = inflight;
     }
@@ -186,6 +196,7 @@ type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
 /// translation uses `Option<OffsetAndMetadata>` (`None` == no committed
 /// offset), matching the pre-existing fetch-result representation.
 #[derive(Clone, Debug, PartialEq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult")]
 pub(crate) struct OffsetFetchResult {
     /// Partitions with offsets successfully retrieved (a `None` value marks
     /// a partition that has no committed offset).
@@ -196,6 +207,9 @@ pub(crate) struct OffsetFetchResult {
 }
 
 impl OffsetFetchResult {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult#OffsetFetchResult"
+    )]
     pub(crate) fn new(
         offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
         retriable_partition_errors: HashMap<TopicPartition, Errors>,
@@ -204,16 +218,23 @@ impl OffsetFetchResult {
     }
 
     /// Java: `offsets()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult#offsets")]
     pub(crate) fn offsets(&self) -> &HashMap<TopicPartition, Option<OffsetAndMetadata>> {
         &self.offsets
     }
 
     /// Java: `retriablePartitionErrors()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult#retriablePartitionErrors"
+    )]
     pub(crate) fn retriable_partition_errors(&self) -> &HashMap<TopicPartition, Errors> {
         &self.retriable_partition_errors
     }
 
     /// Java: `hasRetriablePartitionErrors()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult#hasRetriablePartitionErrors"
+    )]
     pub(crate) fn has_retriable_partition_errors(&self) -> bool {
         !self.retriable_partition_errors.is_empty()
     }
@@ -224,6 +245,9 @@ impl OffsetFetchResult {
     /// that the offset for that partition could not be fetched.
     ///
     /// Java: `toOffsetMapWithNulls()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchResult#toOffsetMapWithNulls"
+    )]
     pub(crate) fn to_offset_map_with_nulls(&self) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
         let mut result = self.offsets.clone();
         for tp in self.retriable_partition_errors.keys() {
@@ -253,6 +277,7 @@ type RebalanceFlushTx = Arc<Mutex<Option<oneshot::Sender<Result<(), Error>>>>>;
 /// `future_tx` is the application-side notification sink. Wrapped in
 /// `Arc<Mutex<Option<...>>>` so completion is idempotent — only the first
 /// call to `complete()` / `complete_err()` wins.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetCommitRequestState")]
 struct OffsetCommitRequestState {
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     member_info: MemberInfo,
@@ -280,6 +305,9 @@ struct OffsetCommitRequestState {
 }
 
 impl OffsetCommitRequestState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetCommitRequestState#OffsetCommitRequestState"
+    )]
     fn new(
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         member_info: MemberInfo,
@@ -334,6 +362,9 @@ impl OffsetCommitRequestState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetCommitRequestState#resetFuture"
+    )]
     fn reset_future(&mut self) -> oneshot::Receiver<CommitResult> {
         let (tx, rx) = oneshot::channel();
         let mut guard = self.future_tx.lock().expect("OffsetCommit future_tx mutex poisoned");
@@ -344,6 +375,7 @@ impl OffsetCommitRequestState {
 
 /// Pending offset-fetch request awaiting send / response. Translated from
 /// the nested `CommitRequestManager.OffsetFetchRequestState`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchRequestState")]
 struct OffsetFetchRequestState {
     /// Monotonic per-manager identifier. Java uses object identity
     /// (`.remove(fetchRequest)` is reference-equality) to find the matching
@@ -370,6 +402,9 @@ struct OffsetFetchRequestState {
 }
 
 impl OffsetFetchRequestState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchRequestState#OffsetFetchRequestState"
+    )]
     fn new(
         request_id: u64,
         requested_partitions: HashSet<TopicPartition>,
@@ -400,6 +435,9 @@ impl OffsetFetchRequestState {
         )
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchRequestState#sameRequest"
+    )]
     fn same_request(&self, other: &OffsetFetchRequestState) -> bool {
         self.requested_partitions == other.requested_partitions
     }
@@ -418,6 +456,9 @@ impl OffsetFetchRequestState {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetFetchRequestState#resetFuture"
+    )]
     fn reset_future(&mut self) -> oneshot::Receiver<FetchResult> {
         let (tx, rx) = oneshot::channel();
         let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
@@ -448,6 +489,7 @@ impl OffsetFetchRequestState {
 /// Translated from `CommitRequestManager`. The "metrics manager" and
 /// "Streams" hooks present in the Java source are intentionally dropped
 /// per the Phase 9 plan ("Out of scope").
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager")]
 pub(crate) struct CommitRequestManager {
     inner: Arc<CommitRequestManagerInner>,
 }
@@ -536,6 +578,7 @@ struct CommitRequestManagerState {
 
 /// Holds unsent commits + fetches + inflight fetches. Java:
 /// `CommitRequestManager.PendingRequests`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$PendingRequests")]
 struct PendingRequests {
     unsent_offset_commits: VecDeque<OffsetCommitRequestState>,
     unsent_offset_fetches: Vec<OffsetFetchRequestState>,
@@ -551,6 +594,7 @@ impl PendingRequests {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$PendingRequests#hasUnsentRequests")]
     fn has_unsent_requests(&self) -> bool {
         !self.unsent_offset_commits.is_empty() || !self.unsent_offset_fetches.is_empty()
     }
@@ -564,6 +608,7 @@ impl CommitRequestManager {
     /// (the last is consumed at `poll` time via `Arc<Mutex<...>>` — Java
     /// holds a direct reference; we hold an `Arc<Mutex<...>>` so the BG
     /// task can mutate both managers).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#CommitRequestManager")]
     pub(crate) fn new(
         config: &ConsumerConfig,
         metadata: Arc<ConsumerMetadata>,
@@ -668,6 +713,7 @@ impl CommitRequestManager {
 
     /// Returns `true` if auto-commit is enabled. Mirrors Java's
     /// `autoCommitEnabled()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#autoCommitEnabled")]
     pub(crate) fn auto_commit_enabled(&self) -> bool {
         let guard = self.inner.state.lock().expect("commit manager state poisoned");
         guard.auto_commit.is_some()
@@ -675,6 +721,7 @@ impl CommitRequestManager {
 
     /// Reset the auto-commit timer to the auto-commit interval from
     /// `now_ms`. Mirrors Java's `resetAutoCommitTimer()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#resetAutoCommitTimer")]
     pub(crate) fn reset_auto_commit_timer(&self, now_ms: i64) {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if let Some(ac) = guard.auto_commit.as_mut() {
@@ -684,6 +731,7 @@ impl CommitRequestManager {
 
     /// Reset the auto-commit timer to a caller-supplied backoff. Mirrors
     /// Java's overloaded `resetAutoCommitTimer(long retryBackoffMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#resetAutoCommitTimer")]
     pub(crate) fn reset_auto_commit_timer_with_backoff(&self, now_ms: i64, retry_backoff_ms: i64) {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if let Some(ac) = guard.auto_commit.as_mut() {
@@ -712,6 +760,7 @@ impl CommitRequestManager {
     /// shape change is required for Phase-12 production wire-up where the
     /// commit manager is held as `Arc<CommitRequestManager>` and shared
     /// with `ConsumerMembershipManager`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#updateTimerAndMaybeCommit")]
     pub(crate) fn update_timer_and_maybe_commit(&self, current_time_ms: i64) {
         // Java: updateTimerAndMaybeCommit — ensures the auto-commit timer
         // reflects the latest poll/event tick before potentially firing.
@@ -749,6 +798,7 @@ impl CommitRequestManager {
 
     /// Update the latest member epoch and id. Mirrors Java's
     /// `onMemberEpochUpdated(Optional<Integer>, String)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#onMemberEpochUpdated")]
     pub(crate) fn on_member_epoch_updated(&self, new_epoch: Option<i32>, new_member_id: String) {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         let old_epoch = guard.member_info.member_epoch;
@@ -769,6 +819,7 @@ impl CommitRequestManager {
     }
 
     /// Diagnostic accessor — Java: `lastEpochSentOnCommit()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#lastEpochSentOnCommit")]
     pub(crate) fn last_epoch_sent_on_commit(&self) -> Option<i32> {
         let guard = self.inner.state.lock().expect("commit manager state poisoned");
         guard.last_epoch_sent_on_commit
@@ -785,6 +836,7 @@ impl CommitRequestManager {
     /// success or a [`Error`] on failure. Callers `.await` it.
     ///
     /// An empty `offsets` map resolves the future immediately to `Ok({})`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#commitSync")]
     pub(crate) fn commit_sync(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -860,6 +912,9 @@ impl CommitRequestManager {
     ///
     /// Returns a `oneshot::Receiver` resolving to `Ok(())` on success or
     /// the surfaced [`Error`] on failure. Callers `.await` it.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeAutoCommitSyncBeforeRebalance"
+    )]
     pub(crate) fn maybe_auto_commit_sync_before_rebalance(
         &self,
         deadline_ms: i64,
@@ -944,6 +999,7 @@ impl CommitRequestManager {
     /// completes (or fails). The invoker drains the queue on the next
     /// `poll() / commit_*() / close()` call — see
     /// consumer-threading.md §31.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#commitAsync")]
     pub(crate) fn commit_async<K: Send + 'static, V: Send + 'static>(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -1078,6 +1134,7 @@ impl CommitRequestManager {
     ///
     /// Returns a `oneshot::Receiver` resolving to a map keyed by partition,
     /// with `None` values for partitions that had no committed offset.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#fetchOffsets")]
     pub(crate) fn fetch_offsets(
         &self,
         partitions: HashSet<TopicPartition>,
@@ -1270,6 +1327,7 @@ impl CommitRequestManager {
 
     /// Drain remaining unsent commit requests for the close path. Java:
     /// `drainPendingOffsetCommitRequests()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#drainPendingOffsetCommitRequests")]
     pub(crate) fn drain_pending_offset_commit_requests(&self) -> PollResult {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if guard.pending.unsent_offset_commits.is_empty() {
@@ -1294,6 +1352,7 @@ impl CommitRequestManager {
 
     /// Propagate the leader epoch from each [`OffsetAndMetadata`] into the
     /// `Metadata` cache (Java: `maybeUpdateLastSeenEpochIfNewer`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeUpdateLastSeenEpochIfNewer")]
     fn maybe_update_last_seen_epoch_if_newer(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
         for (tp, oam) in offsets {
             if let Some(epoch) = oam.leader_epoch() {
@@ -1324,6 +1383,7 @@ impl CommitRequestManager {
     /// where `requestManagers.entries()` iterates immutable references.
     ///
     /// Mirrors Java's `poll(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#poll")]
     pub(crate) fn poll_with_coordinator(
         &self,
         coordinator: &CoordinatorRequestManager,
@@ -1422,6 +1482,7 @@ impl CommitRequestManager {
         PollResult::new(next_poll, to_send)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeAutoCommitAsync")]
     fn maybe_auto_commit_async(&self, current_time_ms: i64) {
         // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
         // AND timer expired AND no in-flight commit. Then snapshots
@@ -1664,9 +1725,9 @@ fn build_offset_commit_unsent_request(
     // `poll_with_coordinator`.
 
     let builder = if can_use_topic_ids {
-        OffsetCommitRequestBuilder::for_topic_ids_or_names(data)
+        offset_commit_request::Builder::for_topic_ids_or_names(data)
     } else {
-        OffsetCommitRequestBuilder::for_topic_names(data)
+        offset_commit_request::Builder::for_topic_names(data)
     };
 
     // Build the unsent request, register a completion handler that
@@ -1694,7 +1755,7 @@ fn build_offset_commit_unsent_request(
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
                 // (CommitRequestManager.java:947).
-                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
+                inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 request.complete_err(err);
             },
             Err(_recv_err) => {
@@ -1746,9 +1807,9 @@ fn build_offset_fetch_unsent_request(
     data.set_groups(vec![group]);
 
     let builder = if can_use_topic_ids {
-        OffsetFetchRequestBuilder::for_topic_ids_or_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+        offset_fetch_request::Builder::for_topic_ids_or_names(data, inner.throw_on_fetch_stable_offset_unsupported)
     } else {
-        OffsetFetchRequestBuilder::for_topic_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+        offset_fetch_request::Builder::for_topic_names(data, inner.throw_on_fetch_stable_offset_unsupported)
     };
 
     let coordinator_node = inner.coordinator_node();
@@ -1779,7 +1840,7 @@ fn build_offset_fetch_unsent_request(
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
                 // (CommitRequestManager.java:947).
-                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
+                inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
                     let _ = tx.send(Err(err));
                 }
@@ -1864,7 +1925,7 @@ fn classify_and_complete_commit(
                     // Java line 801-806: mark coordinator unknown before
                     // surfacing the error so the retry driver's next
                     // commit attempt re-discovers the coordinator.
-                    inner.mark_coordinator_unknown(error.message(), current_time_ms_now());
+                    inner.mark_coordinator_unknown(error.message(), inner.time.milliseconds());
                     request.complete_err(Error::new(error));
                     return;
                 },
@@ -1938,7 +1999,7 @@ fn handle_offset_fetch_response(
         // exceptionally so the retry driver's next OffsetFetch goes to
         // a freshly discovered coordinator.
         if matches!(group_error, Errors::NotCoordinator | Errors::CoordinatorNotAvailable) {
-            inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), current_time_ms_now());
+            inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), inner.time.milliseconds());
         }
         send(Err(classify_fetch_group_error(group_error, group_id)));
         return;
@@ -2042,21 +2103,6 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
     }
 }
 
-/// Wall-clock `System.currentTimeMillis()` equivalent used by the
-/// coordinator-disconnect / mark-coordinator-unknown response handlers,
-/// which do not carry an injected `current_time_ms` parameter. Mirrors
-/// Java's bg-task `time.milliseconds()` inside
-/// `OffsetFetchRequestState.onFailure`. (The retry drivers no longer rely
-/// on this: they read the injected `inner.time.milliseconds()` at each
-/// response — see `fetch_offsets_with_retries` and the sync-commit driver.)
-fn current_time_ms_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
-}
-
 impl CommitRequestManagerInner {
     fn coordinator_node(&self) -> Option<crate::common::Node> {
         // Read the coordinator handle (if wired) and return its currently
@@ -2147,6 +2193,7 @@ impl CommitRequestManagerInner {
 //                Retry drivers (spawned per outstanding request)
 // =========================================================================
 
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#commitSyncWithRetries")]
 async fn commit_sync_with_retries(
     inner: Arc<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<CommitResult>,
@@ -2250,7 +2297,9 @@ async fn commit_sync_with_retries(
 ///
 /// Always clears the auto-commit inflight flag when the driver exits, so a
 /// later interval-based auto-commit can fire.
-#[allow(clippy::too_many_arguments)]
+#[doc(
+    alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#autoCommitSyncBeforeRebalanceWithRetries"
+)]
 async fn auto_commit_sync_before_rebalance_with_retries(
     inner: Arc<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<CommitResult>,
@@ -2433,7 +2482,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
 /// [`Error::timeout`] wrapping the original error message.
-#[allow(clippy::too_many_arguments)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#fetchOffsetsWithRetries")]
 async fn fetch_offsets_with_retries(
     inner: Arc<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<FetchResult>,
@@ -2677,7 +2726,7 @@ mod tests {
     //! `deadline_ms` — mirroring Java, which checks `isExpired()` /
     //! `handleRetriablePartitionErrors` against `time.milliseconds()` at
     //! response-handling time. Deadline-expiry tests therefore inject a
-    //! [`MockTime`](crate::common::metrics::MockTime) via
+    //! [`MockTime`](crate::common::utils::MockTime) via
     //! [`make_manager_with_mock_time`] and advance it with `MockTime::sleep`
     //! to trip the deadline (mirroring Java's `MockTime.sleep`), rather than
     //! relying on a model clock advanced by `retry_backoff_ms`. Each retry
@@ -2716,17 +2765,23 @@ mod tests {
         // backoff windows unreachably far ahead of the poll `now`).
         // Deadline-expiry tests use [`make_manager_with_mock_time`] instead so
         // they can advance the clock past the deadline.
-        make_manager_with_time(now_ms, enable_auto_commit, Arc::new(crate::common::metrics::MockTime::new()))
+        make_manager_with_time(
+            now_ms,
+            enable_auto_commit,
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
+        )
     }
 
     /// Build a manager over an explicit [`Time`] handle. Deadline-expiry tests
-    /// pass a [`MockTime`](crate::common::metrics::MockTime) so
+    /// pass a [`MockTime`](crate::common::utils::MockTime) so
     /// they can advance the clock past `deadline_ms` deterministically —
     /// mirroring Java's `MockTime.sleep` driving `isExpired()`.
     fn make_manager_with_time(now_ms: i64, enable_auto_commit: bool, time: Arc<dyn Time>) -> CommitRequestManager {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
@@ -2741,8 +2796,10 @@ mod tests {
     fn make_manager_with_mock_time(
         now_ms: i64,
         enable_auto_commit: bool,
-    ) -> (CommitRequestManager, Arc<crate::common::metrics::MockTime>) {
-        let time = Arc::new(crate::common::metrics::MockTime::new());
+    ) -> (CommitRequestManager, Arc<crate::common::utils::MockTime>) {
+        let time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let mgr = make_manager_with_time(now_ms, enable_auto_commit, Arc::clone(&time) as Arc<dyn Time>);
         (mgr, time)
     }
@@ -2758,14 +2815,16 @@ mod tests {
         let (mgr, subs, _time) = make_manager_with_subs_and_time(
             now_ms,
             enable_auto_commit,
-            Arc::new(crate::common::metrics::MockTime::new()),
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
         );
         (mgr, subs)
     }
 
     /// As [`make_manager_with_subs`] but over an explicit [`Time`] handle,
     /// returning the handle too so deadline-expiry tests can advance a
-    /// [`MockTime`](crate::common::metrics::MockTime).
+    /// [`MockTime`](crate::common::utils::MockTime).
     fn make_manager_with_subs_and_time(
         now_ms: i64,
         enable_auto_commit: bool,
@@ -2773,7 +2832,7 @@ mod tests {
     ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>, Arc<dyn Time>) {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
@@ -2792,8 +2851,8 @@ mod tests {
     }
 
     use crate::ClientResponse;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::consumer::internals::CoordinatorRequestManager;
 
@@ -3214,7 +3273,7 @@ mod tests {
         );
         let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
                 .set_client_id("test-client")
                 .set_correlation_id(0)
@@ -3545,7 +3604,7 @@ mod tests {
         );
         let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
                 .set_client_id("test-client")
                 .set_correlation_id(0)
@@ -3661,7 +3720,9 @@ mod tests {
         use crate::common::Node;
         use crate::consumer::internals::CoordinatorRequestManager;
 
-        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
+        let mock_time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let (manager, subs, _time) = make_manager_with_subs_and_time(0, true, Arc::clone(&mock_time) as Arc<dyn Time>);
         let tp = TopicPartition::new("t".to_string(), 0);
         {
@@ -5128,14 +5189,16 @@ mod tests {
         cfg.retry_backoff_ms = 0;
         cfg.retry_backoff_max_ms = 0;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
+        let mock_time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let manager =
             CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, Arc::clone(&mock_time) as Arc<dyn Time>, 0);
         let coordinator = coordinator_with_node();
@@ -5464,7 +5527,7 @@ mod tests {
         let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
         // The retried request carries the new member id + epoch.
         let req = retried.request_builder_mut().expect("builder present").build().expect("build");
-        if let crate::common::requests::ConcreteRequest::OffsetFetch(fetch) = req {
+        if let crate::common::requests::AbstractRequest::OffsetFetch(fetch) = req {
             let groups = &fetch.data().groups;
             assert_eq!(groups.len(), 1);
             assert_eq!(groups[0].member_epoch, new_epoch);
@@ -5971,13 +6034,15 @@ mod tests {
             now_ms,
             enable_auto_commit,
             interval_ms,
-            Arc::new(crate::common::metrics::MockTime::new()),
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
         )
     }
 
     /// As [`make_manager_with_subs_interval`] but over an explicit [`Time`]
     /// handle. The rebalance-flush retry test injects a
-    /// [`MockTime`](crate::common::metrics::MockTime) held below
+    /// [`MockTime`](crate::common::utils::MockTime) held below
     /// the deadline so a retriable failure re-queues (rather than being seen
     /// as expired against the wall clock).
     fn make_manager_with_subs_interval_time(
@@ -5989,7 +6054,7 @@ mod tests {
         let mut cfg = test_config(enable_auto_commit);
         cfg.auto_commit_interval_ms = interval_ms.clamp(0, i64::from(i32::MAX)) as i32;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,

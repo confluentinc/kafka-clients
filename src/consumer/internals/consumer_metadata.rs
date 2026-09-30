@@ -25,14 +25,14 @@
 //! The single-arg name-only retain handles the client-side regex /
 //! transient-topic / explicit subscription paths.
 
-#![allow(dead_code)] // Phase 4: lands before any Rust caller (Phases 5-11).
+#![expect(dead_code)] // Phase 4: lands before any Rust caller (Phases 5-11).
 
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::requests::MetadataRequestBuilder;
+use crate::common::requests::metadata_request;
 use crate::common::utils::LogContext;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::SubscriptionState;
@@ -59,6 +59,7 @@ struct ConsumerMetadataInner {
 /// - Honour `include.internal.topics` and `allow.auto.create.topics`.
 ///
 /// Translated from `org.apache.kafka.clients.consumer.internals.ConsumerMetadata`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata")]
 pub(crate) struct ConsumerMetadata {
     /// Underlying [`Metadata`], wrapped in `Arc` so it can be shared with
     /// `NetworkClient` (and other downstream consumers) just like
@@ -76,6 +77,7 @@ pub(crate) struct ConsumerMetadata {
 impl ConsumerMetadata {
     /// Full constructor mirroring Java's primary `ConsumerMetadata(...)`
     /// constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#ConsumerMetadata")]
     pub(crate) fn new(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -136,21 +138,21 @@ impl ConsumerMetadata {
         // 3. Otherwise -> request by metadata-topics + transient topic names.
         let builder_subscription = Arc::clone(&subscription);
         let builder_inner = Arc::clone(&inner);
-        let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
+        let request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> = Box::new(move || {
             let sub_guard = builder_subscription.lock().unwrap();
             if sub_guard.has_pattern_subscription() {
-                return MetadataRequestBuilder::all_topics();
+                return metadata_request::Builder::all_topics();
             }
             let inner_guard = builder_inner.lock().unwrap();
             if sub_guard.has_re2j_pattern_subscription() && inner_guard.transient_topics.is_empty() {
                 // Use BTreeSet to preserve Java's `TreeSet<Uuid>` ordering on the wire.
-                return MetadataRequestBuilder::for_topic_ids(sub_guard.assigned_topic_ids());
+                return metadata_request::Builder::for_topic_ids(sub_guard.assigned_topic_ids());
             }
             // Explicit topic names + transient topics.
             let mut topics: HashSet<String> = sub_guard.metadata_topics();
             topics.extend(inner_guard.transient_topics.iter().cloned());
             let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::for_topic_names(&topic_refs, allow_auto_topic_creation)
+            metadata_request::Builder::for_topic_names(&topic_refs, allow_auto_topic_creation)
         });
 
         let metadata = Arc::new(Metadata::with_overrides(
@@ -180,6 +182,7 @@ impl ConsumerMetadata {
     /// `allow_auto_create_topics` via the `pub(crate)` fields on
     /// `ConsumerConfig` (no public getters currently exist for these — the
     /// fields are accessed directly within the crate).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#ConsumerMetadata")]
     pub(crate) fn with_config(
         config: &ConsumerConfig,
         subscription: Arc<Mutex<SubscriptionState>>,
@@ -197,6 +200,7 @@ impl ConsumerMetadata {
     }
 
     /// Translates Java's `allowAutoTopicCreation()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#allowAutoTopicCreation")]
     pub(crate) fn allow_auto_topic_creation(&self) -> bool {
         self.allow_auto_topic_creation
     }
@@ -206,6 +210,7 @@ impl ConsumerMetadata {
     /// Adds topics to the transient set. If the resulting set introduces
     /// topics not yet in the metadata cache, schedule a partial update so
     /// the next refresh covers them.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#addTransientTopics")]
     pub(crate) fn add_transient_topics(&self, topics: HashSet<String>) {
         let mut inner = self.inner.lock().unwrap();
         inner.transient_topics.extend(topics);
@@ -222,6 +227,7 @@ impl ConsumerMetadata {
     }
 
     /// Translates Java's `clearTransientTopics()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#clearTransientTopics")]
     pub(crate) fn clear_transient_topics(&self) {
         self.inner.lock().unwrap().transient_topics.clear();
     }
@@ -268,7 +274,8 @@ mod tests {
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::requests::MetadataResponse;
     use crate::common::{Node, TopicPartition, Uuid};
-    use crate::consumer::{AutoOffsetResetStrategy, SubscriptionPattern};
+    use crate::consumer::SubscriptionPattern;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     fn topics_set(metadata: &ConsumerMetadata) -> HashSet<String> {
@@ -346,6 +353,7 @@ mod tests {
     /// Translated from `ConsumerMetadataTest.testPatternSubscriptionNoInternalTopics` and
     /// `testPatternSubscriptionIncludeInternalTopics`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testPatternSubscription")]
     fn test_pattern_subscription() {
         // Compile the regex once outside the loop to satisfy
         // `regex_creation_in_loops`. `Regex::clone` is cheap (Arc'd).
@@ -382,6 +390,9 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testSubscriptionToBrokerRegexDoesNotRequestAllTopicsMetadata`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexDoesNotRequestAllTopicsMetadata"
+    )]
     fn test_subscription_to_broker_regex_does_not_request_all_topics_metadata() {
         let sub = new_subscription();
         sub.lock()
@@ -403,6 +414,9 @@ mod tests {
     /// This is the *behavioral gate* the plan flagged for verifying the
     /// `retain_topic_with_id_fn` plumbing.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexRetainsAssignedTopics"
+    )]
     fn test_subscription_to_broker_regex_retains_assigned_topics() {
         let sub = new_subscription();
         sub.lock()
@@ -432,6 +446,9 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testSubscriptionToBrokerRegexAllowsTransientTopics`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexAllowsTransientTopics"
+    )]
     fn test_subscription_to_broker_regex_allows_transient_topics() {
         let sub = new_subscription();
         sub.lock()
@@ -463,6 +480,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testUserAssignment`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testUserAssignment")]
     fn test_user_assignment() {
         let sub = new_subscription();
         let tp_foo_0 = TopicPartition::new("foo".to_string(), 0);
@@ -496,6 +514,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testNormalSubscription`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testNormalSubscription")]
     fn test_normal_subscription() {
         let sub = new_subscription();
         sub.lock()
@@ -530,6 +549,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testTransientTopics`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testTransientTopics")]
     fn test_transient_topics() {
         let sub = new_subscription();
         sub.lock()

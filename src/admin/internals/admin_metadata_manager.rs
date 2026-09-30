@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 /// The metadata-refresh state machine, mirroring Java's `State` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager$State")]
 enum State {
     /// There is no in-flight metadata request and no need for one.
     Quiescent,
@@ -66,6 +67,7 @@ struct Inner {
 /// share the cluster with the `NetworkClient`'s [`AdminMetadataUpdater`], not
 /// for cross-task concurrency.
 #[derive(Clone)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager")]
 pub(crate) struct AdminMetadataManager {
     inner: Arc<Mutex<Inner>>,
     refresh_backoff_ms: i64,
@@ -76,6 +78,7 @@ pub(crate) struct AdminMetadataManager {
 
 impl AdminMetadataManager {
     /// Creates a manager with the given refresh backoff and metadata expiry.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#AdminMetadataManager")]
     pub(crate) fn new(
         refresh_backoff_ms: i64,
         metadata_expire_ms: i64,
@@ -100,11 +103,13 @@ impl AdminMetadataManager {
 
     /// Returns a [`MetadataUpdater`] sharing this manager's cluster, to be moved
     /// into the `NetworkClient`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#updater")]
     pub(crate) fn updater(&self) -> Box<dyn MetadataUpdater> {
         Box::new(AdminMetadataUpdater { inner: Arc::clone(&self.inner), log_context: self.log_context.clone() })
     }
 
     /// Whether the client is configured with `bootstrap.controllers` (KIP-919).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#usingBootstrapControllers")]
     pub(crate) fn using_bootstrap_controllers(&self) -> bool {
         self.using_bootstrap_controllers
     }
@@ -115,6 +120,7 @@ impl AdminMetadataManager {
     ///
     /// Returns the stored fatal exception (if any), mirroring Java's `isReady`
     /// which rethrows `fatalException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#isReady")]
     pub(crate) fn is_ready(&self) -> Result<bool, Error> {
         let inner = self.inner.lock().unwrap();
         if let Some(err) = &inner.fatal_error {
@@ -132,20 +138,21 @@ impl AdminMetadataManager {
     }
 
     /// The current controller node, if known.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#controller")]
     pub(crate) fn controller(&self) -> Option<Node> {
         self.inner.lock().unwrap().cluster.controller().cloned()
     }
 
     /// The node with the given id, if known.
     ///
-    /// Used by `ConstantNodeIdProvider`, which the Phase-1 topic RPCs do not
-    /// exercise (it arrives with later tiers, per admin-client.md §2).
-    #[allow(dead_code)]
+    /// Used by `ConstantNodeIdProvider` (admin-client.md §2).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#nodeById")]
     pub(crate) fn node_by_id(&self, id: i32) -> Option<Node> {
         self.inner.lock().unwrap().cluster.node_by_id(id).cloned()
     }
 
     /// Requests a metadata update on the next opportunity.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#requestUpdate")]
     pub(crate) fn request_update(&self) {
         let mut inner = self.inner.lock().unwrap();
         if inner.state == State::Quiescent {
@@ -155,6 +162,7 @@ impl AdminMetadataManager {
 
     /// Clears the current controller (used on `NOT_CONTROLLER`) and requests an
     /// update. Mirrors Java's `clearController` + a caller-side `requestUpdate`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#clearController")]
     pub(crate) fn clear_controller(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.cluster = rebuild_without_controller(&inner.cluster);
@@ -162,6 +170,7 @@ impl AdminMetadataManager {
 
     /// The delay in milliseconds before the next metadata fetch is due. When
     /// this returns `0`, the background task fires a metadata call.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#metadataFetchDelayMs")]
     pub(crate) fn metadata_fetch_delay_ms(&self, now: i64) -> i64 {
         let inner = self.inner.lock().unwrap();
         let delay_before_next_expire = 0i64.max(self.metadata_expire_ms - (now - inner.last_metadata_update_ms));
@@ -176,6 +185,7 @@ impl AdminMetadataManager {
     }
 
     /// Transitions to `UPDATE_PENDING`, recording the attempt time.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#transitionToUpdatePending")]
     pub(crate) fn transition_to_update_pending(&self, now: i64) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::UpdatePending;
@@ -183,6 +193,7 @@ impl AdminMetadataManager {
     }
 
     /// Applies a successful metadata response's cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#update")]
     pub(crate) fn update(&self, cluster: Cluster, now: i64) {
         let mut inner = self.inner.lock().unwrap();
         if cluster.is_bootstrap_configured() {
@@ -201,6 +212,7 @@ impl AdminMetadataManager {
 
     /// Records a failed metadata update, storing a fatal exception if the error
     /// is not retriable.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#updateFailed")]
     pub(crate) fn update_failed(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::Quiescent;
@@ -243,6 +255,7 @@ fn rebuild_without_controller(cluster: &Cluster) -> Cluster {
 /// node list and handles disconnects.
 ///
 /// Corresponds to `AdminMetadataManager.AdminMetadataUpdater`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager$AdminMetadataUpdater")]
 struct AdminMetadataUpdater {
     inner: Arc<Mutex<Inner>>,
     log_context: LogContext,

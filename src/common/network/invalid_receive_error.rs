@@ -29,19 +29,26 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// Java `extends` chain:
 ///    `InvalidReceiveException` -> `KafkaException`
 ///
-/// Hand-written rather than declared with `kafka_error_class!` because the
+/// Hand-written rather than declared with `kafka_error_type!` because the
 /// network layer surfaces it across an [`io::Error`] boundary, so it needs the
 /// `From<_> for io::Error` conversion the macro does not provide. It still implements
 /// [`ErrorHierarchy`] / [`ErrorMessage`] / [`ErrorCode`] and has an
 /// [`Error`](crate::common::Error) variant, so it answers `is_kafka_error()`
 /// like every other translated `KafkaException` descendant.
+///
+/// Crate-private although `Error::InvalidReceive` is public: Java's class sits in
+/// `common.network`, which is "not a supported API". Callers match the variant and
+/// use `Display` / `source()`; the payload itself is not reachable by name.
+#[expect(unnameable_types)]
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.network.InvalidReceiveException")]
 pub struct InvalidReceiveError {
     message: String,
 }
 
 impl InvalidReceiveError {
     /// Creates a new `InvalidReceiveError` with the given message.
+    #[doc(alias = "org.apache.kafka.common.network.InvalidReceiveException#InvalidReceiveException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
     }

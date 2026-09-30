@@ -35,7 +35,7 @@
 //! Misuse returns `Err` where Java throws: `IllegalStateException` becomes
 //! [`Error::local_illegal_state`] and `ProducerFencedException` becomes a
 //! [`Error`] carrying [`Errors::ProducerFenced`], with Java's message text
-//! preserved verbatim (CLAUDE.md §10.2).
+//! preserved verbatim (CLAUDE.md §12.2).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -49,13 +49,13 @@ use super::internals::FutureRecordMetadata;
 use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
+use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
 use crate::consumer::ConsumerGroupMetadata;
@@ -179,6 +179,7 @@ use super::Callback;
 /// All methods use interior mutability via `Mutex`, matching Java's
 /// `synchronized` methods. The struct is `Send + Sync` so it can be shared
 /// via `Arc`.
+#[doc(alias = "org.apache.kafka.clients.producer.MockProducer")]
 pub struct MockProducer<K, V> {
     inner: Mutex<MockProducerInner<K, V>>,
 }
@@ -374,6 +375,7 @@ impl<K, V> MockProducerInner<K, V> {
 /// [`FutureRecordMetadata`].
 ///
 /// Corresponds to Java's `MockProducer.Completion` inner class.
+#[doc(alias = "org.apache.kafka.clients.producer.MockProducer$Completion")]
 struct Completion {
     offset: i64,
     metadata: RecordMetadata,
@@ -392,6 +394,7 @@ impl Completion {
     /// observe the send as complete before the callback has returned. It is not
     /// observable from the single task that calls `complete`, since both happen
     /// before the call returns, but it is from a concurrent one.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer$Completion#complete")]
     fn complete(self, error: Option<Error>) {
         let Completion { offset, metadata, result, callback, topic_partition } = self;
         if let Some(e) = error {
@@ -439,19 +442,19 @@ impl Completion {
 pub struct MockProducerOptions<K, V> {
     /// The cluster holding metadata for this producer. Java's `cluster`; starts
     /// as [`Cluster::empty`], the value `:137` passes on the caller's behalf.
-    pub cluster: Cluster,
+    pub(crate) cluster: Cluster,
     /// If `true`, automatically complete all requests successfully and execute
     /// the callback. Java's `autoComplete`.
-    pub auto_complete: bool,
+    pub(crate) auto_complete: bool,
     /// The partition strategy, or `None`. Java's `partitioner`, which `:149`
     /// passes as `null`.
-    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    pub(crate) partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// The key serializer, or `None`. Java's `keySerializer`, which `:149`
     /// passes as `null`.
-    pub key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    pub(crate) key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
     /// The value serializer, or `None`. Java's `valueSerializer`, which `:149`
     /// passes as `null`.
-    pub value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    pub(crate) value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
 }
 
 /// Fluent builder for [`MockProducerOptions`].
@@ -488,28 +491,28 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`MockProducerOptions::cluster`].
+    /// Sets `MockProducerOptions::cluster`.
     pub fn set_cluster(mut self, cluster: Cluster) -> Self {
         self.cluster = Some(cluster);
         self
     }
-    /// Sets [`MockProducerOptions::auto_complete`], a mandatory parameter:
+    /// Sets `MockProducerOptions::auto_complete`, a mandatory parameter:
     /// [`Self::build`] returns an error if it was not set.
     pub fn set_auto_complete(mut self, auto_complete: bool) -> Self {
         self.auto_complete = Some(auto_complete);
         self
     }
-    /// Sets [`MockProducerOptions::partitioner`].
+    /// Sets `MockProducerOptions::partitioner`.
     pub fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
-    /// Sets [`MockProducerOptions::key_serializer`].
+    /// Sets `MockProducerOptions::key_serializer`.
     pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>) -> Self {
         self.key_serializer = key_serializer;
         self
     }
-    /// Sets [`MockProducerOptions::value_serializer`].
+    /// Sets `MockProducerOptions::value_serializer`.
     pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>) -> Self {
         self.value_serializer = value_serializer;
         self
@@ -574,6 +577,7 @@ impl<K, V> MockProducer<K, V> {
     /// Serializer, Serializer)` constructor invoked with a null partitioner and
     /// null serializers (`MockProducer.java:113`). Delegates to
     /// [`with_options`](Self::with_options).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
         Self::with_options(
             MockProducerOptionsBuilder::new()
@@ -598,6 +602,7 @@ impl<K, V> MockProducer<K, V> {
     /// Serializer, Serializer)` constructor (`MockProducer.java:113`), and — with
     /// `cluster` left unset — to `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)` (`:137`), which passes `Cluster.empty()` itself.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_options(options: MockProducerOptions<K, V>) -> Self {
         let MockProducerOptions { cluster, auto_complete, partitioner, key_serializer, value_serializer } = options;
         Self {
@@ -642,6 +647,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_auto_complete(auto_complete: bool) -> Self {
         Self::with_cluster_auto_complete(Cluster::empty(), auto_complete)
     }
@@ -651,6 +657,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns a clone of the internal sent list.
     ///
     /// Corresponds to Java's `MockProducer.history()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#history")]
     pub fn history(&self) -> Vec<ProducerRecord<K, V>>
     where
         K: Clone,
@@ -667,6 +674,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.uncommittedRecords()`
     /// (`MockProducer.java:471`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#uncommittedRecords")]
     pub fn uncommitted_records(&self) -> Vec<ProducerRecord<K, V>>
     where
         K: Clone,
@@ -682,6 +690,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.consumerGroupOffsetsHistory()`
     /// (`MockProducer.java:479`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#consumerGroupOffsetsHistory")]
     pub fn consumer_group_offsets_history(&self) -> Vec<ConsumerGroupOffsets> {
         let inner = self.inner.lock().unwrap();
         inner.consumer_group_offsets.clone()
@@ -714,6 +723,7 @@ impl<K, V> MockProducer<K, V> {
     /// (`MockProducer.java:483`). Java hands back the live map; behind the mutex
     /// that is not expressible, so this returns a snapshot clone. No Java caller
     /// mutates the returned map.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#uncommittedOffsets")]
     pub fn uncommitted_offsets(&self) -> ConsumerGroupOffsets {
         let inner = self.inner.lock().unwrap();
         inner.uncommitted_consumer_group_offsets.clone()
@@ -727,6 +737,7 @@ impl<K, V> MockProducer<K, V> {
     /// flags — only `sentOffsets`.
     ///
     /// Corresponds to Java's `MockProducer.clear()` (`MockProducer.java:490`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#clear")]
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.sent.clear();
@@ -742,6 +753,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if there was an uncompleted call to complete.
     ///
     /// Corresponds to Java's `MockProducer.completeNext()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#completeNext")]
     pub fn complete_next(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
         inner.complete_next()
@@ -752,6 +764,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if there was an uncompleted call to complete.
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#errorNext")]
     pub fn error_next(&self, error: Error) -> bool {
         let mut inner = self.inner.lock().unwrap();
         inner.error_next(Some(error))
@@ -760,7 +773,7 @@ impl<K, V> MockProducer<K, V> {
     /// Mark this producer as fenced by another producer with the same
     /// `transactional.id`. Every subsequent transactional call and every
     /// [`send()`](Producer::send) then fails with
-    /// [`Errors::ProducerFenced`].
+    /// `Errors::ProducerFenced`.
     ///
     /// Corresponds to Java's `MockProducer.fenceProducer()`
     /// (`MockProducer.java:429`).
@@ -769,7 +782,8 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Returns `Err` if the producer is closed, is already fenced, or was never
     /// initialized for transactions ([`Error::local_illegal_state`] for the first
-    /// and last, [`Errors::ProducerFenced`] for the second).
+    /// and last, `Errors::ProducerFenced` for the second).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#fenceProducer")]
     pub fn fence_producer(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -784,6 +798,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.transactionInitialized()`
     /// (`MockProducer.java:436`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionInitialized")]
     pub fn transaction_initialized(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.transaction_initialized
@@ -794,6 +809,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.transactionInFlight()`
     /// (`MockProducer.java:440`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionInFlight")]
     pub fn transaction_in_flight(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.transaction_in_flight
@@ -803,6 +819,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.transactionCommitted()`
     /// (`MockProducer.java:444`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionCommitted")]
     pub fn transaction_committed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.transaction_committed
@@ -812,6 +829,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.transactionAborted()`
     /// (`MockProducer.java:448`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionAborted")]
     pub fn transaction_aborted(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.transaction_aborted
@@ -824,6 +842,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.sentOffsets()`
     /// (`MockProducer.java:456`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sentOffsets")]
     pub fn sent_offsets(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.sent_offsets
@@ -834,6 +853,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.commitCount()`
     /// (`MockProducer.java:460`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#commitCount")]
     pub fn commit_count(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
         inner.commit_count
@@ -842,6 +862,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if the producer is closed.
     ///
     /// Corresponds to Java's `MockProducer.closed()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#closed")]
     pub fn closed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.closed
@@ -850,6 +871,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if there are no pending completions.
     ///
     /// Corresponds to Java's `MockProducer.flushed()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#flushed")]
     pub fn flushed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.completions.is_empty()
@@ -907,6 +929,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.setMockMetrics(MetricName name,
     /// Metric metric)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#setMockMetrics")]
     pub fn set_mock_metrics(&self, name: MetricName, metric: Arc<KafkaMetric>) {
         let mut inner = self.inner.lock().unwrap();
         inner.mock_metrics.insert(name, metric);
@@ -1041,8 +1064,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// Corresponds to Java's `MockProducer.sendOffsetsToTransaction(Map,
     /// ConsumerGroupMetadata)` (`MockProducer.java:182`). Java's
     /// `Objects.requireNonNull(groupMetadata)` (`:184`) has no counterpart: the
-    /// parameter is taken by value and is not an `Option`, so a missing metadata is
-    /// not expressible.
+    /// parameter is a reference and not an `Option`, so a missing metadata is not
+    /// expressible.
     ///
     /// An empty `offsets` map is ignored and leaves
     /// [`sent_offsets()`](MockProducer::sent_offsets) `false` (Java `:194-196`).
@@ -1055,7 +1078,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1297,6 +1320,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 /// increment and return the previous value.
 ///
 /// Corresponds to Java's `MockProducer.nextOffset(TopicPartition)`.
+#[doc(alias = "org.apache.kafka.clients.producer.MockProducer#nextOffset")]
 fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) -> i64 {
     match offsets.get_mut(tp) {
         Some(offset) => {
@@ -1315,6 +1339,7 @@ fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) 
 mod tests {
     use super::*;
     use crate::common::serialization::StringSerializer;
+    use crate::consumer::ConsumerGroupMetadataImpl;
     use crate::producer::RoundRobinPartitioner;
 
     // -----------------------------------------------------------------------
@@ -1355,12 +1380,11 @@ mod tests {
         MockProducer::with_auto_complete(auto_complete)
     }
 
-    /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
-    /// `#[deprecated]`, mirroring Java's `@Deprecated(since = "4.2")`; the tests
-    /// must still exercise it, so the allowance sits at this one call site.
-    #[allow(deprecated)]
-    fn group_metadata(group_id: &str) -> ConsumerGroupMetadata {
-        ConsumerGroupMetadata::new(group_id)
+    /// Java's `new ConsumerGroupMetadata(groupId)`. Java has deprecated that
+    /// constructor since 4.2 and the public Rust API has none, so the tests build
+    /// the crate-internal implementation.
+    fn group_metadata(group_id: &str) -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new(group_id)
     }
 
     /// Assert `result` failed the way Java's `IllegalStateException` does, with
@@ -1411,6 +1435,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.testAutoCompleteMock` (Java 73).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testAutoCompleteMock")]
     async fn test_auto_complete_mock() {
         let producer = build_mock_producer(true);
         let record1 = record1();
@@ -1458,6 +1483,7 @@ mod tests {
     /// round-robin falls back to the full partition count and the first send lands
     /// on partition 0 — the value Java asserts.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testPartitioner")]
     async fn test_partitioner() {
         let producer: MockProducer<String, String> = MockProducer::with_options(
             MockProducerOptionsBuilder::new()
@@ -1575,6 +1601,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.testManualCompletion` (Java 107).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testManualCompletion")]
     async fn test_manual_completion() {
         let producer = build_mock_producer(false);
         let record1 = record1();
@@ -1628,6 +1655,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords` (Java 696).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeFlushedIfNoBufferedRecords")]
     fn should_be_flushed_if_no_buffered_records() {
         let producer = build_mock_producer(true);
         assert!(producer.flushed());
@@ -1635,6 +1663,9 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords` (Java 702).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeFlushedWithAutoCompleteIfBufferedRecords"
+    )]
     async fn should_be_flushed_with_auto_complete_if_buffered_records() {
         let producer = build_mock_producer(true);
         producer.send(make_record("topic", "key1", "value1")).await.unwrap();
@@ -1643,6 +1674,9 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords` (Java 709).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords"
+    )]
     async fn should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
         let producer = build_mock_producer(false);
         producer.send(make_record("topic", "key1", "value1")).await.unwrap();
@@ -1657,6 +1691,7 @@ mod tests {
     /// `shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled`, whose name
     /// is misleading in the same way) and the assertion follows the body.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldNotBeFlushedAfterFlush")]
     async fn should_not_be_flushed_after_flush() {
         let producer = build_mock_producer(false);
         producer.send(record1()).await.unwrap();
@@ -1680,6 +1715,7 @@ mod tests {
     /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testMetadataOnException")]
     async fn test_metadata_on_error() {
         let producer = build_mock_producer(false);
 
@@ -1718,6 +1754,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldInitTransactions` (Java 134).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldInitTransactions")]
     async fn should_init_transactions() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1751,6 +1788,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldBeginTransactions` (Java 154).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeginTransactions")]
     async fn should_begin_transactions() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1783,7 +1821,7 @@ mod tests {
         let producer = build_mock_producer(true);
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer hasn't been initialized for transactions.",
         );
@@ -1799,7 +1837,7 @@ mod tests {
         producer.init_transactions().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "There is no open transaction.",
         );
@@ -1828,6 +1866,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldCommitEmptyTransaction` (Java 196).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldCommitEmptyTransaction")]
     async fn should_commit_empty_transaction() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1840,6 +1879,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldCountCommittedTransaction` (Java 207).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldCountCommittedTransaction")]
     async fn should_count_committed_transaction() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1852,6 +1892,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldNotCountAbortedTransaction` (Java 218).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldNotCountAbortedTransaction")]
     async fn should_not_count_aborted_transaction() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1887,6 +1928,7 @@ mod tests {
 
     /// Translated from `MockProducerTest.shouldAbortEmptyTransaction` (Java 244).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldAbortEmptyTransaction")]
     async fn should_abort_empty_transaction() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -1974,7 +2016,7 @@ mod tests {
         producer.fence_producer().unwrap();
         assert_producer_fenced(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
         );
     }
@@ -1989,7 +2031,7 @@ mod tests {
         producer.fence_producer().unwrap();
         assert_producer_fenced(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
         );
     }
@@ -2059,7 +2101,7 @@ mod tests {
         producer.close().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer is already closed.",
         );
@@ -2074,7 +2116,7 @@ mod tests {
         producer.close().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer is already closed.",
         );
@@ -2115,6 +2157,9 @@ mod tests {
     /// `MockProducerTest.shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled`
     /// (Java 310).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled"
+    )]
     async fn should_publish_messages_only_after_commit_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2134,6 +2179,9 @@ mod tests {
     /// `MockProducerTest.shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled`
     /// (Java 330).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled"
+    )]
     async fn should_flush_on_commit_for_non_auto_complete_if_transactions_are_enabled() {
         let producer = build_mock_producer(false);
         producer.init_transactions().await.unwrap();
@@ -2154,6 +2202,9 @@ mod tests {
     /// Translated from
     /// `MockProducerTest.shouldDropMessagesOnAbortIfTransactionsAreEnabled` (Java 348).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldDropMessagesOnAbortIfTransactionsAreEnabled"
+    )]
     async fn should_drop_messages_on_abort_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2193,6 +2244,9 @@ mod tests {
     /// `MockProducerTest.shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled`
     /// (Java 377).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled"
+    )]
     async fn should_preserve_committed_messages_on_abort_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2216,6 +2270,9 @@ mod tests {
     /// `MockProducerTest.shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`
     /// (Java 397).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled"
+    )]
     async fn should_publish_consumer_group_offsets_only_after_commit_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2226,11 +2283,11 @@ mod tests {
         let group2 = "g2";
         let group2_commit = offsets(&[(0, 101), (1, 21)]);
         producer
-            .send_offsets_to_transaction(group1_commit.clone(), group_metadata(group1))
+            .send_offsets_to_transaction(group1_commit.clone(), &group_metadata(group1))
             .await
             .unwrap();
         producer
-            .send_offsets_to_transaction(group2_commit.clone(), group_metadata(group2))
+            .send_offsets_to_transaction(group2_commit.clone(), &group_metadata(group2))
             .await
             .unwrap();
 
@@ -2247,12 +2304,15 @@ mod tests {
     /// `MockProducerTest.shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
     /// (Java 438).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata"
+    )]
     async fn should_ignore_empty_offsets_when_send_offsets_to_transaction_by_group_metadata() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
         producer.begin_transaction().unwrap();
         producer
-            .send_offsets_to_transaction(HashMap::new(), group_metadata("groupId"))
+            .send_offsets_to_transaction(HashMap::new(), &group_metadata("groupId"))
             .await
             .unwrap();
         assert!(!producer.sent_offsets());
@@ -2262,6 +2322,9 @@ mod tests {
     /// `MockProducerTest.shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
     /// (Java 447).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata"
+    )]
     async fn should_add_offsets_when_send_offsets_to_transaction_by_group_metadata() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2271,7 +2334,7 @@ mod tests {
 
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit, &group_metadata("groupId"))
             .await
             .unwrap();
         assert!(producer.sent_offsets());
@@ -2281,6 +2344,9 @@ mod tests {
     /// `MockProducerTest.shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction`
     /// (Java 464).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction"
+    )]
     async fn should_reset_sent_offsets_flag_only_when_beginning_new_transaction() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2290,7 +2356,7 @@ mod tests {
 
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata("groupId"))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
@@ -2300,7 +2366,7 @@ mod tests {
         assert!(!producer.sent_offsets());
 
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit, &group_metadata("groupId"))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
@@ -2318,6 +2384,9 @@ mod tests {
     /// 73 to 101 — Java's `putAll` semantics (`MockProducer.java:199`), spelled as
     /// `HashMap::extend`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled"
+    )]
     async fn should_publish_latest_and_cumulative_consumer_group_offsets_only_after_commit_if_transactions_are_enabled()
     {
         let producer = build_mock_producer(true);
@@ -2328,11 +2397,11 @@ mod tests {
         let group_commit1 = offsets(&[(0, 42), (1, 73)]);
         let group_commit2 = offsets(&[(1, 101), (2, 21)]);
         producer
-            .send_offsets_to_transaction(group_commit1, group_metadata(group))
+            .send_offsets_to_transaction(group_commit1, &group_metadata(group))
             .await
             .unwrap();
         producer
-            .send_offsets_to_transaction(group_commit2, group_metadata(group))
+            .send_offsets_to_transaction(group_commit2, &group_metadata(group))
             .await
             .unwrap();
 
@@ -2349,6 +2418,9 @@ mod tests {
     /// `MockProducerTest.shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled`
     /// (Java 529).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled"
+    )]
     async fn should_drop_consumer_group_offsets_on_abort_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2357,7 +2429,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2368,7 +2440,7 @@ mod tests {
 
         producer.begin_transaction().unwrap();
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata(group))
+            .send_offsets_to_transaction(group_commit, &group_metadata(group))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2382,6 +2454,9 @@ mod tests {
     /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled`
     /// (Java 558).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled"
+    )]
     async fn should_preserve_offsets_from_commit_by_group_id_on_abort_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2390,7 +2465,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2411,6 +2486,9 @@ mod tests {
     /// published by the first commit must survive the second transaction's abort,
     /// which `clear()`s the (now separate) staging map.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled"
+    )]
     async fn should_preserve_offsets_from_commit_by_group_metadata_on_abort_if_transactions_are_enabled() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
@@ -2419,7 +2497,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2429,7 +2507,7 @@ mod tests {
         let group2 = "g2";
         let group_commit2 = offsets(&[(2, 53), (3, 84)]);
         producer
-            .send_offsets_to_transaction(group_commit2, group_metadata(group2))
+            .send_offsets_to_transaction(group_commit2, &group_metadata(group2))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2712,7 +2790,7 @@ mod tests {
         producer.send(record1()).await.unwrap();
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(GROUP_ID))
             .await
             .unwrap();
 
@@ -2739,7 +2817,7 @@ mod tests {
         producer.begin_transaction().unwrap();
         producer.send(record1()).await.unwrap();
         producer
-            .send_offsets_to_transaction(offsets(&[(0, 42)]), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(offsets(&[(0, 42)]), &group_metadata(GROUP_ID))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2747,7 +2825,7 @@ mod tests {
         producer.begin_transaction().unwrap();
         producer.send(record2()).await.unwrap();
         producer
-            .send_offsets_to_transaction(offsets(&[(1, 73)]), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(offsets(&[(1, 73)]), &group_metadata(GROUP_ID))
             .await
             .unwrap();
 
@@ -2817,7 +2895,7 @@ mod tests {
         // empty map surfaces it.
         producer.set_send_offsets_to_transaction_error(Some(injected()));
         let error = producer
-            .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
             .await
             .unwrap_err();
         assert_eq!(Errors::CoordinatorNotAvailable, error.error());

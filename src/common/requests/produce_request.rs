@@ -26,7 +26,7 @@ use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::ProduceResponse;
 use super::RequestBuilder;
@@ -35,6 +35,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ProduceRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceRequest")]
 pub struct ProduceRequest {
     data: ProduceRequestData,
     version: i16,
@@ -47,6 +48,38 @@ pub struct ProduceRequest {
 }
 
 impl ProduceRequest {
+    /// Creates a builder with default version range.
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#builder")]
+    pub fn builder(data: ProduceRequestData) -> Builder {
+        Self::builder_with_use_transaction_v1_version(data, false)
+    }
+
+    /// Creates a builder, optionally limiting the version to Transaction V1.
+    ///
+    /// When `use_transaction_v1_version` is true, the maximum version is capped at
+    /// [`Self::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] so that the broker knows the
+    /// client is using transaction protocol V1.
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData, boolean)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#builder")]
+    pub fn builder_with_use_transaction_v1_version(
+        data: ProduceRequestData,
+        use_transaction_v1_version: bool,
+    ) -> Builder {
+        let max_version = if use_transaction_v1_version {
+            Self::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+        } else {
+            ApiKeys::PRODUCE.latest_version()
+        };
+        Builder {
+            data,
+            oldest_allowed_version: ApiKeys::PRODUCE.oldest_version(),
+            latest_allowed_version: max_version,
+        }
+    }
+
     /// Sentinel value: last stable version before Transaction V2 protocol.
     ///
     /// When using transaction V1 protocol, the request version upper limit is set to
@@ -57,6 +90,7 @@ impl ProduceRequest {
     pub const INVALID_OFFSET: i64 = -1;
 
     /// Creates a new `ProduceRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#ProduceRequest")]
     pub fn new(data: ProduceRequestData, version: i16) -> Self {
         let acks = data.acks;
         let timeout = data.timeout_ms;
@@ -65,6 +99,7 @@ impl ProduceRequest {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#data")]
     pub fn data(&self) -> &ProduceRequestData {
         &self.data
     }
@@ -85,21 +120,25 @@ impl ProduceRequest {
     }
 
     /// The number of acknowledgments the producer requires.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#acks")]
     pub fn acks(&self) -> i16 {
         self.acks
     }
 
     /// The timeout to await a response in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#timeout")]
     pub fn timeout(&self) -> i32 {
         self.timeout
     }
 
     /// The transactional ID, or `None` if not transactional.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#transactionalId")]
     pub fn transactional_id(&self) -> Option<&str> {
         self.transactional_id.as_deref()
     }
 
     /// Whether the Transaction V2 protocol is being requested.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#isTransactionV2Requested")]
     pub fn is_transaction_v2_requested(version: i16) -> bool {
         version > ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
     }
@@ -109,6 +148,7 @@ impl ProduceRequest {
     /// Returns `None` when acks is 0 because the producer does not expect any
     /// response in that case. In Java, `getErrorResponse()` returns `null` for
     /// acks=0.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> Option<ConcreteResponse> {
         // In case the producer doesn't actually want any response
         if self.acks == 0 {
@@ -154,6 +194,7 @@ impl ProduceRequest {
     /// # Errors
     ///
     /// Returns an error if validation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#validateRecords")]
     pub fn validate_records(version: i16, records_bytes: &Option<bytes::Bytes>) -> io::Result<()> {
         let bytes: &[u8] = match records_bytes {
             Some(b) if !b.is_empty() => b,
@@ -221,6 +262,7 @@ impl ProduceRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ProduceRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -241,49 +283,24 @@ impl std::fmt::Display for ProduceRequest {
 ///
 /// Corresponds to `ProduceRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct ProduceRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.ProduceRequest$Builder")]
+pub struct Builder {
     data: ProduceRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ProduceRequestBuilder {
-    /// Creates a builder with default version range.
-    ///
-    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData)`.
-    pub fn builder(data: ProduceRequestData) -> Self {
-        Self::builder_use_transaction_v1_version(data, false)
-    }
-
-    /// Creates a builder, optionally limiting the version to Transaction V1.
-    ///
-    /// When `use_transaction_v1_version` is true, the maximum version is capped at
-    /// [`ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] so that the broker knows the
-    /// client is using transaction protocol V1.
-    ///
-    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData, boolean)`.
-    pub fn builder_use_transaction_v1_version(data: ProduceRequestData, use_transaction_v1_version: bool) -> Self {
-        let max_version = if use_transaction_v1_version {
-            ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
-        } else {
-            ApiKeys::PRODUCE.latest_version()
-        };
-        Self {
-            data,
-            oldest_allowed_version: ApiKeys::PRODUCE.oldest_version(),
-            latest_allowed_version: max_version,
-        }
-    }
-
+impl Builder {
     /// Creates a builder with explicit version range.
     ///
     /// Corresponds to Java's `ProduceRequest.Builder(short, short, ProduceRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest$Builder#Builder")]
     pub fn new(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }
 }
 
-impl RequestBuilder for ProduceRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::PRODUCE
     }
@@ -296,14 +313,14 @@ impl RequestBuilder for ProduceRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Validate the given records first, matching Java's Builder.build(short version)
         for topic_data in &self.data.topic_data {
             for partition_data in &topic_data.partition_data {
                 ProduceRequest::validate_records(version, &partition_data.records)?;
             }
         }
-        Ok(ConcreteRequest::Produce(ProduceRequest::new(
+        Ok(AbstractRequest::Produce(ProduceRequest::new(
             std::mem::replace(&mut self.data, ProduceRequestData::new()),
             version,
         )))
@@ -340,7 +357,7 @@ mod tests {
     #[test]
     fn test_builder_default_version_range() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::builder(data);
+        let builder = ProduceRequest::builder(data);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::PRODUCE.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::PRODUCE.latest_version());
     }
@@ -348,7 +365,7 @@ mod tests {
     #[test]
     fn test_builder_transaction_v1_version() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::builder_use_transaction_v1_version(data, true);
+        let builder = ProduceRequest::builder_with_use_transaction_v1_version(data, true);
         assert_eq!(
             builder.latest_allowed_version(),
             ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
@@ -422,11 +439,12 @@ mod tests {
     /// `ClientRequest`), so this is a latent divergence rather than a live defect; §9.30
     /// carries the reachability derivation.
     #[test]
-    #[ignore = "PLAN §9.30: ProduceRequestBuilder::build_version drains the builder, where Java's \
+    #[ignore = "PLAN §9.30: Builder::build_version drains the builder, where Java's \
                 Builder.build does not"]
     fn test_build_is_repeatable() {
         use crate::common::compress::Compression;
-        use crate::common::record::{MemoryRecords, TimestampType};
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::MemoryRecords;
         use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
         // `validate_records` requires a real magic-v2 batch (`:185-193`), so build one
@@ -435,7 +453,7 @@ mod tests {
         let mut records_builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 512],
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -454,12 +472,12 @@ mod tests {
         data.set_acks(-1);
         data.set_topic_data(vec![topic]);
 
-        let mut builder = ProduceRequestBuilder::new(3, 3, data);
+        let mut builder = Builder::new(3, 3, data);
 
-        let ConcreteRequest::Produce(first) = builder.build_version(3).expect("first build") else {
+        let AbstractRequest::Produce(first) = builder.build_version(3).expect("first build") else {
             panic!("expected a produce request");
         };
-        let ConcreteRequest::Produce(second) = builder.build_version(3).expect("second build") else {
+        let AbstractRequest::Produce(second) = builder.build_version(3).expect("second build") else {
             panic!("expected a produce request");
         };
 

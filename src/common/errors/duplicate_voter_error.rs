@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.DuplicateVoterException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The voter is already part of the set of voters.
     ///
-    /// Corresponds to Java's `DuplicateVoterException`, error code [`Errors::DuplicateVoter`].
+    /// Corresponds to Java's `DuplicateVoterException`, error code `Errors::DuplicateVoter`.
     ///
     /// Java `extends` chain:
     ///    `DuplicateVoterException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DuplicateVoterException")]
     DuplicateVoterError,
     code: Errors::DuplicateVoter,
     extends: [

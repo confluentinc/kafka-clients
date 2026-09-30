@@ -25,28 +25,33 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTopicsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult")]
 pub struct ListTopicsResult {
     future: KafkaFuture<HashMap<String, TopicListing>>,
 }
 
 impl ListTopicsResult {
     /// Creates a result wrapping the topic-listing future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#ListTopicsResult")]
     pub(crate) fn new(future: KafkaFuture<HashMap<String, TopicListing>>) -> Self {
         Self { future }
     }
 
     /// Return a future which yields a map of topic names to `TopicListing`
     /// objects.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#namesToListings")]
     pub fn names_to_listings(&self) -> KafkaFuture<HashMap<String, TopicListing>> {
         self.future.clone()
     }
 
     /// Return a future which yields a collection of `TopicListing` objects.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#listings")]
     pub fn listings(&self) -> KafkaFuture<Vec<TopicListing>> {
         self.future.then_apply(|map| map.into_values().collect())
     }
 
     /// Return a future which yields a set of topic names.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#names")]
     pub fn names(&self) -> KafkaFuture<HashSet<String>> {
         self.future.then_apply(|map| map.into_keys().collect())
     }

@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.MemberIdRequiredException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The group member needs to have a valid member id before actually entering
     /// a consumer group.
     ///
-    /// Corresponds to Java's `MemberIdRequiredException`, error code [`Errors::MemberIdRequired`].
+    /// Corresponds to Java's `MemberIdRequiredException`, error code `Errors::MemberIdRequired`.
     ///
     /// Java `extends` chain:
     ///    `MemberIdRequiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.MemberIdRequiredException")]
     MemberIdRequiredError,
     code: Errors::MemberIdRequired,
     extends: [

@@ -24,8 +24,8 @@ use std::time::Duration;
 use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::config_entry::{ConfigSource, ConfigType};
 use confluent_kafka::admin::{
-    AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
-    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
+    AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClient, AdminClientConfig, AlterClientQuotasOptions,
+    AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
     AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
     ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
     CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
@@ -34,25 +34,19 @@ use confluent_kafka::admin::{
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, KafkaAdminClient,
-    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
-    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
-    OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
+    LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
+    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
     UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
-#[allow(deprecated)]
-use confluent_kafka::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
-};
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
-use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
     ElectionType, Error, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
@@ -69,6 +63,29 @@ use crate::common::test_utils::{
 /// uses for a negative `timeout_ms` (`src/ffi/admin.rs::close_with_timeout`).
 fn close_with_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(i64::MAX as u64))
+}
+
+/// The producer id and epoch `fenceProducers` allocated for one transactional
+/// id: Java's `FenceProducersResult.producerId(id)` / `epochId(id)` reassembled
+/// into one value. (The client's own `ProducerIdAndEpoch` is not public API.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FencedProducer {
+    producer_id: i64,
+    epoch: i16,
+}
+
+impl FencedProducer {
+    pub fn new(producer_id: i64, epoch: i16) -> Self {
+        Self { producer_id, epoch }
+    }
+
+    pub fn producer_id(&self) -> i64 {
+        self.producer_id
+    }
+
+    pub fn epoch(&self) -> i16 {
+        self.epoch
+    }
 }
 
 /// The admin surface the multilanguage scenarios are written against.
@@ -110,7 +127,7 @@ fn close_with_timeout(timeout: Option<Duration>) -> Duration {
 /// through any binding (both are eager at the boundary) and stays covered by the
 /// unit tests in `src/admin`, which use the real trait.
 ///
-/// Methods are `async fn` in the trait (hence `#[allow(async_fn_in_trait)]`,
+/// Methods are `async fn` in the trait (hence `#[expect(async_fn_in_trait)]`,
 /// matching the existing backend factories) and return already-resolved plain
 /// data; the gRPC implementation awaits one round-trip per call.
 ///
@@ -129,7 +146,7 @@ fn close_with_timeout(timeout: Option<Duration>) -> Duration {
 ///      `result.low_watermarks()[&tp].get().await`. Against an owned map of
 ///      per-key `Result`s that becomes `map[&topic].clone()` /
 ///      `map.get(&topic).unwrap()`, with the same `expect` / `expect_err` and
-///      the same `err.error() == Errors::X` assertion after it. `K` needs
+///      the same `matches!(err, Error::X(_))` assertion after it. `K` needs
 ///      `Hash + Eq`; the key types in use are `String`, `TopicPartition` and
 ///      `ConfigResource`.
 ///   2. **The `.all()`-shaped call sites are served by the same map.** Most
@@ -147,7 +164,6 @@ fn close_with_timeout(timeout: Option<Duration>) -> Duration {
 ///      method returning a single future cannot express that; a method
 ///      returning a struct of the three resolved values can, and eager
 ///      resolution is already the shape both bindings hand back.
-#[allow(async_fn_in_trait)]
 pub trait AdminBackend {
     /// Create a batch of topics.
     ///
@@ -244,21 +260,9 @@ pub trait AdminBackend {
     /// `KafkaFuture<Collection<ConfigResource>>`.
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error>;
-
-    /// List the cluster's client-metrics resources (KIP-714).
-    ///
-    /// Deprecated in Java since 4.1 in favour of
-    /// `listConfigResources(Set.of(CLIENT_METRICS))`, and carried here because
-    /// both bindings still expose it. Not an [`Outcomes`], for the same reason as
-    /// [`AdminBackend::list_config_resources`].
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error>;
 
     /// Query the log directories of each broker.
     ///
@@ -362,17 +366,6 @@ pub trait AdminBackend {
     /// collection, and the two are independent — a partial success has both
     /// non-empty. See [`Listings`].
     async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error>;
-
-    /// List the consumer groups in the cluster.
-    ///
-    /// Deprecated in Java since 4.1 in favour of
-    /// [`AdminBackend::list_groups`], which covers every group type, and carried
-    /// here because both bindings still expose it. Same [`Listings`] shape.
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error>;
 
     /// Describe the given groups, classic or KIP-848 consumer protocol.
     async fn describe_consumer_groups(
@@ -482,8 +475,9 @@ pub trait AdminBackend {
     /// Delete every ACL matching each filter, keyed by the filter.
     ///
     /// The per-filter value is *nested* **and** carries its own errors: Java's
-    /// per-filter future resolves to a whole [`FilterResults`], one
-    /// `FilterResult { binding, exception }` per ACL the filter matched. So a
+    /// per-filter future resolves to a whole `FilterResults`, one
+    /// `FilterResult { binding, exception }` per ACL the filter matched, here as
+    /// a [`FilterResultsView`]. So a
     /// filter can succeed here — it matched — while an individual matched ACL
     /// failed to delete. That is `admin_service.proto`'s envelope exception 3,
     /// and `deleteAcls` is the third and last of the three RPCs that reach it
@@ -492,7 +486,7 @@ pub trait AdminBackend {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error>;
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error>;
 
     /// Describe the client quotas matching `filter`, keyed by entity.
     ///
@@ -649,7 +643,7 @@ pub trait AdminBackend {
     /// Fence out any producer currently using each transactional id, returning
     /// the newly allocated producer id and epoch.
     ///
-    /// Java never exposes the `ProducerIdAndEpoch` as one value —
+    /// Java never exposes the producer id and epoch as one value —
     /// `producerId(id)` and `epochId(id)` are two `then_apply` projections of the
     /// same per-id future — so the pair is reassembled here exactly as
     /// `src/ffi/admin.rs`'s `submit_fence_producers` does. Both projections
@@ -658,7 +652,7 @@ pub trait AdminBackend {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error>;
+    ) -> Result<Outcomes<String, FencedProducer>, Error>;
 
     /// Close the admin client, joining its background task.
     ///
@@ -682,8 +676,7 @@ pub trait AdminBackend {
 pub type Outcomes<K, V> = HashMap<K, Result<V, Error>>;
 
 /// The already-resolved outcome of an RPC whose Java `*Result` splits **one**
-/// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups` and
-/// `listConsumerGroups`.
+/// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups`.
 ///
 /// # DoD #7 justification (a type with no Java counterpart)
 ///
@@ -818,26 +811,25 @@ where
 // production types.
 //
 // Slice G5 added exactly one, [`FeatureMetadataView`]: `FeatureMetadata::new` is
-// `pub(crate)`. Everything else in that slice crosses as a production type,
+// `pub(crate)`. [`FilterResultsView`] joined it later, when `FilterResult::new`
+// and `FilterResults::new` were made `pub(crate)` to match Java. Everything else in that slice crosses as a production type,
 // checked one by one rather than assumed — `AclBinding::new`,
 // `AclBindingFilter::new`, `AccessControlEntry::new`,
 // `AccessControlEntryFilter::new`, `ResourcePattern::new`,
 // `ResourcePatternFilter::new`, `ClientQuotaEntity::new`,
 // `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
 // `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
-// `UserScramCredentialsDescription::new`, `FilterResult::new`,
-// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
+// `UserScramCredentialsDescription::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
 // `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
 // `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
 // private, but it is an *input* the harness only reads, and its three public
 // factories cover both `strict` values.)
 //
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
-// `ConsumerGroupListing::with_group_state_group_type`, `ConsumerGroupDescription::new`,
-// `ClassicGroupDescription::new`, `MemberDescription::new`,
+// `ConsumerGroupDescription::new`, `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
 // `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so
-// the nine group RPCs cross entirely as production types. It did add
+// the group RPCs cross entirely as production types. It did add
 // [`Listings`], but that is not a stand-in for an unreachable constructor — it is
 // the resolved form of a Java result shape that has no class at all.
 // ---------------------------------------------------------------------------
@@ -967,6 +959,35 @@ pub struct FeatureMetadataView {
     pub supported_features: HashMap<String, SupportedVersionRange>,
 }
 
+/// Every ACL one `deleteAcls` filter matched, standing in for the production
+/// `DeleteAclsResult.FilterResults`.
+///
+/// `FilterResults::new` and `FilterResult::new` are `pub(crate)` — faithfully,
+/// because both Java constructors are package-private
+/// (`DeleteAclsResult.java`, no access modifier) — so a gRPC backend cannot
+/// rebuild what the wire carried. Output-only: no API takes it back, so it
+/// needs no server-side handle, only the data the backend's accessors read.
+#[derive(Clone, Debug)]
+pub struct FilterResultsView {
+    /// Java `FilterResults.values()`. Empty is a successful "the filter
+    /// matched nothing".
+    pub values: Vec<FilterResultView>,
+}
+
+/// One ACL a `deleteAcls` filter matched, standing in for the production
+/// `DeleteAclsResult.FilterResult`.
+///
+/// Both halves are independent optionals, as Java's accessors are: a backend
+/// that set both or neither stays visible to the scenario.
+#[derive(Clone, Debug)]
+pub struct FilterResultView {
+    /// Java `FilterResult.binding()`: the deleted binding, `None` on error.
+    pub binding: Option<AclBinding>,
+    /// Java `FilterResult.exception()`: why the delete failed, `None` on
+    /// success.
+    pub error: Option<Error>,
+}
+
 /// Where one replica lives and where it is moving to, standing in for the
 /// production `ReplicaLogDirInfo`.
 ///
@@ -1006,6 +1027,11 @@ fn config_source_name(source: ConfigSource) -> &'static str {
         ConfigSource::StaticBrokerConfig => "STATIC_BROKER_CONFIG",
         ConfigSource::DefaultConfig => "DEFAULT_CONFIG",
         ConfigSource::Unknown => "UNKNOWN",
+        // `ConfigSource` is `#[non_exhaustive]`, so this external crate needs a
+        // wildcard arm. A variant added upstream has no entry in Java's
+        // `name()` table above, so name the gap rather than assert a wrong
+        // string against the C and Python servers.
+        _ => panic!("config_source_name is missing an entry for {source:?}"),
     }
 }
 
@@ -1022,6 +1048,8 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
         ConfigType::List => "LIST",
         ConfigType::Class => "CLASS",
         ConfigType::Password => "PASSWORD",
+        // See the wildcard arm in `config_source_name`.
+        _ => panic!("config_type_name is missing an entry for {config_type:?}"),
     }
 }
 
@@ -1073,7 +1101,7 @@ impl RustNativeAdmin {
     /// Build a network-backed admin client from `config`.
     pub fn from_config(config: &HashMap<String, String>) -> Result<Self, Error> {
         let config = AdminClientConfig::new(config)?;
-        Ok(Self { admin: Box::new(KafkaAdminClient::new(config)?) })
+        Ok(Self { admin: AdminClient::create(config)? })
     }
 
     /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.
@@ -1238,23 +1266,11 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error> {
         self.admin
             .list_config_resources_with_options(config_resource_types, options)
-            .all()
-            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
-            .await
-    }
-
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
-        self.admin
-            .list_client_metrics_resources_with_options(options)
             .all()
             .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1368,17 +1384,6 @@ impl AdminBackend for RustNativeAdmin {
         let result = self.admin.list_groups_with_options(options);
         // Both views are awaited before either error is reported, so neither is
         // abandoned. Identical to the FFI's `submit_list_groups`.
-        let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        Ok(Listings { valid: valid?, errors: errors? })
-    }
-
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error> {
-        let result = self.admin.list_consumer_groups_with_options(options);
         let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(Listings { valid: valid?, errors: errors? })
@@ -1532,9 +1537,22 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
+    ) -> Result<Outcomes<AclBindingFilter, FilterResultsView>, Error> {
         let result = self.admin.delete_acls_with_options(filters, options);
-        Ok(resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await)
+        let outcomes = resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await;
+        Ok(outcomes
+            .into_iter()
+            .map(|(filter, outcome)| {
+                let view = outcome.map(|results| FilterResultsView {
+                    values: results
+                        .values()
+                        .iter()
+                        .map(|r| FilterResultView { binding: r.binding().cloned(), error: r.error().cloned() })
+                        .collect(),
+                });
+                (filter, view)
+            })
+            .collect())
     }
 
     async fn describe_client_quotas(
@@ -1760,7 +1778,7 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
+    ) -> Result<Outcomes<String, FencedProducer>, Error> {
         let result = self.admin.fence_producers_with_options(transactional_ids, options);
         // Java has no accessor for the pair, only the two `then_apply`
         // projections `producerId(id)` and `epochId(id)`. They resolve from the
@@ -1775,7 +1793,7 @@ impl AdminBackend for RustNativeAdmin {
             let producer_id = result.producer_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             let epoch = result.epoch_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             let outcome = match (producer_id, epoch) {
-                (Ok(producer_id), Ok(epoch)) => Ok(ProducerIdAndEpoch::new(producer_id, epoch)),
+                (Ok(producer_id), Ok(epoch)) => Ok(FencedProducer::new(producer_id, epoch)),
                 // Both projections share one future, so the two errors are the
                 // same one; report whichever is present.
                 (Err(e), _) | (_, Err(e)) => Err(e),
@@ -1804,7 +1822,7 @@ impl AdminBackend for RustNativeAdmin {
 /// `default.api.timeout.ms=30000`, so a broker-side stall still fails on its
 /// own; what an unbounded `get()` loses is the bound on a **client-side future
 /// that is never completed at all** — no API timeout fires for it, so the test
-/// binary hangs and takes every other entry down with it, which CLAUDE.md §5
+/// binary hangs and takes every other entry down with it, which CLAUDE.md §7
 /// singles out as worse than an explicit error. The gRPC backends already have a
 /// channel deadline, so this restores the same guarantee on the native arm.
 const NATIVE_FUTURE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2083,7 +2101,7 @@ pub async fn alter_consumer_group_offsets_awaiting_propagation<B: AdminBackend>(
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: {what}: {e}"));
         if let Some(tp) = outcomes.iter().find_map(|(tp, outcome)| match outcome {
-            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Some(tp),
+            Err(Error::UnknownTopicOrPartition(_)) => Some(tp),
             _ => None,
         }) {
             return Err(format!(

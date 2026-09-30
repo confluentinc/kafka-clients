@@ -28,7 +28,7 @@ mod measurable;
 mod measurable_stat;
 mod metric_config;
 mod metric_value_provider;
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod metrics;
 mod metrics_reporter;
 mod quota;
@@ -36,17 +36,13 @@ mod quota_violation_error;
 pub mod sensor;
 mod stat;
 pub mod stats;
-mod system_time;
-mod time;
+mod time_unit;
 
 pub use compound_stat::{CompoundStat, NamedMeasurable};
 pub use gauge::{ClosureGauge, Gauge};
 pub use kafka_metric::KafkaMetric;
 pub use measurable::{ClosureMeasurable, Measurable};
 pub use measurable_stat::MeasurableStat;
-// `Metric` and `MetricValue` live in `org.apache.kafka.common` (→ `common::metric`);
-// re-export `MetricValue` here for convenience since the stats/providers produce it.
-pub use crate::common::MetricValue;
 pub use metric_config::MetricConfig;
 pub use metric_value_provider::MetricValueProvider;
 pub(crate) use metrics::MetricsShared;
@@ -56,7 +52,4 @@ pub use quota::Quota;
 pub use quota_violation_error::QuotaViolationError;
 pub use sensor::{RecordingLevel, Sensor};
 pub use stat::Stat;
-pub use system_time::SystemTime;
-pub use time::Time;
-#[cfg(test)]
-pub(crate) use time::mock::MockTime;
+pub use time_unit::TimeUnit;

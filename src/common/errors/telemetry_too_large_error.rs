@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.TelemetryTooLargeException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Client sent a push telemetry request larger than the maximum size the
     /// broker will accept.
     ///
-    /// Corresponds to Java's `TelemetryTooLargeException`, error code [`Errors::TelemetryTooLarge`].
+    /// Corresponds to Java's `TelemetryTooLargeException`, error code `Errors::TelemetryTooLarge`.
     ///
     /// Java `extends` chain:
     ///    `TelemetryTooLargeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TelemetryTooLargeException")]
     TelemetryTooLargeError,
     code: Errors::TelemetryTooLarge,
     extends: [

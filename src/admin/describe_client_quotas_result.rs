@@ -25,12 +25,14 @@ use crate::common::quota::ClientQuotaEntity;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClientQuotasResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult")]
 pub struct DescribeClientQuotasResult {
     entities: KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>>,
 }
 
 impl DescribeClientQuotasResult {
     /// Creates a new result from the future for the matched entities.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult#DescribeClientQuotasResult")]
     pub fn new(entities: KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>>) -> Self {
         Self { entities }
     }
@@ -40,6 +42,7 @@ impl DescribeClientQuotasResult {
     /// entity's config, then it is not included in the resulting value map.
     ///
     /// Mirrors `DescribeClientQuotasResult.entities()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult#entities")]
     pub fn entities(&self) -> &KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>> {
         &self.entities
     }

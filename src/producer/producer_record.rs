@@ -44,6 +44,7 @@ use crate::common::header::RecordHeaders;
 /// In either case, the timestamp that has actually been used will be returned to the user
 /// in [`RecordMetadata`](super::RecordMetadata).
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord")]
 pub struct ProducerRecord<K, V> {
     topic: String,
     partition: Option<i32>,
@@ -73,22 +74,22 @@ pub struct ProducerRecord<K, V> {
 #[derive(Debug, Clone)]
 pub struct ProducerRecordOptions<K, V> {
     /// The topic the record will be appended to. Java's `topic`.
-    pub topic: String,
+    pub(crate) topic: String,
     /// The partition to which the record should be sent. Java's `partition`.
     /// Starts as `None`, as in `:142`.
-    pub partition: Option<i32>,
+    pub(crate) partition: Option<i32>,
     /// The timestamp of the record, in milliseconds since epoch. If `None`,
     /// the producer will assign the timestamp using the system clock. Java's
     /// `timestamp`; starts as `None`, as in `:142`.
-    pub timestamp: Option<i64>,
+    pub(crate) timestamp: Option<i64>,
     /// The key that will be included in the record. Java's `key`. Starts as
     /// `None`, as in `:142`.
-    pub key: Option<K>,
+    pub(crate) key: Option<K>,
     /// The record contents. Java's `value`.
-    pub value: Option<V>,
+    pub(crate) value: Option<V>,
     /// The headers that will be included in the record. Java's `headers`.
     /// Starts as `None`, as in `:142`.
-    pub headers: Option<RecordHeaders>,
+    pub(crate) headers: Option<RecordHeaders>,
 }
 
 /// Fluent builder for [`ProducerRecordOptions`].
@@ -126,34 +127,34 @@ impl<K, V> ProducerRecordOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`ProducerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// Sets `ProducerRecordOptions::topic`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_topic(mut self, topic: String) -> Self {
         self.topic = Some(topic);
         self
     }
-    /// Sets [`ProducerRecordOptions::partition`].
+    /// Sets `ProducerRecordOptions::partition`.
     pub fn set_partition(mut self, partition: Option<i32>) -> Self {
         self.partition = partition;
         self
     }
-    /// Sets [`ProducerRecordOptions::timestamp`].
+    /// Sets `ProducerRecordOptions::timestamp`.
     pub fn set_timestamp(mut self, timestamp: Option<i64>) -> Self {
         self.timestamp = timestamp;
         self
     }
-    /// Sets [`ProducerRecordOptions::key`].
+    /// Sets `ProducerRecordOptions::key`.
     pub fn set_key(mut self, key: Option<K>) -> Self {
         self.key = key;
         self
     }
-    /// Sets [`ProducerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// Sets `ProducerRecordOptions::value`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_value(mut self, value: Option<V>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets [`ProducerRecordOptions::headers`].
+    /// Sets `ProducerRecordOptions::headers`.
     pub fn set_headers(mut self, headers: Option<RecordHeaders>) -> Self {
         self.headers = headers;
         self
@@ -211,6 +212,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// Returns an error if:
     /// - The timestamp is negative
     /// - The partition is negative
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn with_options(options: ProducerRecordOptions<K, V>) -> Result<Self, LocalIllegalArgumentError> {
         let ProducerRecordOptions { topic, partition, timestamp, key, value, headers } = options;
         if let Some(ts) = timestamp
@@ -239,6 +241,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// # Errors
     ///
     /// Returns an error if the timestamp is negative or the partition is negative.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn with_partition_timestamp_key(
         topic: String,
         partition: Option<i32>,
@@ -267,6 +270,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// # Errors
     ///
     /// Returns an error if the partition is negative.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn with_partition_key_headers(
         topic: String,
         partition: Option<i32>,
@@ -294,6 +298,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// # Errors
     ///
     /// Returns an error if the partition is negative.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn with_partition_key(
         topic: String,
         partition: Option<i32>,
@@ -315,6 +320,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// timestamp, no headers).
     ///
     /// Corresponds to Java's `ProducerRecord(String, K, V)` (`ProducerRecord.java:132`).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn with_key(topic: String, key: Option<K>, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
         Self::with_options(
@@ -333,6 +339,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// Corresponds to Java's `ProducerRecord(String, V)` (`ProducerRecord.java:142`),
     /// whose parameters `{topic, value}` are the intersection across the six
     /// constructors — so it owns the plain name (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord")]
     pub fn new(topic: String, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
         Self::with_options(
@@ -346,11 +353,13 @@ impl<K, V> ProducerRecord<K, V> {
     }
 
     /// Returns the topic this record is being sent to.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
     /// Returns the headers.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#headers")]
     pub fn headers(&self) -> &RecordHeaders {
         &self.headers
     }
@@ -361,22 +370,26 @@ impl<K, V> ProducerRecord<K, V> {
     }
 
     /// Returns the key (or `None` if no key is specified).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#key")]
     pub fn key(&self) -> Option<&K> {
         self.key.as_ref()
     }
 
     /// Returns the value.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#value")]
     pub fn value(&self) -> Option<&V> {
         self.value.as_ref()
     }
 
     /// Returns the timestamp, which is in milliseconds since epoch.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#timestamp")]
     pub fn timestamp(&self) -> Option<i64> {
         self.timestamp
     }
 
     /// Returns the partition to which the record will be sent (or `None` if no partition
     /// was specified).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord#partition")]
     pub fn partition(&self) -> Option<i32> {
         self.partition
     }
@@ -440,6 +453,7 @@ mod tests {
 
     /// Translated from `ProducerRecordTest.testEqualsAndHashCode`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecordTest#testEqualsAndHashCode")]
     fn test_equals_and_hash_code() {
         let producer_record =
             ProducerRecord::with_partition_key("test".to_string(), Some(1), Some("key".to_string()), Some(1)).unwrap();
@@ -482,6 +496,7 @@ mod tests {
 
     /// Translated from `ProducerRecordTest.testInvalidRecords`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerRecordTest#testInvalidRecords")]
     fn test_invalid_records() {
         // Negative timestamp
         let result = ProducerRecord::with_partition_timestamp_key(

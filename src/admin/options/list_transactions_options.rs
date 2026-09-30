@@ -24,6 +24,7 @@ use crate::admin::TransactionState;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions")]
 pub struct ListTransactionsOptions {
     timeout_ms: Option<i32>,
     filtered_states: HashSet<TransactionState>,

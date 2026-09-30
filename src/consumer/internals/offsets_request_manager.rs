@@ -34,7 +34,7 @@
 //! All mutable state lives on `OffsetsRequestManager` itself, which the
 //! consumer's bg task owns exclusively (consumer-threading.md §10). The
 //! `Arc<Mutex<SubscriptionState>>` is borrowed for the brief critical
-//! sections; no lock is held across an `.await` (CLAUDE.md §9.6).
+//! sections; no lock is held across an `.await` (CLAUDE.md §11.6).
 //!
 //! ## Pending-completion handling
 //!
@@ -47,9 +47,10 @@
 //! drains the channel on its next `poll`, applying the success/failure
 //! handler from `OffsetFetcherUtils`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use crate::common::requests::ListOffsetsResponse;
+use crate::common::utils::Time;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -60,7 +61,7 @@ use crate::ClientResponse;
 use crate::common::ClusterResource;
 use crate::common::ClusterResourceListener;
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilder, OffsetsForLeaderEpochResponse,
+    ConcreteResponse, ListOffsetsRequest, OffsetsForLeaderEpochResponse, list_offsets_request,
 };
 use crate::common::{Error, IsolationLevel, Node, TopicPartition};
 use crate::consumer::ConsumerLogTruncationError;
@@ -123,6 +124,7 @@ type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<
 /// call from the same set of timestamps can fail with `StaleMetadataException`
 /// and be parked on `requests_to_retry`, where it's replayed when
 /// `OffsetsClusterListener::on_update` fires.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState")]
 pub(crate) struct ListOffsetsRequestState {
     /// The input timestamps the caller asked us to resolve. Java:
     /// `ListOffsetsRequestState.timestampsToSearch`.
@@ -151,6 +153,9 @@ pub(crate) struct ListOffsetsRequestState {
 }
 
 impl ListOffsetsRequestState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState#ListOffsetsRequestState"
+    )]
     fn new(timestamps_to_search: HashMap<TopicPartition, i64>, require_timestamps: bool) -> Self {
         Self {
             timestamps_to_search,
@@ -166,6 +171,9 @@ impl ListOffsetsRequestState {
     /// Java: `addPartitionsToRetry`. Records the input timestamp for each
     /// partition that the broker couldn't serve (retriable error / unknown
     /// leader) so the metadata-update replay can rebuild requests.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState#addPartitionsToRetry"
+    )]
     fn add_partitions_to_retry(&mut self, partitions: &HashSet<TopicPartition>) {
         for tp in partitions {
             if let Some(ts) = self.timestamps_to_search.get(tp) {
@@ -314,7 +322,7 @@ impl OffsetsManagerShared {
         }
 
         for (node, target_times) in by_node {
-            let mut builder = ListOffsetsRequestBuilder::for_consumer(require_timestamps, self_arc.isolation_level);
+            let mut builder = list_offsets_request::Builder::for_consumer(require_timestamps, self_arc.isolation_level);
             let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&target_times);
             builder.set_target_times(topics);
             builder.set_timeout_ms(self_arc.request_timeout_ms as i32);
@@ -329,7 +337,7 @@ impl OffsetsManagerShared {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForFetchOffsets {
                     state: state_for_task,
@@ -535,10 +543,13 @@ fn partial_fetched_for_node<'a>(
 /// the callback with `Metadata::add_cluster_update_listener` without
 /// binding the listener's lifetime to the manager's `&mut`. The
 /// callback-shared state lives in [`OffsetsManagerShared`].
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager")]
 pub(crate) struct OffsetsRequestManager {
     /// Shared state accessible to the [`OffsetsClusterListener`] and to
     /// per-response spawned tasks.
     shared: Arc<OffsetsManagerShared>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Java: `defaultApiTimeoutMs`. Used by
     /// [`Self::init_with_committed_offsets_if_needed`] to compute the
     /// internal `fetchCommittedDeadlineMs` (Java
@@ -591,6 +602,7 @@ pub(crate) struct OffsetsRequestManager {
 /// Java holds a `CompletableFuture` whose downstream `whenComplete`
 /// handlers form a chain; Rust uses a `Vec<oneshot::Sender>` because
 /// `oneshot::Receiver` is single-consumer.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$PendingFetchCommittedRequest")]
 struct PendingFetchCommittedRequest {
     requested_partitions: HashSet<TopicPartition>,
     /// Senders waiting for the in-flight fetch to resolve. The first
@@ -619,7 +631,7 @@ struct PendingFetchCommittedRequest {
 ///
 /// Rust's `oneshot` is single-consumer, so the waiter list lives *inside* the
 /// replaceable slot and its senders are dropped on replacement. We must still
-/// complete the caller (CLAUDE.md §5 — a silently hung future is worse than an
+/// complete the caller (CLAUDE.md §7 — a silently hung future is worse than an
 /// explicit error), so we complete it with the outcome Java produces for an
 /// abandoned fetch: a timeout. That matters beyond cosmetics —
 /// `is_ignorable_async_poll_error` swallows only `Error::Timeout`, exactly
@@ -642,11 +654,13 @@ impl OffsetsRequestManager {
     /// (out-of-scope) group-less assignor path can pass `None`; Java
     /// requires the commit manager non-null and short-circuits the
     /// `initWithCommittedOffsetsIfNeeded` path internally.
-    #[allow(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
+    #[expect(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#OffsetsRequestManager")]
     pub(crate) fn new(
         subscription_state: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
         isolation_level: IsolationLevel,
+        time: Arc<dyn Time>,
         retry_backoff_ms: i64,
         request_timeout_ms: i64,
         default_api_timeout_ms: i64,
@@ -677,6 +691,7 @@ impl OffsetsRequestManager {
         });
         let manager = Self {
             shared: shared.clone(),
+            time,
             default_api_timeout_ms,
             api_versions,
             commit_request_manager,
@@ -709,6 +724,7 @@ impl OffsetsRequestManager {
     /// call (e.g. `TopicAuthorizationException`), or any
     /// `NoOffsetForPartitionException` raised when a partition needs
     /// reset but no strategy is configured.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#resetPositionsIfNeeded")]
     pub(crate) fn reset_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partition_strategies = self
             .shared
@@ -731,6 +747,7 @@ impl OffsetsRequestManager {
     ///
     /// Propagates the cached validate-positions exception from a previous
     /// call (e.g. a saved `LogTruncationException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#validatePositionsIfNeeded")]
     pub(crate) fn validate_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partitions_to_validate = self
             .shared
@@ -760,6 +777,7 @@ impl OffsetsRequestManager {
     /// [`OffsetsClusterListener::on_update`]).
     ///
     /// Used by `ListOffsetsEvent` and `CurrentLagEvent`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#fetchOffsets")]
     pub(crate) fn fetch_offsets(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -838,6 +856,9 @@ impl OffsetsRequestManager {
     /// into a tokio task that forwards the result into the manager's
     /// `pending_completions` channel; `poll` drains the channel and
     /// applies success/failure handlers via `OffsetFetcherUtils`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#sendListOffsetsRequestsAndResetPositions"
+    )]
     fn send_list_offsets_requests_and_reset_positions(
         &mut self,
         partition_strategies: HashMap<TopicPartition, AutoOffsetResetStrategy>,
@@ -882,7 +903,7 @@ impl OffsetsRequestManager {
                 subs.set_next_allowed_retry(&partitions, now_ms + self.shared.request_timeout_ms);
             }
 
-            let mut builder = ListOffsetsRequestBuilder::for_consumer(false, self.shared.isolation_level);
+            let mut builder = list_offsets_request::Builder::for_consumer(false, self.shared.isolation_level);
             let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&reset_timestamps);
             builder.set_target_times(topics);
             builder.set_timeout_ms(self.shared.request_timeout_ms as i32);
@@ -900,7 +921,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForReset {
                     reset_timestamps: timestamps,
@@ -917,6 +938,9 @@ impl OffsetsRequestManager {
     }
 
     /// Mirrors Java's `sendOffsetsForLeaderEpochRequestsAndValidatePositions`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#sendOffsetsForLeaderEpochRequestsAndValidatePositions"
+    )]
     fn send_offsets_for_leader_epoch_requests_and_validate_positions(
         &mut self,
         partitions_to_validate: HashMap<TopicPartition, FetchPosition>,
@@ -970,7 +994,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result });
             });
@@ -1002,6 +1026,7 @@ impl OffsetsRequestManager {
     /// 4. On fetch completion: apply offsets via [`Self::refresh_offsets`]
     ///    (mirrors Java's `refreshOffsets` + `ConsumerUtils.refreshCommittedOffsets`)
     ///    and fan the result out to every waiter on the pending event.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#initWithCommittedOffsetsIfNeeded")]
     pub(crate) fn init_with_committed_offsets_if_needed(
         &self,
         initializing_partitions: HashSet<TopicPartition>,
@@ -1144,6 +1169,7 @@ impl OffsetsRequestManager {
     /// `update_fetch_positions` until `has_all_fetch_positions()`
     /// returns true. This matches Java's caller pattern in
     /// `AsyncKafkaConsumer.poll`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#updateFetchPositions")]
     pub(crate) fn update_fetch_positions(
         &mut self,
         deadline_ms: i64,
@@ -1155,7 +1181,7 @@ impl OffsetsRequestManager {
         // which is CONDITIONAL: an error already in the `KafkaException`
         // hierarchy passes through, anything else is wrapped so the caller
         // always observes a `KafkaException`. That is not a no-op here — per
-        // CLAUDE.md §10.3 the flat `Error` enum also holds Java's `java.lang`
+        // CLAUDE.md §12.3 the flat `Error` enum also holds Java's `java.lang`
         // runtime exceptions, and `SubscriptionState`'s "No current assignment
         // for partition ..." reaches this catch as `Error::LocalIllegalState`, for
         // which `is_kafka_error()` is false.
@@ -1193,7 +1219,7 @@ impl OffsetsRequestManager {
     /// is the exceptional one — a cached `LogTruncationException` or an
     /// `LocalIllegalState` from `SubscriptionState` — so the allocation is on the
     /// rare branch.
-    #[allow(clippy::type_complexity)] // Java has the same fan-out via try/catch.
+    #[expect(clippy::type_complexity)] // Java has the same fan-out via try/catch.
     fn update_fetch_positions_inner(
         &mut self,
         deadline_ms: i64,
@@ -1264,6 +1290,7 @@ impl OffsetsRequestManager {
     /// the captured set so partitions added mid-flight are NOT reset) and
     /// then enqueues `ListOffsets` requests via
     /// [`Self::reset_positions_if_needed`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#initWithPartitionOffsetsIfNeeded")]
     fn init_with_partition_offsets_if_needed(
         &mut self,
         initializing_partitions: &HashSet<TopicPartition>,
@@ -1299,6 +1326,7 @@ impl OffsetsRequestManager {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
         let cached = Arc::clone(&self.cached_update_positions_error);
+        let time = Arc::clone(&self.time);
         tokio::spawn(async move {
             // Await the committed-offset fetch. The sender can be dropped
             // when the pending-fetch slot is replaced by a later request for
@@ -1348,7 +1376,7 @@ impl OffsetsRequestManager {
             // result completion. We invoke the same logic here. The
             // "current time" is captured at this moment — Java reads
             // `time.milliseconds()` inside the `whenComplete` callback.
-            let now_ms = current_time_ms_for_followup();
+            let now_ms = time.milliseconds();
             if let Err(ref err) = result_for_outer
                 && now_ms >= deadline_ms
             {
@@ -1590,24 +1618,6 @@ impl OffsetsRequestManager {
     }
 }
 
-/// Read the wall-clock time in milliseconds since the unix epoch — used
-/// by the spawned `update_fetch_positions` followup to decide whether
-/// the triggering event has already expired (Java parity:
-/// `time.milliseconds()` inside `cacheExceptionIfEventExpired`).
-///
-/// Java's `Time` abstraction is mock-friendly; the Rust translation uses
-/// `std::time::SystemTime` directly inside the spawned task. Tests that
-/// need to control time can instead pass `current_time_ms` directly via
-/// the synchronous fail path of [`OffsetsRequestManager::update_fetch_positions`]
-/// (where the spawned task is not used).
-fn current_time_ms_for_followup() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
-}
-
 /// Helper to downcast a `ClientResponse` to a `ListOffsetsResponse`.
 fn downcast_list_offsets(response: &ClientResponse) -> Option<&crate::common::requests::ListOffsetsResponse> {
     match response.response_body() {
@@ -1635,6 +1645,7 @@ fn downcast_offsets_for_leader_epoch(response: &ClientResponse) -> Option<&Offse
 /// manually via `seek` between the time the OffsetFetch was issued and
 /// the response arrived; Java does the same in
 /// `OffsetsRequestManager.offsetsForInitializingPartitions`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#refreshOffsets")]
 fn refresh_offsets(
     offsets: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
     subscription_state: &Mutex<SubscriptionState>,
@@ -1796,7 +1807,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1808,6 +1819,7 @@ mod tests {
             subscription_state,
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -1856,6 +1868,9 @@ mod tests {
     /// land, the next `validate_positions_if_needed` produces the
     /// expected request and the `try_connect` queue is empty.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest#testValidatePositionsAbortIfNoApiVersionsToCheckAgainstThenRecovers"
+    )]
     async fn test_validate_positions_abort_if_no_api_versions_to_check_against_then_recovers() {
         // Build the manager around a controllable `ApiVersions` so the
         // test can withhold/install entries; the rest of the wiring
@@ -1866,7 +1881,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1879,6 +1894,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -1976,7 +1992,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1989,7 +2005,7 @@ mod tests {
             subscription_state.clone(),
             "g",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ));
         let positions_validator = test_positions_validator(&subscription_state, &metadata);
@@ -1997,6 +2013,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -2385,7 +2402,7 @@ mod tests {
             "a differing initializing set must issue a new OffsetFetch, superseding the first"
         );
 
-        // The orphaned caller must still be completed (CLAUDE.md §5 — never
+        // The orphaned caller must still be completed (CLAUDE.md §7 — never
         // leave the future hanging) and with an ignorable timeout.
         let err = rx1
             .await
@@ -2583,7 +2600,7 @@ mod tests {
         // Pre-seed a validate error (Java's path:
         // `OffsetsForLeaderEpoch` response set it via
         // `cachedValidatePositionsException.set(error)`).
-        let seeded_err = Error::new(crate::common::Errors::UnknownServerError);
+        let seeded_err = Error::new(crate::common::protocol::Errors::UnknownServerError);
         mgr.shared.offset_fetcher_utils.maybe_set_validate_error(seeded_err.clone());
 
         // current_time_ms == deadline_ms triggers the would-be cache
@@ -2626,7 +2643,7 @@ mod tests {
         // Seed a cached error directly (this is what
         // `cacheExceptionIfEventExpired` does in Java when an expired event
         // surfaces an error).
-        let cached_err = Error::new(crate::common::Errors::TopicAuthorizationFailed);
+        let cached_err = Error::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
         {
             let mut guard = mgr.cached_update_positions_error.lock().unwrap();
             *guard = Some(cached_err.clone());
@@ -2661,8 +2678,8 @@ mod tests {
 
     use crate::ClientResponse;
     use crate::ListOffsetsResponseData;
-    use crate::common::ApiKeys;
-    use crate::common::Errors;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::protocol::Errors;
     use crate::common::requests::ListOffsetsRequest;
     use crate::common::requests::ListOffsetsResponse;
     use crate::common::requests::RequestTestUtils;
@@ -2862,7 +2879,7 @@ mod tests {
             let built = {
                 let mut unsent = unsent;
                 let request = unsent.request_builder_mut().expect("builder present").build().expect("build");
-                let crate::common::requests::ConcreteRequest::ListOffsets(r) = request else {
+                let crate::common::requests::AbstractRequest::ListOffsets(r) = request else {
                     panic!("expected ListOffsetsRequest");
                 };
                 // Re-take the handler from the original unsent: rebuild is
@@ -3980,7 +3997,7 @@ mod tests {
         let poll_result = RequestManager::poll(&mut mgr, 0);
         let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         for topic in req.topics() {
@@ -4049,7 +4066,7 @@ mod tests {
         let poll_result = RequestManager::poll(&mut mgr, 0);
         let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         for topic in req.topics() {
@@ -4112,7 +4129,7 @@ mod tests {
         let res = RequestManager::poll(&mut mgr, 0);
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         assert_eq!(
@@ -4131,7 +4148,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -4143,6 +4160,7 @@ mod tests {
             subscription_state,
             metadata.clone(),
             IsolationLevel::ReadCommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -4159,7 +4177,7 @@ mod tests {
         let res = RequestManager::poll(&mut mgr, 0);
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         assert_eq!(
@@ -4362,7 +4380,7 @@ mod tests {
         // maps to `NetworkException` in `FutureCompletionHandler::on_complete`.
         assert_eq!(
             err.error(),
-            crate::common::Errors::NetworkError,
+            crate::common::protocol::Errors::NetworkError,
             "per-node disconnect must surface as a network error"
         );
         // The description, not the enum constant `Display` renders.
@@ -4395,7 +4413,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -4408,6 +4426,7 @@ mod tests {
             subscription_state,
             metadata.clone(),
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             500, // retry_backoff
             TEST_REQUEST_TIMEOUT_MS,
             500, // default_api_timeout
@@ -4430,10 +4449,10 @@ mod tests {
         );
         // Java's `unsentRequest.requestBuilder().build()` returns an
         // `AbstractRequest` that is downcast to `ListOffsetsRequest`. The
-        // Rust equivalent is `builder.build()` → `ConcreteRequest::ListOffsets`.
+        // Rust equivalent is `builder.build()` → `AbstractRequest::ListOffsets`.
         let built = unsent.request_builder_mut().expect("builder present").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         assert_eq!(request.timeout_ms(), TEST_REQUEST_TIMEOUT_MS as i32);
@@ -4451,7 +4470,7 @@ mod tests {
     // =================================================================
 
     use crate::OffsetForLeaderEpochResponseData;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::offset_for_leader_epoch_response_data::{EpochEndOffset, OffsetForLeaderTopicResult};
 
     /// Bootstrap `metadata` with a single topic / one-partition-per-index
@@ -4869,6 +4888,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             500,
             30_000,
             60_000,
@@ -5052,6 +5072,7 @@ mod tests {
             subscription_state.clone(),
             metadata.clone(),
             isolation_level,
+            Arc::new(crate::common::utils::SystemTime),
             500,
             TEST_REQUEST_TIMEOUT_MS,
             60_000,
@@ -5068,7 +5089,7 @@ mod tests {
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         // Java: assertEquals(requestTimeoutMs, request.timeoutMs()).
@@ -5107,7 +5128,7 @@ mod tests {
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         let epoch = request.topics()[0].partitions[0].current_leader_epoch;

@@ -63,17 +63,12 @@ use crate::admin::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
     DescribeUserScramCredentialsResult, UserScramCredentialAlteration,
 };
-#[allow(deprecated)]
-use crate::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
-    ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
-};
 use crate::common::ElectionType;
-use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::internals::KafkaFutureImpl;
+use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
@@ -113,9 +108,7 @@ struct TopicMetadata {
 #[derive(Debug)]
 struct State {
     brokers: Vec<Node>,
-    #[allow(dead_code)]
     controller: Node,
-    #[allow(dead_code)]
     cluster_id: String,
     all_topics: BTreeMap<String, TopicMetadata>,
     topic_ids: BTreeMap<String, Uuid>,
@@ -193,9 +186,9 @@ impl MockAdminClient {
     ///
     /// This is a `Result` rather than a `panic!` because the argument is a
     /// caller-supplied count that the caller can trivially correct, which is
-    /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
+    /// CLAUDE.md §12.2 ("return a `Result` when Java code throws … even if
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
-    /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
+    /// keeps `crate::ffi::admin` free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
     pub fn create(num_brokers: i32) -> Result<Self, Error> {
         let brokers: Vec<Node> = (0..num_brokers)
@@ -276,7 +269,7 @@ impl MockAdminClient {
     // Convention for this group: a seeding helper whose Java counterpart is a
     // `void` method that *throws* returns `Result<(), Error>` and reuses
     // Java's message verbatim, rather than panicking. Java's throws here are all
-    // catchable `IllegalArgumentException`s, and CLAUDE.md §10.2 asks for a
+    // catchable `IllegalArgumentException`s, and CLAUDE.md §12.2 asks for a
     // `Result` for a recoverable Java throw even when it is unchecked. A helper
     // whose Java counterpart cannot fail (`updateBeginningOffsets`,
     // `updateEndOffsets`, `updateConsumerGroupOffsets`, `timeoutNextRequest`)
@@ -376,7 +369,7 @@ impl MockAdminClient {
         // established by anything — Java's `brokerLogDirs.get(id).get(0)`
         // (MockAdminClient.java:312-314) throws `IndexOutOfBoundsException` for a
         // broker configured with no log directory — so it is surfaced as an error
-        // rather than panicked on (CLAUDE.md §10.2).
+        // rather than panicked on (CLAUDE.md §12.2).
         let mut partition_log_dirs: Vec<String> = Vec::with_capacity(partitions.len());
         for leader in partitions.iter().filter_map(TopicPartitionInfo::leader) {
             let dirs = &state.broker_log_dirs[leader.id() as usize];
@@ -453,7 +446,7 @@ fn current_time_millis() -> i64 {
 /// Returns an error when a stored reassignment references a partition with no
 /// metadata. Java throws a bare `RuntimeException` from both of these branches;
 /// since `list_partition_reassignments` cannot throw, the caller fails the
-/// result's future instead (CLAUDE.md §10.1 — a panic here would unwind into C
+/// result's future instead (CLAUDE.md §12.1 — a panic here would unwind into C
 /// through the FFI). This is *not* only reachable through internal corruption:
 /// `delete_topics` removes the topic from `all_topics` without pruning
 /// `reassignments`, exactly as Java's does, so any legal
@@ -548,7 +541,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 /// Corresponds to `MockAdminClient.getResourceDescription`.
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
-        ConfigResourceType::Broker => {
+        config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
             })?;
@@ -560,7 +553,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                 )),
             }
         },
-        ConfigResourceType::Topic => {
+        config_resource::Type::Topic => {
             if let Some(metadata) = state.all_topics.get_mut(resource.name())
                 && !metadata.marked_for_deletion
             {
@@ -576,7 +569,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                 format!("Resource {resource} not found."),
             ))
         },
-        ConfigResourceType::ClientMetrics => {
+        config_resource::Type::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -584,7 +577,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             let config = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             Ok(to_config_object(&config))
         },
-        ConfigResourceType::Group => {
+        config_resource::Type::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -609,7 +602,7 @@ fn handle_incremental_resource_alteration(
     ops: &[AlterConfigOp],
 ) -> Result<(), Error> {
     match resource.resource_type() {
-        ConfigResourceType::Broker => {
+        config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
             })?;
@@ -624,7 +617,7 @@ fn handle_incremental_resource_alteration(
             state.broker_configs[broker_id] = new_map;
             Ok(())
         },
-        ConfigResourceType::Topic => {
+        config_resource::Type::Topic => {
             let metadata = state.all_topics.get_mut(resource.name()).ok_or_else(|| {
                 Error::with_message(Errors::UnknownTopicOrPartition, format!("No such topic as {}", resource.name()))
             })?;
@@ -633,7 +626,7 @@ fn handle_incremental_resource_alteration(
             metadata.configs = Some(new_map);
             Ok(())
         },
-        ConfigResourceType::ClientMetrics => {
+        config_resource::Type::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -643,7 +636,7 @@ fn handle_incremental_resource_alteration(
             state.client_metrics_configs.insert(resource_name.to_string(), new_map);
             Ok(())
         },
-        ConfigResourceType::Group => {
+        config_resource::Type::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -715,7 +708,7 @@ impl Admin for MockAdminClient {
             // throws an unchecked `IndexOutOfBoundsException` for a broker with
             // no log directories; `add_topic` already translates the identical
             // situation as a per-topic error instead of a panic (CLAUDE.md
-            // §10.2), so `create_topics` gets the same treatment here.
+            // §12.2), so `create_topics` gets the same treatment here.
             if state.broker_log_dirs[leader.id() as usize].is_empty() {
                 handle.complete_with_error(Error::local_illegal_argument(format!(
                     "Broker {} has no log directories.",
@@ -1167,7 +1160,7 @@ impl Admin for MockAdminClient {
 
     fn list_config_resources_with_options(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         _options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
         let state = self.state.lock().unwrap();
@@ -1176,51 +1169,33 @@ impl Admin for MockAdminClient {
         let mut config_resources: HashSet<ConfigResource> = HashSet::new();
         let all = config_resource_types.is_empty();
 
-        if all || config_resource_types.contains(&ConfigResourceType::Topic) {
+        if all || config_resource_types.contains(&config_resource::Type::Topic) {
             for name in state.all_topics.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Topic, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Topic, name.clone()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::Broker) {
+        if all || config_resource_types.contains(&config_resource::Type::Broker) {
             for i in 0..state.brokers.len() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Broker, i.to_string()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Broker, i.to_string()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::BrokerLogger) {
+        if all || config_resource_types.contains(&config_resource::Type::BrokerLogger) {
             for i in 0..state.brokers.len() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::BrokerLogger, i.to_string()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::ClientMetrics) {
+        if all || config_resource_types.contains(&config_resource::Type::ClientMetrics) {
             for name in state.client_metrics_configs.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::ClientMetrics, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::ClientMetrics, name.clone()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::Group) {
+        if all || config_resource_types.contains(&config_resource::Type::Group) {
             for name in state.group_configs.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Group, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Group, name.clone()));
             }
         }
         handle.complete(config_resources.into_iter().collect());
         ListConfigResourcesResult::new(handle.future())
-    }
-
-    #[allow(deprecated)]
-    fn list_client_metrics_resources_with_options(
-        &self,
-        _options: ListClientMetricsResourcesOptions,
-    ) -> ListClientMetricsResourcesResult {
-        let state = self.state.lock().unwrap();
-        let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
-        // Mirrors Java's `MockAdminClient.listClientMetricsResources`, which
-        // maps every client-metrics config key to a `ClientMetricsResourceListing`.
-        let listings = state
-            .client_metrics_configs
-            .keys()
-            .map(ClientMetricsResourceListing::new)
-            .collect();
-        handle.complete(listings);
-        ListClientMetricsResourcesResult::new(handle.future())
     }
 
     /// Mirrors `MockAdminClient.describeLogDirs`.
@@ -1242,7 +1217,7 @@ impl Admin for MockAdminClient {
         // `IndexOutOfBoundsException` and a replica on a broker the caller did
         // not ask about raises an NPE. Both are latent defects in a test helper
         // rather than a contract, and reproducing them would mean panicking in a
-        // public API (CLAUDE.md §10.1), so each case is skipped instead.
+        // public API (CLAUDE.md §12.1), so each case is skipped instead.
         for (topic_name, meta) in &state.all_topics {
             // For tests, we assume there will always be only 1 log-dir entry.
             let Some(log_dir) = meta.partition_log_dirs.first() else {
@@ -1393,7 +1368,7 @@ impl Admin for MockAdminClient {
     /// Mirrors `MockAdminClient.electLeaders`, which throws
     /// `UnsupportedOperationException("Not implemented yet")`
     /// (`MockAdminClient.java:797`). Translated to a future failed with an
-    /// "unsupported" `Error` (CLAUDE.md §10.1: no panic in public API).
+    /// "unsupported" `Error` (CLAUDE.md §12.1: no panic in public API).
     fn elect_leaders_with_options(
         &self,
         _election_type: ElectionType,
@@ -1439,7 +1414,7 @@ impl Admin for MockAdminClient {
     /// (`MockAdminClient.java:1186-1192`). A synchronous throw is not
     /// representable in this signature, so the result's single future is failed
     /// instead — the same accommodation `list_offsets` makes for a
-    /// `TimestampSpec` (CLAUDE.md §10.1).
+    /// `TimestampSpec` (CLAUDE.md §12.1).
     fn list_partition_reassignments_with_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -1473,7 +1448,7 @@ impl Admin for MockAdminClient {
     /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
     /// (`MockAdminClient.java:1230`); since a synchronous throw is not
     /// representable in this signature, the affected partition's future is
-    /// failed with an "unsupported" `Error` (CLAUDE.md §10.1).
+    /// failed with an "unsupported" `Error` (CLAUDE.md §12.1).
     fn list_offsets_with_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
@@ -1520,21 +1495,6 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListGroupsResult::new(handle.future())
-    }
-
-    #[allow(deprecated)]
-    fn list_consumer_groups_with_options(&self, _options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
-        // Mirrors Java's `MockAdminClient.listConsumerGroups`: a simple
-        // ConsumerGroupListing per seeded group config.
-        let state = self.state.lock().unwrap();
-        let listings: Vec<Result<ConsumerGroupListing, Error>> = state
-            .group_configs
-            .keys()
-            .map(|g| Ok(ConsumerGroupListing::with_group_state_group_type(g.clone(), None, None, false)))
-            .collect();
-        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
-        handle.complete(listings);
-        ListConsumerGroupsResult::new(handle.future())
     }
 
     fn describe_consumer_groups_with_options(
@@ -1610,7 +1570,7 @@ impl Admin for MockAdminClient {
         // wrapper — `admin_sync_future_op` runs the submit closure inline on the
         // calling thread — and abort the process. So the error is surfaced on the
         // group's future, which the trait signature can carry
-        // (CLAUDE.md §10.1/§10.2, admin-client.md §9).
+        // (CLAUDE.md §12.1/§12.2, admin-client.md §9).
         let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
@@ -1821,7 +1781,7 @@ impl Admin for MockAdminClient {
         // when no renewer was supplied. That is a catchable `RuntimeException`
         // in Java, but an index panic in Rust — and every FFI path runs this
         // inline on the calling thread, so it would unwind across an
-        // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
+        // `extern "C"` boundary and abort the process. Per CLAUDE.md §12.1 the
         // future is completed exceptionally instead.
         let Some(owner) = options.renewers().first().cloned() else {
             handle.complete_with_error(Error::local_illegal_argument(
@@ -2443,7 +2403,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
@@ -2453,7 +2413,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_broker_returns_default_replication_factor() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
@@ -2463,7 +2423,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_unknown_topic_is_unknown_topic_error() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "missing".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
@@ -2474,7 +2434,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_unknown_broker_is_invalid_request() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "99".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "99".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
@@ -2486,7 +2446,7 @@ mod tests {
     async fn describe_configs_timeout_recovers_on_next_call() {
         let client = admin();
         client.timeout_next_request(1);
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
         let timed_out =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         assert!(matches!(timed_out.values()[&resource].get().await, Err(Error::Timeout(_))));
@@ -2507,7 +2467,7 @@ mod tests {
             .get()
             .await
             .unwrap();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
 
         // SET.
         let set_op = AlterConfigOp::new(
@@ -2554,7 +2514,7 @@ mod tests {
     #[tokio::test]
     async fn incremental_alter_configs_unknown_topic_is_unknown_topic_error() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "missing".to_string());
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
@@ -2567,7 +2527,7 @@ mod tests {
     #[tokio::test]
     async fn incremental_alter_configs_client_metrics_creates_resource() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "cm".to_string());
+        let resource = ConfigResource::new(config_resource::Type::ClientMetrics, "cm".to_string());
         let op = AlterConfigOp::new(
             ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
             OpType::Set,
@@ -2584,7 +2544,7 @@ mod tests {
         // The new client-metrics resource now shows up in list_config_resources.
         let listed = client
             .list_config_resources_with_options(
-                &HashSet::from([ConfigResourceType::ClientMetrics]),
+                &HashSet::from([config_resource::Type::ClientMetrics]),
                 ListConfigResourcesOptions::new(),
             )
             .all()
@@ -2595,57 +2555,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources_returns_seeded_names() {
-        use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
-        let client = admin();
-
-        // Empty when nothing has been seeded, mirroring Java's mock over an
-        // empty `clientMetricsConfigs`.
-        let empty = client
-            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-        assert!(empty.is_empty());
-
-        // Seed two client-metrics resources via incrementalAlterConfigs.
-        for name in ["one", "two"] {
-            let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, name.to_string());
-            let op = AlterConfigOp::new(
-                ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
-                OpType::Set,
-            );
-            let mut configs = HashMap::new();
-            configs.insert(resource, vec![op]);
-            client
-                .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
-                .all()
-                .get()
-                .await
-                .unwrap();
-        }
-
-        let listed = client
-            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-        let expected: HashSet<ClientMetricsResourceListing> = [
-            ClientMetricsResourceListing::new("one"),
-            ClientMetricsResourceListing::new("two"),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
-    }
-
-    #[tokio::test]
     async fn incremental_alter_configs_empty_client_metrics_name_is_invalid_request() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, String::new());
+        let resource = ConfigResource::new(config_resource::Type::ClientMetrics, String::new());
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
@@ -2674,11 +2586,11 @@ mod tests {
             .await
             .unwrap();
         let set: HashSet<ConfigResource> = listed.into_iter().collect();
-        assert!(set.contains(&ConfigResource::new(ConfigResourceType::Topic, "t".to_string())));
+        assert!(set.contains(&ConfigResource::new(config_resource::Type::Topic, "t".to_string())));
         // 3 brokers -> broker 0..2 and broker-logger 0..2.
         for i in 0..3 {
-            assert!(set.contains(&ConfigResource::new(ConfigResourceType::Broker, i.to_string())));
-            assert!(set.contains(&ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string())));
+            assert!(set.contains(&ConfigResource::new(config_resource::Type::Broker, i.to_string())));
+            assert!(set.contains(&ConfigResource::new(config_resource::Type::BrokerLogger, i.to_string())));
         }
     }
 
@@ -2696,14 +2608,14 @@ mod tests {
             .unwrap();
         let listed = client
             .list_config_resources_with_options(
-                &HashSet::from([ConfigResourceType::Topic]),
+                &HashSet::from([config_resource::Type::Topic]),
                 ListConfigResourcesOptions::new(),
             )
             .all()
             .get()
             .await
             .unwrap();
-        assert_eq!(listed, vec![ConfigResource::new(ConfigResourceType::Topic, "t".to_string())]);
+        assert_eq!(listed, vec![ConfigResource::new(config_resource::Type::Topic, "t".to_string())]);
     }
 
     // --- Delegation tokens ---

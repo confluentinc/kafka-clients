@@ -29,11 +29,13 @@ use crate::common::record::internal::RecordBatch;
 /// This type is two scalars, so it is `Copy` and lives on the stack — Java
 /// allocates an object here, but there is nothing to own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch")]
 pub struct ProducerIdAndEpoch {
     /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
-    pub producer_id: i64,
+    pub(crate) producer_id: i64,
     /// The producer epoch, or `RecordBatch::NO_PRODUCER_EPOCH`.
-    pub epoch: i16,
+    pub(crate) epoch: i16,
 }
 
 impl ProducerIdAndEpoch {
@@ -43,6 +45,7 @@ impl ProducerIdAndEpoch {
     pub const NONE: Self = Self { producer_id: RecordBatch::NO_PRODUCER_ID, epoch: RecordBatch::NO_PRODUCER_EPOCH };
 
     /// Creates a new producer ID and epoch pair.
+    #[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch#ProducerIdAndEpoch")]
     pub const fn new(producer_id: i64, epoch: i16) -> Self {
         Self { producer_id, epoch }
     }
@@ -52,8 +55,23 @@ impl ProducerIdAndEpoch {
     /// Note this compares `<` against the sentinel rather than testing
     /// inequality with [`Self::NONE`], matching Java's `isValid()`: any
     /// producer ID above `NO_PRODUCER_ID` is valid regardless of epoch.
+    #[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch#isValid")]
     pub fn is_valid(&self) -> bool {
         RecordBatch::NO_PRODUCER_ID < self.producer_id
+    }
+
+    /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
+    ///
+    /// Java's public `ProducerIdAndEpoch.producerId`.
+    pub fn producer_id(&self) -> i64 {
+        self.producer_id
+    }
+
+    /// The producer epoch, or `RecordBatch::NO_PRODUCER_EPOCH`.
+    ///
+    /// Java's public `ProducerIdAndEpoch.epoch`.
+    pub fn epoch(&self) -> i16 {
+        self.epoch
     }
 }
 
@@ -125,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_is_copy() {
-        // Guards CLAUDE.md §11: the type must stay stack-allocated and cheap to
+        // Guards CLAUDE.md §13: the type must stay stack-allocated and cheap to
         // pass by value. If `Copy` is ever dropped this stops compiling.
         let a = ProducerIdAndEpoch::new(1, 2);
         let b = a;
