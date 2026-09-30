@@ -29,6 +29,7 @@
 //! out of scope for Phase 1 — it lives wherever `AsyncKafkaConsumer`
 //! constructs its config.
 
+use crate::MetadataRecoveryStrategy;
 use std::collections::HashMap;
 
 use log::warn;
@@ -136,7 +137,7 @@ pub struct ConsumerConfig {
     /// `metadata.max.age.ms`
     pub(crate) metadata_max_age_ms: i64,
     /// `metadata.recovery.strategy`
-    pub(crate) metadata_recovery_strategy: String,
+    pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
     /// `metadata.recovery.rebootstrap.trigger.ms`
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
 
@@ -237,7 +238,7 @@ impl Default for ConsumerConfig {
             default_api_timeout_ms: 60_000,
 
             metadata_max_age_ms: 5 * 60 * 1000,
-            metadata_recovery_strategy: "rebootstrap".to_string(),
+            metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
             metadata_recovery_rebootstrap_trigger_ms: 5 * 60 * 1000,
 
             exclude_internal_topics: true,
@@ -477,7 +478,7 @@ impl ConsumerConfig {
     }
     /// `metadata.recovery.strategy`.
     pub fn metadata_recovery_strategy(&self) -> &str {
-        &self.metadata_recovery_strategy
+        self.metadata_recovery_strategy.name()
     }
     /// `internal.throw.on.fetch.stable.offset.unsupported`.
     pub fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
@@ -557,7 +558,7 @@ impl ConsumerConfig {
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        // NOTE: 13 of Java's per-field `atLeast(..)` numeric validators
+        // NOTE: 15 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
         // that lands, negative / out-of-range values are silently accepted
@@ -737,11 +738,9 @@ impl ConsumerConfig {
                     config.metadata_max_age_ms = parse_i64(key, value)?;
                 },
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
-                    let lc = value.to_ascii_lowercase();
-                    if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
-                    }
-                    config.metadata_recovery_strategy = value.clone();
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`.
+                    config.metadata_recovery_strategy =
+                        MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ConsumerConfig` (`:686-689`):
