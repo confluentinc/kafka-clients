@@ -14,12 +14,17 @@
 
 use std::collections::HashMap;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerHandle;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::GroupProtocol;
 use confluent_kafka::consumer::KafkaConsumer;
 
@@ -43,7 +48,12 @@ async fn run() -> Result<(), Error> {
     let mut consumer = create_kafka_consumer()?;
     println!("Kafka consumer created successfully.");
 
-    consumer.subscribe_with_topics(vec![TOPIC_NAME.to_string()]).await?;
+    // The listener runs inside `poll()`, which already borrows the consumer
+    // mutably, so it calls back into the consumer through a `ConsumerHandle`.
+    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(CommitOnRevokeListener { consumer: consumer.handle() });
+    consumer
+        .subscribe_with_topics_listener(vec![TOPIC_NAME.to_string()], listener)
+        .await?;
     println!("Subscribed to topic: {TOPIC_NAME}");
 
     let handle = consumer.handle();
@@ -78,6 +88,33 @@ async fn consume_loop(consumer: &mut dyn Consumer<String, String>) -> Result<(),
             println!("Consumed record: key={:?}, value={:?}", record.key(), record.value());
         }
         consumer.commit_sync().await?;
+    }
+}
+
+/// Prints every change to the assignment, and commits the offsets consumed so
+/// far before partitions are revoked, so the member that takes them over
+/// resumes where this one stopped.
+struct CommitOnRevokeListener {
+    consumer: ConsumerHandle,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for CommitOnRevokeListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        println!("Partitions revoked: {partitions:?}");
+        self.consumer.commit_sync().await
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        println!("Partitions assigned: {partitions:?}");
+        Ok(())
+    }
+
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        // Lost partitions may already belong to another member, so a commit
+        // could fail or overwrite theirs: only report them.
+        println!("Partitions lost: {partitions:?}");
+        Ok(())
     }
 }
 

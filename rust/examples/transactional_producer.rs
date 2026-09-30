@@ -58,7 +58,7 @@ async fn produce_transactionally(producer: &KafkaProducer<String, String>) -> Re
 
     let result = match produce_in_transaction(producer).await {
         // Abortable: abort so the caller may retry. A failed abort replaces `e`.
-        Err(e) if matches!(e, Error::TransactionAbortable(_)) => {
+        Err(e) if e.is_transaction_abortable_error() => {
             eprintln!("Aborting transaction: {e}");
             producer.abort_transaction().await.and(Err(e))
         },

@@ -14,7 +14,7 @@ In some cases, the derivation of the Rust client is evident in the detail of the
 ## Distribution
 
 * **Crate:** published to `crates.io`
-* **Install:** `cargo add confluent-kafka-rust`
+* **Install:** `cargo add confluent-kafka`
 * **Import:** `confluent_kafka`, e.g. `use confluent_kafka::producer::KafkaProducer;`
 
 ## API shape
@@ -86,7 +86,7 @@ Rust can propagate the error to the caller automatically, without all the condit
 
 #### Inspecting an error
 
-* `code()` — the protocol error code as an i16; `error()` — the same as an `Errors` value; `message()` — the text, translating `Throwable.getMessage()`.
+* `message()` — the text, translating `Throwable.getMessage()`.
 
 * Match a specific error as an enum variant, e.g. `Error::Timeout(_)` or `Error::RecordTooLarge(_)`.
 
@@ -119,7 +119,7 @@ let props = HashMap::from([
 ]);
 let config = ProducerConfig::new(&props)?;
 let producer = KafkaProducer::<String, String>::new(
-    config, Box::new(StringSerializer), Box::new(StringSerializer),
+    config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()),
 )?;
 let record = ProducerRecord::with_key("my-topic".to_string(), Some("key".to_string()), Some("value".to_string()));
 producer.send(record).await?.get().await?;
@@ -147,7 +147,7 @@ while (true) {
 
 ```rust
 let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-    config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer),
+    config, Box::new(ByteArrayDeserializer::new()), Box::new(ByteArrayDeserializer::new()),
 )?;
 consumer.subscribe_with_topics(vec!["foo".into(), "bar".into()]).await?;
 loop {
@@ -167,16 +167,14 @@ The listener runs on the caller's poll task in every client: Java invokes it ins
 #### Java
 
 ```java
-class LoggingRebalanceListener implements RebalanceListener {
-    public void onPartitionsRevoked(Collection<TopicPartition> partitions, RebalanceConsumer consumer) {
+consumer.subscribe(Arrays.asList("foo", "bar"), new ConsumerRebalanceListener() {
+    public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
         consumer.commitSync(); // flush offsets before the partitions move
     }
-    public void onPartitionsAssigned(Collection<TopicPartition> partitions, RebalanceConsumer consumer) {
+    public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
         System.out.println("assigned: " + partitions);
     }
-}
-consumer.setRebalanceListener(new LoggingRebalanceListener());
-consumer.subscribe(Arrays.asList("foo", "bar"));
+});
 while (true) {
     ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
     for (ConsumerRecord<String, String> record : records)
@@ -187,20 +185,22 @@ while (true) {
 #### Rust
 
 ```rust
-struct LoggingRebalanceListener;
+struct CommittingRebalanceListener {
+    consumer: ConsumerHandle,
+}
 #[async_trait]
-impl RebalanceListener for LoggingRebalanceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition], consumer: &RebalanceListener) -> Result<(), Error> {
-        consumer.commitSync().await?;
-        Ok(())
+impl ConsumerRebalanceListener for CommittingRebalanceListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.consumer.commit_sync().await // flush offsets before the partitions move
     }
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition], consumer: &RebalanceListener) -> Result<(), Error> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         println!("assigned: {partitions:?}");
         Ok(())
     }
 }
 
-let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(LoggingRebalanceListener);
+let listener: Arc<dyn ConsumerRebalanceListener> =
+    Arc::new(CommittingRebalanceListener { consumer: consumer.handle() });
 consumer
     .subscribe_with_topics_listener(vec!["foo".into(), "bar".into()], listener)
     .await?;
@@ -233,7 +233,7 @@ let result = admin.create_topics(&[
 result.all().get().await?; // block until created or failed
 ```
 
-When you need to override the default options, use create_topics_options instead:
+When you need to override the default options, use `create_topics_with_options` instead:
 
 ```rust
 let result = admin.create_topics_with_options(
@@ -249,33 +249,37 @@ result.all().get().await?; // block until created or failed
 
 The equivalent of the Java `Producer<K, V>` interface is a trait. Applications use `KafkaProducer<K, V>` which implements the trait, just like in Java.
 
-Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait uses native `async fn` and is annotated with `#[allow(async_fn_in_trait)]`, which silences the lint warning that such futures carry no `Send` bound. The futures returned by `KafkaProducer` are `Send`, but generic code over `impl Producer<K, V>` cannot assume that without naming the concrete type.
+Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait's asynchronous methods return `impl Future<Output = ...> + Send` rather than being declared `async fn`, so the futures are `Send` even in generic code over `impl Producer<K, V>`, and the send path allocates no boxed future per record. `KafkaProducer` implements them as ordinary `async fn`s.
+
+Returning `impl Future` makes `Producer<K, V>` not dyn-compatible. To hold different producer implementations behind one type, as a Java `List<Producer<K, V>>` would, use `DynProducer<K, V>`: every `Producer` implements it automatically, and it returns each future boxed, so only callers that go through `dyn` pay for the allocation.
 
 The `Producer<K, V>` trait has looser restrictions than the consumer equivalent. The methods of the `Producer<K, V>` trait take a non-mutable reference to the producer. The producer instance is shareable across threads.
 
 ```rust
-#[allow(async_fn_in_trait)]
-pub trait Producer<K, V> {
-    async fn init_transactions(&self) -> Result<(), Error>;
+pub trait Producer<K, V>: Send + Sync {
+    fn init_transactions(&self) -> impl Future<Output = Result<(), Error>> + Send;
     fn begin_transaction(&self) -> Result<(), Error>;
-    async fn send_offsets_to_transaction(
+    fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), Error>;
-    async fn commit_transaction(&self) -> Result<(), Error>;
-    async fn abort_transaction(&self) -> Result<(), Error>;
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
-    async fn send_with_callback(
+        group_metadata: &dyn ConsumerGroupMetadata,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn abort_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(
+        &self,
+        record: ProducerRecord<K, V>,
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
+    fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
-    async fn flush(&self) -> Result<(), Error>;
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
+    fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
-    async fn close(&self) -> Result<(), Error>;
-    async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error>;
+    fn close(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn close_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 }
 ```
 
@@ -364,13 +368,13 @@ where
     fn assignment(&self) -> HashSet<TopicPartition>;
     fn subscription(&self) -> HashSet<String>;
     fn paused(&self) -> HashSet<TopicPartition>;
-    fn group_metadata(&self) -> ConsumerGroupMetadata;
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
     fn client_id(&self) -> &str;
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>; // currently always returns None
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
     // --- Subscription and assignment ---
-    async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
-    async fn subscribe_topics_listener(
+    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
+    async fn subscribe_with_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
@@ -387,26 +391,26 @@ where
     async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
     // --- Committing ---
     async fn commit_sync(&mut self) -> Result<(), Error>;
-    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
-    async fn commit_sync_offsets(
+    async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+    async fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error>;
-    async fn commit_sync_offsets_timeout(
+    async fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
     ) -> Result<(), Error>;
     async fn commit_async(&mut self) -> Result<(), Error>;
-    async fn commit_async_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
-    async fn commit_async_offsets_callback(
+    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
+    async fn commit_async_with_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
     ) -> Result<(), Error>;
     // --- Positioning ---
-    async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
-    async fn seek_offset_and_metadata(
+    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+    async fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -414,38 +418,45 @@ where
     async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
     async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
-    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
+    async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
-    async fn committed_timeout(
+    async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
     // --- Metadata and offset lookup ---
     async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
-    async fn partitions_for_timeout(&mut self, topic: &str, timeout: Duration) -> Result<Vec<PartitionInfo>, Error>;
+    async fn partitions_for_with_timeout(
+        &mut self,
+        topic: &str,
+        timeout: Duration,
+    ) -> Result<Vec<PartitionInfo>, Error>;
     async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
-    async fn list_topics_timeout(&mut self, timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
+    async fn list_topics_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
-    async fn offsets_for_times_timeout(
+    async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
     async fn beginning_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
-    async fn beginning_offsets_timeout(
+    async fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, Error>;
     async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
-    async fn end_offsets_timeout(
+    async fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
@@ -455,11 +466,10 @@ where
     async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
     // --- Lifecycle ---
     async fn enforce_rebalance(&mut self) -> Result<(), Error>;
-    async fn enforce_rebalance_reason(&mut self, reason: &str) -> Result<(), Error>;
+    async fn enforce_rebalance_with_reason(&mut self, reason: &str) -> Result<(), Error>;
     async fn close(&mut self) -> Result<(), Error>;
-    #[deprecated] // mirrors Java's @Deprecated close(Duration); use close_options
-    async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
-    async fn close_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+    // Java's deprecated close(Duration) is not translated; pass a timeout through CloseOptions.
+    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
     fn wakeup(&self);
     fn handle(&self) -> ConsumerHandle;
 }
@@ -511,9 +521,8 @@ And `ConsumerRecords` which is returned when the consumer is polled looks like t
 
 ```rust
 impl<K, V> ConsumerRecords<K, V> {
-    #[deprecated] // Java 4.0.0
-    pub fn new(records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>) -> Self;
-    pub fn new_next_offsets(
+    // Java's deprecated ConsumerRecords(Map) constructor is not translated.
+    pub fn with_next_offsets(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Self;
@@ -528,7 +537,7 @@ impl<K, V> ConsumerRecords<K, V> {
 ```
 
 ## More comprehensive examples
-These are complete, compilable examples which you can also find in the examples directory.
+These are complete, compilable examples which you can also find in the [`rust/examples`](../../rust/examples) directory.
 
 ### Producer example
 
@@ -614,7 +623,7 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     println!("Kafka producer properties: {props:?}");
 
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
 }
 ```
 
@@ -709,27 +718,36 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     ]);
     println!("Kafka producer properties: {props:?}");
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
 }
 ```
 
 ### Consumer example
 
-This consumer polls for records with a 30-second timeout. It stops if no records are received within the timeout. If records are received, it prints the record content, and then commits the records just received.
+This consumer polls for records with a 30-second timeout. It stops if no records are received within the timeout. If records are received, it prints the record content, and then commits the records just received. A rebalance listener prints every partition assignment, revocation and loss, and commits the consumed offsets before partitions are revoked.
 
 ```rust
 use std::collections::HashMap;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerHandle;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::GroupProtocol;
 use confluent_kafka::consumer::KafkaConsumer;
+
 use uuid::Uuid;
+
 const TOPIC_NAME: &str = "my-topic";
 const GROUP_ID: &str = "my-group";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -740,10 +758,17 @@ async fn main() -> ExitCode {
         },
     }
 }
+
 async fn run() -> Result<(), Error> {
     let mut consumer = create_kafka_consumer()?;
     println!("Kafka consumer created successfully.");
-    consumer.subscribe_with_topics(vec![TOPIC_NAME.to_string()]).await?;
+
+    // The listener runs inside `poll()`, which already borrows the consumer
+    // mutably, so it calls back into the consumer through a `ConsumerHandle`.
+    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(CommitOnRevokeListener { consumer: consumer.handle() });
+    consumer
+        .subscribe_with_topics_listener(vec![TOPIC_NAME.to_string()], listener)
+        .await?;
     println!("Subscribed to topic: {TOPIC_NAME}");
 
     let handle = consumer.handle();
@@ -756,6 +781,7 @@ async fn run() -> Result<(), Error> {
     let close_result = consumer.close().await;
     result.and(close_result)
 }
+
 async fn consume_loop(consumer: &mut dyn Consumer<String, String>) -> Result<(), Error> {
     loop {
         let records = match consumer.poll(Duration::from_secs(30)).await {
@@ -767,19 +793,50 @@ async fn consume_loop(consumer: &mut dyn Consumer<String, String>) -> Result<(),
             Err(Error::Wakeup(_)) => return Ok(()),
             Err(e) => return Err(e),
         };
+
         if records.is_empty() {
             println!("No records consumed in this poll interval.");
             return Ok(());
         }
+
         for record in records {
             println!("Consumed record: key={:?}, value={:?}", record.key(), record.value());
         }
         consumer.commit_sync().await?;
     }
 }
+
+/// Prints every change to the assignment, and commits the offsets consumed so
+/// far before partitions are revoked, so the member that takes them over
+/// resumes where this one stopped.
+struct CommitOnRevokeListener {
+    consumer: ConsumerHandle,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for CommitOnRevokeListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        println!("Partitions revoked: {partitions:?}");
+        self.consumer.commit_sync().await
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        println!("Partitions assigned: {partitions:?}");
+        Ok(())
+    }
+
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        // Lost partitions may already belong to another member, so a commit
+        // could fail or overwrite theirs: only report them.
+        println!("Partitions lost: {partitions:?}");
+        Ok(())
+    }
+}
+
 fn bootstrap_servers() -> String {
     std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".to_string())
 }
+
 fn create_kafka_consumer() -> Result<Box<dyn Consumer<String, String>>, Error> {
     let props = HashMap::from([
         (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
@@ -793,8 +850,10 @@ fn create_kafka_consumer() -> Result<Box<dyn Consumer<String, String>>, Error> {
             format!("client-{}", Uuid::new_v4()),
         ),
     ]);
+
     println!("Kafka consumer properties: {props:?}");
+
     let config = ConsumerConfig::new(&props)?;
-    KafkaConsumer::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+    KafkaConsumer::new(config, Box::new(StringDeserializer::new()), Box::new(StringDeserializer::new()))
 }
 ```
