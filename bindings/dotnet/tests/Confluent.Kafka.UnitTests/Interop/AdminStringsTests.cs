@@ -26,18 +26,18 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M15/P13.3 (c) — the shared key-string precondition, <see cref="AdminKeyStrings"/>: its
+/// M15/P13.3 (c) — the shared key-string precondition, <see cref="AdminStrings"/>: its
 /// exact accept/reject boundary, and that a rejection happens <b>before</b> the native submit
 /// (ffi §B5), leaving nothing held that would defer the client's release.
 /// </summary>
-public sealed class AdminKeyStringsTests
+public sealed class AdminStringsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_releaseBound = TimeSpan.FromSeconds(5);
 
-    private const string InvalidKeyMessage =
-        "An admin request key must not contain a NUL character or an unpaired UTF-16 " +
+    private const string InvalidStringMessage =
+        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
         "surrogate: such a string cannot be passed to the native client unchanged.";
 
     /// <summary>
@@ -109,7 +109,7 @@ public sealed class AdminKeyStringsTests
     [MemberData(nameof(AcceptedLabels))]
     public void Validate_AcceptsAStringThatCrossesUnchanged(string label)
     {
-        AdminKeyStrings.Validate(s_accepted[label], "p");
+        AdminStrings.Validate(s_accepted[label], "p");
     }
 
     /// <summary>
@@ -121,10 +121,10 @@ public sealed class AdminKeyStringsTests
     public void Validate_RejectsAStringTheAbiWouldChange(string label)
     {
         ArgumentException rejected =
-            Assert.Throws<ArgumentException>(() => AdminKeyStrings.Validate(s_rejected[label], "keys"));
+            Assert.Throws<ArgumentException>(() => AdminStrings.Validate(s_rejected[label], "keys"));
 
         Assert.Equal("keys", rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -145,7 +145,7 @@ public sealed class AdminKeyStringsTests
             (nativeHandle, topics, count, timeoutMs, validateOnly, retry, callback, userData) => submitted = true));
 
         Assert.Equal("newTopics", rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
         Assert.True(DisposeAndAwaitRelease(admin, handle), "a rejected call must hold no client reference");
     }
@@ -168,7 +168,7 @@ public sealed class AdminKeyStringsTests
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => submitted = true));
 
         Assert.Equal("topics", rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
         Assert.True(DisposeAndAwaitRelease(admin, handle), "a rejected call must hold no client reference");
     }

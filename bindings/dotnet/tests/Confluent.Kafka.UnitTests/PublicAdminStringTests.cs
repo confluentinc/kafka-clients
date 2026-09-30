@@ -35,13 +35,13 @@ namespace Confluent.Kafka.UnitTests;
 /// and the parameter it blames. The rows are the commit's guarded-string list; a string added
 /// to a per-key key without a row here is the gap this table is meant to make visible.
 /// </remarks>
-public sealed class PublicAdminKeyStringTests
+public sealed class PublicAdminStringTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     /// <summary>The message every rejection carries (asserted verbatim, DoD §3).</summary>
-    private const string InvalidKeyMessage =
-        "An admin request key must not contain a NUL character or an unpaired UTF-16 " +
+    private const string InvalidStringMessage =
+        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
         "surrogate: such a string cannot be passed to the native client unchanged.";
 
     /// <summary>
@@ -198,7 +198,7 @@ public sealed class PublicAdminKeyStringTests
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => call(admin, s_badStrings[kind]));
 
         Assert.Equal(parameter, rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -219,7 +219,7 @@ public sealed class PublicAdminKeyStringTests
             Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(s_badStrings[kind]));
 
         Assert.Equal("groupId", rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -236,7 +236,7 @@ public sealed class PublicAdminKeyStringTests
         ArgumentException rejected = Assert.Throws<ArgumentException>(
             () => admin.CreateTopics(new[] { new NewTopic("a\0b", 1, 1), new NewTopic("a\0c", 1, 1) }));
         Assert.Equal("newTopics", rejected.ParamName);
-        Assert.StartsWith(InvalidKeyMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
         // Nothing named "a" was created by the rejected call.
         DescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));

@@ -17,55 +17,70 @@ using System;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The one precondition every string that is part of a per-key admin key must meet: it
-/// crosses the C ABI unchanged, so the key the core answers is the key the caller asked for.
+/// The one precondition every string the admin client hands the C ABI must meet: it crosses
+/// unchanged, so the request the core sends names exactly what the caller named.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Why this exists at all</b> (M15/P13.3 (c), decision D9;
-/// <c>definition-of-done.md</c> §7 — Java has no such type, because a Java string never
-/// crosses a C boundary). The binding hands every string to the ABI as NUL-terminated UTF-8
-/// (<see cref="Interop.Utf8Marshal"/>). Two kinds of C# string do not survive that:
+/// ⚠ <b>Why this exists at all</b> (M15/P13.3 (c) decision D9, widened by M15/P13.4 decision
+/// D2; <c>definition-of-done.md</c> §7 — Java has no such type). The binding hands every
+/// string to the ABI as NUL-terminated UTF-8 (<see cref="Interop.Utf8Marshal"/>). Two kinds
+/// of C# string do not survive that:
 /// </para>
 /// <list type="bullet">
 /// <item>one containing <c>'\0'</c> — the C string ends at the first NUL, so <c>"a\0b"</c>
-/// and <c>"a\0c"</c> both reach the core as <c>"a"</c>, and a topic named <c>"a\0b"</c>
-/// silently becomes topic <c>"a"</c>;</item>
+/// and <c>"a\0c"</c> both reach the core as <c>"a"</c>;</item>
 /// <item>one containing an unpaired UTF-16 surrogate — <c>Encoding.UTF8</c> replaces it with
-/// U+FFFD, so two different lone surrogates become the same key.</item>
+/// U+FFFD, so two different lone surrogates become the same string.</item>
 /// </list>
 /// <para>
-/// Since PR #201 round 70 the core fires one callback per <b>distinct</b> key by C-string
-/// equality (M15/P13.3 F4). Two C# keys that collapse to one C key therefore get one
-/// callback where the binding's countdown waits for two — the call would never complete.
-/// Rejecting such a string before anything is pinned, allocated or ref-counted (ffi §B5
-/// order) is the only fix that keeps one result per caller key: de-duplicating on the
-/// encoded bytes instead would silently merge two of the caller's keys into one answer.
+/// Each has two consequences, and either one alone is reason enough to reject it:
+/// </para>
+/// <list type="bullet">
+/// <item><b>The request goes to the wrong target</b> (M15/P13.4). A truncated or altered
+/// string still names <em>something</em>: <c>"a\0b"</c> silently acts on group, topic,
+/// user, transaction, config value or log directory <c>"a"</c>, and the caller is told
+/// nothing.</item>
+/// <item><b>Collapsing keys hang a countdown</b> (PR #201 round 70, M15/P13.3 F4). The core
+/// fires one callback per <b>distinct</b> key by C-string equality, so two C# keys that
+/// collapse to one C key get one callback where the binding's countdown waits for two — the
+/// call would never complete. De-duplicating on the encoded bytes instead would silently
+/// merge two of the caller's keys into one answer.</item>
+/// </list>
+/// <para>
+/// Rejecting the string synchronously, with <see cref="ArgumentException"/>, before anything
+/// is pinned, allocated or ref-counted (ffi §B5 order) is the fix that avoids both. It is a
+/// recorded .NET-only deviation: Java length-prefixes every string on the wire
+/// (<c>kafka/clients/src/main/java/org/apache/kafka/common/protocol/types/Type.java:520</c>,
+/// <c>:565</c>), so it never truncates one and has no rejection to mirror.
 /// </para>
 /// <para>
-/// Scope: the strings that make up a per-key key of a per-key admin RPC, and nothing else.
-/// Producer and consumer strings, config names and values, log-directory paths and the
-/// admin RPCs that answer with one callback are outside it — none of them keys a countdown,
-/// so none of them can hang on a collapsed key.
+/// Scope: every user-supplied string the admin client passes to the C ABI as a C string —
+/// request keys, the other request fields, strings held in an <c>*Options</c> object, the
+/// name <c>DescribeUserScramCredentialsResult.Description(string)</c> looks up, and the
+/// strings the <c>MockAdminClient</c> seeding methods pass. Outside it: producer and consumer
+/// strings, the construction config (M15/P13.4 decision D3), and the wire names the binding
+/// derives from its own enums, which are never user text.
 /// </para>
 /// </remarks>
-internal static class AdminKeyStrings
+internal static class AdminStrings
 {
     /// <summary>
     /// The <see cref="ArgumentException"/> message every rejection carries — one text for
     /// every guarded string, so that the caller is pointed at the argument by
     /// <see cref="ArgumentException.ParamName"/>, not by a per-site wording.
     /// </summary>
-    internal const string InvalidKeyMessage =
-        "An admin request key must not contain a NUL character or an unpaired UTF-16 " +
+    internal const string InvalidStringMessage =
+        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
         "surrogate: such a string cannot be passed to the native client unchanged.";
 
     /// <summary>
     /// Rejects <paramref name="value"/> when it contains <c>'\0'</c> or an unpaired
     /// surrogate. A <c>null</c> value passes: whether null is allowed is each site's own
-    /// precondition (an ACL filter's null name means "any").
+    /// precondition (an ACL filter's null name means "any", and an offset's null metadata is
+    /// sent as empty).
     /// </summary>
-    /// <param name="value">The key string the caller passed.</param>
+    /// <param name="value">The string the caller passed.</param>
     /// <param name="parameterName">The caller's parameter to blame.</param>
     /// <exception cref="ArgumentException">
     /// <paramref name="value"/> cannot cross the C ABI unchanged.
@@ -74,7 +89,7 @@ internal static class AdminKeyStrings
     {
         if (value is not null && !CrossesUnchanged(value))
         {
-            throw new ArgumentException(InvalidKeyMessage, parameterName);
+            throw new ArgumentException(InvalidStringMessage, parameterName);
         }
     }
 

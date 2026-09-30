@@ -206,7 +206,7 @@ public sealed class MockAdminClient : IAdmin
 
         // Here, so that a rejected id blames this overload's own parameter rather than the
         // batched form's `groupSpecs` (M15/P13.3 (c)).
-        AdminKeyStrings.Validate(groupId, nameof(groupId));
+        AdminStrings.Validate(groupId, nameof(groupId));
 
         // Java's default overload (Admin.java:912-918): delegate to the batched form
         // with a fresh spec, whose null TopicPartitions means "every committed
