@@ -38,8 +38,10 @@ COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.
 COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
-COPY bindings/python/producer.py /workspace/bindings/python/producer.py
-COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
+# The new confluent_kafka package (the servers speak it); the paused admin
+# binding stays a top-level module (it imports the package's private
+# _legacy_compat shim).
+COPY bindings/python/confluent_kafka /workspace/bindings/python/confluent_kafka
 COPY bindings/python/admin.py /workspace/bindings/python/admin.py
 
 # Single source of truth for the wire schema: the proto crate.
@@ -79,8 +81,9 @@ WORKDIR /app
 # loader resolves it via the rpath setup.py embedded.
 COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
-COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
-COPY --from=builder /workspace/bindings/python/consumer.py /app/consumer.py
+# The confluent_kafka package + the paused admin module. The _confluentkafka
+# extension sits at /app next to them (top-level import).
+COPY --from=builder /workspace/bindings/python/confluent_kafka /app/confluent_kafka
 COPY --from=builder /workspace/bindings/python/admin.py /app/admin.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
@@ -90,10 +93,6 @@ COPY --from=builder /workspace/bindings/python/admin_service_pb2.py /app/admin_s
 COPY --from=builder /workspace/bindings/python/admin_service_pb2_grpc.py /app/admin_service_pb2_grpc.py
 # grpc_server.py imports the shared translation helpers from grpc_translate.py.
 COPY bindings/python/grpc_translate.py /app/grpc_translate.py
-# _error_code.py is generated from kafka_common_ErrorCode_t by
-# `cargo xtask generate-error-codes`; grpc_translate.py and the servicers
-# import it to stamp real codes on their own synthetic errors.
-COPY bindings/python/_error_code.py /app/_error_code.py
 COPY bindings/python/grpc_server.py /app/grpc_server.py
 
 # The Python extension was linked with rpath pointing at the original

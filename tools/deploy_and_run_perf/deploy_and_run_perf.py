@@ -107,9 +107,12 @@ fi
 
 if [[ "$TEST" == python-* ]]; then
   # Python binding perf tests. Build the Rust lib (release) + the _confluentkafka
-  # extension into a venv; install confluent-kafka (v2 backend) + psutil. No kafka
-  # submodule needed (only the Rust build + the C extension). For python-consumer
-  # also install a JRE + Apache Kafka so the test self-spawns load via KAFKA_BIN.
+  # extension into a venv (+ psutil), and install confluent-kafka (the v2 backend,
+  # also used for topic recreation / verification) into a SEPARATE venv: both
+  # packages install the top-level package `confluent_kafka`, so they cannot
+  # share one. No kafka submodule needed (only the Rust build + the C
+  # extension). For python-consumer also install a JRE + Apache Kafka so the test
+  # self-spawns load via KAFKA_BIN.
   sudo apt install -y python3 python3-venv python3-pip rustup
   rustup default stable
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
@@ -123,7 +126,13 @@ if [[ "$TEST" == python-* ]]; then
   pip install --upgrade pip setuptools wheel
   ( cd "$REPO/bindings/python" && \
     CONFLUENT_KAFKA_LIB_DIR="$REPO/target/release" CFLAGS="-O2 -march=native" pip install -e . )
-  pip install "confluent-kafka>=2.13.0" psutil
+  # pytest: consumer_performance_test.py imports it at module level.
+  pip install psutil pytest
+  echo "== Creating the librdkafka venv (confluent-kafka, CLIENT_VERSION=2) =="
+  python3 -m venv "$REPO/venv-librdkafka"
+  "$REPO/venv-librdkafka/bin/pip" install --upgrade pip
+  "$REPO/venv-librdkafka/bin/pip" install \
+    -r "$REPO/bindings/python/test/performance/requirements-librdkafka.txt"
   if [ "$TEST" = "python-consumer" ]; then
     KVER="${KAFKA_VERSION:-4.2.0}"
     if [ ! -x /opt/kafka/bin/kafka-producer-perf-test.sh ]; then
@@ -196,6 +205,20 @@ set +a
 # apply it AFTER sourcing the .env so the flag wins over any ASYNC there.
 if [ "${RUN_ASYNC:-0}" = "1" ]; then export ASYNC=True; fi
 
+# Python tests: CLIENT_VERSION=2 (the confluent-kafka baseline) runs in the
+# librdkafka venv, the Rust binding in the repo venv; both packages install the
+# top-level package `confluent_kafka`, so they cannot share one. The Rust run
+# reaches the librdkafka venv through LIBRDKAFKA_PYTHON for topic recreation /
+# verification (bindings/python/test/performance/librdkafka_helpers.py).
+python_for_client_version() {
+  export LIBRDKAFKA_PYTHON="$REPO/venv-librdkafka/bin/python"
+  if [ "${CLIENT_VERSION:-3}" = "2" ]; then
+    PY="$LIBRDKAFKA_PYTHON"
+  else
+    PY="$REPO/venv/bin/python"
+  fi
+}
+
 cd "$REPO"
 case "$TEST" in
   rust-native)
@@ -223,20 +246,20 @@ case "$TEST" in
     ;;
   python-producer)
     echo "######## Python producer perf test (ASYNC=${ASYNC:-False}, CLIENT_VERSION=${CLIENT_VERSION:-3}) ########"
-    set +u; . "$REPO/venv/bin/activate"; set -u
+    python_for_client_version
     mkdir -p "$RESULTS/python-producer"
     ( cd "$RESULTS/python-producer" && \
-      python "$REPO/bindings/python/test/performance/producer_performance_test.py" )
+      "$PY" "$REPO/bindings/python/test/performance/producer_performance_test.py" )
     ;;
   python-consumer)
     echo "######## Python consumer perf test (ASYNC=${ASYNC:-False}, CLIENT_VERSION=${CLIENT_VERSION:-3}) ########"
-    set +u; . "$REPO/venv/bin/activate"; set -u
+    python_for_client_version
     # Self-spawn load via kafka-producer-perf-test.sh from the installed Kafka
     # (KAFKA_BIN in the .env overrides). Without it the test is consume-only.
     export KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
     mkdir -p "$RESULTS/python-consumer"
     ( cd "$RESULTS/python-consumer" && \
-      python "$REPO/bindings/python/test/performance/consumer_performance_test.py" )
+      "$PY" "$REPO/bindings/python/test/performance/consumer_performance_test.py" )
     ;;
   *)
     echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer)" >&2
