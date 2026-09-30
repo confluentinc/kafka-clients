@@ -4648,6 +4648,27 @@ where
             )
             .await?;
 
+        // Empty explicit offsets: Java's `commit()` returns an already-completed
+        // future (`AsyncKafkaConsumer.java:1042-1044`), so `whenComplete` runs
+        // inline on the calling thread and the result replaces
+        // `lastPendingAsyncCommit` (`:1019`). Enqueue the callbacks here and
+        // store an already-completed pending commit, without chaining behind
+        // earlier in-flight commits: a later `commitSync` / `close` does not
+        // wait for them, and they still enqueue their own callbacks when they
+        // complete.
+        if offsets.as_ref().is_some_and(HashMap::is_empty) {
+            self.offset_commit_callback_invoker
+                .enqueue_interceptor_invocation(HashMap::new());
+            if let Some(cb) = callback {
+                self.offset_commit_callback_invoker
+                    .enqueue_user_callback_invocation(cb, HashMap::new(), None);
+            }
+            let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = pending_tx.send(());
+            self.last_pending_async_commit = Some(pending_rx);
+            return Ok(());
+        }
+
         // Java: `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
         // — the resulting future is stored on the consumer so a later
         // `commitSync` / `close` can wait for it to complete. The Rust
@@ -4661,13 +4682,6 @@ where
         // requires (`KafkaConsumer.java:1122-1123`), and `pending_rx`
         // resolving implies every earlier callback is enqueued, which is why
         // `commit_sync` and `close` await only the most recent commit.
-        //
-        // Divergence: for empty explicit offsets Java's `commit()` returns an
-        // already-completed future (`AsyncKafkaConsumer.java:1042-1044`), so
-        // its callback runs ahead of in-flight earlier commits and
-        // `lastPendingAsyncCommit` no longer covers them. Here the empty
-        // commit still chains behind its predecessor, keeping the javadoc
-        // ordering guarantee.
         let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
         let previous_pending = self.last_pending_async_commit.take();
         let invoker = Arc::clone(&self.offset_commit_callback_invoker);
@@ -9978,15 +9992,15 @@ mod tests {
             .expect("commit sync must succeed");
     }
 
-    /// Rust-specific companion to the two tests above, covering the empty-offsets
-    /// `commit_async` divergence documented in `commit_async_internal`. In
-    /// Java the empty commit completes immediately and replaces
-    /// `lastPendingAsyncCommit`, so the next `commitSync` neither waits for
-    /// the earlier commit nor preserves callback order. Here the empty commit
-    /// chains behind the earlier one: `commit_sync` still waits, and both
-    /// callbacks run in commit order once it returns.
+    /// Rust-specific companion to the two tests above, covering an empty-offsets
+    /// `commit_async` issued while an earlier async commit is in flight. As in
+    /// Java (`AsyncKafkaConsumer.java:1019, 1042-1044`), the empty commit
+    /// completes immediately and replaces `lastPendingAsyncCommit`, so it is
+    /// not chained behind the earlier commit: its callback is enqueued before
+    /// `commit_async` returns, the next `commit_sync` does not wait for the
+    /// earlier commit, and the empty commit's callback runs first.
     #[tokio::test]
-    async fn commit_sync_awaits_commit_async_before_later_empty_offsets_commit_async() {
+    async fn commit_sync_does_not_await_commit_async_before_later_empty_offsets_commit_async() {
         struct LabelCallback {
             label: &'static str,
             order: Arc<std::sync::Mutex<Vec<&'static str>>>,
@@ -10010,26 +10024,38 @@ mod tests {
             .await
             .expect("empty commit_async");
 
-        let err = consumer
-            .commit_sync_with_timeout(Duration::from_millis(100))
-            .await
-            .expect_err("commit sync must wait for the earlier async commit");
-        assert_pending_async_commit_timeout(&err);
-        assert!(
-            order.lock().unwrap().is_empty(),
-            "no callback may run before the earlier async commit completes"
+        // As in Java, the empty commit's callback is enqueued before
+        // `commit_async` returns, so it runs on the next callback invocation.
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["second"],
+            "the empty commit's callback must be enqueued before commit_async returns"
         );
 
-        async_commit.complete(singleton_offsets(tp, 20));
+        // The last pending async commit is the already-completed empty one, so
+        // commit sync does not wait for the earlier, still incomplete commit.
         consumer
             .commit_sync_with_timeout(Duration::from_millis(100))
             .await
-            .expect("commit sync must succeed");
+            .expect("commit sync must not wait for the earlier async commit");
         assert_eq!(
             *order.lock().unwrap(),
-            vec!["first", "second"],
-            "callbacks must run in commit order"
+            vec!["second"],
+            "the earlier commit's callback must not run before it completes"
         );
+
+        // The earlier commit still enqueues its callback once it completes.
+        async_commit.complete(singleton_offsets(tp, 20));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while order.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+                consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+            }
+        })
+        .await
+        .expect("the earlier commit's callback must run after it completes");
+        assert_eq!(*order.lock().unwrap(), vec!["second", "first"]);
     }
 
     // ─── Close / lifecycle tests (commit 7/N) ───
