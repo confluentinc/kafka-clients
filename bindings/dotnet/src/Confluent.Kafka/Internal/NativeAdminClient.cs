@@ -677,7 +677,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Four of the seven arrays are arrays-of-arrays: row <c>i</c>'s entity is
+    /// Five of the seven arrays are arrays-of-arrays: row <c>i</c>'s entity is
     /// <c>entityCounts[i]</c> <c>(type, name)</c> pairs and its ops are <c>opCounts[i]</c>
     /// triples, with the two lengths independent of each other
     /// (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).

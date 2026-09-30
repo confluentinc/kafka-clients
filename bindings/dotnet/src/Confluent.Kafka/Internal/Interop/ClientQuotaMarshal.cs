@@ -106,7 +106,7 @@ internal static class ClientQuotaMarshal
     }
 
     /// <summary>
-    /// Projects a batch of alterations onto the seven <c>alter_client_quotas</c> arrays, four
+    /// Projects a batch of alterations onto the seven <c>alter_client_quotas</c> arrays, five
     /// of which are ragged arrays-of-arrays.
     /// </summary>
     /// <param name="alterations">The alterations to submit, in request order.</param>
@@ -311,7 +311,7 @@ internal static class ClientQuotaMarshal
     }
 
     /// <summary>
-    /// One <c>alter_client_quotas</c> submit: seven outer arrays, of which four are
+    /// One <c>alter_client_quotas</c> submit: seven outer arrays, of which five are
     /// <b>ragged</b> arrays-of-arrays, plus the call-scoped pins behind every inner buffer.
     /// </summary>
     /// <remarks>
