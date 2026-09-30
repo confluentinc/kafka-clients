@@ -452,7 +452,11 @@ impl TopicMetadataRequestManager {
             let response_rx = req.take_response_receiver().expect("receiver fresh");
             let inner_for_handler = Arc::clone(&self.inner);
             let request_id = state.id;
-            let handler = req.handler();
+            // The completion-time cell, not a handler clone: a clone would keep the
+            // sender alive, so `response_rx` could never see the request dropped
+            // uncompleted (`NetworkClient::close` with it in flight) and this
+            // task would never exit.
+            let completion_time_ms = req.handler().completion_time_ms_cell();
             tokio::spawn(async move {
                 // Java: `handleError(exception, unsent.handler().completionTimeMs())`
                 // on failure, `handleError(e, response.receivedTimeMs())` when the
@@ -476,13 +480,18 @@ impl TopicMetadataRequestManager {
                         }
                     },
                     Ok(Err(err)) => {
-                        Self::on_failure_inner(&inner_for_handler, request_id, handler.completion_time_ms(), err);
+                        Self::on_failure_inner(
+                            &inner_for_handler,
+                            request_id,
+                            completion_time_ms.load(Ordering::Acquire),
+                            err,
+                        );
                     },
                     Err(_recv) => {
                         Self::on_failure_inner(
                             &inner_for_handler,
                             request_id,
-                            handler.completion_time_ms(),
+                            completion_time_ms.load(Ordering::Acquire),
                             Error::new(Errors::NetworkError),
                         );
                     },

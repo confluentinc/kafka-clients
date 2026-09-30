@@ -26,6 +26,7 @@
 use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 
@@ -406,13 +407,17 @@ impl ConsumerHeartbeatRequestManager {
         } else {
             None
         };
-        let handler = unsent.handler();
+        // The completion-time cell, not a handler clone: a clone would keep the
+        // sender alive, so `response_rx` could never see the request dropped
+        // uncompleted (`NetworkClient::close` with it in flight) and this
+        // task would never exit.
+        let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
             let result = response_rx.await;
             // Java: `long completionTimeMs = request.handler().completionTimeMs()`
             // — read once the request has completed, so it is the time the
             // response (or failure) arrived, not the time the request was sent.
-            let now_ms = handler.completion_time_ms();
+            let now_ms = completion_time_ms.load(Ordering::Acquire);
             let completion = match result {
                 Ok(Ok(mut client_response)) => {
                     // Java: `response.requestLatencyMs()` — captured before

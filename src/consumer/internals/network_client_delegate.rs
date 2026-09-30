@@ -22,6 +22,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
@@ -279,6 +280,9 @@ impl fmt::Debug for UnsentRequest {
     }
 }
 
+/// The sending half of an [`UnsentRequest`]'s response channel.
+type ResponseSender = oneshot::Sender<Result<ClientResponse, Error>>;
+
 /// Idempotent completion handle for an [`UnsentRequest`].
 ///
 /// Mirrors Phase 5's [`super::events::CompletableEventHandle`]
@@ -291,21 +295,24 @@ impl fmt::Debug for UnsentRequest {
 /// The handle is `Clone` so the bg task can hand off completion to a
 /// request manager (via `whenComplete`-equivalent) while keeping its own
 /// copy for cleanup paths.
+///
+/// The completion time is shared separately from the sender, through
+/// [`Self::completion_time_ms_cell`]: a task awaiting the receiver must not
+/// hold a handler clone, because that clone keeps the sender alive, so the
+/// receiver could never observe a request dropped without completion (as
+/// `NetworkClient::close` drops in-flight requests) and the task would
+/// never exit.
 #[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler")]
 pub(crate) struct FutureCompletionHandler {
-    inner: Arc<FutureCompletionInner>,
-}
-
-struct FutureCompletionInner {
     /// Idempotent sender slot. Synchronous `Mutex` because the critical
     /// section is a single `Option::take` and is never held across an
     /// `.await`.
-    sender: Mutex<Option<oneshot::Sender<Result<ClientResponse, Error>>>>,
+    sender: Arc<Mutex<Option<ResponseSender>>>,
     /// Time (ms) at which `on_complete` / `on_failure` was first called.
-    /// Recorded with `set_completion_time_ms` regardless of whether the
-    /// receiver is still alive (Java: `responseCompletionTimeMs`).
-    completion_time_ms: Mutex<i64>,
+    /// Recorded regardless of whether the receiver is still alive
+    /// (Java: `responseCompletionTimeMs`).
+    completion_time_ms: Arc<AtomicI64>,
 }
 
 impl FutureCompletionHandler {
@@ -320,8 +327,11 @@ impl FutureCompletionHandler {
     )]
     pub(crate) fn new() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
         let (tx, rx) = oneshot::channel();
-        let inner = Arc::new(FutureCompletionInner { sender: Mutex::new(Some(tx)), completion_time_ms: Mutex::new(0) });
-        (Self { inner }, rx)
+        let handler = Self {
+            sender: Arc::new(Mutex::new(Some(tx))),
+            completion_time_ms: Arc::new(AtomicI64::new(0)),
+        };
+        (handler, rx)
     }
 
     /// Java: `onFailure(long currentTimeMs, RuntimeException e)`. Records
@@ -333,7 +343,7 @@ impl FutureCompletionHandler {
     pub(crate) fn on_failure(&self, current_time_ms: i64, error: Error) {
         self.set_completion_time(current_time_ms);
         let sender_opt = {
-            let mut guard = match self.inner.sender.lock() {
+            let mut guard = match self.sender.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -377,7 +387,7 @@ impl FutureCompletionHandler {
         }
         self.set_completion_time(completion_time_ms);
         let sender_opt = {
-            let mut guard = match self.inner.sender.lock() {
+            let mut guard = match self.sender.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -428,16 +438,22 @@ impl FutureCompletionHandler {
         alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler#completionTimeMs"
     )]
     pub(crate) fn completion_time_ms(&self) -> i64 {
-        match self.inner.completion_time_ms.lock() {
-            Ok(g) => *g,
-            Err(poisoned) => *poisoned.into_inner(),
-        }
+        self.completion_time_ms.load(Ordering::Acquire)
+    }
+
+    /// The cell [`Self::completion_time_ms`] reads, for a task that awaits
+    /// the receiver: holding the cell instead of a handler clone lets the
+    /// receiver observe the sender being dropped (see the type docs).
+    /// The time is stored before the receiver is completed, so a task that
+    /// has received the result reads the time of that completion.
+    pub(crate) fn completion_time_ms_cell(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.completion_time_ms)
     }
 
     /// `true` if the sender slot has been consumed (either by
     /// `on_complete` or `on_failure`).
     pub(crate) fn is_done(&self) -> bool {
-        let guard = match self.inner.sender.lock() {
+        let guard = match self.sender.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -445,15 +461,9 @@ impl FutureCompletionHandler {
     }
 
     fn set_completion_time(&self, current_time_ms: i64) {
-        let mut guard = match self.inner.completion_time_ms.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
         // Java's onComplete sets responseCompletionTimeMs only on the
         // successful path; onFailure unconditionally records the time.
-        // Either way, the *first* completion time wins because we take
-        // the sender slot before recording.
-        *guard = current_time_ms;
+        self.completion_time_ms.store(current_time_ms, Ordering::Release);
     }
 }
 

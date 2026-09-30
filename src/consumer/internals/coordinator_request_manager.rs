@@ -21,6 +21,7 @@
 
 #![cfg_attr(not(test), expect(dead_code))]
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::FindCoordinatorRequestData;
@@ -361,7 +362,11 @@ impl CoordinatorRequestManager {
         let mut unsent = UnsentRequest::new(builder, None);
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let inner_for_handler = Arc::clone(inner);
-        let handler = unsent.handler();
+        // The completion-time cell, not a handler clone: a clone would keep the
+        // sender alive, so `response_rx` could never see the request dropped
+        // uncompleted (`NetworkClient::close` with it in flight) and this
+        // task would never exit.
+        let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
             // Java: `CoordinatorRequestManager.java:124` —
             // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
@@ -396,12 +401,12 @@ impl CoordinatorRequestManager {
                     }
                 },
                 Ok(Err(err)) => {
-                    Self::on_failed_response_inner(&inner_for_handler, handler.completion_time_ms(), err);
+                    Self::on_failed_response_inner(&inner_for_handler, completion_time_ms.load(Ordering::Acquire), err);
                 },
                 Err(_recv) => {
                     Self::on_failed_response_inner(
                         &inner_for_handler,
-                        handler.completion_time_ms(),
+                        completion_time_ms.load(Ordering::Acquire),
                         Error::new(Errors::NetworkError),
                     );
                 },
@@ -999,6 +1004,33 @@ mod tests {
         // Coordinator stays unknown (it was never set), and the
         // mark-coordinator-unknown anchor is recorded by the forwarder.
         assert!(manager.coordinator().is_none());
+    }
+
+    /// A request dropped without being completed — as `NetworkClient::close`
+    /// drops the requests in flight — must still end the forwarder: its
+    /// `Err(_recv)` arm runs, and the task releases the manager state it
+    /// holds. Before the forwarder held only the completion-time cell, its
+    /// handler clone kept the sender alive, so the receiver never resolved
+    /// and the task and `inner` leaked.
+    #[tokio::test]
+    async fn test_forwarder_exits_when_request_dropped_uncompleted() {
+        let mut manager = setup_manager();
+        let result = manager.poll(0);
+        assert_eq!(1, result.unsent_requests.len());
+        assert_eq!(
+            2,
+            Arc::strong_count(&manager.inner),
+            "the forwarder holds `inner` while the request is live"
+        );
+
+        drop(result);
+
+        wait_until(|| Arc::strong_count(&manager.inner) == 1).await;
+        assert_ne!(
+            -1,
+            *manager.inner.time_marked_unknown_ms.lock().unwrap(),
+            "the forwarder's `Err(_recv)` arm must mark the coordinator unknown"
+        );
     }
 
     /// Phase 12.5 regression — fatal-error clearing on the failure
