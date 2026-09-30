@@ -42,14 +42,13 @@ impl TestContext {
     ///
     /// Generates a unique prefix from the current thread name + random suffix.
     ///
-    /// A [`ClusterConfig::dedicated`] config is not shared: the test gets its
-    /// own cluster (as every Java `@ClusterTest` invocation does), removed
-    /// when this context is dropped. It still counts toward the pool's
-    /// residency target (`cluster_pool::start_dedicated`).
+    /// A [`ClusterConfig::dedicated`] config bypasses the pool: the test gets
+    /// its own cluster (as every Java `@ClusterTest` invocation does), removed
+    /// when this context is dropped.
     pub async fn new(config: ClusterConfig) -> Self {
         init_test_logger();
         let cluster = if config.dedicated {
-            cluster_pool::start_dedicated(&config).await
+            Arc::new(KafkaCluster::start_with_config(&config).await)
         } else {
             cluster_pool::get_or_create(&config).await
         };
@@ -164,7 +163,7 @@ impl Drop for TestContext {
             // containers synchronously, one extra strong reference is leaked
             // so the `KafkaCluster` (and its `ContainerAsync`s) is never
             // dropped; that is a few hundred bytes per dedicated test.
-            cluster_pool::teardown_dedicated(&self.cluster);
+            cluster_pool::teardown(&self.cluster);
             std::mem::forget(Arc::clone(&self.cluster));
         }
         if !self.created_topics.is_empty() {
