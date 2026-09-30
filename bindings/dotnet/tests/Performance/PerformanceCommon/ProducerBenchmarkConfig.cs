@@ -77,6 +77,25 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>Optional target rate (<c>LIMIT_RPS</c>); when set, <see cref="NumMessages"/> = rate × duration.</summary>
     public int? LimitRps { get; private set; }
 
+    /// <summary>
+    /// Pacing slice of the rate limiter in ms (<c>LIMIT_RPS_SLICE_MS</c>, default 1000; only read when
+    /// <c>LIMIT_RPS</c> is set). The limiter checks the clock once per slice: it sends
+    /// <see cref="LimitRpsSliceMessages"/> records at full speed, then sleeps until the slice's scheduled
+    /// end. The default reproduces Python's per-second quota exactly (<c>producer_performance_test.py</c>
+    /// checks every <c>limit_rps</c> messages). That quota is not a smooth offered load: at
+    /// <c>LIMIT_RPS=500000</c> the sender runs flat out for ~95 % of every second, so a client whose
+    /// buffer fills at full speed shows its saturated latency regardless of the limit. A slice of 5–10 ms
+    /// keeps the buffer from filling and measures the client below saturation.
+    /// </summary>
+    public int LimitRpsSliceMs { get; private set; } = 1000;
+
+    /// <summary>
+    /// Records per pacing slice: <c>LIMIT_RPS × LIMIT_RPS_SLICE_MS / 1000</c>, at least 1; 0 when no rate
+    /// limit is set. At the default slice this is exactly <c>LIMIT_RPS</c>.
+    /// </summary>
+    public long LimitRpsSliceMessages =>
+        LimitRps is int rps && rps > 0 ? Math.Max(1L, (long)rps * LimitRpsSliceMs / 1000) : 0;
+
     /// <summary>p99 latency budget in ms (<c>P99_LIMIT_MS</c>, default 0 = disabled); exceeding it fails the run.</summary>
     public int P99LimitMs { get; private set; }
 
@@ -128,6 +147,12 @@ public sealed class ProducerBenchmarkConfig
                 // unset entirely. Match that instead of silently falling through to max-rate, which would
                 // run a materially different benchmark than what was asked for.
                 throw new ArgumentException("LIMIT_RPS must be positive");
+            }
+
+            config.LimitRpsSliceMs = PerfEnv.GetInt("LIMIT_RPS_SLICE_MS", 1000);
+            if (config.LimitRpsSliceMs <= 0)
+            {
+                throw new ArgumentException("LIMIT_RPS_SLICE_MS must be positive");
             }
 
             // Run for the specified duration at the target rate (Python: num_messages = limit_rps * duration).

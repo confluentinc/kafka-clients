@@ -103,7 +103,7 @@ public static class ProducerBenchmark
 
         long beforeMs = Metrics.NowMs();
         long firstTicks = Stopwatch.GetTimestamp();
-        long nextCheckTicks = firstTicks + Stopwatch.Frequency;
+        long nextCheckTicks = firstTicks + RateLimitSliceTicks(config);
         metrics.SetMeasurementStart(beforeMs);
         Console.WriteLine($"Starting measured interval at {beforeMs} ms: {DateTime.UtcNow:o}");
 
@@ -248,7 +248,7 @@ public static class ProducerBenchmark
 
         long beforeMs = Metrics.NowMs();
         long firstTicks = Stopwatch.GetTimestamp();
-        long nextCheckTicks = firstTicks + Stopwatch.Frequency;
+        long nextCheckTicks = firstTicks + RateLimitSliceTicks(config);
         metrics.SetMeasurementStart(beforeMs);
         Console.WriteLine($"Starting measured interval at {beforeMs} ms: {DateTime.UtcNow:o}");
 
@@ -446,9 +446,14 @@ public static class ProducerBenchmark
         return false;
     }
 
+    // The limiter is a quota per pacing slice (Python: check the clock every limit_rps messages, i.e. a
+    // one-second slice): send LimitRpsSliceMessages at full speed, then sleep until the slice's scheduled
+    // end. The schedule is absolute (nextCheckTicks advances by a fixed amount whether or not we slept), so
+    // an oversleep or a stall is caught up over the following slices and the long-run rate is LIMIT_RPS.
+    // LIMIT_RPS_SLICE_MS shrinks the slice so the offered load is smooth enough to measure below saturation.
     private static void ApplyRateLimit(ProducerBenchmarkConfig config, long messagesSent, ref long nextCheckTicks, CancellationToken token)
     {
-        if (config.LimitRps is not int rps || rps <= 0 || messagesSent % rps != 0)
+        if (config.LimitRps is not int rps || rps <= 0 || messagesSent % config.LimitRpsSliceMessages != 0)
         {
             return;
         }
@@ -460,12 +465,12 @@ public static class ProducerBenchmark
             SleepSeconds(waitSeconds, token);
         }
 
-        nextCheckTicks += Stopwatch.Frequency;
+        nextCheckTicks += RateLimitSliceTicks(config);
     }
 
     private static async Task ApplyRateLimitAsync(ProducerBenchmarkConfig config, long messagesSent, Func<long> getNext, Action<long> setNext, CancellationToken token)
     {
-        if (config.LimitRps is not int rps || rps <= 0 || messagesSent % rps != 0)
+        if (config.LimitRps is not int rps || rps <= 0 || messagesSent % config.LimitRpsSliceMessages != 0)
         {
             return;
         }
@@ -481,8 +486,18 @@ public static class ProducerBenchmark
             }
         }
 
-        setNext(nextCheckTicks + Stopwatch.Frequency);
+        setNext(nextCheckTicks + RateLimitSliceTicks(config));
     }
+
+    /// <summary>
+    /// Stopwatch ticks one pacing slice is scheduled to take: <c>LimitRpsSliceMessages / LIMIT_RPS</c>
+    /// seconds, computed from the rounded slice count so the long-run rate is exactly <c>LIMIT_RPS</c>.
+    /// One second when the slice is the default (the original per-second quota) or no limit is set.
+    /// </summary>
+    private static long RateLimitSliceTicks(ProducerBenchmarkConfig config) =>
+        config.LimitRps is int rps && rps > 0
+            ? Stopwatch.Frequency * config.LimitRpsSliceMessages / rps
+            : Stopwatch.Frequency;
 
     private static void SleepSeconds(double seconds, CancellationToken token)
     {
