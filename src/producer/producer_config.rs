@@ -560,7 +560,13 @@ impl ProducerConfig {
                         MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    config.metadata_recovery_rebootstrap_trigger_ms = Self::parse_i64(key, value)?;
+                    // Java `ProducerConfig` (`:555-558`):
+                    // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.metadata_recovery_rebootstrap_trigger_ms = v;
                 },
                 Self::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG => {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
@@ -996,6 +1002,29 @@ mod tests {
         let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ProducerConfig::new(&props).is_err());
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
+    /// `ProducerConfig.java:555-558`): 0 is accepted, -1 is rejected with
+    /// Java's `ConfigDef.Range.atLeast` message.
+    #[test]
+    fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "0".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 0);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
+             Value must be at least 0"
+        );
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ProducerConfig /
