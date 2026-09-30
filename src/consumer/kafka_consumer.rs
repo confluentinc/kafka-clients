@@ -18,7 +18,7 @@
 
 use crate::common::Error;
 use crate::common::serialization::Deserializer;
-use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol, async_kafka_consumer};
+use crate::consumer::{AsyncKafkaConsumer, Consumer, ConsumerConfig, GroupProtocol};
 
 /// The public entry point for constructing a [`Consumer`].
 ///
@@ -39,6 +39,8 @@ use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol, async_kafka_consu
 /// `ConsumerDelegateCreator` are out of scope per `consumer-threading.md` §20
 /// ("collapses to direct `Box::new(AsyncKafkaConsumer)`"); this type is where
 /// that collapsed creator lives.
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
 pub struct KafkaConsumer;
 
 impl KafkaConsumer {
@@ -66,7 +68,8 @@ impl KafkaConsumer {
     // (`KafkaConsumer.java:615`), and Rust returns it as `Box<dyn Consumer<K, V>>`
     // rather than re-wrapping it in a type whose only content is 55 forwarding
     // methods. See the type-level comment above.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(clippy::new_ret_no_self)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new<K, V>(
         config: ConsumerConfig,
         key_deserializer: Box<dyn Deserializer<K>>,
@@ -78,7 +81,7 @@ impl KafkaConsumer {
     {
         // Phase 12 commit (4/N) wires the `GroupProtocol::Consumer` arm to
         // the production constructor at
-        // [`async_kafka_consumer::AsyncKafkaConsumer::new`], which translates
+        // [`AsyncKafkaConsumer::new`], which translates
         // the Java primary constructor at `AsyncKafkaConsumer.java:285-518`
         // end-to-end. The ctor builds the full dependency closure
         // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
@@ -94,7 +97,7 @@ impl KafkaConsumer {
         // later milestone).
         let protocol = GroupProtocol::of(config.group_protocol())?;
         match protocol {
-            GroupProtocol::Consumer => Ok(Box::new(async_kafka_consumer::AsyncKafkaConsumer::<K, V>::new(
+            GroupProtocol::Consumer => Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(
                 config,
                 key_deserializer,
                 value_deserializer,

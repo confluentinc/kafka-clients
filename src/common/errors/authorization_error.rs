@@ -14,14 +14,14 @@
 
 //! Translated from `org.apache.kafka.common.errors.AuthorizationException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The client is not authorized to perform the operation.
     ///
     /// Corresponds to Java's `AuthorizationException`, which reports error code
-    /// [`Errors::InvalidConfig`] by inheritance.
+    /// `Errors::InvalidConfig` by inheritance.
     ///
     /// Java `extends` chain:
     ///    `AuthorizationException` -> `InvalidConfigurationException` ->
@@ -34,6 +34,7 @@ kafka_error_class! {
     /// class itself has no entry of its own. `InvalidConfigurationError` remains
     /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
     /// one.
+    #[doc(alias = "org.apache.kafka.common.errors.AuthorizationException")]
     AuthorizationError,
     code: Errors::InvalidConfig,
     extends: [

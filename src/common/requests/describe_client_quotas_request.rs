@@ -24,12 +24,13 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::{ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaMatch};
 use crate::describe_client_quotas_request_data::ComponentData;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeClientQuotasResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeClientQuotasResponse, RequestBuilder};
 
 /// A DescribeClientQuotas request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeClientQuotasRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest")]
 pub struct DescribeClientQuotasRequest {
     data: DescribeClientQuotasRequestData,
     version: i16,
@@ -46,11 +47,13 @@ impl DescribeClientQuotasRequest {
     pub const MATCH_TYPE_SPECIFIED: i8 = 2;
 
     /// Creates a new `DescribeClientQuotasRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#DescribeClientQuotasRequest")]
     pub fn new(data: DescribeClientQuotasRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#data")]
     pub fn data(&self) -> &DescribeClientQuotasRequestData {
         &self.data
     }
@@ -78,6 +81,7 @@ impl DescribeClientQuotasRequest {
     ///
     /// Returns an error if a component carries an unexpected match type
     /// (mirrors Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#filter")]
     pub fn filter(&self) -> io::Result<ClientQuotaFilter> {
         let mut components = Vec::with_capacity(self.data.components.len());
         for component_data in &self.data.components {
@@ -111,6 +115,7 @@ impl DescribeClientQuotasRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeClientQuotasRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeClientQuotasResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -126,6 +131,7 @@ impl DescribeClientQuotasRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeClientQuotasRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -142,15 +148,17 @@ impl std::fmt::Display for DescribeClientQuotasRequest {
 ///
 /// Corresponds to `DescribeClientQuotasRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct DescribeClientQuotasRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest$Builder")]
+pub struct Builder {
     data: DescribeClientQuotasRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeClientQuotasRequestBuilder {
+impl Builder {
     /// Creates a builder from a [`ClientQuotaFilter`], mirroring
     /// `DescribeClientQuotasRequest.Builder(ClientQuotaFilter)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest$Builder#Builder")]
     pub fn new(filter: &ClientQuotaFilter) -> Self {
         let mut component_data = Vec::with_capacity(filter.components().len());
         for component in filter.components() {
@@ -182,7 +190,7 @@ impl DescribeClientQuotasRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeClientQuotasRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_CLIENT_QUOTAS
     }
@@ -195,8 +203,8 @@ impl RequestBuilder for DescribeClientQuotasRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeClientQuotas(DescribeClientQuotasRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeClientQuotas(DescribeClientQuotasRequest::new(
             self.data.clone(),
             version,
         )))
@@ -215,8 +223,8 @@ mod tests {
             ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
             ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER),
         ]);
-        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
-        let ConcreteRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&filter);
+        let AbstractRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected DescribeClientQuotas request");
         };
         let comps = &r.data().components;
@@ -235,8 +243,8 @@ mod tests {
             ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
             ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER),
         ]);
-        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
-        let ConcreteRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&filter);
+        let AbstractRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected DescribeClientQuotas request");
         };
         assert_eq!(r.filter().unwrap(), filter);
@@ -247,10 +255,10 @@ mod tests {
         let filter =
             ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1")]);
         let version = ApiKeys::DESCRIBE_CLIENT_QUOTAS.latest_version();
-        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
+        let mut builder = Builder::new(&filter);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter().unwrap(), filter);
     }
@@ -274,7 +282,7 @@ mod tests {
         // match "u1", strict=false. Asserts the match-type byte (0=EXACT) is on
         // the wire — a wrong match-type byte is wire-incompatible with Java.
         let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity("user", "u1")]);
-        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
+        let mut builder = Builder::new(&filter);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -310,7 +318,7 @@ mod tests {
             ),
         ] {
             let filter = ClientQuotaFilter::contains(vec![component]);
-            let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
+            let mut builder = Builder::new(&filter);
             let mut request = builder.build_version(1).unwrap();
             let bytes = request.serialize().unwrap().into_buffer();
             let expected: Vec<u8> = vec![

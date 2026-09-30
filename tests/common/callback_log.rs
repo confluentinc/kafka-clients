@@ -353,7 +353,7 @@ impl ProducerCallbackLog {
     /// common case, sampled between the two appends and an `== 1` assertion
     /// passes vacuously — pinning only the "at least once" half of the
     /// contract. "At most once" is the interesting half: double-firing is the
-    /// classic FFI/binding callback bug and CLAUDE.md §9.5 makes exactly-once
+    /// classic FFI/binding callback bug and CLAUDE.md §11.5 makes exactly-once
     /// invocation an explicit obligation. A stray second append lands within
     /// milliseconds of the first (same completion path, same dispatcher), so a
     /// sub-second grace window is enough to catch it, and the window is a flat

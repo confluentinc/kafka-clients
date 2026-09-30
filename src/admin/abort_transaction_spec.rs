@@ -24,6 +24,7 @@ use crate::common::TopicPartition;
 /// `producer_id` is `i64` and `producer_epoch` is `i16` (Java `long` /
 /// `short`); `coordinator_epoch` is `i32`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec")]
 pub struct AbortTransactionSpec {
     topic_partition: TopicPartition,
     producer_id: i64,
@@ -33,26 +34,31 @@ pub struct AbortTransactionSpec {
 
 impl AbortTransactionSpec {
     /// Creates a new `AbortTransactionSpec`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#AbortTransactionSpec")]
     pub fn new(topic_partition: TopicPartition, producer_id: i64, producer_epoch: i16, coordinator_epoch: i32) -> Self {
         Self { topic_partition, producer_id, producer_epoch, coordinator_epoch }
     }
 
     /// The topic partition of the hanging transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#topicPartition")]
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.topic_partition
     }
 
     /// The producer id of the hanging transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
     /// The producer epoch of the hanging transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#producerEpoch")]
     pub fn producer_epoch(&self) -> i16 {
         self.producer_epoch
     }
 
     /// The coordinator epoch of the hanging transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#coordinatorEpoch")]
     pub fn coordinator_epoch(&self) -> i32 {
         self.coordinator_epoch
     }

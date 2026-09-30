@@ -243,12 +243,12 @@ async fn send_offsets(
     producer: &txn_common::StringProducer,
     input_tp: &TopicPartition,
     next_offset: i64,
-    group_metadata: confluent_kafka::consumer::ConsumerGroupMetadata,
+    group_metadata: std::sync::Arc<dyn confluent_kafka::consumer::ConsumerGroupMetadata>,
 ) -> Result<(), String> {
     let offset = OffsetAndMetadata::new(next_offset).map_err(|e| format!("OffsetAndMetadata: {e}"))?;
     let offsets = HashMap::from([(input_tp.clone(), offset)]);
     producer
-        .send_offsets_to_transaction(offsets, group_metadata)
+        .send_offsets_to_transaction(offsets, &*group_metadata)
         .await
         .map_err(|e| format!("send_offsets_to_transaction: {e}"))?;
     println!("  send_offsets_to_transaction({next_offset}) attached to the open transaction");

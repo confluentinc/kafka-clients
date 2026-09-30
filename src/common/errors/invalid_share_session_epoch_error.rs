@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidShareSessionEpochException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The share session epoch is invalid.
     ///
-    /// Corresponds to Java's `InvalidShareSessionEpochException`, error code [`Errors::InvalidShareSessionEpoch`].
+    /// Corresponds to Java's `InvalidShareSessionEpochException`, error code `Errors::InvalidShareSessionEpoch`.
     ///
     /// Java `extends` chain:
     ///    `InvalidShareSessionEpochException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidShareSessionEpochException")]
     InvalidShareSessionEpochError,
     code: Errors::InvalidShareSessionEpoch,
     extends: [

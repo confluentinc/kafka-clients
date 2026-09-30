@@ -49,7 +49,7 @@
 //! - **Must NOT** be called from a thread that is already inside a tokio
 //!   runtime (a worker thread, or any code reached from `block_on`):
 //!   `Handle::block_on` panics there. Rather than let a panic cross the FFI
-//!   boundary (CLAUDE.md §10.1), every entry point detects that situation and
+//!   boundary (CLAUDE.md §12.1), every entry point detects that situation and
 //!   fails with an `IllegalStateError` instead. The only way an embedder can
 //!   hit this is by calling a handle op from a callback that ran *inline on a
 //!   runtime worker* — which happens only in the documented teardown fallback
@@ -89,11 +89,6 @@
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
 
-// FFI function names follow the kafka_<TypeName>_<method> convention with
-// PascalCase type names, which intentionally differs from Rust's snake_case
-// convention.
-#![allow(non_snake_case, non_camel_case_types)]
-
 use std::ffi::{CStr, c_char};
 use std::future::Future;
 use std::time::Duration;
@@ -104,9 +99,9 @@ use crate::consumer::{ConsumerHandle, OffsetAndMetadata};
 use super::common::{box_error, kafka_common_Error_t};
 use super::consumer::{
     box_long_offset_map, box_offset_and_timestamp_map, box_offset_map, box_string_list, box_topic_partition_list,
-    clone_core_handle, kafka_consumer_Consumer_t, kafka_consumer_LongOffsetMap_t,
-    kafka_consumer_OffsetAndTimestampMap_t, kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t,
-    kafka_consumer_TopicPartitionList_t, read_offset_map, read_timestamps_to_search, read_topic_partitions,
+    clone_core_handle, kafka_common_TopicPartitionList_t, kafka_consumer_Consumer_t, kafka_consumer_LongOffsetMap_t,
+    kafka_consumer_OffsetAndTimestampMap_t, kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t, read_offset_map,
+    read_timestamps_to_search, read_topic_partitions,
 };
 
 // ---------------------------------------------------------------------------
@@ -170,7 +165,7 @@ where
 /// Boxed future type used by [`block_on_void`], so one helper can serve every
 /// void-returning core-handle method (each returns a distinct anonymous
 /// future). One `Box` per FFI call is amortized over a whole consumer
-/// operation — not a hot path (CLAUDE.md §11).
+/// operation — not a hot path (CLAUDE.md §13).
 type BoxFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 
 /// Drives a value-returning core-handle future to completion on the calling
@@ -276,8 +271,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(handle: *const kaf
 // ---------------------------------------------------------------------------
 
 /// Returns the owning consumer's current assignment as a non-null
-/// [`kafka_consumer_TopicPartitionList_t`] (free it with
-/// [`super::consumer::kafka_consumer_TopicPartitionList_destroy`]).
+/// [`kafka_common_TopicPartitionList_t`] (free it with
+/// [`super::consumer::kafka_common_TopicPartitionList_destroy`]).
 ///
 /// Always empty on a `MockConsumer`-derived handle (core behavior).
 ///
@@ -287,7 +282,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(handle: *const kaf
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
     handle: *const kafka_consumer_ConsumerHandle_t,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     box_topic_partition_list(unsafe { wrapper_ref(handle) }.inner.assignment())
 }
 
@@ -308,8 +303,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
 }
 
 /// Returns the owning consumer's currently paused partitions as a non-null
-/// [`kafka_consumer_TopicPartitionList_t`] (free it with
-/// [`super::consumer::kafka_consumer_TopicPartitionList_destroy`]).
+/// [`kafka_common_TopicPartitionList_t`] (free it with
+/// [`super::consumer::kafka_common_TopicPartitionList_destroy`]).
 ///
 /// Always empty on a `MockConsumer`-derived handle (core behavior).
 ///
@@ -319,7 +314,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
     handle: *const kafka_consumer_ConsumerHandle_t,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     box_topic_partition_list(unsafe { wrapper_ref(handle) }.inner.paused())
 }
 
@@ -747,9 +742,9 @@ mod tests {
 
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::consumer::{
+        kafka_common_TopicPartitionList_count, kafka_common_TopicPartitionList_destroy,
         kafka_consumer_Consumer_destroy, kafka_consumer_Consumer_poll, kafka_consumer_ConsumerRecords_destroy,
         kafka_consumer_MockConsumer_new, kafka_consumer_StringList_count, kafka_consumer_StringList_destroy,
-        kafka_consumer_TopicPartitionList_count, kafka_consumer_TopicPartitionList_destroy,
     };
 
     /// Reads an error handle's message into an owned `String`.
@@ -795,8 +790,8 @@ mod tests {
 
         let assignment = unsafe { kafka_consumer_ConsumerHandle_assignment(handle) };
         assert!(!assignment.is_null());
-        assert_eq!(0, unsafe { kafka_consumer_TopicPartitionList_count(assignment) });
-        unsafe { kafka_consumer_TopicPartitionList_destroy(assignment) };
+        assert_eq!(0, unsafe { kafka_common_TopicPartitionList_count(assignment) });
+        unsafe { kafka_common_TopicPartitionList_destroy(assignment) };
 
         let subscription = unsafe { kafka_consumer_ConsumerHandle_subscription(handle) };
         assert!(!subscription.is_null());
@@ -805,8 +800,8 @@ mod tests {
 
         let paused = unsafe { kafka_consumer_ConsumerHandle_paused(handle) };
         assert!(!paused.is_null());
-        assert_eq!(0, unsafe { kafka_consumer_TopicPartitionList_count(paused) });
-        unsafe { kafka_consumer_TopicPartitionList_destroy(paused) };
+        assert_eq!(0, unsafe { kafka_common_TopicPartitionList_count(paused) });
+        unsafe { kafka_common_TopicPartitionList_destroy(paused) };
 
         unsafe { kafka_consumer_ConsumerHandle_destroy(handle) };
         unsafe { kafka_consumer_Consumer_destroy(consumer) };
@@ -1004,7 +999,7 @@ mod tests {
             // The sync getters do not block, so they still work in that context.
             let assignment = unsafe { kafka_consumer_ConsumerHandle_assignment(handle) };
             assert!(!assignment.is_null());
-            unsafe { kafka_consumer_TopicPartitionList_destroy(assignment) };
+            unsafe { kafka_common_TopicPartitionList_destroy(assignment) };
         });
 
         unsafe { kafka_consumer_ConsumerHandle_destroy(handle) };

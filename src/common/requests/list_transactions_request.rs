@@ -22,12 +22,13 @@ use crate::ListTransactionsRequestData;
 use crate::ListTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, ListTransactionsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, ListTransactionsResponse, RequestBuilder};
 
 /// A ListTransactions request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListTransactionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest")]
 pub struct ListTransactionsRequest {
     data: ListTransactionsRequestData,
     version: i16,
@@ -35,11 +36,13 @@ pub struct ListTransactionsRequest {
 
 impl ListTransactionsRequest {
     /// Creates a new `ListTransactionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#ListTransactionsRequest")]
     pub fn new(data: ListTransactionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#data")]
     pub fn data(&self) -> &ListTransactionsRequestData {
         &self.data
     }
@@ -62,6 +65,7 @@ impl ListTransactionsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `ListTransactionsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = ListTransactionsResponseData::new();
         response.set_error_code(error.code());
@@ -75,6 +79,7 @@ impl ListTransactionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListTransactionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -91,18 +96,20 @@ impl std::fmt::Display for ListTransactionsRequest {
 ///
 /// Corresponds to `ListTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
-pub struct ListTransactionsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder")]
+pub struct Builder {
     data: ListTransactionsRequestData,
 }
 
-impl ListTransactionsRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder#Builder")]
     pub fn new(data: ListTransactionsRequestData) -> Self {
         Self { data }
     }
 }
 
-impl RequestBuilder for ListTransactionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_TRANSACTIONS
     }
@@ -115,8 +122,8 @@ impl RequestBuilder for ListTransactionsRequestBuilder {
         ApiKeys::LIST_TRANSACTIONS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ListTransactions(ListTransactionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ListTransactions(ListTransactionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -144,10 +151,10 @@ mod tests {
         data.set_state_filters(vec!["Ongoing".to_string()]);
         data.set_producer_id_filters(vec![1, 2]);
         data.set_duration_filter(-1);
-        let mut builder = ListTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListTransactionsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().state_filters, vec!["Ongoing".to_string()]);
         assert_eq!(parsed.data().producer_id_filters, vec![1, 2]);
@@ -164,7 +171,7 @@ mod tests {
         let mut data = ListTransactionsRequestData::new();
         data.set_state_filters(vec!["Ongoing".to_string()]);
         data.set_duration_filter(-1);
-        let mut builder = ListTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

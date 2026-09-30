@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.SerializationException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// Any exception during serialization in the producer, or deserialization
     /// in the consumer.
     ///
@@ -31,6 +31,7 @@ kafka_error_class! {
     /// [`is_api_error`](crate::common::Error::is_api_error) disagree on it. It is
     /// itself an intermediate class; its subclass is
     /// `RecordDeserializationException`.
+    #[doc(alias = "org.apache.kafka.common.errors.SerializationException")]
     SerializationError,
     extends: [
         is_kafka_error,

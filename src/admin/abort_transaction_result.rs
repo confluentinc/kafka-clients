@@ -24,12 +24,14 @@ use crate::common::{KafkaFuture, TopicPartition};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AbortTransactionResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionResult")]
 pub struct AbortTransactionResult {
     futures: HashMap<TopicPartition, KafkaFuture<()>>,
 }
 
 impl AbortTransactionResult {
     /// Creates a result from the per-partition futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionResult#AbortTransactionResult")]
     pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -38,6 +40,7 @@ impl AbortTransactionResult {
     /// fails on error / timeout).
     ///
     /// Mirrors `AbortTransactionResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

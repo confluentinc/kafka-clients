@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.VoterNotFoundException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The voter is not part of the set of voters.
     ///
-    /// Corresponds to Java's `VoterNotFoundException`, error code [`Errors::VoterNotFound`].
+    /// Corresponds to Java's `VoterNotFoundException`, error code `Errors::VoterNotFound`.
     ///
     /// Java `extends` chain:
     ///    `VoterNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.VoterNotFoundException")]
     VoterNotFoundError,
     code: Errors::VoterNotFound,
     extends: [

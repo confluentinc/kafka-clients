@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.DuplicateSequenceException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The broker received a duplicate sequence number.
     ///
-    /// Corresponds to Java's `DuplicateSequenceException`, error code [`Errors::DuplicateSequenceNumber`].
+    /// Corresponds to Java's `DuplicateSequenceException`, error code `Errors::DuplicateSequenceNumber`.
     ///
     /// Java `extends` chain:
     ///    `DuplicateSequenceException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DuplicateSequenceException")]
     DuplicateSequenceError,
     code: Errors::DuplicateSequenceNumber,
     extends: [

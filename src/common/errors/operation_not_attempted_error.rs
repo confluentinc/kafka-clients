@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.OperationNotAttemptedException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The broker did not attempt to execute this operation. This may happen for
     /// batched RPCs where some operations in the batch failed, causing the broker
     /// to respond without trying the rest.
     ///
-    /// Corresponds to Java's `OperationNotAttemptedException`, error code [`Errors::OperationNotAttempted`].
+    /// Corresponds to Java's `OperationNotAttemptedException`, error code `Errors::OperationNotAttempted`.
     ///
     /// Java `extends` chain:
     ///    `OperationNotAttemptedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OperationNotAttemptedException")]
     OperationNotAttemptedError,
     code: Errors::OperationNotAttempted,
     extends: [

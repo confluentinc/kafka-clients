@@ -497,7 +497,7 @@ fn bucket_json(average: f64, max: f64, total: f64, count: u64) -> serde_json::Va
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn rollover_line(
     snap: &MetricsSnapshot,
     cpu: f64,
@@ -659,8 +659,8 @@ async fn producer_perf_test() {
 
     let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         producer_config,
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::new()),
+        Box::new(ByteArraySerializer::new()),
     )
     .expect("Failed to create producer");
 

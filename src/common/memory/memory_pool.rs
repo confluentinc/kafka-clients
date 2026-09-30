@@ -24,23 +24,28 @@ use std::fmt;
 /// A common memory pool interface for non-blocking pools.
 ///
 /// Translated from the Java `MemoryPool` interface.
+#[doc(alias = "org.apache.kafka.common.memory.MemoryPool")]
 pub trait MemoryPool: Send {
     /// Tries to acquire a buffer of the specified size.
     ///
     /// Returns `Some(Vec<u8>)` with the buffer, or `None` if no memory is available.
     /// The buffer will be of the exact size requested, even if backed by a larger
     /// chunk of memory.
+    #[doc(alias = "org.apache.kafka.common.memory.MemoryPool#tryAllocate")]
     fn try_allocate(&self, size_bytes: usize) -> Option<Vec<u8>>;
 
     /// Returns a previously allocated buffer to the pool.
+    #[doc(alias = "org.apache.kafka.common.memory.MemoryPool#release")]
     fn release(&self, previously_allocated: Vec<u8>);
 
     /// Returns the total size of this pool in bytes.
+    #[doc(alias = "org.apache.kafka.common.memory.MemoryPool#size")]
     fn size(&self) -> i64;
 
     /// Returns the amount of memory available for allocation by this pool.
     ///
     /// Note: result may be negative (pools may over-allocate to avoid starvation issues).
+    #[doc(alias = "org.apache.kafka.common.memory.MemoryPool#availableMemory")]
     fn available_memory(&self) -> i64;
 
     /// Returns `true` if the pool cannot currently allocate any more buffers,
@@ -48,6 +53,7 @@ pub trait MemoryPool: Send {
     /// would need to be released before further allocations are possible.
     ///
     /// This is equivalent to `available_memory() <= 0`.
+    #[doc(alias = "org.apache.kafka.common.memory.MemoryPool#isOutOfMemory")]
     fn is_out_of_memory(&self) -> bool;
 }
 
@@ -56,6 +62,7 @@ pub trait MemoryPool: Send {
 /// This corresponds to Java's `MemoryPool.NONE` — the default pool used by clients
 /// where memory pooling is not needed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct NoopMemoryPool;
 
 impl MemoryPool for NoopMemoryPool {

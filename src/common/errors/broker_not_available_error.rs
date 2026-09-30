@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.BrokerNotAvailableException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The broker is not available.
     ///
-    /// Corresponds to Java's `BrokerNotAvailableException`, error code [`Errors::BrokerNotAvailable`].
+    /// Corresponds to Java's `BrokerNotAvailableException`, error code `Errors::BrokerNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `BrokerNotAvailableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.BrokerNotAvailableException")]
     BrokerNotAvailableError,
     code: Errors::BrokerNotAvailable,
     extends: [

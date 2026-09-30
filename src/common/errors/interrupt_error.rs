@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.InterruptException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// A blocking operation was interrupted.
     ///
     /// Java wraps `InterruptedException`, which is checked; it extends
@@ -27,6 +27,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InterruptException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InterruptException")]
     InterruptError,
     extends: [
         is_kafka_error,

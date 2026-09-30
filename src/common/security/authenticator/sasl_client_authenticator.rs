@@ -39,22 +39,22 @@
 use crate::SaslAuthenticateRequestData;
 use crate::SaslHandshakeRequestData;
 use crate::common::Error;
+use crate::common::network;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
-use crate::common::network::KafkaSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
 use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::network::{auth_io_error, auth_io_error_with_source};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::ApiVersionsRequestBuilder;
+use crate::common::requests::AbstractRequest;
 use crate::common::requests::ApiVersionsResponse;
-use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
 use crate::common::requests::SaslAuthenticateRequest;
 use crate::common::requests::SaslHandshakeRequest;
 use crate::common::requests::SaslHandshakeResponse;
+use crate::common::requests::api_versions_request;
 use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
 use crate::common::utils::LogContext;
@@ -71,6 +71,7 @@ use std::pin::Pin;
 ///
 /// Translated from `SaslClientAuthenticator.SaslState` in Java.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$SaslState")]
 pub enum SaslState {
     /// Initial state: client sends ApiVersionsRequest.
     SendApiVersionsRequest,
@@ -103,6 +104,7 @@ pub enum SaslState {
 ///
 /// Re-authentication states from the Java source are intentionally omitted since
 /// they are out of scope for the current milestone.
+#[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator")]
 pub struct SaslClientAuthenticator {
     /// Current SASL state.
     state: SaslState,
@@ -117,7 +119,7 @@ pub struct SaslClientAuthenticator {
     /// The broker hostname.
     /// Used by GSSAPI/Kerberos for service principal construction; retained for
     /// future mechanism support.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     host: String,
     /// The Kafka client ID for request headers.
     client_id: String,
@@ -131,7 +133,7 @@ pub struct SaslClientAuthenticator {
     /// Request header for which a response from the server is pending.
     current_request_header: Option<RequestHeader>,
     /// Pending outbound data.
-    net_out_buffer: Option<Box<dyn KafkaSend>>,
+    net_out_buffer: Option<Box<dyn network::Send>>,
     /// Pending inbound data.
     net_in_buffer: Option<NetworkReceive>,
     /// Next SASL state to be set when outgoing writes complete.
@@ -142,6 +144,7 @@ pub struct SaslClientAuthenticator {
 
 impl SaslClientAuthenticator {
     /// Returns `true` if the correlation ID is reserved for SASL requests.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#isReserved")]
     pub fn is_reserved(correlation_id: i32) -> bool {
         correlation_id >= SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
     }
@@ -174,6 +177,7 @@ impl SaslClientAuthenticator {
     /// * `node` - Node identifier for this connection
     /// * `host` - Broker hostname
     /// * `client_id` - Kafka client ID for request headers
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#SaslClientAuthenticator")]
     pub fn new(
         mechanism: &str,
         username: &str,
@@ -222,6 +226,7 @@ impl SaslClientAuthenticator {
     }
 
     /// Allocates the next correlation ID from the reserved range.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#nextCorrelationId")]
     fn next_correlation_id(&mut self) -> i32 {
         if !SaslClientAuthenticator::is_reserved(self.correlation_id) {
             self.correlation_id = SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
@@ -232,6 +237,7 @@ impl SaslClientAuthenticator {
     }
 
     /// Creates the next request header for the given API key and version.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#nextRequestHeader")]
     fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
         let correlation_id = self.next_correlation_id();
         let header = RequestHeader::with_options(
@@ -251,6 +257,7 @@ impl SaslClientAuthenticator {
     ///
     /// For PLAIN, the token is always the same regardless of whether this is
     /// an initial token or a challenge response.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#createSaslToken")]
     fn create_sasl_token(&self) -> Vec<u8> {
         // PLAIN token: \0<username>\0<password>
         let mut token = Vec::with_capacity(1 + self.username.len() + 1 + self.password.len());
@@ -267,7 +274,7 @@ impl SaslClientAuthenticator {
     /// to `Failed` state.
     async fn send_request(
         &mut self,
-        send: Box<dyn KafkaSend>,
+        send: Box<dyn network::Send>,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<()> {
         self.net_out_buffer = Some(send);
@@ -283,6 +290,7 @@ impl SaslClientAuthenticator {
     /// Sends the initial SASL token (PLAIN: `\0username\0password`).
     ///
     /// Corresponds to `sendInitialToken()` and `sendSaslClientToken()` in Java.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#sendInitialToken")]
     async fn send_initial_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         self.send_sasl_client_token(transport).await
     }
@@ -294,9 +302,10 @@ impl SaslClientAuthenticator {
     /// buffer. Otherwise, it's wrapped in a SaslAuthenticate request.
     ///
     /// Returns `true` if a token was sent.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#sendSaslClientToken")]
     async fn send_sasl_client_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         let sasl_token = self.create_sasl_token();
-        let send: Box<dyn KafkaSend> =
+        let send: Box<dyn network::Send> =
             if self.sasl_authenticate_version == SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
                 Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::from(sasl_token)))
             } else {
@@ -304,7 +313,7 @@ impl SaslClientAuthenticator {
                 data.set_auth_bytes(sasl_token);
                 let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
                 let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-                let mut concrete = ConcreteRequest::SaslAuthenticate(request);
+                let mut concrete = AbstractRequest::SaslAuthenticate(request);
                 let byte_buffer_send = concrete.to_send(&header)?;
                 Box::new(byte_buffer_send)
             };
@@ -314,6 +323,9 @@ impl SaslClientAuthenticator {
     /// Flushes the outbound buffer to the transport and updates interest ops.
     ///
     /// Returns `true` if the buffer was completely flushed.
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#flushNetOutBufferAndUpdateInterestOps"
+    )]
     async fn flush_net_out_buffer_and_update_interest_ops(
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
@@ -333,6 +345,7 @@ impl SaslClientAuthenticator {
     /// Writes pending data from the outbound buffer to the transport.
     ///
     /// Returns `true` if the buffer is completely written.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#flushNetOutBuffer")]
     async fn flush_net_out_buffer(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<bool> {
         if let Some(ref mut buf) = self.net_out_buffer {
             if !buf.completed() {
@@ -348,6 +361,7 @@ impl SaslClientAuthenticator {
     ///
     /// Returns `None` if the read is incomplete (would block), `Some(bytes)`
     /// when a complete message is available.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#receiveResponseOrToken")]
     async fn receive_response_or_token(
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
@@ -370,6 +384,7 @@ impl SaslClientAuthenticator {
     ///
     /// Returns `None` if the read is incomplete. On successful read, validates
     /// the correlation ID against `current_request_header`.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#receiveKafkaResponse")]
     async fn receive_kafka_response(
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
@@ -439,6 +454,7 @@ impl SaslClientAuthenticator {
     /// In legacy mode (no SaslAuthenticate header), this reads a raw size-delimited
     /// token. Otherwise, it parses a SaslAuthenticateResponse and validates the
     /// error code.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#receiveToken")]
     async fn receive_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<Option<Vec<u8>>> {
         if self.sasl_authenticate_version == SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
             self.receive_response_or_token(transport).await
@@ -463,6 +479,7 @@ impl SaslClientAuthenticator {
     }
 
     /// Sets the SASL state, deferring the transition if there is pending outbound data.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#setSaslState")]
     fn set_sasl_state(&mut self, sasl_state: SaslState) {
         if let Some(ref buf) = self.net_out_buffer
             && !buf.completed()
@@ -483,6 +500,9 @@ impl SaslClientAuthenticator {
     /// Extracts SASL handshake and authenticate versions from the ApiVersionsResponse.
     ///
     /// Translated from `setSaslAuthenticateAndHandshakeVersions` in Java.
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#setSaslAuthenticateAndHandshakeVersions"
+    )]
     fn set_sasl_authenticate_and_handshake_versions(&mut self, api_versions_response: &ApiVersionsResponse) {
         if let Some(auth_version) = api_versions_response.api_version(ApiKeys::SASL_AUTHENTICATE.id()) {
             self.sasl_authenticate_version = auth_version.max_version.min(ApiKeys::SASL_AUTHENTICATE.latest_version());
@@ -496,6 +516,7 @@ impl SaslClientAuthenticator {
     ///
     /// Checks the error code and throws descriptive errors for unsupported
     /// mechanisms or illegal SASL states.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#handleSaslHandshakeResponse")]
     fn handle_sasl_handshake_response(&mut self, response: &SaslHandshakeResponse) -> io::Result<()> {
         let error = response.error();
         if error != Errors::None {
@@ -537,7 +558,7 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let mut builder = ApiVersionsRequestBuilder::with_version(0);
+                let mut builder = api_versions_request::Builder::with_version(0);
                 let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
@@ -616,12 +637,13 @@ impl SaslClientAuthenticator {
     }
 
     /// Sends a SaslHandshake request with the negotiated version.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#sendHandshakeRequest")]
     async fn send_handshake_request(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism(self.mechanism.clone());
         let request = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
         let header = self.next_request_header(&ApiKeys::SASL_HANDSHAKE, request.version())?;
-        let mut concrete = ConcreteRequest::SaslHandshake(request);
+        let mut concrete = AbstractRequest::SaslHandshake(request);
         let send = Box::new(concrete.to_send(&header)?);
         self.send_request(send, transport).await
     }
@@ -651,11 +673,11 @@ mod tests {
     use crate::SaslAuthenticateResponseData;
     use crate::SaslHandshakeResponseData;
     use crate::api_versions_response_data::ApiVersion;
-    use crate::common::Writable;
     use crate::common::network::InterestOps;
     use crate::common::network::is_authentication_error;
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
+    use crate::common::protocol::Writable;
     use crate::common::requests::ResponseHeader;
 
     use std::collections::VecDeque;

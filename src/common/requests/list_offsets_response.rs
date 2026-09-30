@@ -43,6 +43,7 @@ use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListOffsetsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse")]
 pub struct ListOffsetsResponse {
     data: ListOffsetsResponseData,
 }
@@ -58,6 +59,7 @@ impl ListOffsetsResponse {
     pub const UNKNOWN_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 
     /// Creates a new `ListOffsetsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#ListOffsetsResponse")]
     pub fn new(data: ListOffsetsResponseData) -> Self {
         Self { data }
     }
@@ -68,6 +70,7 @@ impl ListOffsetsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#data")]
     pub fn data(&self) -> &ListOffsetsResponseData {
         &self.data
     }
@@ -78,21 +81,25 @@ impl ListOffsetsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the per-topic response list.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#topics")]
     pub fn topics(&self) -> &[ListOffsetsTopicResponse] {
         &self.data.topics
     }
 
     /// Returns the error counts aggregated across all partition responses.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -109,12 +116,14 @@ impl ListOffsetsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListOffsetsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (v3+).
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 3
     }
@@ -123,6 +132,7 @@ impl ListOffsetsResponse {
     /// for tests and synthetic responses.
     ///
     /// Mirrors `ListOffsetsResponse.singletonListOffsetsTopicResponse(...)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsResponse#singletonListOffsetsTopicResponse")]
     pub fn singleton_list_offsets_topic_response(
         tp: &TopicPartition,
         error: Errors,

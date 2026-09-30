@@ -21,21 +21,22 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(test, expect(dead_code))]
 
 use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 
 use crate::ConsumerGroupHeartbeatRequestData;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::Uuid;
+use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
-use crate::common::requests::ConsumerGroupHeartbeatRequestBuilder;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
+use crate::common::requests::consumer_group_heartbeat_request;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -90,6 +91,7 @@ pub(crate) enum PendingHeartbeatCompletion {
 /// changed in unscoped paths (rebalance timeout, regex pattern) on a
 /// per-request basis to keep the protocol compact.
 #[derive(Default)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields")]
 struct SentFields {
     rebalance_timeout_ms: i32,
     /// Topic names sorted; `None` means "not yet sent".
@@ -100,10 +102,16 @@ struct SentFields {
 }
 
 impl SentFields {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields#SentFields"
+    )]
     fn new() -> Self {
         Self { rebalance_timeout_ms: -1, ..Default::default() }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields#reset"
+    )]
     fn reset(&mut self) {
         self.subscribed_topic_names = None;
         self.rebalance_timeout_ms = -1;
@@ -115,6 +123,7 @@ impl SentFields {
 
 /// State for building `ConsumerGroupHeartbeatRequest`s with field
 /// diffing. Mirrors Java's `ConsumerHeartbeatRequestManager.HeartbeatState`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState")]
 struct HeartbeatState {
     subscriptions: Arc<Mutex<SubscriptionState>>,
     membership_manager: Arc<ConsumerMembershipManager>,
@@ -123,6 +132,9 @@ struct HeartbeatState {
 }
 
 impl HeartbeatState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#HeartbeatState"
+    )]
     fn new(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         membership_manager: Arc<ConsumerMembershipManager>,
@@ -136,6 +148,7 @@ impl HeartbeatState {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#reset")]
     fn reset(&mut self) {
         self.sent_fields.reset();
     }
@@ -143,6 +156,9 @@ impl HeartbeatState {
     /// Java: `buildRequestData()`. Constructs the request data with
     /// field-level diffing so subsequent heartbeats only include
     /// changed fields.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#buildRequestData"
+    )]
     fn build_request_data(&mut self) -> ConsumerGroupHeartbeatRequestData {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
 
@@ -252,6 +268,7 @@ fn build_topic_partitions_list(partitions: &std::collections::HashMap<Uuid, Vec<
 /// [`AbstractHeartbeatRequestManager`].
 ///
 /// Java: `ConsumerHeartbeatRequestManager extends AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse>`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager")]
 pub(crate) struct ConsumerHeartbeatRequestManager {
     inner: AbstractHeartbeatRequestManager,
     membership_manager: Arc<ConsumerMembershipManager>,
@@ -274,6 +291,9 @@ impl ConsumerHeartbeatRequestManager {
     /// Java: `ConsumerHeartbeatRequestManager(LogContext, Time, ConsumerConfig,
     /// CoordinatorRequestManager, SubscriptionState, ConsumerMembershipManager,
     /// BackgroundEventHandler, Metrics)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#ConsumerHeartbeatRequestManager"
+    )]
     pub(crate) fn new(
         current_time_ms: i64,
         config: &ConsumerConfig,
@@ -312,6 +332,7 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Java: `resetHeartbeatState()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#resetHeartbeatState")]
     pub(crate) fn reset_heartbeat_state(&mut self) {
         self.heartbeat_state.reset();
     }
@@ -338,6 +359,9 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Java: `shouldSendLeaveHeartbeatNow()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow"
+    )]
     fn should_send_leave_heartbeat_now(&self) -> bool {
         use crate::consumer::GroupMembershipOperation;
         if self.membership_manager.group_instance_id().is_none()
@@ -365,9 +389,10 @@ impl ConsumerHeartbeatRequestManager {
     /// completion silently instead of enqueueing it. Java's
     /// `logResponse(request)` path also drops the response side-effect
     /// without driving state machinery.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#buildHeartbeatRequest")]
     fn build_heartbeat_request(&mut self, ignore_response: bool) -> UnsentRequest {
         let data = self.heartbeat_state.build_request_data();
-        let builder = Box::new(ConsumerGroupHeartbeatRequestBuilder::new(data));
+        let builder = Box::new(consumer_group_heartbeat_request::Builder::new(data));
         let node = self.inner.coordinator_request_manager.coordinator();
         let mut unsent = UnsentRequest::new(builder, node);
 
@@ -382,12 +407,18 @@ impl ConsumerHeartbeatRequestManager {
         } else {
             None
         };
+        // The completion-time cell, not a handler clone: a clone would keep the
+        // sender alive, so `response_rx` could never see the request dropped
+        // uncompleted (`NetworkClient::close` with it in flight) and this
+        // task would never exit.
+        let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let completion = match response_rx.await {
+            let result = response_rx.await;
+            // Java: `long completionTimeMs = request.handler().completionTimeMs()`
+            // — read once the request has completed, so it is the time the
+            // response (or failure) arrived, not the time the request was sent.
+            let now_ms = completion_time_ms.load(Ordering::Acquire);
+            let completion = match result {
                 Ok(Ok(mut client_response)) => {
                     // Java: `response.requestLatencyMs()` — captured before
                     // `take_response_body()`. Recorded in the drain (normal
@@ -657,9 +688,10 @@ impl ConsumerHeartbeatRequestManager {
     /// `current_time_ms` is threaded through to
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
     /// attributed to the actual failure time rather than epoch zero.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificFailure")]
     pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         if error.error() == Errors::UnsupportedVersion {
             let msg = error.to_string();
             let message = if msg.contains(ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG) {
@@ -688,14 +720,17 @@ impl ConsumerHeartbeatRequestManager {
     /// Wrap the shared `classify_response_error` dispatch with the
     /// Consumer-specific extras (UNSUPPORTED_VERSION, UNRELEASED_INSTANCE_ID,
     /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificExceptionInResponse"
+    )]
     pub(crate) fn handle_specific_error_in_response(
         &mut self,
-        error: crate::common::Errors,
+        error: crate::common::protocol::Errors,
         error_message: Option<&str>,
         _current_time_ms: i64,
     ) -> Option<HeartbeatErrorAction> {
         use crate::common::Error;
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         match error {
             Errors::UnsupportedVersion => {
                 log::error!(
@@ -829,6 +864,7 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Returns the wrapped membership manager.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#membershipManager")]
     pub(crate) fn membership_manager(&self) -> &Arc<ConsumerMembershipManager> {
         &self.membership_manager
     }
@@ -1089,8 +1125,8 @@ mod tests {
     use super::*;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use tokio::sync::mpsc;
 
@@ -1152,7 +1188,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1221,7 +1257,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1296,7 +1332,7 @@ mod tests {
     fn handle_specific_unsupported_version_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::Errors::UnsupportedVersion,
+            crate::common::protocol::Errors::UnsupportedVersion,
             Some("broker doesn't support"),
             0,
         );
@@ -1313,7 +1349,8 @@ mod tests {
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::Errors::FencedInstanceId, Some("msg"), 0);
+        let action =
+            mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, Some("msg"), 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
@@ -1322,7 +1359,7 @@ mod tests {
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::Errors::None, Some(""), 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, Some(""), 0);
         assert!(action.is_none());
     }
 
@@ -1378,8 +1415,11 @@ mod tests {
     fn group_id_not_found_while_unsubscribed_is_skipped() {
         let (mut mgr, _coord, mm) = make_with_coord(None);
         assert_eq!(mm.state(), MemberState::Unsubscribed);
-        let action =
-            mgr.handle_specific_error_in_response(crate::common::Errors::GroupIdNotFound, Some("group not found"), 0);
+        let action = mgr.handle_specific_error_in_response(
+            crate::common::protocol::Errors::GroupIdNotFound,
+            Some("group not found"),
+            0,
+        );
         assert!(
             matches!(action, Some(HeartbeatErrorAction::Handled)),
             "GROUP_ID_NOT_FOUND while UNSUBSCRIBED must be skipped (Handled), not fatal/fenced",
@@ -1489,7 +1529,7 @@ mod tests {
     fn handle_specific_unreleased_instance_id_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::Errors::UnreleasedInstanceId,
+            crate::common::protocol::Errors::UnreleasedInstanceId,
             Some("instance id still in use"),
             0,
         );
@@ -1554,7 +1594,7 @@ mod tests {
     async fn test_response_routing_through_spawned_forwarder() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer_group_heartbeat_response_data::Assignment;
 
@@ -1662,7 +1702,7 @@ mod tests {
     async fn issue3_error_response_resets_sent_fields() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use std::collections::HashSet;
 
@@ -1725,11 +1765,13 @@ mod tests {
         );
         unsent.handler().on_complete(client_response);
 
-        // Drive poll() until the spawned forwarder has enqueued the
-        // completion and the drain has run.
+        // Drain until the spawned forwarder has enqueued the completion.
+        // Drain directly rather than through poll(0): the error completes
+        // at time 0, so a poll at 0 would immediately send the retry,
+        // repopulating the sent fields this test inspects.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         loop {
-            let _ = mgr.poll(0);
+            mgr.drain_pending_completions(0);
             if !mgr.sent_fields_topics_populated() {
                 break;
             }
@@ -1863,7 +1905,7 @@ mod tests {
     ) {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
         set_coordinator(coord);
@@ -2854,7 +2896,7 @@ mod tests {
     async fn error_response_surfaces_the_broker_error_message() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer::internals::events::BackgroundEvent;
 

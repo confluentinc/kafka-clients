@@ -49,7 +49,7 @@
 //! `MutexGuard`s on `MembershipInner` are scoped tightly so they are
 //! ALWAYS dropped before any `.await`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -57,9 +57,9 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::metrics::Time;
+use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
-use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::ConsumerRebalanceMetricsManager;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -74,6 +74,7 @@ use super::SubscriptionState;
 ///
 /// Java: `AbstractMembershipManager.LocalAssignment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager$LocalAssignment")]
 pub(crate) struct LocalAssignment {
     pub(crate) local_epoch: i64,
     pub(crate) partitions: HashMap<Uuid, Vec<i32>>,
@@ -95,6 +96,9 @@ impl LocalAssignment {
     /// public API; we return `Result` and let the caller propagate.
     ///
     /// Java: `new LocalAssignment(localEpoch, partitions)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager$LocalAssignment#LocalAssignment"
+    )]
     pub(crate) fn new(local_epoch: i64, partitions: HashMap<Uuid, Vec<i32>>) -> Result<Self, Error> {
         if local_epoch == Self::NONE_EPOCH && !partitions.is_empty() {
             return Err(Error::local_illegal_argument("Local epoch must be set if there are partitions"));
@@ -103,6 +107,7 @@ impl LocalAssignment {
     }
 
     /// Returns `true` if this is the NONE sentinel.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager$LocalAssignment#isNone")]
     pub(crate) fn is_none(&self) -> bool {
         self.local_epoch == Self::NONE_EPOCH
     }
@@ -112,6 +117,7 @@ impl LocalAssignment {
     /// `local_epoch + 1`.
     ///
     /// Java: `Optional<LocalAssignment> updateWith(Map<...>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager$LocalAssignment#updateWith")]
     pub(crate) fn update_with(&self, assignment: HashMap<Uuid, Vec<i32>>) -> Option<LocalAssignment> {
         if self.local_epoch != Self::NONE_EPOCH && assignment == self.partitions {
             return None;
@@ -313,6 +319,7 @@ impl MembershipInner {
 /// manager can perform short locked operations directly. Long
 /// operations live as methods on this struct so they are documented
 /// against the Java source.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager")]
 pub(crate) struct AbstractMembershipManager {
     pub(crate) inner: Arc<Mutex<MembershipInner>>,
     pub(crate) subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -325,6 +332,7 @@ impl AbstractMembershipManager {
     /// Metadata, Logger, Time, RebalanceMetricsManager, boolean)`.
     ///
     /// Metrics dropped. Time / logger via the `log` crate.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#AbstractMembershipManager")]
     pub(crate) fn new(
         group_id: impl Into<String>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -365,6 +373,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `registerStateListener(MemberStateListener listener)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#registerStateListener")]
     pub(crate) fn register_state_listener(&self, listener: Arc<dyn MemberStateListener>) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -379,6 +388,7 @@ impl AbstractMembershipManager {
     /// `RECONCILING` or `JOINING`.
     ///
     /// Java: `processAssignmentReceived(Map<Uuid, SortedSet<Integer>>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#processAssignmentReceived")]
     pub(crate) fn process_assignment_received(&self, assignment: HashMap<Uuid, Vec<i32>>) -> Result<(), Error> {
         // Compute new target & whether we transition to RECONCILING.
         let (assigned_topic_ids, must_reconcile, state_after) = {
@@ -443,6 +453,9 @@ impl AbstractMembershipManager {
     /// Returns a `Vec` of `(topic_id, topic_name, partitions)` triples
     /// for the partitions whose topic name could be resolved either
     /// from global metadata or the local cache.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#findResolvableAssignmentAndTriggerMetadataUpdate"
+    )]
     pub(crate) fn find_resolvable_assignment_and_trigger_metadata_update(&self) -> Vec<(Uuid, String, Vec<i32>)> {
         let target_partitions = {
             let guard = match self.inner.lock() {
@@ -498,6 +511,7 @@ impl AbstractMembershipManager {
     }
 
     /// Mark reconciliation in progress. Java: `markReconciliationInProgress()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#markReconciliationInProgress")]
     pub(crate) fn mark_reconciliation_in_progress(&self) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -508,6 +522,7 @@ impl AbstractMembershipManager {
     }
 
     /// Mark reconciliation completed. Java: `markReconciliationCompleted()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#markReconciliationCompleted")]
     pub(crate) fn mark_reconciliation_completed(&self) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -519,6 +534,7 @@ impl AbstractMembershipManager {
 
     /// Java: `maybeAbortReconciliation()`. Returns `true` if the
     /// reconciliation should be aborted.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeAbortReconciliation")]
     pub(crate) fn maybe_abort_reconciliation(&self) -> bool {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -542,6 +558,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `clearAssignment()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#clearAssignment")]
     pub(crate) fn clear_assignment(&self) {
         // Drop the SubscriptionState guard before mutating inner state.
         let has_auto_assigned = {
@@ -577,6 +594,7 @@ impl AbstractMembershipManager {
 
     /// Java: `onSubscriptionUpdated()`. Atomically sets the
     /// `subscriptionUpdated` flag.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onSubscriptionUpdated")]
     pub(crate) fn on_subscription_updated(&self) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -589,6 +607,7 @@ impl AbstractMembershipManager {
 
     /// Java: `onConsumerPoll()`. If a subscription update is pending
     /// and we're UNSUBSCRIBED, transition to JOINING.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onConsumerPoll")]
     pub(crate) fn on_consumer_poll(&self, join_group_epoch: i32) -> Result<(), Error> {
         let should_join = {
             let mut guard = match self.inner.lock() {
@@ -615,6 +634,7 @@ impl AbstractMembershipManager {
 
     /// Java: `transitionToJoining()`. The Consumer subclass supplies
     /// the join epoch via `joinGroupEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#transitionToJoining")]
     pub(crate) fn transition_to_joining(&self, join_group_epoch: i32) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -639,6 +659,9 @@ impl AbstractMembershipManager {
     /// Java: `transitionToSendingLeaveGroup(boolean dueToExpiredPollTimer)`.
     /// The Consumer subclass supplies the leave epoch via
     /// `leaveGroupEpoch()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#transitionToSendingLeaveGroup"
+    )]
     pub(crate) fn transition_to_sending_leave_group(
         &self,
         leave_group_epoch: i32,
@@ -674,6 +697,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `onHeartbeatRequestSkipped()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatRequestSkipped")]
     pub(crate) fn on_heartbeat_request_skipped(&self) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -692,6 +716,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `onHeartbeatRequestGenerated()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatRequestGenerated")]
     pub(crate) fn on_heartbeat_request_generated(&self) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -751,6 +776,7 @@ impl AbstractMembershipManager {
     /// `AsyncPoll` arm reads it via
     /// [`crate::consumer::internals::ConsumerMembershipManager::join_group_epoch`]
     /// just before invoking this method.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeRejoinStaleMember")]
     pub(crate) fn maybe_rejoin_stale_member(&self, join_group_epoch: i32) {
         let should_transition_to_joining = {
             let mut guard = match self.inner.lock() {
@@ -786,6 +812,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `transitionToFatal()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#transitionToFatal")]
     pub(crate) fn transition_to_fatal(&self) -> Result<MemberState, Error> {
         let previous_state = {
             let mut guard = match self.inner.lock() {
@@ -809,6 +836,7 @@ impl AbstractMembershipManager {
     /// On a non-retriable failure, records a failed rebalance (if one was in
     /// progress). Returns `true` when the member is UNSUBSCRIBED with a
     /// pending leave; caller (the Consumer subclass) should log a warning.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatFailure")]
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) -> bool {
         let guard = match self.inner.lock() {
             Ok(g) => g,
@@ -971,9 +999,9 @@ impl AbstractMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -1025,7 +1053,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
@@ -1044,7 +1072,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
@@ -1062,7 +1090,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
@@ -1109,7 +1137,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         // Spawn the bg-side invocation.
@@ -1151,7 +1179,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);
@@ -1198,7 +1226,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         // Without a listener, the handshake must complete immediately
@@ -1228,7 +1256,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);

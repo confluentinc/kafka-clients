@@ -13,6 +13,16 @@
 // limitations under the License.
 
 //! Feature version range types (org.apache.kafka.common.feature)
+//!
+//! # Dead-code lint
+//!
+//! Java marks this package "not a supported API", so it is crate-private. It
+//! is translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![expect(dead_code)]
 
 mod supported_version_range;
 

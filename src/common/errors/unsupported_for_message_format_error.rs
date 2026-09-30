@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnsupportedForMessageFormatException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The message format version on the broker does not support the request.
     ///
-    /// Corresponds to Java's `UnsupportedForMessageFormatException`, error code [`Errors::UnsupportedForMessageFormat`].
+    /// Corresponds to Java's `UnsupportedForMessageFormatException`, error code `Errors::UnsupportedForMessageFormat`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedForMessageFormatException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedForMessageFormatException")]
     UnsupportedForMessageFormatError,
     code: Errors::UnsupportedForMessageFormat,
     extends: [

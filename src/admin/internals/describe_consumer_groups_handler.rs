@@ -28,10 +28,9 @@ use crate::ConsumerGroupDescribeRequestData;
 use crate::DescribeGroupsRequestData;
 use crate::admin::internals::AdminUtils;
 use crate::admin::{ConsumerGroupDescription, MemberAssignment, MemberDescription};
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
-    ConcreteResponse, ConsumerGroupDescribeRequestBuilder, CoordinatorType, DescribeGroupsRequestBuilder,
-    RequestBuilder,
+    ConcreteResponse, CoordinatorType, RequestBuilder, consumer_group_describe_request, describe_groups_request,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, GroupState, GroupType, Node, TopicPartition};
@@ -48,6 +47,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 /// The `describeConsumerGroups` handler.
 ///
 /// Corresponds to `DescribeConsumerGroupsHandler`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler")]
 pub(crate) struct DescribeConsumerGroupsHandler {
     include_authorized_operations: bool,
     log_context: LogContext,
@@ -62,6 +62,9 @@ pub(crate) struct DescribeConsumerGroupsHandler {
 
 impl DescribeConsumerGroupsHandler {
     /// Creates a handler.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler#DescribeConsumerGroupsHandler"
+    )]
     pub(crate) fn new(include_authorized_operations: bool, log_context: LogContext) -> Self {
         Self {
             include_authorized_operations,
@@ -73,6 +76,7 @@ impl DescribeConsumerGroupsHandler {
     }
 
     /// Builds the key set for a collection of group ids.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler#buildKeySet")]
     fn build_key_set(group_ids: &[String]) -> HashSet<CoordinatorKey> {
         group_ids.iter().map(CoordinatorKey::by_group_id).collect()
     }
@@ -80,10 +84,12 @@ impl DescribeConsumerGroupsHandler {
     /// Creates the future bundle for the given group ids.
     ///
     /// Mirrors `DescribeConsumerGroupsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler#newFuture")]
     pub(crate) fn new_future(group_ids: &[String]) -> SimpleAdminApiFuture<CoordinatorKey, ConsumerGroupDescription> {
         SimpleAdminApiFuture::for_keys(Self::build_key_set(group_ids))
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler#convertAssignment")]
     fn convert_assignment(assignment: &WireAssignment) -> HashSet<TopicPartition> {
         let mut partitions = HashSet::new();
         for topic in &assignment.topic_partitions {
@@ -236,6 +242,7 @@ impl DescribeConsumerGroupsHandler {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler#handleError")]
     fn handle_error(
         &self,
         group_id: &CoordinatorKey,
@@ -379,7 +386,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             data.set_group_ids(new_ids);
             data.set_include_authorized_operations(self.include_authorized_operations);
             requests.push(RequestAndKeys {
-                request: Box::new(ConsumerGroupDescribeRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+                request: Box::new(consumer_group_describe_request::Builder::new(data)) as Box<dyn RequestBuilder>,
                 keys: new_keys,
             });
         }
@@ -388,7 +395,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             data.set_groups(old_ids);
             data.set_include_authorized_operations(self.include_authorized_operations);
             requests.push(RequestAndKeys {
-                request: Box::new(DescribeGroupsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+                request: Box::new(describe_groups_request::Builder::new(data)) as Box<dyn RequestBuilder>,
                 keys: old_keys,
             });
         }
@@ -498,10 +505,10 @@ mod tests {
     /// request, whichever concrete variant it is.
     fn request_ids(mut request: Box<dyn RequestBuilder>) -> (Vec<String>, bool, &'static str) {
         match request.build().unwrap() {
-            crate::common::requests::ConcreteRequest::ConsumerGroupDescribe(r) => {
+            crate::common::requests::AbstractRequest::ConsumerGroupDescribe(r) => {
                 (r.data().group_ids.clone(), r.data().include_authorized_operations, "consumer")
             },
-            crate::common::requests::ConcreteRequest::DescribeGroups(r) => {
+            crate::common::requests::AbstractRequest::DescribeGroups(r) => {
                 (r.data().groups.clone(), r.data().include_authorized_operations, "classic")
             },
             other => panic!("unexpected request {other:?}"),
@@ -515,6 +522,9 @@ mod tests {
 
     /// Translated from `testBuildRequestWithMultipleGroupTypes` (both bool values).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testBuildRequestWithMultipleGroupTypes"
+    )]
     fn test_build_request_with_multiple_group_types() {
         for include_authorized_operations in [true, false] {
             let handler = DescribeConsumerGroupsHandler::new(include_authorized_operations, log_context());
@@ -565,6 +575,7 @@ mod tests {
     /// Translated from `testInvalidBuildRequest`.
     #[test]
     #[should_panic(expected = "Invalid group coordinator key")]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testInvalidBuildRequest")]
     fn test_invalid_build_request() {
         let handler = DescribeConsumerGroupsHandler::new(false, log_context());
         handler.build_request(1, &HashSet::from([CoordinatorKey::by_transactional_id("tId")]));
@@ -580,6 +591,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleConsumerGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testSuccessfulHandleConsumerGroupResponse"
+    )]
     fn test_successful_handle_consumer_group_response() {
         let handler = DescribeConsumerGroupsHandler::new(false, log_context());
 
@@ -761,6 +775,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleClassicGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testSuccessfulHandleClassicGroupResponse"
+    )]
     fn test_successful_handle_classic_group_response() {
         let result = handle_classic_group_with_error(Errors::None, "");
         let members = vec![MemberDescription::new(
@@ -791,6 +808,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleClassicGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testUnmappedHandleClassicGroupResponse"
+    )]
     fn test_unmapped_handle_classic_group_response() {
         assert_unmapped(&handle_classic_group_with_error(Errors::CoordinatorNotAvailable, ""));
         assert_unmapped(&handle_classic_group_with_error(Errors::NotCoordinator, ""));
@@ -798,12 +818,18 @@ mod tests {
 
     /// Translated from `testRetriableHandleClassicGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testRetriableHandleClassicGroupResponse"
+    )]
     fn test_retriable_handle_classic_group_response() {
         assert_retriable(&handle_classic_group_with_error(Errors::CoordinatorLoadInProgress, ""));
     }
 
     /// Translated from `testFailedHandleClassicGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testFailedHandleClassicGroupResponse"
+    )]
     fn test_failed_handle_classic_group_response() {
         assert_failed_error(
             Errors::UnsupportedVersion,
@@ -826,6 +852,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleConsumerGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testUnmappedHandleConsumerGroupResponse"
+    )]
     fn test_unmapped_handle_consumer_group_response() {
         assert_unmapped(&handle_consumer_group_with_error(Errors::CoordinatorNotAvailable));
         assert_unmapped(&handle_consumer_group_with_error(Errors::NotCoordinator));
@@ -833,6 +862,9 @@ mod tests {
 
     /// Translated from `testRetriableHandleConsumerGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testRetriableHandleConsumerGroupResponse"
+    )]
     fn test_retriable_handle_consumer_group_response() {
         assert_retriable(&handle_consumer_group_with_error(Errors::CoordinatorLoadInProgress));
         assert_retriable(&handle_consumer_group_with_error(Errors::GroupIdNotFound));
@@ -908,6 +940,9 @@ mod tests {
 
     /// Translated from `testFailedHandleConsumerGroupResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandlerTest#testFailedHandleConsumerGroupResponse"
+    )]
     fn test_failed_handle_consumer_group_response() {
         assert_failed_error(
             Errors::GroupAuthorizationFailed,

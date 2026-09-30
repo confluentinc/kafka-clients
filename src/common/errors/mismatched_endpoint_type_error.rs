@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.MismatchedEndpointTypeException`.
 
-use crate::common::Errors;
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
+use crate::common::protocol::Errors;
 
-kafka_error_class! {
+kafka_error_type! {
     /// The request was sent to an endpoint of the wrong type.
     ///
-    /// Corresponds to Java's `MismatchedEndpointTypeException`, error code [`Errors::MismatchedEndpointType`].
+    /// Corresponds to Java's `MismatchedEndpointTypeException`, error code `Errors::MismatchedEndpointType`.
     ///
     /// Java `extends` chain:
     ///    `MismatchedEndpointTypeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.MismatchedEndpointTypeException")]
     MismatchedEndpointTypeError,
     code: Errors::MismatchedEndpointType,
     extends: [

@@ -17,7 +17,7 @@
 //! This is useful when building record sets to avoid depending on a specific
 //! magic version.
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
+//! Corresponds to Java's `org.apache.kafka.common.record.internal.SimpleRecord`.
 
 use crate::common::Error;
 use crate::common::header::RecordHeader;
@@ -28,8 +28,9 @@ use crate::common::record::internal::RecordBatch;
 /// This is useful when building record sets to avoid depending on a specific
 /// magic version. It owns its key, value, and headers data.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
+/// Corresponds to Java's `org.apache.kafka.common.record.internal.SimpleRecord`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord")]
 pub struct SimpleRecord {
     key: Option<Vec<u8>>,
     value: Option<Vec<u8>>,
@@ -179,6 +180,7 @@ impl SimpleRecord {
     ///
     /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer,
     /// Header[])` (`SimpleRecord.java:36`) and its `byte[]` twin (`:44`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub(crate) fn with_options(options: SimpleRecordOptions) -> Self {
         let SimpleRecordOptions { timestamp, key, value, headers } = options;
         Self { key, value, timestamp, headers }
@@ -188,6 +190,7 @@ impl SimpleRecord {
     ///
     /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer)`
     /// (`SimpleRecord.java:48`), which passes `Record.EMPTY_HEADERS` itself.
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_timestamp_key_value(timestamp: i64, key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
         Self::with_options(
             SimpleRecordOptionsBuilder::new()
@@ -202,6 +205,7 @@ impl SimpleRecord {
     /// Create a new `SimpleRecord` with timestamp and value only (no key, no headers).
     ///
     /// Corresponds to Java's `SimpleRecord(long, byte[])` (`SimpleRecord.java:56`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_timestamp_value(timestamp: i64, value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(timestamp, None, value)
     }
@@ -212,6 +216,7 @@ impl SimpleRecord {
     ///
     /// Corresponds to Java's `SimpleRecord(byte[])` (`SimpleRecord.java:60`) and
     /// its `ByteBuffer` twin (`:64`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_value(value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(RecordBatch::NO_TIMESTAMP, None, value)
     }
@@ -221,6 +226,7 @@ impl SimpleRecord {
     /// Uses `RecordBatch::NO_TIMESTAMP` as the timestamp.
     ///
     /// Corresponds to Java's `SimpleRecord(byte[], byte[])` (`SimpleRecord.java:68`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_key_value(key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(RecordBatch::NO_TIMESTAMP, key, value)
     }
@@ -230,6 +236,7 @@ impl SimpleRecord {
     /// Copies the key, value, and headers from the record.
     ///
     /// Corresponds to Java's `SimpleRecord(Record)` (`SimpleRecord.java:72`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_record(record: &dyn super::Record) -> Self {
         Self::with_options(
             SimpleRecordOptionsBuilder::new()
@@ -243,21 +250,25 @@ impl SimpleRecord {
     }
 
     /// Returns the key, or `None` if there is no key.
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#key")]
     pub fn key(&self) -> Option<&[u8]> {
         self.key.as_deref()
     }
 
     /// Returns the value, or `None` if there is no value.
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#value")]
     pub fn value(&self) -> Option<&[u8]> {
         self.value.as_deref()
     }
 
     /// Returns the timestamp.
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// Returns the headers.
+    #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#headers")]
     pub fn headers(&self) -> &[RecordHeader] {
         &self.headers
     }

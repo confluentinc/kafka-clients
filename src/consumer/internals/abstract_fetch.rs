@@ -52,7 +52,7 @@
 //! pieces a behavioral exercise can't reach through 7b: per-node
 //! session-handler lifecycle and the pending-fetch tracking set.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -61,12 +61,12 @@ use indexmap::IndexMap;
 use log::{debug, trace};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use crate::common::ApiKeys;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::memory::BufferSupplier;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchResponse;
-use crate::common::requests::fetch_request::{FetchRequest, FetchRequestBuilder, PartitionData};
+use crate::common::requests::fetch_request::{self, FetchRequest, PartitionData};
 use crate::consumer::internals::CompletedFetch;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::FetchBuffer;
@@ -88,6 +88,7 @@ use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData}
 /// [`crate::consumer::internals::RequestManager`]
 /// implementation in Phase 7b can read / write them. This matches Java's
 /// `protected` semantics on the abstract base.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch")]
 pub(crate) struct AbstractFetch {
     /// Cluster metadata.
     pub(crate) metadata: Arc<ConsumerMetadata>,
@@ -160,6 +161,7 @@ impl AbstractFetch {
     /// single supplier and passes it both here and into ad-hoc
     /// decompression). Callers that don't need sharing can pass
     /// `Arc::new(BufferSupplier::create())`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#AbstractFetch")]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -188,6 +190,7 @@ impl AbstractFetch {
     /// return to the user.
     ///
     /// Translates `boolean hasCompletedFetches()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#hasCompletedFetches")]
     pub(crate) fn has_completed_fetches(&self) -> bool {
         !self.fetch_buffer.is_empty()
     }
@@ -197,6 +200,7 @@ impl AbstractFetch {
     /// perspective.
     ///
     /// Translates `boolean hasAvailableFetches()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#hasAvailableFetches")]
     pub(crate) fn has_available_fetches(&self) -> bool {
         let subs = self.subscriptions.clone();
         self.fetch_buffer.has_completed_fetches(|cf| {
@@ -210,6 +214,7 @@ impl AbstractFetch {
     ///
     /// Visible for testing; mirrors Java's `protected FetchSessionHandler
     /// sessionHandler(int node)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#sessionHandler")]
     pub(crate) fn session_handler(&self, node: i32) -> Option<&FetchSessionHandler> {
         self.session_handlers.get(&node)
     }
@@ -238,6 +243,7 @@ impl AbstractFetch {
     /// failure) is observed.
     ///
     /// Mirrors Java's `removePendingFetchRequest`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#removePendingFetchRequest")]
     pub(crate) fn remove_pending_fetch_request(&mut self, fetch_target: &Node, session_id: i32) {
         debug!(
             "Removing pending request for fetch session: {} for node: {}",
@@ -258,6 +264,7 @@ impl AbstractFetch {
     /// Skipping the resolution into a parameter keeps the cluster
     /// lookup out of this struct's responsibilities (Phase 7b will do
     /// the lookup before calling).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#prepareCloseFetchSessionRequests")]
     pub(crate) fn prepare_close_fetch_session_requests(
         &mut self,
         nodes: &HashMap<i32, Node>,
@@ -291,11 +298,12 @@ impl AbstractFetch {
     ///
     /// Translates `protected FetchRequest.Builder createFetchRequest(Node,
     /// FetchSessionHandler.FetchRequestData)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#createFetchRequest")]
     pub(crate) fn create_fetch_request(
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-    ) -> FetchRequestBuilder {
+    ) -> fetch_request::Builder {
         let max_version = if request_data.can_use_topic_ids {
             ApiKeys::FETCH.latest_version()
         } else {
@@ -307,7 +315,7 @@ impl AbstractFetch {
         let to_fetch: IndexMap<TopicPartition, PartitionData> =
             request_data.to_send.iter().map(|(tp, pd)| (tp.clone(), pd.clone())).collect();
 
-        let builder = FetchRequestBuilder::for_consumer(
+        let builder = fetch_request::Builder::for_consumer(
             max_version,
             self.fetch_config.max_wait_ms,
             self.fetch_config.min_bytes,
@@ -335,6 +343,7 @@ impl AbstractFetch {
     /// `CompletedFetch`es into the fetch buffer.
     ///
     /// Translates `protected void handleFetchSuccess(Node, FetchRequestData, ClientResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess")]
     pub(crate) fn handle_fetch_success(
         &mut self,
         fetch_target: &Node,
@@ -495,10 +504,11 @@ impl AbstractFetch {
             // KIP-951: when a partition reports a leadership-change error AND
             // carries new leader info, record it for the post-loop metadata
             // update. Translates `AbstractFetch.java:207-214`.
-            let partition_error = crate::common::Errors::for_code(partition_data.error_code);
+            let partition_error = crate::common::protocol::Errors::for_code(partition_data.error_code);
             if matches!(
                 partition_error,
-                crate::common::Errors::NotLeaderOrFollower | crate::common::Errors::FencedLeaderEpoch
+                crate::common::protocol::Errors::NotLeaderOrFollower
+                    | crate::common::protocol::Errors::FencedLeaderEpoch
             ) {
                 let leader_id = partition_data.current_leader.leader_id;
                 let leader_epoch = partition_data.current_leader.leader_epoch;
@@ -579,6 +589,7 @@ impl AbstractFetch {
     /// Translates `protected void handleCloseFetchSessionSuccess(Node,
     /// FetchSessionHandler.FetchRequestData, ClientResponse)`. Drops the
     /// node from the pending-fetch set and logs at debug.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleCloseFetchSessionSuccess")]
     pub(crate) fn handle_close_fetch_session_success(
         &mut self,
         fetch_target: &Node,
@@ -599,6 +610,7 @@ impl AbstractFetch {
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
     /// throwable; we log the `Error` message).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleCloseFetchSessionFailure")]
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
@@ -619,6 +631,7 @@ impl AbstractFetch {
     /// Handles a fetch-request failure.
     ///
     /// Translates `protected void handleFetchFailure(Node, FetchRequestData, Throwable)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchFailure")]
     pub(crate) fn handle_fetch_failure(
         &mut self,
         fetch_target: &Node,
@@ -642,6 +655,7 @@ impl AbstractFetch {
     /// Closes the fetch buffer and decompression supplier. Idempotent.
     ///
     /// Translates `void close(Timer)` (Java's `IdempotentCloser`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
             return;
@@ -689,6 +703,7 @@ impl AbstractFetch {
     /// `NetworkClientDelegate` (which it does not own — Phase 7b's
     /// `FetchRequestManager` owns the delegate and supplies the
     /// closures).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#prepareFetchRequests")]
     pub(crate) fn prepare_fetch_requests(
         &mut self,
         current_time_ms: i64,
@@ -998,7 +1013,7 @@ mod tests {
     use super::*;
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     fn make_fetch_config() -> FetchConfig {
         FetchConfig::new(
@@ -1365,8 +1380,9 @@ mod tests {
     use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::requests::FetchMetadata;
     use crate::common::serialization::Deserializer;
+    use crate::common::utils::SystemTime;
     use crate::consumer::internals::Deserializers;
-    use crate::consumer::internals::{FetchCollector, SystemFetchCollectorTime};
+    use crate::consumer::internals::FetchCollector;
     use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     /// Minimal UTF-8 string deserializer for this test module.
@@ -1390,7 +1406,7 @@ mod tests {
         let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             &records,
         );
@@ -1482,7 +1498,7 @@ mod tests {
             make_fetch_config(),
             deserializers,
             FetchMetricsManager::for_test(),
-            Arc::new(SystemFetchCollectorTime),
+            Arc::new(SystemTime),
         );
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");

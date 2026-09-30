@@ -34,6 +34,7 @@ use super::{AdminApiLookupStrategy, LookupResult};
 /// [`build_request`](AdminApiLookupStrategy::build_request) and
 /// [`handle_response`](AdminApiLookupStrategy::handle_response) are never
 /// invoked (they panic, mirroring Java's `UnsupportedOperationException`).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.StaticBrokerStrategy")]
 pub(crate) struct StaticBrokerStrategy<K> {
     broker_id: i32,
     _marker: PhantomData<fn() -> K>,
@@ -41,6 +42,7 @@ pub(crate) struct StaticBrokerStrategy<K> {
 
 impl<K> StaticBrokerStrategy<K> {
     /// Creates a strategy targeting the given broker id.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.StaticBrokerStrategy#StaticBrokerStrategy")]
     pub(crate) fn new(broker_id: i32) -> Self {
         Self { broker_id, _marker: PhantomData }
     }

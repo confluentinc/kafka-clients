@@ -25,6 +25,7 @@ use super::{PatternType, ResourcePatternFilter, ResourceType};
 ///
 /// Corresponds to `org.apache.kafka.common.resource.ResourcePattern`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.resource.ResourcePattern")]
 pub struct ResourcePattern {
     resource_type: ResourceType,
     name: String,
@@ -49,6 +50,7 @@ impl ResourcePattern {
     /// Returns [`Error::LocalIllegalArgument`] if `resource_type` is
     /// [`ResourceType::Any`], or `pattern_type` is [`PatternType::Match`] or
     /// [`PatternType::Any`] (mirrors Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#ResourcePattern")]
     pub fn new(
         resource_type: ResourceType,
         name: impl Into<String>,
@@ -64,26 +66,31 @@ impl ResourcePattern {
     }
 
     /// Return the specific resource type this pattern matches.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#resourceType")]
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
     /// Return the resource name.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Return the resource pattern type.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#patternType")]
     pub fn pattern_type(&self) -> PatternType {
         self.pattern_type
     }
 
     /// Return a filter which matches only this pattern.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#toFilter")]
     pub fn to_filter(&self) -> ResourcePatternFilter {
         ResourcePatternFilter::new(self.resource_type, Some(self.name.clone()), self.pattern_type)
     }
 
     /// Return `true` if this pattern has any UNKNOWN components.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.resource_type.is_unknown() || self.pattern_type.is_unknown()
     }

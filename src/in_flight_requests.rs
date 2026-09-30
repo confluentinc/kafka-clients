@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::network::NetworkSend;
-use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
+use crate::common::requests::{AbstractRequest, ConcreteResponse, RequestHeader};
 
 use super::ClientResponse;
 use super::RequestCompletionHandler;
@@ -36,23 +36,25 @@ use super::RequestCompletionHandler;
 /// Translated from `NetworkClient.InFlightRequest` inner class in Java.
 pub struct InFlightRequest {
     /// The request header.
-    pub header: RequestHeader,
+    pub(crate) header: RequestHeader,
     /// The request timeout in milliseconds.
-    pub request_timeout_ms: i64,
+    pub(crate) request_timeout_ms: i64,
     /// The unix timestamp when the request was created.
-    pub created_time_ms: i64,
+    pub(crate) created_time_ms: i64,
     /// The destination node id.
-    pub destination: String,
+    pub(crate) destination: String,
     /// The completion callback, if any.
     callback: Option<RequestCompletionHandler>,
     /// Whether we expect a response message or this request is complete once sent.
-    pub expect_response: bool,
+    pub(crate) expect_response: bool,
     /// Whether this request is initiated internally by the `NetworkClient`.
-    pub is_internal_request: bool,
+    pub(crate) is_internal_request: bool,
     /// The built request.
-    pub request: Option<ConcreteRequest>,
+    pub(crate) request: Option<AbstractRequest>,
     /// The network send associated with this request.
-    pub send: NetworkSend,
+    // Java only ever assigns `InFlightRequest.send` (`NetworkClient.java:1557`).
+    #[expect(dead_code)]
+    pub(crate) send: NetworkSend,
     /// Whether the network send has been completed (confirmed by the selector).
     ///
     /// In Java, the same `Send` object is shared between `InFlightRequest` and
@@ -61,7 +63,7 @@ pub struct InFlightRequest {
     /// the selector reports a completed send for this destination.
     send_completed: bool,
     /// The unix timestamp when this request was sent.
-    pub send_time_ms: i64,
+    pub(crate) send_time_ms: i64,
     /// Accumulated throttle time in milliseconds.
     throttle_time_ms: i64,
 }
@@ -74,7 +76,7 @@ impl InFlightRequest {
         client_request: &mut super::ClientRequest,
         header: RequestHeader,
         is_internal_request: bool,
-        request: Option<ConcreteRequest>,
+        request: Option<AbstractRequest>,
         send: NetworkSend,
         send_time_ms: i64,
     ) -> Self {
@@ -97,7 +99,7 @@ impl InFlightRequest {
     /// Creates a new `InFlightRequest` with all fields specified directly.
     ///
     /// This corresponds to the Java constructor with explicit parameters.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         header: RequestHeader,
         request_timeout_ms: i64,
@@ -106,7 +108,7 @@ impl InFlightRequest {
         callback: Option<RequestCompletionHandler>,
         expect_response: bool,
         is_internal_request: bool,
-        request: Option<ConcreteRequest>,
+        request: Option<AbstractRequest>,
         send: NetworkSend,
         send_time_ms: i64,
     ) -> Self {
@@ -229,6 +231,7 @@ impl fmt::Display for InFlightRequest {
 /// In Java, `inFlightRequestCount` is an `AtomicInteger` for thread-safe reads.
 /// We preserve this via [`AtomicI32`] so that `count()` (total) can be called
 /// from other threads without taking a lock.
+#[doc(alias = "org.apache.kafka.clients.InFlightRequests")]
 pub struct InFlightRequests {
     max_in_flight_requests_per_connection: usize,
     /// Keyed by node-id string. `FxHashMap` (Phase 27): this map is looked
@@ -248,6 +251,7 @@ pub struct InFlightRequests {
 
 impl InFlightRequests {
     /// Creates a new `InFlightRequests` with the given per-connection limit.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#InFlightRequests")]
     pub fn new(max_in_flight_requests_per_connection: usize) -> Self {
         Self {
             max_in_flight_requests_per_connection,
@@ -259,6 +263,7 @@ impl InFlightRequests {
     /// Adds the given request to the queue for the connection it was directed to.
     ///
     /// New requests are added to the *front* of the deque (most recently sent first).
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#add")]
     pub fn add(&mut self, request: InFlightRequest) {
         let destination = request.destination.clone();
         let reqs = self.requests.entry(destination).or_default();
@@ -271,6 +276,7 @@ impl InFlightRequests {
     /// # Errors
     ///
     /// Returns `Err` if there are no in-flight requests for the node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#requestQueue")]
     fn request_queue(&self, node: &str) -> Result<&VecDeque<InFlightRequest>, String> {
         match self.requests.get(node) {
             Some(reqs) if !reqs.is_empty() => Ok(reqs),
@@ -296,6 +302,7 @@ impl InFlightRequests {
     /// # Panics
     ///
     /// Panics if there are no in-flight requests for the given node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#completeNext")]
     pub fn complete_next(&mut self, node: &str) -> InFlightRequest {
         let reqs = self.request_queue_mut(node).unwrap_or_else(|e| panic!("{e}"));
         let request = reqs.pop_back().expect("Queue should not be empty");
@@ -309,6 +316,7 @@ impl InFlightRequests {
     /// # Panics
     ///
     /// Panics if there are no in-flight requests for the given node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#lastSent")]
     pub fn last_sent(&self, node: &str) -> &InFlightRequest {
         let reqs = self.request_queue(node).unwrap_or_else(|e| panic!("{e}"));
         reqs.front().expect("Queue should not be empty")
@@ -333,6 +341,7 @@ impl InFlightRequests {
     /// # Panics
     ///
     /// Panics if there are no in-flight requests for the given node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#completeLastSent")]
     pub fn complete_last_sent(&mut self, node: &str) -> InFlightRequest {
         let reqs = self.request_queue_mut(node).unwrap_or_else(|e| panic!("{e}"));
         let request = reqs.pop_front().expect("Queue should not be empty");
@@ -346,6 +355,7 @@ impl InFlightRequests {
     /// - There are no requests in the queue, or
     /// - The most recently sent request's send is completed AND the queue size is
     ///   below the per-connection limit.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#canSendMore")]
     pub fn can_send_more(&self, node: &str) -> bool {
         match self.requests.get(node) {
             None => true,
@@ -370,6 +380,7 @@ impl InFlightRequests {
     /// Returns the total count of in-flight requests across all nodes.
     ///
     /// This method is thread-safe but may lag the actual count.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#count")]
     pub fn count(&self) -> i32 {
         self.in_flight_request_count.load(Ordering::Relaxed)
     }
@@ -381,6 +392,7 @@ impl InFlightRequests {
     }
 
     /// Returns `true` if there are no in-flight requests for any node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#isEmpty")]
     pub fn is_empty(&self) -> bool {
         self.requests.values().all(VecDeque::is_empty)
     }
@@ -389,6 +401,7 @@ impl InFlightRequests {
     ///
     /// The returned requests are in oldest-first order (the order they were
     /// originally sent).
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#clearAll")]
     pub fn clear_all(&mut self, node: &str) -> Vec<InFlightRequest> {
         match self.requests.remove(node) {
             None => Vec::new(),
@@ -409,6 +422,7 @@ impl InFlightRequests {
     ///
     /// A request is considered timed out if the elapsed time since send (minus
     /// any throttle time) exceeds its request timeout.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#nodesWithTimedOutRequests")]
     pub fn nodes_with_timed_out_requests(&self, now: i64) -> Vec<String> {
         let mut node_ids = Vec::new();
         for (node_id, deque) in &self.requests {
@@ -420,6 +434,7 @@ impl InFlightRequests {
     }
 
     /// Increments the throttle time for all in-flight requests to the given node.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#incrementThrottleTime")]
     pub fn increment_throttle_time(&mut self, node_id: &str, throttle_time_ms: i64) {
         if let Some(deque) = self.requests.get_mut(node_id) {
             for request in deque.iter_mut() {
@@ -429,6 +444,7 @@ impl InFlightRequests {
     }
 
     /// Checks if any request in the deque has expired.
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequests#hasExpiredRequest")]
     fn has_expired_request(now: i64, deque: &VecDeque<InFlightRequest>) -> bool {
         for request in deque {
             // Exclude throttle time because we want to ensure that we don't expire
@@ -445,8 +461,8 @@ impl InFlightRequests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::ApiKeys;
     use crate::common::network::{ByteBufferSend, NetworkSend};
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     fn add_request(
@@ -501,6 +517,7 @@ mod tests {
 
     /// Translated from Java `InFlightRequestsTest.testCompleteLastSent`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequestsTest#testCompleteLastSent")]
     fn test_complete_last_sent() {
         let mut in_flight = InFlightRequests::new(12);
         let mut correlation_id = 0;
@@ -519,6 +536,7 @@ mod tests {
 
     /// Translated from Java `InFlightRequestsTest.testClearAll`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequestsTest#testClearAll")]
     fn test_clear_all() {
         let mut in_flight = InFlightRequests::new(12);
         let mut correlation_id = 0;
@@ -536,6 +554,7 @@ mod tests {
 
     /// Translated from Java `InFlightRequestsTest.testTimedOutNodes`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequestsTest#testTimedOutNodes")]
     fn test_timed_out_nodes() {
         let mut in_flight = InFlightRequests::new(12);
         let mut correlation_id = 0;
@@ -562,6 +581,7 @@ mod tests {
 
     /// Translated from Java `InFlightRequestsTest.testCompleteNext`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.InFlightRequestsTest#testCompleteNext")]
     fn test_complete_next() {
         let mut in_flight = InFlightRequests::new(12);
         let mut correlation_id = 0;

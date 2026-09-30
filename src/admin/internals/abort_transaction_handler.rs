@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use crate::WriteTxnMarkersRequestData;
 use crate::admin::AbortTransactionSpec;
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, RequestBuilder, WriteTxnMarkersRequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, RequestBuilder, write_txn_markers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
@@ -39,6 +39,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `AbortTransactionHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding `()` values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler")]
 pub(crate) struct AbortTransactionHandler {
     log_context: LogContext,
     abort_spec: AbortTransactionSpec,
@@ -47,6 +48,7 @@ pub(crate) struct AbortTransactionHandler {
 
 impl AbortTransactionHandler {
     /// Creates a handler for the given abort spec.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler#AbortTransactionHandler")]
     pub(crate) fn new(abort_spec: AbortTransactionSpec, log_context: LogContext) -> Self {
         let lookup_strategy = PartitionLeaderStrategy::new(log_context.clone());
         Self { log_context, abort_spec, lookup_strategy }
@@ -56,6 +58,7 @@ impl AbortTransactionHandler {
     /// completes.
     ///
     /// Mirrors `AbortTransactionHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -66,6 +69,7 @@ impl AbortTransactionHandler {
     /// Builds the `WriteTxnMarkers` request for the abort spec's partition.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler#buildBatchedRequest")]
     fn build_batched_request(&self, topic_partitions: &HashSet<TopicPartition>) -> WriteTxnMarkersRequestData {
         self.validate_topic_partitions(topic_partitions);
 
@@ -89,6 +93,7 @@ impl AbortTransactionHandler {
     /// (retry via a fresh leader lookup).
     ///
     /// Mirrors `handleError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler#handleError")]
     fn handle_error(&self, error: Errors) -> ApiResult<TopicPartition, ()> {
         let tp = self.abort_spec.topic_partition().clone();
         match error {
@@ -182,6 +187,7 @@ impl AbortTransactionHandler {
     /// `IllegalArgumentException`) when the driver hands over a key set other
     /// than the single partition of the abort spec — a programming error the
     /// driver never triggers in production.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AbortTransactionHandler#validateTopicPartitions")]
     fn validate_topic_partitions(&self, topic_partitions: &HashSet<TopicPartition>) {
         let expected: HashSet<TopicPartition> = HashSet::from([self.abort_spec.topic_partition().clone()]);
         if topic_partitions != &expected {
@@ -220,7 +226,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(keys);
         vec![RequestAndKeys {
-            request: Box::new(WriteTxnMarkersRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(write_txn_markers_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

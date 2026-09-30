@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::common::Metric;
     use crate::common::metrics::Metrics;
-    use crate::common::metrics::MockTime;
+    use crate::common::utils::MockTime;
 
     /// Java: `OffsetCommitMetricsManagerTest.testOffsetCommitMetrics`.
     #[test]

@@ -160,7 +160,7 @@ async fn metadata_roundtrip_case(bootstrap: &str, suffix: &str) -> Result<bool, 
         OffsetAndMetadata::with_metadata(2, "checkpoint-42").map_err(|e| format!("with_metadata: {e}"))?,
     )]);
     producer
-        .send_offsets_to_transaction(offsets, consumer.group_metadata())
+        .send_offsets_to_transaction(offsets, &*consumer.group_metadata())
         .await
         .map_err(|e| format!("meta: send_offsets: {e}"))?;
     producer.commit_transaction().await.map_err(|e| format!("meta: commit: {e}"))?;
@@ -194,7 +194,7 @@ async fn unstable_offsets_case(bootstrap: &str, suffix: &str) -> Result<bool, St
         OffsetAndMetadata::new(1).map_err(|e| format!("OffsetAndMetadata: {e}"))?,
     )]);
     producer
-        .send_offsets_to_transaction(offsets, consumer.group_metadata())
+        .send_offsets_to_transaction(offsets, &*consumer.group_metadata())
         .await
         .map_err(|e| format!("unstable: send_offsets: {e}"))?;
     println!("  offsets attached; the transaction stays OPEN — asking the coordinator now");
@@ -304,7 +304,7 @@ async fn stale_metadata_case(bootstrap: &str, suffix: &str) -> Result<bool, Stri
         tp.clone(),
         OffsetAndMetadata::new(1).map_err(|e| format!("OffsetAndMetadata: {e}"))?,
     )]);
-    let send_offsets = producer.send_offsets_to_transaction(offsets, stale_metadata.clone()).await;
+    let send_offsets = producer.send_offsets_to_transaction(offsets, &*stale_metadata).await;
     match &send_offsets {
         Err(e) => {
             let text = e.to_string();
@@ -354,7 +354,7 @@ async fn stale_metadata_case(bootstrap: &str, suffix: &str) -> Result<bool, Stri
             tp.clone(),
             OffsetAndMetadata::new(1).map_err(|e| format!("OffsetAndMetadata: {e}"))?,
         )]);
-        let second = producer.send_offsets_to_transaction(offsets_again, stale_metadata).await;
+        let second = producer.send_offsets_to_transaction(offsets_again, &*stale_metadata).await;
         match second {
             Ok(()) => {
                 producer

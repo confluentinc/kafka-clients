@@ -13,19 +13,40 @@
 // limitations under the License.
 
 //! Common utility classes (org.apache.kafka.common.utils)
+//!
+//! # Dead-code lint
+//!
+//! None of the translated classes is `@InterfaceAudience.Public` in Java, so
+//! they are crate-private. They are translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
 
+#![expect(dead_code)]
+
+mod byte_utils;
 mod exponential_backoff;
 mod log_context;
 #[macro_use]
 mod log_macros;
+// Java ships `MockTime` in the clients test jar.
+#[cfg(test)]
+mod mock_time;
 mod producer_id_and_epoch;
+mod system_time;
+mod time;
 // `utils.rs` inside `utils/` mirrors Java's `org.apache.kafka.common.utils.Utils`
 // sitting inside the `utils` package; the struct is reached through the
 // re-export below, never through this module path (CLAUDE.md §2).
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod utils;
 
-pub use exponential_backoff::ExponentialBackoff;
-pub use log_context::LogContext;
-pub use producer_id_and_epoch::ProducerIdAndEpoch;
-pub use utils::Utils;
+pub(crate) use byte_utils::ByteUtils;
+pub(crate) use exponential_backoff::ExponentialBackoff;
+pub(crate) use log_context::LogContext;
+#[cfg(test)]
+pub(crate) use mock_time::MockTime;
+pub(crate) use producer_id_and_epoch::ProducerIdAndEpoch;
+pub(crate) use system_time::SystemTime;
+pub(crate) use time::Time;
+pub(crate) use utils::Utils;

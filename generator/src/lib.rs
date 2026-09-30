@@ -17,7 +17,7 @@
 //! Message generator library - can be used from both build.rs and CLI binary
 
 #![deny(warnings)]
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 mod message;
 
@@ -205,14 +205,13 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     )?;
     writeln!(file, "//! for each Kafka API key.")?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file)?;
-    writeln!(file, "use crate::common::protocol::Schema;")?;
+    writeln!(file, "use crate::common::protocol::types::Schema;")?;
     writeln!(file)?;
 
     // --- ListenerType enum ---
     writeln!(file, "/// Kafka listener types.")?;
     writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub enum ListenerType {{")?;
     writeln!(file, "    Broker,")?;
     writeln!(file, "    Controller,")?;
@@ -222,7 +221,8 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     // --- ApiMessageType enum ---
     writeln!(file, "/// Identifiers and metadata for every Kafka API.")?;
     writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
-    writeln!(file, "#[allow(non_camel_case_types)]")?;
+    writeln!(file, "#[expect(non_camel_case_types)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub enum ApiMessageType {{")?;
 
     for data in apis.values() {
@@ -432,7 +432,6 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
             }
         }
     }
-    writeln!(file, "            #[allow(unreachable_patterns)]")?;
     writeln!(file, "            _ => 1,")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
@@ -475,7 +474,6 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
             }
         }
     }
-    writeln!(file, "            #[allow(unreachable_patterns)]")?;
     writeln!(file, "            _ => 0,")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
@@ -601,12 +599,16 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(String, Str
     // Write generated code
     writeln!(file, "//! Generated from {}.json", file_name)?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file, "#![allow(dead_code)]")?;
+    writeln!(file, "#![expect(unused_imports)]")?;
+    writeln!(file, "#![expect(dead_code)]")?;
     writeln!(file)?;
     writeln!(
         file,
-        "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField, Message, ApiMessage, ObjectSerializationCache, MessageSizeAccumulator, ByteBufferAccessor}};"
+        "use crate::common::protocol::{{Readable, Writable, Message, ApiMessage, ObjectSerializationCache, MessageSizeAccumulator, ByteBufferAccessor}};"
+    )?;
+    writeln!(
+        file,
+        "use crate::common::protocol::types::{{Field, Schema, SchemaType, RawTaggedField}};"
     )?;
     writeln!(file, "use crate::common::Uuid;")?;
     writeln!(file, "use bytes::Bytes;")?;
@@ -664,11 +666,11 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -720,6 +722,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     generate_schema_method(file, struct_spec, flexible_versions)?;
 
     // Builder setters
+    generate_field_accessors(file, struct_spec)?;
     generate_builder_setters(file, struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -801,11 +804,11 @@ fn generate_nested_struct(
         if !nested_field.about().is_empty() {
             writeln!(file, "    /// {}", nested_field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -837,6 +840,7 @@ fn generate_nested_struct(
     generate_write_method(file, &struct_name, &struct_spec, flexible_versions, parent_versions)?;
 
     // Builder setters
+    generate_field_accessors(file, &struct_spec)?;
     generate_builder_setters(file, &struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -886,11 +890,11 @@ fn generate_common_struct(
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -920,6 +924,7 @@ fn generate_common_struct(
     generate_write_method(file, struct_name, struct_spec, flexible_versions, struct_spec.versions())?;
 
     // Builder setters
+    generate_field_accessors(file, struct_spec)?;
     generate_builder_setters(file, struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -1001,6 +1006,65 @@ fn generate_manual_eq_hash(
     writeln!(file, "    }}")?;
     writeln!(file, "}}")?;
     writeln!(file)?;
+
+    Ok(())
+}
+
+/// True when the field's Rust type is `Copy`, so its getter can return by
+/// value instead of by reference. `Option<T>` is `Copy` when `T` is, so
+/// nullability does not change the answer.
+fn is_copy_field(field: &FieldSpec) -> bool {
+    matches!(
+        field.field_type(),
+        FieldType::Bool
+            | FieldType::Int8
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::Uint16
+            | FieldType::Uint32
+            | FieldType::Uuid
+            | FieldType::Float64
+    )
+}
+
+/// Generates the public getters, translating Java's
+/// `MessageDataGenerator.generateFieldAccessors`. Java names the getter after
+/// the field with no `get` prefix (`nullableStruct()`), so we do the same in
+/// snake_case. Fields are `pub(crate)` — mirroring the package-private fields
+/// Java emits — so these accessors are the only read path for other crates.
+///
+/// Copy scalars are returned by value; everything else is borrowed, because the
+/// data stays owned by the message (CLAUDE.md §14).
+fn generate_field_accessors(file: &mut fs::File, struct_spec: &StructSpec) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file)?;
+    for field in struct_spec.fields() {
+        let field_name = to_snake_case(field.name());
+        let field_name = escape_rust_keyword(&field_name);
+        let rust_type = field_type_to_rust_for_field(field);
+
+        if is_copy_field(field) {
+            writeln!(file, "    pub fn {}(&self) -> {} {{", field_name, rust_type)?;
+            writeln!(file, "        self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+        } else {
+            writeln!(file, "    pub fn {}(&self) -> &{} {{", field_name, rust_type)?;
+            writeln!(file, "        &self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+
+            // Java's getter hands back the object reference itself, so
+            // `data.topics().add(t)` mutates in place. Rust splits that into a
+            // shared and a mutable borrow, so a non-Copy field also gets a
+            // `_mut` accessor — same shape as `unknown_tagged_fields_mut`.
+            let mut_name = field_name.strip_prefix("r#").unwrap_or(&field_name);
+            writeln!(file, "    pub fn {}_mut(&mut self) -> &mut {} {{", mut_name, rust_type)?;
+            writeln!(file, "        &mut self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+        }
+    }
 
     Ok(())
 }
@@ -1160,19 +1224,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
             writeln!(file, "        }}")?;
@@ -1182,19 +1246,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
         }
@@ -1416,7 +1480,7 @@ fn generate_string_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1433,7 +1497,7 @@ fn generate_string_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1467,7 +1531,7 @@ fn generate_bytes_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1484,7 +1548,7 @@ fn generate_bytes_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1512,7 +1576,7 @@ fn generate_array_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
         } else {
@@ -1529,7 +1593,7 @@ fn generate_array_add_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
             writeln!(file, "{}}} else {{", indent)?;
@@ -1579,7 +1643,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1596,7 +1660,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1614,7 +1678,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1631,7 +1695,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1698,7 +1762,7 @@ fn generate_tagged_field_add_size(
     writeln!(file, "{}num_tagged_fields += 1;", inner)?;
     writeln!(
         file,
-        "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}));",
+        "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}));",
         inner, tag
     )?;
     generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
@@ -1923,7 +1987,7 @@ fn generate_tagged_field_content_size(
         FieldType::Bool | FieldType::Int8 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(1);", indent)?;
@@ -1931,7 +1995,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int16 | FieldType::Uint16 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(2)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(2)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(2);", indent)?;
@@ -1939,7 +2003,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int32 | FieldType::Uint32 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(4)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(4)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(4);", indent)?;
@@ -1947,7 +2011,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1955,7 +2019,7 @@ fn generate_tagged_field_content_size(
         FieldType::Float64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1963,7 +2027,7 @@ fn generate_tagged_field_content_size(
         FieldType::Uuid => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(16)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(16)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(16);", indent)?;
@@ -1977,7 +2041,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(
@@ -1987,7 +2051,7 @@ fn generate_tagged_field_content_size(
                 )?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -1995,7 +2059,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -2004,13 +2068,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -2024,13 +2088,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let bytes_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let bytes_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}        let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -2038,7 +2102,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -2047,13 +2111,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let bytes_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let bytes_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -2067,7 +2131,7 @@ fn generate_tagged_field_content_size(
             // Array length prefix (varint(len+1))
             writeln!(
                 file,
-                "{}    array_size += crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1);",
+                "{}    array_size += crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1);",
                 indent, accessor
             )?;
             // Element sizes
@@ -2081,7 +2145,7 @@ fn generate_tagged_field_content_size(
                         writeln!(file, "{}        let elem_len = element.len() as u32;", indent)?;
                         writeln!(
                             file,
-                            "{}        array_size += crate::common::protocol::ByteUtils::size_of_unsigned_varint(elem_len + 1);",
+                            "{}        array_size += crate::common::utils::ByteUtils::size_of_unsigned_varint(elem_len + 1);",
                             indent
                         )?;
                         writeln!(file, "{}        array_size += elem_len as i32;", indent)?;
@@ -2097,7 +2161,7 @@ fn generate_tagged_field_content_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(array_size as u32)); // size prefix",
+                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(array_size as u32)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(array_size);", indent)?;
@@ -2123,7 +2187,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -2141,7 +2205,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -2153,7 +2217,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for 1 byte",
+                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for 1 byte",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(1); // varint(0) null indicator", indent)?;
@@ -2166,7 +2230,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(struct_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
@@ -2722,7 +2786,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    let bytes = val.as_bytes();", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                    let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2754,7 +2818,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
                             writeln!(
                                 file,
-                                "{}                let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -4151,7 +4215,7 @@ fn generate_field_write(
             } else {
                 // Non-nullable: clone the owned handle rather than `std::mem::take`.
                 // A `bytes::Bytes` clone is a reference-count bump that copies no
-                // payload (still zero-copy per CLAUDE.md §12), and — unlike
+                // payload (still zero-copy per CLAUDE.md §14), and — unlike
                 // `std::mem::take` — it does NOT mutate the message as a side effect
                 // of serialising, mirroring the nullable path above. `std::mem::take`
                 // left the field empty after a `write`, so a second `write` emitted an
@@ -4692,7 +4756,7 @@ fn generate_schema_method(
         let schema_type_expr = schema_type_expr_for_field(field, flexible_versions);
         let about_escaped = field.about().replace('"', "\\\"");
         let push_stmt = format!(
-            "fields.push(Field {{ name: \"{}\", field_type: {}, about: \"{}\" }});",
+            "fields.push(Field::new(\"{}\", {}, \"{}\"));",
             field_name, schema_type_expr, about_escaped,
         );
 
@@ -5006,9 +5070,10 @@ fn generate_stub_file(file_name: &str, output_dir: &Path) -> Result<(), Box<dyn 
 
     writeln!(file, "//! Generated from {}.json (stub due to parse error)", file_name)?;
     writeln!(file)?;
-    writeln!(file, "#![allow(dead_code)]")?;
+    writeln!(file, "#![expect(dead_code)]")?;
     writeln!(file)?;
     writeln!(file, "#[derive(Debug, Clone)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub struct {}Data {{", file_name)?;
     writeln!(file, "    // Fields will be generated when spec can be parsed")?;
     writeln!(file, "}}")?;

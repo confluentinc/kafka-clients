@@ -14,9 +14,9 @@
 
 //! Translated from `org.apache.kafka.common.errors.WakeupException`.
 
-use crate::common::error::kafka_error_class;
+use crate::common::error::kafka_error_type;
 
-kafka_error_class! {
+kafka_error_type! {
     /// A blocking operation was preempted by `wakeup()`.
     ///
     /// Corresponds to Java's `WakeupException`, thrown from a blocking
@@ -28,6 +28,7 @@ kafka_error_class! {
     ///
     /// Like [`SerializationError`](super::SerializationError) it bypasses
     /// `ApiException`.
+    #[doc(alias = "org.apache.kafka.common.errors.WakeupException")]
     WakeupError,
     extends: [
         is_kafka_error,

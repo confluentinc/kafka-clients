@@ -18,6 +18,7 @@ use std::fmt;
 
 /// Information about a Kafka node.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.Node")]
 pub struct Node {
     id: i32,
     id_string: String,
@@ -32,32 +33,38 @@ static NO_NODE: std::sync::LazyLock<Node> = std::sync::LazyLock::new(|| Node::ne
 
 impl Node {
     /// Creates a new `Node` with no rack and not fenced.
+    #[doc(alias = "org.apache.kafka.common.Node#Node")]
     pub fn new(id: i32, host: String, port: i32) -> Self {
         Self::with_rack(id, host, port, None)
     }
 
     /// Creates a new `Node` with the given rack.
+    #[doc(alias = "org.apache.kafka.common.Node#Node")]
     pub fn with_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
         Self::with_rack_is_fenced(id, host, port, rack, false)
     }
 
     /// Creates a new `Node` with the given rack and fenced status.
+    #[doc(alias = "org.apache.kafka.common.Node#Node")]
     pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
         Self { id, id_string: id.to_string(), host, port, rack, is_fenced }
     }
 
     /// Returns a sentinel node representing no node.
+    #[doc(alias = "org.apache.kafka.common.Node#noNode")]
     pub fn no_node() -> &'static Node {
         &NO_NODE
     }
 
     /// Check whether this node is empty, which may be the case if `no_node()` is used
     /// as a placeholder in a response payload with an error.
+    #[doc(alias = "org.apache.kafka.common.Node#isEmpty")]
     pub fn is_empty(&self) -> bool {
         self.host.is_empty() || self.port < 0
     }
 
     /// The node id of this node.
+    #[doc(alias = "org.apache.kafka.common.Node#id")]
     pub fn id(&self) -> i32 {
         self.id
     }
@@ -65,26 +72,31 @@ impl Node {
     /// String representation of the node id.
     /// Typically the integer id is used to serialize over the wire, the string
     /// representation is used as an identifier with NetworkClient code.
+    #[doc(alias = "org.apache.kafka.common.Node#idString")]
     pub fn id_string(&self) -> &str {
         &self.id_string
     }
 
     /// The host name for this node.
+    #[doc(alias = "org.apache.kafka.common.Node#host")]
     pub fn host(&self) -> &str {
         &self.host
     }
 
     /// The port for this node.
+    #[doc(alias = "org.apache.kafka.common.Node#port")]
     pub fn port(&self) -> i32 {
         self.port
     }
 
     /// True if this node has a defined rack.
+    #[doc(alias = "org.apache.kafka.common.Node#hasRack")]
     pub fn has_rack(&self) -> bool {
         self.rack.is_some()
     }
 
     /// The rack for this node.
+    #[doc(alias = "org.apache.kafka.common.Node#rack")]
     pub fn rack(&self) -> Option<&str> {
         self.rack.as_deref()
     }
@@ -93,6 +105,7 @@ impl Node {
     ///
     /// This applies to broker nodes only. For controller quorum nodes, this field
     /// is not relevant and is defined to be `false`.
+    #[doc(alias = "org.apache.kafka.common.Node#isFenced")]
     pub fn is_fenced(&self) -> bool {
         self.is_fenced
     }

@@ -28,6 +28,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeLogDirsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse")]
 pub struct DescribeLogDirsResponse {
     data: DescribeLogDirsResponseData,
 }
@@ -42,6 +43,7 @@ impl DescribeLogDirsResponse {
     pub const UNKNOWN_VOLUME_BYTES: i64 = -1;
 
     /// Creates a new `DescribeLogDirsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#DescribeLogDirsResponse")]
     pub fn new(data: DescribeLogDirsResponseData) -> Self {
         Self { data }
     }
@@ -52,6 +54,7 @@ impl DescribeLogDirsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#data")]
     pub fn data(&self) -> &DescribeLogDirsResponseData {
         &self.data
     }
@@ -62,17 +65,20 @@ impl DescribeLogDirsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the error counts: the top-level error code plus one per
     /// per-directory result (mirrors `DescribeLogDirsResponse.errorCounts`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         counts.insert(Errors::for_code(self.data.error_code), 1);
@@ -88,12 +94,14 @@ impl DescribeLogDirsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeLogDirsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

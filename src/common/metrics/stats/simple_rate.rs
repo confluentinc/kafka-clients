@@ -14,7 +14,8 @@
 
 //! A simple incremental rate (`org.apache.kafka.common.metrics.stats.SimpleRate`).
 
-use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
+use crate::common::metrics::TimeUnit;
+use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::stats::Rate;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
@@ -29,6 +30,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// no inheritance, so we compose a `Rate` and re-implement `measure` using the
 /// overridden `window_size` (Java's `measure` is on `Rate`, calling the virtual
 /// `windowSize`).
+#[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate")]
 pub struct SimpleRate {
     rate: Rate,
 }
@@ -41,6 +43,7 @@ impl SimpleRate {
 
     /// Compute the window size in milliseconds, overriding [`Rate::window_size`]:
     /// `max(elapsed, config.timeWindowMs())`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate#windowSize")]
     pub fn window_size(&self, config: &MetricConfig, now: i64) -> i64 {
         let stat = self.rate.stat();
         stat.purge_obsolete_samples(config, now);
@@ -73,8 +76,8 @@ impl Measurable for SimpleRate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     fn record(rate: &SimpleRate, config: &MetricConfig, time: &MockTime, value: f64) {
         rate.record(config, value, time.milliseconds());

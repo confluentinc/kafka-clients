@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 /// A topic name and partition number.
 #[derive(Clone, Debug, Eq)]
+#[doc(alias = "org.apache.kafka.common.TopicPartition")]
 pub struct TopicPartition {
     partition: i32,
     topic: Arc<str>,
@@ -26,16 +27,19 @@ pub struct TopicPartition {
 
 impl TopicPartition {
     /// Creates a new `TopicPartition` with the given topic and partition.
+    #[doc(alias = "org.apache.kafka.common.TopicPartition#TopicPartition")]
     pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
         Self { partition, topic: topic.into() }
     }
 
     /// Returns the partition number.
+    #[doc(alias = "org.apache.kafka.common.TopicPartition#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
     /// Returns the topic name.
+    #[doc(alias = "org.apache.kafka.common.TopicPartition#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
