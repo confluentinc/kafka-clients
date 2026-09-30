@@ -93,7 +93,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
-    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig")]
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_set = false;

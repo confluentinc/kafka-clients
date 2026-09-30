@@ -1331,7 +1331,9 @@ impl AllowList {
     }
 
     /// Parses `text`: a line is `<key>  # <reason>`, and the reason is
-    /// required; blank lines and lines starting with `#` are comments.
+    /// required; blank lines and lines starting with `#` are comments. The
+    /// reason starts at the first `#` after whitespace, since a member marker
+    /// key (`Class#member`) contains a `#` of its own.
     fn parse(file: &str, text: &str) -> (Self, Vec<String>) {
         let mut list = AllowList::default();
         let mut errors = Vec::new();
@@ -1340,7 +1342,10 @@ impl AllowList {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (key, reason) = line.split_once('#').map_or((line, ""), |(k, r)| (k.trim(), r.trim()));
+            let reason_at = line
+                .char_indices()
+                .find(|&(at, c)| c == '#' && line[..at].ends_with(char::is_whitespace));
+            let (key, reason) = reason_at.map_or((line, ""), |(at, _)| (line[..at].trim(), line[at + 1..].trim()));
             if key.is_empty() || key.contains(char::is_whitespace) || reason.is_empty() {
                 errors.push(format!("{file}:{}: expected `<key>  # <reason>`, found `{line}`", i + 1));
                 continue;
@@ -1552,7 +1557,24 @@ impl PublicAudience {
                     continue;
                 };
                 checked += 1;
-                if visibility != java::Visibility::Public && !self.allow.allows(&[marker.as_str()]) {
+                if self.allow.allows(&[marker.as_str()]) {
+                    continue;
+                }
+                let visibility = match visibility {
+                    java::MemberVisibility::Known(visibility) => visibility,
+                    java::MemberVisibility::Ambiguous(public) => {
+                        findings.push(format!(
+                            "{}: `{}` is marked `{}`, only some of whose overloads are public in Java; mark the \
+                             overload it translates: {}",
+                            file.display(),
+                            item.name,
+                            marker.trim_start_matches(java::MARKER_PREFIX),
+                            public.iter().map(|s| format!("`#{s}`")).collect::<Vec<_>>().join(", ")
+                        ));
+                        continue;
+                    },
+                };
+                if visibility != java::Visibility::Public {
                     findings.push(format!(
                         "{}: `{}` is public but translates `{}`, which is {} in Java; make it `pub(crate)`",
                         file.display(),
@@ -2353,6 +2375,23 @@ mod tests {
         assert_eq!(
             list,
             ["org.apache.kafka.A".to_string(), "org.apache.kafka.B".to_string()].into()
+        );
+    }
+
+    /// A member marker key carries a `#` of its own; the reason starts at the
+    /// first `#` after whitespace.
+    #[test]
+    fn test_allow_list_parses_member_marker_keys() {
+        let text = "# comment\n\
+                    org.apache.kafka.clients.A#m(String,int)  # a reason # with a hash\n\
+                    crate::x::Y  # another\n\
+                    org.apache.kafka.clients.A#m\n";
+        let (list, errors) = AllowList::parse("allow.txt", text);
+        let keys: Vec<&str> = list.entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["org.apache.kafka.clients.A#m(String,int)", "crate::x::Y"]);
+        assert_eq!(
+            errors,
+            ["allow.txt:4: expected `<key>  # <reason>`, found `org.apache.kafka.clients.A#m`"]
         );
     }
 }

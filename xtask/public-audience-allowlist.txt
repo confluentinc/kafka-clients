@@ -5,8 +5,10 @@
 # One entry per line: `<key>  # <reason>`; the reason is required. A key is a
 # Rust path (`crate::<module>::<Name>`, the file module dropped or not), a Java
 # class (`org.apache.kafka.<pkg>.<Class>`) or a C symbol prefix
-# (`kafka_<pkg>_<Class>`); `*` matches any run of characters. An entry that no
-# longer lets anything through is reported as stale.
+# (`kafka_<pkg>_<Class>`), or a Java method marker
+# (`org.apache.kafka.<pkg>.<Class>#<method>(T1,T2)`) for a public Rust method
+# translating a Java method that is not public; `*` matches any run of
+# characters. An entry that no longer lets anything through is reported as stale.
 
 # --- Java classes outside `@InterfaceAudience.Public` that are public anyway ---
 
@@ -39,6 +41,10 @@ crate::consumer::consumer_partition_assignor::SubscriptionOptions*  # Subscripti
 crate::consumer::consumer_record::ConsumerRecordOptions*  # ConsumerRecord constructor overloads
 crate::producer::mock_producer::MockProducerOptions*  # MockProducer constructor overloads
 crate::producer::producer_record::ProducerRecordOptions*  # ProducerRecord constructor overloads
+
+# --- Public methods translating a Java method that is not public ---
+
+org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(ProducerConfig,LogContext,Metrics,Serializer,Serializer,ProducerMetadata,RecordAccumulator,TransactionManager,Sender,ProducerInterceptors,Partitioner,Time,SenderThread,Optional)  # `with_partitioner`: Java loads a custom `Partitioner` (a public interface) from `partitioner.class` by reflection, which Rust lacks, so the instance is passed in; this test-visible constructor is the only Java one taking it
 
 # --- C-only handles: a Java collection, `Properties` or `String` crossing FFI ---
 

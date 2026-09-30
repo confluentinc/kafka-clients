@@ -69,7 +69,7 @@ impl KafkaConsumer {
     // rather than re-wrapping it in a type whose only content is 55 forwarding
     // methods. See the type-level comment above.
     #[expect(clippy::new_ret_no_self)]
-    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new<K, V>(
         config: ConsumerConfig,
         key_deserializer: Box<dyn Deserializer<K>>,

@@ -37,7 +37,9 @@ impl AccessControlEntryFilter {
     /// * `host` - the host or `None`
     /// * `operation` - operation
     /// * `permission_type` - permission type
-    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#AccessControlEntryFilter")]
+    #[doc(
+        alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#AccessControlEntryFilter(String,String,AclOperation,AclPermissionType)"
+    )]
     pub fn new(
         principal: Option<String>,
         host: Option<String>,

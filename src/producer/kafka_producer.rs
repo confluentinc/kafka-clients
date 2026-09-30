@@ -828,7 +828,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///     Box::new(StringSerializer::default()),
     /// ).expect("Failed to create producer");
     /// ```
-    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer")]
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map,Serializer,Serializer)")]
     pub fn new(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
@@ -884,7 +884,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// — is returned relabelled as Java's
     /// `KafkaException("Failed to construct kafka producer", t)`, an
     /// [`Error::KafkaError`] carrying the underlying failure as its source.
-    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer")]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(ProducerConfig,LogContext,Metrics,Serializer,Serializer,ProducerMetadata,RecordAccumulator,TransactionManager,Sender,ProducerInterceptors,Partitioner,Time,SenderThread,Optional)"
+    )]
     pub fn with_partitioner(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,

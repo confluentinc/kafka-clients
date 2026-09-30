@@ -243,13 +243,16 @@ impl JavaClass {
     }
 
     /// The visibility of method `member` — a name or an overload signature
-    /// `name(T1,T2)`: for a name, the widest of its overloads, since the Rust
-    /// item may translate any of them. `None` when the class declares no such
+    /// `name(T1,T2)`. For a name, the widest of its overloads when they are
+    /// all public or all not; when only some are public the name does not say
+    /// which one the Rust item translates, and the result is
+    /// [`MemberVisibility::Ambiguous`]. `None` when the class declares no such
     /// method (a field, or an unknown member).
-    pub fn visibility(&self, member: &str) -> Option<Visibility> {
+    pub fn visibility(&self, member: &str) -> Option<MemberVisibility> {
         let name = member.split_once('(').map_or(member, |(name, _)| name);
         let is_signature = name.len() < member.len();
-        self.overloads
+        let overloads: Vec<&Overload> = self
+            .overloads
             .iter()
             .filter(|o| {
                 if is_signature {
@@ -258,9 +261,29 @@ impl JavaClass {
                     o.name == name
                 }
             })
-            .map(|o| o.visibility)
-            .max()
+            .collect();
+        let widest = overloads.iter().map(|o| o.visibility).max()?;
+        let public: Vec<String> = overloads
+            .iter()
+            .filter(|o| o.visibility == Visibility::Public)
+            .map(|o| o.signature())
+            .collect();
+        if public.is_empty() || public.len() == overloads.len() {
+            Some(MemberVisibility::Known(widest))
+        } else {
+            Some(MemberVisibility::Ambiguous(public))
+        }
     }
+}
+
+/// The visibility of a marker's method.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MemberVisibility {
+    /// The method's visibility (for a name, the widest of its overloads).
+    Known(Visibility),
+    /// A method name some of whose overloads are public and some not: the
+    /// marker must name the overload. Holds the public signatures.
+    Ambiguous(Vec<String>),
 }
 
 /// The Rust names a Java method translates to, before any `_with_..` suffix.
@@ -1033,11 +1056,23 @@ mod tests {
             }
         "#;
         let outer = class_of(src, &["Outer"]);
-        let vis = |class: &JavaClass, member: &str| class.visibility(member);
+        let vis = |class: &JavaClass, member: &str| match class.visibility(member) {
+            Some(MemberVisibility::Known(v)) => Some(v),
+            Some(MemberVisibility::Ambiguous(public)) => panic!("`{member}` is ambiguous: {public:?}"),
+            None => None,
+        };
         assert_eq!(vis(&outer, "Outer()"), Some(Visibility::Public));
         assert_eq!(vis(&outer, "Outer(int)"), Some(Visibility::Private));
-        // A name alone matches its widest overload.
-        assert_eq!(vis(&outer, "Outer"), Some(Visibility::Public));
+        // A name alone, when only some of its overloads are public, does not
+        // say which one it translates.
+        assert_eq!(
+            outer.visibility("Outer"),
+            Some(MemberVisibility::Ambiguous(vec!["Outer()".into()]))
+        );
+        assert_eq!(
+            outer.visibility("tags"),
+            Some(MemberVisibility::Ambiguous(vec!["tags()".into()]))
+        );
         assert_eq!(vis(&outer, "hook"), Some(Visibility::Protected));
         assert_eq!(vis(&outer, "helper"), Some(Visibility::Package));
         assert_eq!(vis(&outer, "tags(String[])"), Some(Visibility::Private));

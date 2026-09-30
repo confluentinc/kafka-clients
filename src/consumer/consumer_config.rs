@@ -549,7 +549,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
-    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to

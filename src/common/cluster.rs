@@ -62,7 +62,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set)")]
     pub fn new(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -93,7 +93,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Node)")]
     pub fn with_controller(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -125,7 +125,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node)")]
     pub fn with_invalid_topics_controller(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -157,7 +157,7 @@ impl Cluster {
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
     #[expect(clippy::too_many_arguments)]
-    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node,Map)")]
     pub fn with_invalid_topics_controller_topic_ids(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
