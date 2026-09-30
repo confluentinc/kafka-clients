@@ -1,5 +1,48 @@
 # Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
 
+> **Paths (2026-09-27):** the repository was split into `rust/`, `python/` and
+> `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,
+> `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
+> formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
+
+> **Current state (2026-09-27, re-verified against the tree):** several
+> statements further down this file were true when written and are now
+> false. The corrections:
+>
+> - **Admin bindings exist.** `src/ffi/admin.rs` exports 490 symbols (47 of
+>   them `*_async`) around `kafka_admin_AdminClient_t`, and
+>   `python/admin.py` provides `Admin` / `AdminClient` / `MockAdminClient`
+>   and their `Async*` twins. Every "C FFI / Python bindings deferred" line
+>   below is historical.
+> - **The admin client supports security.** `AdminClientConfig` carries
+>   `security.protocol` and the SSL / SASL settings, and
+>   `KafkaAdminClient::new` builds its channel builder from them
+>   (`src/admin/kafka_admin_client.rs:325`). The "hardcode `PLAINTEXT`"
+>   reason for the delegation-token and SCRAM integration deferral no longer
+>   applies. Authenticating with those credentials still needs SASL/SCRAM,
+>   which is not implemented (SASL is PLAIN only). `bootstrap.controllers`
+>   (KIP-919) is still unsupported (`:313`).
+> - **44 admin RPCs, not 46.** Java's deprecated `listConsumerGroups` and
+>   `listClientMetricsResources` were removed (CLAUDE.md §3). The trait at
+>   `src/admin/mod.rs:240` declares 94 sync `fn`s (44 of them required) plus
+>   `async fn close` / `close_with_timeout`, and the naming uses
+>   `_with_options` (e.g. `create_topics_with_options`).
+> - **Lib tests: 4144** (`cargo test --lib -- --list`), **4361 with
+>   `--features ffi`**. Integration: 27 files, 109 `#[tokio::test]`s. The
+>   cargo test targets are `producer`, `consumer`, `integration` and the
+>   opt-in `performance`; the `common` target (`tests/main.rs`) is gone, its
+>   message/protocol tests now in-crate under `src/common/message/`.
+> - **Crate size:** 777 files, ~334,000 lines under `src/`.
+> - **The FFI dispatcher** (`CompletionJob`, `spawn_dispatcher`,
+>   `enqueue_or_run_inline`) is at `src/ffi/common.rs:1922-1949`, not
+>   `:214-241`.
+> - **Error model:** `KafkaGenericError` and the 13-variant `KafkaError` enum
+>   are gone. The error type is `common::Error` (162 variants), with Java's
+>   `KafkaException` as the embedded `KafkaError` struct; see `design.md` →
+>   Error Handling.
+> - **Wire specs:** `generator/messages/` holds 198 specs (Kafka 4.3.1), and
+>   `generator/test-messages/` holds 4.
+
 > **Public surface restricted (2026-09-25):** the Rust crate and the C API now
 > export only what Java's audience allows (`@InterfaceAudience.Public` at 4.4,
 > outside `internal*` and "not a supported API" packages), enforced by
@@ -44,13 +87,13 @@
 > and Tier 3 sections further down the same file.
 >
 > **On the "C FFI / Python bindings deferred" scope line repeated throughout
-> this file:** it is still true *for Admin* — there is no Admin FFI
-> (`grep -r kafka_admin_ src/ffi/` is empty) and no admin Python module. It
-> is no longer true of the client as a whole: `src/ffi/producer.rs`,
+> this file:** when this banner was written it was still true *for Admin*.
+> It no longer is — see the 2026-09-27 banner at the top. It was already
+> untrue of the client as a whole: `src/ffi/producer.rs`,
 > `src/ffi/consumer.rs` and `src/ffi/common.rs` all exist (Milestones 4, 9,
-> 10), as do `bindings/python/{producer,consumer}.py` and the C test suite
-> under `bindings/c/tests/`. The "async dispatcher in PR #116" that the
-> deferral notes point at is now in-tree at `src/ffi/common.rs:214-241`
+> 10), as do `python/{producer,consumer}.py` and the C test suite
+> under `c/tests/`. The "async dispatcher in PR #116" that the
+> deferral notes point at is now in-tree at `src/ffi/common.rs:1922-1949`
 > (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`).
 >
 > The sections immediately below (Milestone 1 / Milestone 3) are **historical and
@@ -141,8 +184,9 @@ harness (Milestone 6), the translation agent (Milestone 7), and the entire
 consumer (Milestone 8), which is now the largest module in the crate.
 
 For current scope and progress use `design/history/MILESTONES.md` and the
-per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
-`design/current/client-comparison-results.md`, which is kept current.
+per-phase `design/history/Milestone-N/**/PLAN.md` files. (This paragraph used
+to point at `design/current/client-comparison-results.md` for performance;
+that file has been removed — see the document inventory note at the end.)
 
 ## Completed Components (Milestones 1 and 3 — historical detail)
 
@@ -260,11 +304,11 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 
 ## Test Coverage
 
-> These counts are the Milestone-3-era snapshot. **Current: 3172 lib tests**
-> and 28 integration test files carrying 166 `#[tokio::test]`s (plus the cases
-> the multilanguage test macro generates), across five cargo test targets:
-> `common`, `producer`, `consumer`, `integration` and the opt-in
-> `performance`.
+> These counts are the Milestone-3-era snapshot. **Current (2026-09-27): 4144
+> lib tests** (4361 with `--features ffi`) and 27 integration test files
+> carrying 109 `#[tokio::test]`s (plus the cases the multilanguage test macros
+> generate), across four cargo test targets: `producer`, `consumer`,
+> `integration` and the opt-in `performance`.
 
 - **579 unit tests** + **16 integration tests** (595 total) all passing *(as of Milestone 3)*
 - Integration tests run against Kafka 4.2.0 in Docker (feature-gated: `--features integration-tests`)
@@ -757,7 +801,11 @@ independent of other Tier 3 phases.
 - **Integration deferred (documented)**: delegation-token creation requires a
   SASL-authenticated connection, but `AdminClientConfig`/`from_config` have no
   SASL support yet (hardcode `PLAINTEXT`) — SASL-in-admin-client is a separate
-  feature. The behavioral contract is covered by the mock unit tests per finding
+  feature. *(2026-09-27: the PLAINTEXT hardcode is gone — the admin client
+  builds its channel from `security.protocol`, `kafka_admin_client.rs:325`.
+  Whether the integration suite now creates tokens over a SASL/PLAIN
+  connection has not been re-verified; authenticating *with* a token needs
+  SASL/SCRAM, which is not implemented.)* The behavioral contract is covered by the mock unit tests per finding
   #10. Nothing broken registered in `main.rs`.
 - `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
 - Critic: **CLEAN on first pass — no fix cycle needed** (MockAdminClient fidelity
@@ -940,10 +988,12 @@ RPCs: `describeUserScramCredentials` (`LeastLoadedNodeProvider`),
 All 46/46 in-scope Admin RPCs translated: Tier 1 (17), Tier 2 (9), Tier 3
 Phases 1–7 (20). Rust core + unit tests + real-broker integration throughout; every
 phase Critic-reviewed to clean. 3029 lib tests passing at the time of this
-entry; **3172 today** (later, non-Admin work on the branch).
+entry; **4144 as of 2026-09-27** (later work on the branch).
 
-The 46 count is still verifiable at the trait: `src/admin/mod.rs` declares 46
-plain `fn` RPC methods and exactly one `async fn` (`close`).
+The 46 count is **no longer** what the trait shows: two deprecated RPCs
+(`list_consumer_groups`, `list_client_metrics_resources`) were later removed,
+so `src/admin/mod.rs` now covers 44 RPCs — 94 sync `fn`s including the
+no-options defaults, plus `async fn close` / `close_with_timeout`.
 
 **Out of scope (unchanged):** C FFI / Python bindings — a separate future task
 (reuse the async dispatcher in PR #116); and Tier 4 — Streams groups, Share
@@ -951,11 +1001,10 @@ groups/KIP-932, KRaft raft-voter admin (`addRaftVoter`/`removeRaftVoter`/
 `describeMetadataQuorum`/`unregisterBroker`), and `ForwardingAdmin` (broker-plugin
 delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 
-> **Status of that first deferral, as of 2026-08-13:** still open **for
-> Admin** — `src/ffi/` contains `common.rs`, `producer.rs`, `consumer.rs` and
-> no admin surface, and there is no admin Python module. The referenced
-> dispatcher no longer has to be pulled from a PR: it is in-tree at
-> `src/ffi/common.rs:214-241`. Tier 4 remains untouched: no
+> **Status of that first deferral, as of 2026-09-27:** **closed.**
+> `src/ffi/admin.rs` (490 exported symbols) and `python/admin.py` now exist.
+> The dispatcher they use is in-tree at `src/ffi/common.rs:1922-1949`. Tier 4
+> remains untouched: no
 > `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
 > `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
 
@@ -1019,7 +1068,7 @@ client behaviour.
   surface — a shared `kafka_common_MetricMap_t` would have renamed the consumer
   symbols). Regenerated `confluent_kafka.h` (build artifact); consumer symbols
   unchanged, header compiles as C11.
-- **Python** (`bindings/python/`): `py_Producer_metrics` in `_confluentkafka.c`
+- **Python** (`python/`): `py_Producer_metrics` in `_confluentkafka.c`
   (mirrors `py_Consumer_metrics`); sync `metrics()` on `_ProducerBase` in
   `producer.py` (shared by sync + async producers).
 - **Proto** (`producer_service.proto`): `rpc Metrics(MetricsRequest) returns
@@ -1057,7 +1106,7 @@ client behaviour.
   container-backed multilanguage arms (`test-integration-c`,
   `test-integration-python`, reached via `test-c` / `test-python`) **self-skip
   off Linux** with a loud notice and exit 0: their gRPC-server Dockerfiles COPY
-  the host-built `target/release/libconfluent_kafka.{a,so}` into a Linux
+  the host-built `rust/target/release/libconfluent_kafka.{a,so}` into a Linux
   container and link with GNU ld, so a macOS host's Mach-O (or absent `.so`)
   artifacts cannot build the images. Those arms are **CI-only** — CI runs
   `make verify` on Linux (`uname -s` == Linux), where the artifacts are native
@@ -1088,19 +1137,37 @@ the working tree** (their content remains in git history):
 | `test-translation-review/00..07` | The consumer test-translation review set |
 | `hour_lib_cpu.csv`, `hour_rust_cpu.csv`, `plot_hour.py` | Raw benchmark data + plotting script |
 
-Eleven references into that set are still live and now dangle — one rule file
-and ten code comments:
+References into that set are still live and now dangle. Re-verified
+2026-09-27; line numbers are as of that date:
 
 | Pointing at | From |
 |---|---|
-| `consumer-join-stall-rootcause.md` | `.claude/rules/consumer-threading.md:208`, `src/common/network/selectable.rs:75`, `src/common/network/selector.rs:1460`, `src/consumer/internals/consumer_network_thread.rs:625`, `src/consumer/internals/network_client_delegate.rs:610` |
-| `consumer-throughput-bottleneck.md` | `src/common/network/network_receive.rs:232`, `:365`, `src/common/network/selector.rs:769`, `:929` |
-| `consumer-latency-findings.md` | `src/consumer/async_kafka_consumer.rs:3883`, `:3951`, `src/consumer/internals/fetch_request_manager.rs:633` |
-| `consumer-metrics-perf-analysis.md` | `src/common/metrics/sensor.rs:590` |
+| `consumer-join-stall-rootcause.md` | `.claude/rules/consumer-threading.md:249`, `.claude/rules/producer-transactions.md:155`, `src/common/network/selectable.rs:94`, `src/common/network/selector.rs:1509`, `src/consumer/internals/consumer_network_thread.rs:573`, `src/consumer/internals/network_client_delegate.rs:648` |
+| `consumer-throughput-bottleneck.md` | `src/common/network/network_receive.rs:240`, `:375`, `src/common/network/selector.rs:800`, `:965` |
+| `consumer-latency-findings.md` | `src/consumer/async_kafka_consumer.rs:4145`, `:4221`, `src/consumer/internals/fetch_request_manager.rs:644` |
+| `consumer-metrics-perf-analysis.md` | `src/common/metrics/sensor.rs:839` |
+| `consumer-perf-benchmark-analysis.md` | `consumer-perf/src/main.rs:17` |
+
+Two further documents were deleted later, in commit `eff912f5`, and are also
+still referenced (paths from the repository root):
+
+| Removed file | What it recorded | Still referenced from |
+|---|---|---|
+| `partitioner.md` | The rationale for the CRC-32 default key hasher (librdkafka `consistent_random` co-partitioning) and the sticky-partitioner behaviour | `rust/src/producer/producer_config.rs:213`, `python/test/performance/partitioner.py:10`, `python/test/performance/producer_performance_test.py:514`, `tools/java-perf-test/README.md:135` |
+| `soak-rss-spike-explainer.md` | An explanation of RSS spikes seen in the Python soak runs | `python/soak/README.md:268`, `:431`, `python/soak/run.sh:92` |
 
 One more reference points at a document that **moved rather than vanished**:
 `src/ffi/consumer.rs:37` cites `design/current/consumer-ffi-plan.md`, which now
 lives at `design/history/Milestone-9/consumer-ffi-plan.md`.
+
+And two tests cite a line range of this file that no longer holds what they
+mean: `tests/integration/admin_delegation_tokens_test.rs:51` and
+`tests/integration/admin_scram_test.rs:71` point at `status.md:606-609` for
+the "admin client is PLAINTEXT-only" limitation. That note is the
+delegation-token "Integration deferred" bullet (Tier 3 Phase 4 above), and the
+limitation it records has since been lifted. Authenticating *with* a SCRAM
+credential or a delegation token is still not possible, but now only because
+the SASL client implements PLAIN alone.
 
 The findings those documents established are summarised in `design.md`
 ([Consumer](design.md#consumer-srcconsumer)); this note exists so the

@@ -94,8 +94,8 @@ export CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT=8
 echo "=== macOS agent diagnostics (post-install) ==="
 brew --version
 cmake --version
-rustc --version
-cargo --version
+# From rust/, so rustup resolves the pinned rust/rust-toolchain.toml.
+(cd rust && rustc --version && cargo --version)
 if [ "${MACOS_SKIP_COLIMA:-}" != "true" ]; then
   docker --version
   colima status
