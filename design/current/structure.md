@@ -218,35 +218,45 @@ pipeline over a single owned buffer — read them in that order.*
 ```
 src/ffi/                # feature-gated: --features ffi
 ├── mod.rs
-├── common.rs           # kafka_common_KafkaError_t (5 exported symbols)
+├── common.rs           # kafka_common_Error_t (61 exported symbols)
 │                       # + the callback dispatcher: CompletionJob,
 │                       # spawn_dispatcher, enqueue_or_run_inline
-├── producer.rs         # 34 exported symbols (7 of them *_async)
-└── consumer.rs         # 149 exported symbols (20 of them *_async)
+├── producer.rs         # 65 exported symbols (13 of them *_async)
+├── consumer.rs         # 182 exported symbols (30 of them *_async), incl.
+│                       # the caller-thread callback queue
+├── consumer_handle.rs  # 23 exported symbols (1 *_async): the reentrant
+│                       # ConsumerHandle a rebalance listener calls back through
+└── admin.rs            # 508 exported symbols (49 of them *_async)
 
 bindings/
 ├── c/
 │   ├── CMakeLists.txt, Makefile, Dockerfile.grpc
-│   ├── tests/{test_kafka_producer,test_kafka_consumer,test_mock_producer,
-│   │          test_mock_consumer,producer_perf_test}.c + unity/ (submodule)
+│   ├── tests/{test_kafka_producer,test_kafka_consumer,test_kafka_admin,
+│   │          test_mock_producer,test_mock_consumer,test_mock_admin,
+│   │          test_consumer_callbacks,producer_perf_test}.c + unity/ (submodule)
 │   └── grpc_server/     # C backend for the multilanguage tests
 └── python/
-    ├── producer.py, consumer.py
+    ├── confluent_kafka/    # the Python client (producer + consumer), generated
+    │   │                   # from CLAUDE.md's Python Binding Conventions
+    │   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
+    │   ├── common/                # value types, KafkaError, errors/,
+    │   │                          # serialization/, config/, …
+    │   └── *_error.py             # Java built-in exceptions at the root
+    ├── admin.py            # older admin binding, paused (not in the package)
     ├── _confluentkafka.c   # hand-written C extension
     ├── grpc_server.py, grpc_server_async.py, grpc_translate.py
-    └── setup.py, pyproject.toml
+    ├── test/{unit,integration,performance}/, soak/
+    └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
-There is **no Admin FFI**: `grep -r kafka_admin_ src/ffi/` returns nothing.
-
-Both bindings expose each operation twice: a synchronous entry point that
+Every binding exposes each operation twice: a synchronous entry point that
 `block_on`s the async API on the runtime the handle owns, and an `*_async`
 one that takes a `*_callback_t` + `user_data`, spawns the future and delivers
-the result through a dispatcher thread (`src/ffi/consumer.rs:155-199` for the
-handle fields; `spawn_dispatcher` / `enqueue_or_run_inline` in
-`src/ffi/common.rs:214-241`). 20 of the consumer's 149 exported symbols and 7
-of the producer's 34 are these `*_async` variants; the rest are the sync forms,
-the accessors and the destructors.
+the result through a dispatcher thread (`src/ffi/consumer.rs:269` for the
+handle struct; `spawn_dispatcher` / `enqueue_or_run_inline` in
+`src/ffi/common.rs:2075-2102`). 30 of the consumer's 182 exported symbols, 13
+of the producer's 65 and 49 of admin's 508 are these `*_async` variants; the
+rest are the sync forms, the accessors and the destructors.
 
 ## tests/
 
