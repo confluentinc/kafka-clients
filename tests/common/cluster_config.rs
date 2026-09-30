@@ -20,6 +20,8 @@
 
 use std::collections::BTreeMap;
 
+use super::kafka_cluster::SASL_USERNAME;
+
 /// Describes cluster requirements for a group of tests.
 ///
 /// Tests with identical `ClusterConfig` share one container.
@@ -90,16 +92,23 @@ impl Default for ClusterConfig {
 /// the ACL admin RPC integration tests (finding #11).
 ///
 /// `KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer`
-/// turns on ACL enforcement; `KAFKA_SUPER_USERS=User:ANONYMOUS` grants the
-/// test client (which connects over the PLAINTEXT listener as the anonymous
-/// principal) blanket access so it is never locked out of managing ACLs.
+/// turns on ACL enforcement; `KAFKA_SUPER_USERS` grants the test client blanket
+/// access so it is never locked out of managing ACLs.
+///
+/// Both principals the client may authenticate as are super users, so the ACL
+/// round-trip scenarios pass identically in every protocol run:
+///   - `User:ANONYMOUS` — the principal over the PLAINTEXT and SSL listeners
+///     (one-way TLS, no client cert), used by the plaintext and SSL runs;
+///   - `User:{SASL_USERNAME}` — the SASL/PLAIN principal the SASL_SSL run
+///     authenticates as.
 pub fn authorizer_single_broker() -> ClusterConfig {
     let mut props = BTreeMap::new();
     props.insert(
         "KAFKA_AUTHORIZER_CLASS_NAME".to_string(),
         "org.apache.kafka.metadata.authorizer.StandardAuthorizer".to_string(),
     );
-    props.insert("KAFKA_SUPER_USERS".to_string(), "User:ANONYMOUS".to_string());
+    // Semicolon-separated (Kafka's super.users delimiter).
+    props.insert("KAFKA_SUPER_USERS".to_string(), format!("User:ANONYMOUS;User:{SASL_USERNAME}"));
     ClusterConfig::with_properties(props)
 }
 
