@@ -15,9 +15,9 @@
 //! Translated from `org.apache.kafka.clients.consumer.ConsumerConfigTest`.
 //!
 //! Skipped tests:
-//! - `testOverrideClientId`, `testOverrideEnableAutoCommit` — exercise
-//!   Java's `postProcessParsedConfig`, which is deferred to a later phase
-//!   per PLAN.md "Cross-field validation".
+//! - `testOverrideEnableAutoCommit` — exercises Java's
+//!   `postProcessParsedConfig` auto-commit override, which is deferred to a
+//!   later phase per PLAN.md "Cross-field validation".
 //! - `testAppendDeserializerToConfig`,
 //!   `testAppendDeserializerToConfigWithException` — exercise the Java
 //!   static `appendDeserializerToConfig` helper that mutates a typed
@@ -71,6 +71,15 @@ fn test_default_partition_assignor_is_accepted() {
     // Default is empty in the Rust struct; the actual class-name list is
     // tracked silently for forward compatibility.
     assert!(config.partition_assignment_strategy().is_empty());
+}
+
+/// Translated from `ConsumerConfigTest.testOverrideClientId`.
+#[test]
+fn test_override_client_id() {
+    let mut props = base_props();
+    props.insert(ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string());
+    let config = ConsumerConfig::new(&props).unwrap();
+    assert!(!config.client_id().is_empty());
 }
 
 /// Translated from `ConsumerConfigTest.testInvalidGroupInstanceId`.
