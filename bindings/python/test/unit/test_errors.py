@@ -752,6 +752,23 @@ def test_from_ffi_error_chains_the_core_cause(monkeypatch: pytest.MonkeyPatch) -
     assert from_ffi_error(0, cause=explicit).__cause__ is explicit
 
 
+@pytest.mark.parametrize("outer", [UnknownServerError, RecordDeserializationError])
+def test_copy_and_pickle_keep_the_core_cause(monkeypatch: pytest.MonkeyPatch,
+                                              outer: type[BaseException]) -> None:
+    # The core's cause is set after construction, so the constructor arguments
+    # do not carry it. RecordDeserializationError is built without its
+    # constructor (the core reports no record), the other path of __reduce__.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        outer._ffi_id,  # type: ignore[attr-defined]
+        "outer", source={1: (TopicAuthorizationError._ffi_id, "inner")}))
+    err = from_ffi_error(0)
+    assert type(err) is outer
+    for clone in (copy.copy(err), copy.deepcopy(err), pickle.loads(pickle.dumps(err))):
+        assert type(clone) is outer and str(clone) == "outer"
+        assert type(clone.__cause__) is TopicAuthorizationError
+        assert str(clone.__cause__) == "inner"
+
+
 _PAYLOADS: list[tuple[type[BaseException], dict[str, Any], str, Any]] = [
     (TopicAuthorizationError, {"unauthorized_topics": ["a", "b"]},
      "unauthorized_topics", {"a", "b"}),
