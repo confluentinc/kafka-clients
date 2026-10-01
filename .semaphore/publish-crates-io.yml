@@ -1,34 +1,70 @@
 version: v1.0
 name: publish-crates-io
-# Manual promotion target from semaphore.yml. Run it only on a green build of
-# the current master tip to publish the confluent-kafka version in
-# Cargo.toml; nothing here re-runs the test suite, and any other branch or
-# commit is refused. Verify and publish run on separate single-use VMs, so no
-# build-time code (build scripts, proc macros) runs on the VM where the
-# crates.io token is loaded.
+# TEST MODE: the "Publish to crates.io" block and the master / tip-of-master
+# guards are removed so the pipeline can be exercised from a branch without
+# uploading anything. The promoted verify-crates-io-release.yml then checks the
+# version already on crates.io. Restore both (revert the commit that removed
+# them) before this is used for a real release.
+#
+# Manual promotion target from semaphore.yml ("Publish to crates.io"). It
+# publishes the confluent-kafka version in rust/Cargo.toml, and only when:
+#   - the build is the current tip of master,
+#   - the person promoting typed that same version as CRATE_VERSION, and
+#   - every job listed in REQUIRED_CI_JOBS passed on this build (each passed
+#     job of a master build leaves a ci-passed/<job> marker; see the global
+#     epilogue in semaphore.yml).
+# Any other build, version or CI state is refused before the token is loaded.
+#
+# "Verify package" and "Smoke test package" build and run the crate on VMs
+# with no secret. "Publish to crates.io" runs on its own single-use VM and
+# compiles nothing (`--list`, `--no-verify`), so no build-time code (build
+# scripts, proc macros) runs where the crates.io token is loaded. When it
+# passes, verify-crates-io-release.yml checks the crate crates.io now serves.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
 global_job_config:
+  env_vars:
+    - name: CRATE
+      value: confluent-kafka
+    # Every job of build-test-release that must pass before a release, by its
+    # exact name in semaphore.yml, separated by ';'. A job missing here is not
+    # gated; a renamed job blocks releases until this list follows it.
+    - name: REQUIRED_CI_JOBS
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64)"
   prologue:
     commands:
       - checkout
-      # PR builds report the PR's target branch in SEMAPHORE_GIT_BRANCH, so the
-      # ref type check is what excludes them.
+      # TEST MODE: the master-branch and tip-of-master guards are removed here
+      # (see the header).
+      # The version comes from the reviewed commit; CRATE_VERSION is only a
+      # typed confirmation of it. /usr/bin/python3 is the image's system
+      # Python (3.12 on Ubuntu 24.04), which has tomllib.
       - |
-        if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
-          echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
+        manifest_version=$(/usr/bin/python3 -c 'import tomllib; print(tomllib.load(open("rust/Cargo.toml", "rb"))["package"]["version"])') \
+          || { echo "Refusing to publish: could not read [package] version from rust/Cargo.toml" >&2; exit 1; }
+        if [ "${CRATE_VERSION:-}" != "${manifest_version}" ]; then
+          echo "Refusing to publish: you entered CRATE_VERSION '${CRATE_VERSION:-}', but rust/Cargo.toml at this commit has '${manifest_version}'" >&2
           exit 1
         fi
-      # Promotions can be clicked on any past master build, and a crates.io
-      # version can never be replaced, so only the current tip may publish.
+      # Semaphore lets a manual promotion run on a failed or unfinished
+      # pipeline, so the green build is checked here: every required job must
+      # have left its marker. The name mapping matches semaphore.yml's epilogue.
       - |
-        git fetch --quiet origin master
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
-          echo "Refusing to publish: $(git rev-parse HEAD) is not the current tip of master ($(git rev-parse FETCH_HEAD)); promote the latest master build" >&2
+        missing=""
+        while IFS= read -r job; do
+          [ -n "${job}" ] || continue
+          marker=$(printf '%s' "${job}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+          if ! artifact pull workflow "ci-passed/${marker}" --destination /tmp/ci-passed-check --force >/dev/null 2>&1; then
+            missing="${missing}  - ${job}\n"
+          fi
+        done <<< "$(printf '%s' "${REQUIRED_CI_JOBS}" | tr ';' '\n')"
+        if [ -n "${missing}" ]; then
+          printf 'Refusing to publish: these CI jobs have not passed on this build:\n%bWait for the build to go green, or rerun the failed jobs, then promote again.\n' "${missing}" >&2
           exit 1
         fi
+        echo "All required CI jobs passed on this build; continuing with ${CRATE} ${CRATE_VERSION}"
 
 blocks:
   - name: "Verify package"
@@ -41,29 +77,43 @@ blocks:
             # publish block doesn't, and both blocks must package the same tree.
             - sudo apt install -y cmake rustup
             - cd rust
-            - cargo package -p confluent-kafka --locked
-            # crates.io rejects these at upload; cargo package only warns or doesn't check.
+            # Packages and builds the crate exactly as cargo publish will.
+            - cargo package -p "${CRATE}" --locked
+            # crates.io rejects these at upload; cargo package only warns.
             - |
-              cargo metadata --no-deps --format-version 1 | jq -e '.packages[] | select(.name == "confluent-kafka") | ((.description // "") != "") and (((.license // "") != "") or .license_file != null)' >/dev/null \
+              cargo metadata --no-deps --format-version 1 | jq -e --arg crate "${CRATE}" '.packages[] | select(.name == $crate) | ((.description // "") != "") and (((.license // "") != "") or .license_file != null)' >/dev/null \
                 || { echo "Refusing to publish: crates.io requires a non-empty description and license (or license-file) in [package]" >&2; exit 1; }
-            - |
-              size=$(stat -c%s target/package/confluent-kafka-[0-9]*.crate) || exit 1
-              if [ "$size" -gt 10485760 ]; then
-                echo "Refusing to publish: .crate is ${size} bytes, over crates.io's 10 MiB limit; add an include list to Cargo.toml" >&2
-                exit 1
-              fi
+            # At most 3 MiB (crates.io allows 10 MiB), then the offline smoke
+            # test in a fresh project that depends on the packaged crate.
+            - cargo xtask package-check
 
-  - name: "Publish to crates.io"
-    dependencies: ["Verify package"]
+  - name: "Smoke test package"
+    # The packaged crate against a real broker, before anything is uploaded.
+    # Each job starts a throwaway apache/kafka container (Docker is on the
+    # Ubuntu image) and runs xtask/smoke/main.rs in a fresh project.
+    dependencies: []
     task:
+      prologue:
+        commands:
+          - sudo apt install -y cmake rustup
+          - cd rust
       jobs:
-        - name: "cargo publish"
+        - name: "Rust 1.95 (MSRV), broker round trip"
           commands:
-            - sudo apt install -y rustup
-            - cd rust
-            - cargo package -p confluent-kafka --locked --list
-            # The Vault path keeps the crate's original name.
-            - . vault-get-secret --secret-key=CARGO_REGISTRY_TOKEN crates/confluent-kafka-rust
-            # Verified in the previous block; --no-verify keeps build-time code
-            # off this VM while the token is in the environment.
-            - cargo publish -p confluent-kafka --locked --no-verify
+            - cargo xtask package-smoke-test --with-broker
+        - name: "Rust stable, release, broker round trip"
+          commands:
+            - rustup toolchain install stable --profile minimal
+            - cargo xtask package-smoke-test --with-broker --toolchain stable --release
+
+  # TEST MODE: the "Publish to crates.io" block is removed here (see the
+  # header). It depends on both blocks above, loads CARGO_REGISTRY_TOKEN from
+  # Vault (crates/confluent-kafka-rust), runs `cargo publish --locked
+  # --no-verify`, and pushes the uploaded crate's sha256 as the workflow
+  # artifact crates-io/<crate>-<version>.sha256.
+
+promotions:
+  - name: Verify the published crate
+    pipeline_file: verify-crates-io-release.yml
+    auto_promote:
+      when: "result = 'passed'"
