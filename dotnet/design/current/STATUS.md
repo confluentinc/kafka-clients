@@ -7,6 +7,175 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 17 / Phase 2 — ".NET: adopt master #210 / #209 / #223 through rebased PR #201 — layout move, C ABI rename, Java-deprecated removals": IN PROGRESS (S1a–S2 done; S3 next), 2026-10-01. N=89. Mode A.** Branch `prashah_dev_dotnet_binding`, on top of `274523ec` (the M17/P1 close). The commits are not squashed and not pushed:
+  - S1a: `777dfa83` (`git mv bindings/dotnet dotnet`, 743 files, all R100) and `27b61304` (`bindings/CLAUDE.md` → `dotnet/.claude/rules/bindings.md`, R100; D14).
+  - S1: `b4f019d4` merges `c0220aab` (PR #201 rebased on master `c7dd21bf`, which carries #223, #209, #210, #216–#218; merge-base `d6bf7c76`). `8964a732` switches the .NET harness arms to `#[expect]` for master's `clippy::allow_attributes = "deny"`.
+  - S1b (D15 plumbing): `efce532e` (csproj, Docker and soak paths), `ba536330` (D15(a) Makefile topology), `bf249e8f` (the `bindings.md` link and cites, path-only, user-authorized under D14) and `16df502c` (D9(a) doc path-prefix sweep).
+  - S2a: `91cef6a5` (the 74 EntryPoint renames), `1aca5292` with its `fixup!` `92e44ec0` (the admin `MarshalAs(I1)` sweep keeps `TopicPartitionInfo` after its move to `kafka_common_`) and `52c10a6f` (old ABI names in XML docs and comments).
+  - S2b–S2d: `c4500c3d` (`ListConsumerGroups` / `ListClientMetricsResources`, D6), `e2dc9bed` (`ConsumerGroupDescription.State` / `ConsumerGroupState`, D5) and `36fd0187` (`IConsumer.Close(TimeSpan)`; sync `Dispose` via `Consumer_close`, D2/D3).
+  - S2e: `bbba6ed7` (whole-surface Prelink test, R8), `2bac94dc` (#223 default `client.id`, D7) and `e1a9f9a7` (the sync-Dispose deadline audit, R6).
+  - S2f: this entry.
+
+  Plan: `design/history/M17/P2-master-209-abi-rename-and-deprecations/PLAN.md`. Proof of Mode A: the C# side follows a header it does not change (SHA-1 `af0f1644…`, generated from `c0220aab`'s core). Outside `dotnet/`, the branch differs from `c0220aab` in exactly 16 files, none of them under `rust/src`, `rust/cbindgen.toml`, `rust/build.rs`, `rust/Cargo.*`, `python/` or `c/`.
+  - **Why.** PR #201 was rebased onto master `c7dd21bf`, which restructured the repository into `rust/`, `python/` and `c/` (#210), renamed the C ABI to Java package names and removed its Java-deprecated functions (#209), and made the core derive a default `client.id` (#223). The binding's paths pointed at the old layout, and 89 of its 668 EntryPoints (74 renamed, 15 removed) no longer resolved against the new native.
+  - **What changed:**
+    - **Layout (D14).** The binding lives at `dotnet/`, beside `rust/`, `python/` and `c/`. The cross-binding rulebook moved from `bindings/CLAUDE.md` to `dotnet/.claude/rules/bindings.md`.
+    - **The merge.** 26 conflicts: 20 taken whole-file from `c0220aab` (never hunk-level, which would have kept PR #201's stale imports in cleanly merged regions), 2 modify/delete orphans deleted, and 4 merged by hand (`.semaphore/semaphore.yml`, `Makefile`, `rust/tests/common/admin_backend.rs`, `rust/tests/common/backend_factory.rs`). `dotnet/**` was untouched by the merge.
+    - **Plumbing (D15).** `NativeLibraryPath` points at `rust/target/<profile>/`, `ProtoRoot` at `rust/multilanguage-test-server/proto`, and the Dockerfiles and soak follow the new layout. The root Makefile delegates every dotnet target with `$(MAKE) -C dotnet $(ROOTS) <target>`, `dotnet/Makefile` uses master's `REPO_ROOT` / `RUST_PROJECT_ROOT`, and the native gRPC arm lives in `rust/Makefile`, as for Python and C.
+    - **ABI rename (#209).** 74 EntryPoints in 14 families take their Java package: the consumer's `TopicPartition*` / `PartitionInfo*` / `TopicPartitionInfoMap` and admin's `TopicPartitionInfo` move to `kafka_common_`, `FutureRecordMetadata` becomes `kafka_common_KafkaFuture_RecordMetadata`, the ACL, quota, principal and delegation-token types move under `kafka_common_acl_` / `_quota_` / `_security_auth_` / `_security_token_delegation_`, and `DeleteAclsFilterResults` becomes `kafka_admin_FilterResults`. Opaque types stay `IntPtr` and the C# identifiers keep their short names, so no managed signature changed.
+    - **Removals (#209: Java-deprecated API, root CLAUDE.md §3; deleted outright, no `[Obsolete]` shims, D6).** 15 EntryPoints: the 14 behind `ListConsumerGroups` / `ListClientMetricsResources`, and `kafka_consumer_Consumer_close_with_timeout`. Public API removed: `IAdmin.ListConsumerGroups` / `ListClientMetricsResources` (with their `KafkaAdminClient` / `MockAdminClient` implementations) and the types `ConsumerGroupListing`, `ListConsumerGroupsOptions`, `ListConsumerGroupsResult`, `ClientMetricsResourceListing`, `ListClientMetricsResourcesOptions` and `ListClientMetricsResourcesResult`; `ConsumerGroupDescription.State` and the `ConsumerGroupState` enum (D5); `IConsumer.Close(TimeSpan)` with its `KafkaConsumer` / `MockConsumer` implementations (D3). Kept, because Java does not deprecate them (R9): the admin `Close(TimeSpan)`, `GroupState`, `ClassicGroupState`, `GroupListing` and `ClassicGroupDescription.State`. P/Invokes: 668 → 653.
+    - **⚠ Behaviour change (D2): a sync consumer `Dispose` can now block up to 30 s, not 5 s.** The sync `Dispose` of `KafkaConsumer`, `AsyncKafkaConsumer` and both mocks (all through `NativeConsumer.Dispose`; a mock's close returns at once) closes with `Consumer_close`, bounded by the core's default close timeout of 30 s, instead of the removed `close_with_timeout(…, 5000)`. 30 s is what Java's `close()`, our `Close()` / `DisposeAsync` and Python's close already use; the 5 s was a .NET-only choice. A graceful close that cannot complete, for example against an unreachable group coordinator, now holds a sync `Dispose` for up to 30 s. The teardown order is unchanged (close → destroy on the caller's thread), and `Dispose` still never throws. The XML docs say so on `IConsumer.Close()`, `KafkaConsumer` (Disposal) and `NativeConsumer.Dispose`.
+    - **Tests added (S2e).**
+      - `Interop.NativeMethodsPrelinkTests` (2 facts): `Marshal.Prelink` on every `[DllImport]` in the library assembly, found by attribute across all types, collecting every failure, plus an exact count of 653 as the zero-match guard. A missed rename compiles and fails only when first called (R8); before this, only "EntryPoint is set" was asserted. Mutation-checked: renaming `kafka_admin_FilterResults_count` back to its pre-#209 name fails on net8.0 and net10.0 with "1 of 653 P/Invokes do not resolve … `EntryPointNotFoundException`".
+      - `PublicConsumerClientIdTests` (13 cases, D7), sync and async real consumers, broker-free: without `client.id` the id is `consumer-<group.id>-<n>` (n ≥ 1, increasing across consumers, one counter for both flavours); a static member gets exactly `consumer-<group.id>-<group.instance.id>`; no `group.id` gives `consumer-null-<n>`; `group.instance.id` without `group.id` is accepted as `consumer-null-<group.instance.id>`. #223's new validation of an invalid `group.instance.id` throws `KafkaException` code 40 "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII alphanumerics, '.', '_' and '-'" without `client.id`, and "Failed to construct kafka consumer" with that error as `InnerException` with an explicit `client.id`.
+      - **R6 audit, no deadline changed.** Three hang guards around a consumer's sync `Dispose` equal the new 30 s bound: `PublicSyncConsumerTeardownTests.s_deadline` (mocks only), `SafeConsumerHandleTests.s_disposeDeadline` (mocks and one never-joined real consumer) and `ConsumerConfigMarshalTests.s_disposeDeadline` (never-subscribed real consumers). None of their consumers gives the close anything to wait on; measured whole-test times are ≤ 0.01 s (each churn test ≤ 1.26 s for 100 mocks), and every real-consumer unit test that sync-disposes after subscribing finishes in ≤ 0.6 s. Each site now records why the zero margin is kept. `SoakClient.Dispose` notes that its `_consumer.Dispose()` (normally a no-op after the loop's async close) can now block shutdown up to 30 s.
+    - **Docs (S2f).** After S2a–S2d, no README or living doc under `dotnet/` names a removed member or a pre-#209 ABI name. The older entries below and the "What exists now (structure)" snapshot keep their historical `close_with_timeout` wording.
+  - **Deleted tests (DoD #3).** 96 executed cases per TFM, each with the reason "Java-deprecated API, removed in #209 / root CLAUDE.md §3". TRX-reconciled per TFM:
+
+    ```
+    M17/P2 S2b–S2d — deleted unit tests (dotnet/tests/Confluent.Kafka.UnitTests)
+    Baseline: HEAD 52c10a6f, 2927 executed per TFM (net8.0 / net10.0). Counts are TRX-reconciled per TFM.
+
+    == S2b: 53 [Fact] + 21 [Theory] data rows = 74 executed test cases deleted
+       Reason (every entry): Java-deprecated API, removed in #209 / root CLAUDE.md §3
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminKeySeamShapeTests.EveryReader_IsAHoistedStaticReadonlyField  -- 1 data row(s) deleted (1 of 6 rows):
+                  (fieldName: "ClientMetricsResourceListingValue")
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3OperationLifetimeTests.DisposeRacingAnInFlightOperation_DefersTheNativeDestroy  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3OperationLifetimeTests.EveryTrampoline_IsATotalNoThrowBoundary  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3OperationLifetimeTests.InlineCallback_FreesTheGcHandleExactlyOnce  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3OperationLifetimeTests.SubmitThatThrows_AbandonsTheOperationAndLeavesTheHandleReleasable  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3OperationLifetimeTests.TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP3ResultMarshalTests.ListClientMetricsResources_WalksToAnEmptyCollection_OnAFreshMock
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3SubmitArgumentTests.ExplicitTimeout_IsForwardedVerbatim  -- 2 data row(s) deleted (2 of 6 rows):
+                  (rpc: ListClientMetricsResources, timeoutMs: 0)
+                  (rpc: ListClientMetricsResources, timeoutMs: 34567)
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP3SubmitArgumentTests.NullTimeout_MapsToANegative_NotZero  -- 1 data row(s) deleted (1 of 3 rows):
+                  (rpc: ListClientMetricsResources)
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5ResultMarshalTests.ConsumerAll_ThrowsTheFirstError_WhileValidStillYieldsThePartialResults
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5ResultMarshalTests.ConsumerEachCountAccessor_IsAskedForItsOwnAxis
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP5ResultMarshalTests.ConsumerTwoLists_EachWalkItsOwnCount  -- 6 data row(s) deleted (whole Theory):
+                  (validCount: 0, errorCount: 0)
+                  (validCount: 0, errorCount: 2)
+                  (validCount: 1, errorCount: 3)
+                  (validCount: 2, errorCount: 0)
+                  (validCount: 2, errorCount: 2)
+                  (validCount: 3, errorCount: 1)
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5ResultMarshalTests.ConsumerWalk_CarriesEveryListingField
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_BothFilters_ReachTheSubmit_EachWithItsOwnArrayAndCount
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_EmptyOptions_SendTheSameTwoEmptyAxes
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_ExplicitTimeout_IsForwardedVerbatim  -- 2 data row(s) deleted (whole Theory):
+                  (timeoutMs: 0)
+                  (timeoutMs: 45678)
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_NegativeTimeout_IsRejectedBeforeAnythingIsSubmitted
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_NullOptions_SendTwoEmptyAxes
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_NullTimeout_MapsToANegative_NotZero
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_OneAxisSet_LeavesTheOtherEmpty  -- 2 data row(s) deleted (whole Theory):
+                  (axis: GroupStates)
+                  (axis: Types)
+       [Fact]   Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_TheTwoStateSpellings_AreOneFilter_AndOnlyOneReachesTheSubmit
+       [Theory] Confluent.Kafka.UnitTests.Interop.AdminP5SubmitArgumentTests.Consumer_UndefinedEnumValue_IsRejectedBeforeAnythingIsSubmitted  -- 2 data row(s) deleted (whole Theory):
+                  (onTheStateAxis: False)
+                  (onTheStateAxis: True)
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminClusterConfigResourcesTests.ListClientMetricsResources_IsEmptyOnAFreshMock
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.Accessors_AreJavasFive_AsProperties
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.CanonicalConstructor_ReadsBackEveryAccessor
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.Constructors_AreJavasThreeCurrentOnes
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.Deprecation_IsCarriedAcross_AtWarningSeverity
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.Equality_CoversTheFourStoredMembers
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.NullGroupId_IsRejectedByEveryConstructor
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.ShorterConstructors_LeaveTheOptionalsAbsent
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.TheTwoStateAxes_AgreeByName_ExceptWhereConsumerGroupStateCannotFollow
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupListingTests.ToString_MirrorsJavasRendering
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.AnUndefinedConsumerGroupStateValue_ThrowsWhenWrittenThroughStates
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.AnUndefinedGroupStateValue_ProjectsToUnknown_WhenReadThroughStates
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.Defaults_MatchJavasFieldInitializers
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.Filters_NormalizeNullAndEmptyToTheEmptySet
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.Filters_StoreADeduplicatedDefensiveCopy
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.Filters_StoreAnImmutableCopy
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.PublicShape_IsTheTimeoutPlusJavasThreeAccessors
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.ReadingTheDeprecatedAxis_ProjectsNotReadyToUnknownAndDeduplicates
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.TheDeprecations_AreMirroredAsWarnings
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.TheTwoStateAxes_AreOneFilterViewedThroughTwoEnums
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.TimeoutMs_IsNullableAndRoundTrips
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsOptionsTests.WritingTheDeprecatedAxis_MapsEveryMemberOntoItsNamesake
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.All_FaultsWithTheFirstError_WhenAnyErrorOccurred
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.All_YieldsEveryListing_WhenNoErrorOccurred
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.Empty_SucceedsOnAllThreeAccessors
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.Errors_YieldsEveryError_AndNeverFaults
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.EveryAccessor_ReadsTheOneSharedSource
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.PublicShape_IsJavasThreeAccessors_AsMethods
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.TheDeprecation_IsMirroredAsAWarning
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.TheTwoLists_HaveIndependentLengths
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsResultTests.Valid_YieldsThePartialResults_AndIgnoresErrors
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_AfterDispose_Throws
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_AFullyFilteredCall_CompletesNormally
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_AllAgreesWithValid_WhenNothingFailed
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_ANegativeTimeout_ThrowsRightAway
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_AnUndefinedEnumValue_ThrowsRightAway
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_IsReachableThroughTheInterface
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_NoFilter_IsTheSameCallHoweverItIsSpelled
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_ReportsEverySeededGroup
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_TheDeprecatedStatesFilter_IsCallableEndToEnd
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminListConsumerGroupsTests.ListConsumerGroups_WithNoGroups_YieldsTwoEmptyCollections
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminP3ShapeParityTests.ClientMetricsResourceListing_MirrorsJavasShape
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminP3ShapeParityTests.TheDeprecatedClientMetricsSurface_IsMarkedObsolete
+
+       Renamed (not deleted; executed count unchanged) — the old name stated a count the removal falsified:
+         Interop.AdminP3OperationLifetimeTests.ManyOperationsOfAllThreeKinds_LeaveTheReferenceCountBalanced  ->  Interop.AdminP3OperationLifetimeTests.ManyOperationsOfEveryKind_LeaveTheReferenceCountBalanced
+         PublicAdminClusterConfigResourcesTests.TfmSmoke_TheThreeNewRpcsWorkOnThisFramework  ->  PublicAdminClusterConfigResourcesTests.TfmSmoke_TheNewRpcsWorkOnThisFramework
+         PublicAdminClusterConfigResourcesTests.TheThreeRpcs_AreReachableThroughIAdmin  ->  PublicAdminClusterConfigResourcesTests.TheRpcs_AreReachableThroughIAdmin
+         PublicAdminConfigsTests.ListClientMetricsResources_ReturnsASeededResource_AndListConfigResourcesAgrees  ->  PublicAdminConfigsTests.ListConfigResources_ReportsASeededClientMetricsResource
+         PublicAdminP3ShapeParityTests.IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape  ->  PublicAdminP3ShapeParityTests.IAdmin_TheNewRpcsAreSynchronous_WithTheJavaParameterShape
+         PublicAdminP3ShapeParityTests.TheTwoListResults_PublishExactlyJavasSingleAccessor  ->  PublicAdminP3ShapeParityTests.TheListResult_PublishesExactlyJavasSingleAccessor
+
+    == S2c: 7 [Fact] + 8 [Theory] data rows = 15 executed test cases deleted
+       Reason (every entry): Java-deprecated API, removed in #209 / root CLAUDE.md §3
+       [Theory] Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.AName_DecodesRegardlessOfCasing  -- 4 data row(s) deleted (whole Theory):
+                  (name: "PREPARINGREBALANCE")
+                  (name: "PrEpArInGrEbAlAnCe")
+                  (name: "PreparingRebalance")
+                  (name: "preparingrebalance")
+       [Fact]   Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.ANullName_DecodesToAbsenceNotUnknown
+       [Fact]   Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.AnUndefinedValue_EncodesToNull
+       [Theory] Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.AnUnrecognisedName_DecodesToUnknown  -- 4 data row(s) deleted (whole Theory):
+                  (name: "")
+                  (name: "NotReady")
+                  (name: "SomeStateFromANewerBroker")
+                  (name: "Stable ")
+       [Fact]   Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.EveryJavaConstant_RoundTripsThroughNameAndBack
+       [Fact]   Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.TheEnum_DeclaresExactlyJavasEightConstantsInOrder
+       [Fact]   Confluent.Kafka.UnitTests.Interop.GroupMarshalConsumerStateTests.TheEnum_IsMarkedObsoleteAsAWarning
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupDescriptionTests.State_IsAProjectionOfGroupState_NotAnIndependentMember
+       [Fact]   Confluent.Kafka.UnitTests.PublicAdminConsumerGroupDescriptionTests.State_LosesNotReady_SoItCannotBeRunBackwards
+
+       Renamed / re-scoped (not deleted; executed count unchanged) — the old name or body pinned the removed State member:
+         Interop.AdminP5ResultMarshalTests.Describe_State_IsAProjectionOfTheGroupStateTheAbiNamed  ->  Interop.AdminP5ResultMarshalTests.Describe_GroupState_IsTheGroupStateTheAbiNamed  (keeps the every-GroupState-through-the-walk coverage; asserts State is absent)
+         PublicAdminClassicGroupDescriptionTests.State_IsStoredAndCurrent_UnlikeTheSiblingsProjection  ->  PublicAdminClassicGroupDescriptionTests.State_IsStoredAndCurrent_NotAProjection  (sibling assertion flipped: ConsumerGroupDescription has no State)
+         PublicAdminConsumerGroupDescriptionTests.State_IsObsolete_AndGroupStateAndTheClassAreNot  ->  PublicAdminConsumerGroupDescriptionTests.State_IsNotTranslated_AndGroupStateAndTheClassAreNotObsolete
+
+
+    == S2d: 7 [Fact] + 0 [Theory] data rows = 7 executed test cases deleted
+       Reason (every entry): Java-deprecated API, removed in #209 / root CLAUDE.md §3
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerTeardownTests.CloseWithTimeout_ReturnsWithoutHang
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerTeardownTests.CloseWithTimeout_Zero_ReturnsWithoutHang
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerTeardownTests.CloseWithTimeout_ThenClose_IsIdempotent
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerPreconditionTests.Close_NegativeTimeout_ThrowsArgumentOutOfRange
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerPreconditionTests.Close_NegativeTimeout_ThrownBeforeNativeCall_EvenWhenClosed
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerPreconditionTests.Close_ZeroTimeout_IsValid
+       [Fact]   Confluent.Kafka.UnitTests.PublicSyncConsumerPreconditionTests.Close_NegativeTimeout_LeavesTheConsumerIntactAndStillClosable
+    ```
+  - **Unit-test reconciliation, per TFM (net8.0 and net10.0).** 2927 at the M17/P1 close and through S2a; − 74 (S2b), − 15 (S2c), − 7 (S2d) = 2831; + 2 (Prelink) + 13 (D7) = **2846**.
+  - **Gates at `e1a9f9a7`, run by the Actor.**
+    - **P/Invokes.** 653 EntryPoint strings in `dotnet/src`, all unique, with 0 missing from the header and 0 missing from the release dylib's exports. `NativeMethodsPrelinkTests` discovers 653 and resolves every one on net8.0 and net10.0.
+    - **Native.** `nm -gU rust/target/release/libconfluent_kafka.dylib` exports `kafka_common_KafkaFuture_RecordMetadata_get` and `kafka_admin_FilterResults_count`, and neither `kafka_consumer_Consumer_close_with_timeout` nor `kafka_admin_DeleteAclsFilterResults_count`. The copies in the UnitTests output (net462, net8.0, net10.0) are byte-identical to it (SHA-1 `7dd86bb2…`).
+    - **`make test-dotnet` from the root** (native build, solution build, `dotnet format --verify-no-changes`, unit tests on both TFMs, then the soak's build, format and tests): unit tests 2846/2846 on net8.0 and 2846/2846 on net10.0, no aborted run; `SoakClient.Tests` 165/165 on both. The solution, the soak and the four Performance projects build with 0 warnings and 0 errors.
+  - **Next.** S3: the gRPC server and harness (`dotnet/grpc-server` does not build until then; PLAN §4 S3 lists its 5 sites), then the Critic 89 review. The Manager finalizes this entry at close.
+
 - **Milestone 17 / Phase 1 — ".NET gRPC harness: merge master #204, then SSL / SASL_SSL runs and native mode, with CI jobs": DONE locally (2026-09-30); four CI-only items are pending the user's push. N=88. Mode A.** Branch `prashah_dev_dotnet_binding`. The base is `3b885c1a`, which the user pushed at 19:57 IST, so `origin` already carries P13.4 and its two PM-1 follow-ups. The commits after it are not squashed and not pushed:
   - `35064058` is the approved plan. D1–D9 were taken as recommended.
   - S1: `7690945a` merges `origin/master` `d6bf7c76` (`e565ca74`, `d334cf6e`, `d6bf7c76`, merge-base `7ac1391b`). It resolves 3 textual conflicts (`Makefile`, `semaphore.yml`, the `backend_pool.rs` port-list doc) and 2 semantic ones: a transitional panicking dotnet arm in `native_command`, and the 5 dotnet factories returning `uses_containers()`.
