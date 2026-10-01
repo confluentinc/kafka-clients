@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Every op here is synchronous, and deliberately does NOT take the access guard.</b>
 /// "Nothing in this module acquires the single-owner access guard ... That is deliberate and
-/// is the whole reason the type exists" (<c>src/ffi/consumer_handle.rs:29-31</c>). The core
+/// is the whole reason the type exists" (<c>rust/src/ffi/consumer_handle.rs:29-31</c>). The core
 /// drives each future to completion with <c>block_on</c> on the <em>calling</em> thread, which
 /// is safe from the core's callback-dispatcher thread and from any plain OS thread, and is
 /// <b>not</b> the forbidden managed sync-over-async (the <c>block_on</c> is the core's, inside

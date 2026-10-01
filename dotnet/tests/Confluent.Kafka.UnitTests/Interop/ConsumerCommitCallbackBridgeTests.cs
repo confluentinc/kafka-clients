@@ -105,7 +105,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
     {
         // THE test that discriminates the correct free site from the (wrong) one-shot default.
         //
-        // src/ffi/consumer.rs:4001-4009 builds the callback adapter — which takes ownership of
+        // rust/src/ffi/consumer.rs:4001-4009 builds the callback adapter — which takes ownership of
         // `user_data` — at :4004, BEFORE the fallible read_offset_map at :4005, so the early
         // return at :4007 drops the adapter and fires the release hook WITHOUT ever invoking
         // the callback. A negative offset is exactly that failure

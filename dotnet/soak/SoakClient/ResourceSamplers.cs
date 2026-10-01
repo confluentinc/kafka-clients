@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 // PROVENANCE: MemorySampler / CpuSampler are forked from
-// bindings/dotnet/tests/Performance/PerformanceCommon/MetricSamplers.cs — both are
+// dotnet/tests/Performance/PerformanceCommon/MetricSamplers.cs — both are
 // `internal` there, and the fork is deliberate for the reasons in MetricPrimitives.cs's
 // header. ProcessResourceSampler has no perf-harness counterpart: it is the soak's own
 // `get_rusage()` analog (soakclient.py), producing the cpu.* / memory.* gauges.

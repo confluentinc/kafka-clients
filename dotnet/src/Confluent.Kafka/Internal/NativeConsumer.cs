@@ -42,7 +42,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Single-owner, not thread-safe (M3/P2).</b> A Kafka consumer is single-owner —
 /// at most one operation in flight — and this wrapper mirrors the in-repo Python
-/// sibling's contract exactly (<c>bindings/python/consumer.py</c>: "The Rust
+/// sibling's contract exactly (<c>python/consumer.py</c>: "The Rust
 /// consumer is single-owner (one operation in flight). Concurrent use surfaces as a
 /// <c>KafkaError</c> (ConcurrentModification) or, for the non-blocking state reads, a
 /// <c>RuntimeError</c>."). The <b>Rust core's own access guard</b> is the serializer;
@@ -703,7 +703,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <b>Python-parity <c>false</c> → <c>null</c> (no concurrent-read split).</b> The ABI's
     /// <c>false</c> means <em>either</em> the lag is unknown <em>or</em> the access guard could
     /// not be acquired (a concurrent read) — the binding maps <b>both</b> to <c>null</c>,
-    /// matching the Python sibling (<c>bindings/python/consumer.py:279</c> returns the raw
+    /// matching the Python sibling (<c>python/consumer.py:279</c> returns the raw
     /// value, <c>None</c> on false). <c>CurrentLag</c> deliberately does NOT get the
     /// <see cref="InvalidOperationException"/> concurrent-state-read treatment that
     /// <see cref="GroupId"/> / <see cref="Assignment"/> use (those return a null owned handle
@@ -1414,7 +1414,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // Deliberately NOT released on a non-null error — and this is the path that makes the
         // hook the only correct free site: a marshal failure (e.g. a negative offset) returns
         // the error WITHOUT registering the callback, so the callback never fires while the
-        // hook still does (src/ffi/consumer.rs:4001-4009).
+        // hook still does (rust/src/ffi/consumer.rs:4001-4009).
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
         {
@@ -1588,7 +1588,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                     // call. Load-bearing here — the listener callbacks fire INSIDE this call, and
                     // that reference is what keeps a concurrent teardown from racing them (the
                     // precondition Consumer_destroy places on its caller,
-                    // src/ffi/consumer.rs:513-517).
+                    // rust/src/ffi/consumer.rs:513-517).
                     error = NativeMethods.ConsumerSubscribeWithListener(_handle, pointers, cnt, listenerHandle);
                 }
                 catch
@@ -1892,7 +1892,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // synchronous KafkaException (no managed guard, M3/P2).
     //
     // ⚠ OUT-PARAM PRE-INIT (correctness). The sync query FFI writes *out_handle ONLY on success
-    // and LEAVES IT UNTOUCHED on failure (verified in src/ffi/consumer.rs — the error arm does
+    // and LEAVES IT UNTOUCHED on failure (verified in rust/src/ffi/consumer.rs — the error arm does
     // `return box_error(e)` without writing the out-param). Unlike Consumer_poll (which writes
     // out_error on BOTH paths), a blittable `out IntPtr` marshalled here would be pinned-in-place
     // over the managed local's storage, so an untouched native write leaves whatever was there.
@@ -3013,7 +3013,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <list type="number">
     /// <item>
     /// <b>No self-join.</b> <c>Consumer_destroy</c> explicitly does <em>not</em> join the
-    /// dispatcher — <c>src/ffi/consumer.rs:518-522</c> drops the <c>JoinHandle</c> with
+    /// dispatcher — <c>rust/src/ffi/consumer.rs:518-522</c> drops the <c>JoinHandle</c> with
     /// the comment "detach the dispatcher (do NOT join — outstanding completion jobs may
     /// still hold a cloned <c>completion_tx</c>, and the dispatcher exits once all clones
     /// are released)". Dropping a <c>JoinHandle</c> for the current thread is a no-op
@@ -3021,14 +3021,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </item>
     /// <item>
     /// <b>No producer can block.</b> The completion queue is an <b>unbounded</b>
-    /// <c>std::sync::mpsc::channel</c> (<c>src/ffi/common.rs:224</c>), so nothing the
+    /// <c>std::sync::mpsc::channel</c> (<c>rust/src/ffi/common.rs:224</c>), so nothing the
     /// internal bg task does while <c>drop(consumer)</c> joins it can block on the
     /// dispatcher; <c>runtime.shutdown_background()</c> (<c>consumer.rs:515</c>) is
     /// non-blocking by definition.
     /// </item>
     /// <item>
     /// <b>No use-after-free of the dispatcher's own state.</b> <c>completion_rx</c> is
-    /// moved into the dispatcher closure (<c>src/ffi/common.rs:224-231</c>), separate from
+    /// moved into the dispatcher closure (<c>rust/src/ffi/common.rs:224-231</c>), separate from
     /// the <c>FfiConsumerHandle</c> box being freed; after the box is gone the
     /// dispatcher's <c>while let Ok(job) = completion_rx.recv()</c> still holds a valid
     /// receiver and exits cleanly once the running job returns and releases the last
@@ -3068,7 +3068,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// graceful bg-task join, but it still frees every native resource:
     /// <c>runtime.shutdown_background()</c>, <c>drop(consumer)</c> (which joins the
     /// <em>internal</em> bg task) and the dispatcher detach all run
-    /// (<c>src/ffi/consumer.rs:512-522</c>). The loss is the graceful
+    /// (<c>rust/src/ffi/consumer.rs:512-522</c>). The loss is the graceful
     /// leave-group / commit-on-close courtesy, on a path where the caller already
     /// abandoned an operation.
     /// </item>

@@ -37,8 +37,8 @@ namespace Confluent.Kafka;
 /// guard is held for the whole operation that fired the callback, so the consumer's own API is
 /// rejected with <c>ConcurrentModification</c> from inside one. This handle is the binding
 /// scaffolding that <b>restores the Java behavior</b> — it deliberately takes no guard
-/// (<c>src/ffi/consumer_handle.rs:29-37</c>) — rather than new API surface. Python has the
-/// identical type for the identical reason (<c>bindings/python/consumer.py:378-545</c>).
+/// (<c>rust/src/ffi/consumer_handle.rs:29-37</c>) — rather than new API surface. Python has the
+/// identical type for the identical reason (<c>python/consumer.py:378-545</c>).
 /// </para>
 /// <para>
 /// <b>Lifetime — this handle keeps its consumer alive.</b> The ABI requires every handle to be
@@ -53,7 +53,7 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Method surface — deliberately smaller than the consumer's.</b> There is no <c>Poll</c>,
 /// <c>Subscribe</c>, <c>Unsubscribe</c> or <c>Close</c>: "Java never invokes those reentrantly
-/// from a callback" (<c>src/ffi/consumer_handle.rs:76-80</c>). There is also no
+/// from a callback" (<c>rust/src/ffi/consumer_handle.rs:76-80</c>). There is also no
 /// callback-taking commit — register an <see cref="IOffsetCommitCallback"/> on the owning
 /// consumer instead. Unlike the consumer's own <see cref="IConsumer{TKey, TValue}.Assign"/>, an
 /// <b>empty</b> <see cref="Assign"/> here is rejected: on the consumer that leaves the group,

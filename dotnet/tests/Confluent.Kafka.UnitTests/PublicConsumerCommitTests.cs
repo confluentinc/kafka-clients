@@ -90,7 +90,7 @@ public sealed class PublicConsumerCommitTests
         // Leader epoch round-trips faithfully (7 in, 7 out): the FFI read_offset_map builds
         // OffsetAndMetadata::with_leader_epoch(offset, Some(7), meta) from leader_epochs[i] >= 0,
         // the mock stores it, and committed() clones it back — verified against
-        // src/ffi/consumer.rs + src/consumer/mock_consumer.rs.
+        // rust/src/ffi/consumer.rs + rust/src/consumer/mock_consumer.rs.
         Assert.Equal(7, result[tp].LeaderEpoch);
     }
 

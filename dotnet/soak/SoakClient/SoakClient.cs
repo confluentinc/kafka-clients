@@ -67,7 +67,7 @@ internal sealed class SoakClient : IDisposable
     /// <para>
     /// Deliberately &gt; 1: every <i>client-side</i> error (Timeout, Wakeup, IllegalState)
     /// reports <c>UnknownServerError</c>, which <c>Errors::is_retriable()</c>
-    /// (src/common/protocol/errors.rs) excludes, so one non-retriable poll error is a
+    /// (rust/src/common/protocol/errors.rs) excludes, so one non-retriable poll error is a
     /// routine timeout during a broker roll — exactly what a run against a rolled cluster
     /// must survive — not a permanent failure.
     /// </para>
@@ -101,7 +101,7 @@ internal sealed class SoakClient : IDisposable
     /// </summary>
     internal const double MaxPacingCatchUpSeconds = 1.0;
 
-    // Protocol error codes (src/common/protocol/errors.rs) used to classify the errors a
+    // Protocol error codes (rust/src/common/protocol/errors.rs) used to classify the errors a
     // broker roll produces. Client-side errors (Wakeup, Timeout, ...) all report
     // UnknownServerError (-1), so they are classified by message instead.
     private static readonly IReadOnlyCollection<int> s_coordinatorErrorCodes = new HashSet<int>

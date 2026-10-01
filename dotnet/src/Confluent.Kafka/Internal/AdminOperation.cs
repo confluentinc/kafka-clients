@@ -287,7 +287,7 @@ internal abstract class AdminOperation
 /// header documents that inline path for every admin entry point (trigger: a NULL
 /// <c>admin</c> handle; the by-id entry points add "an unparseable or NULL base64 topic
 /// id"), and the wider family-wide trigger set is stated in
-/// <c>src/ffi/admin.rs:56-63</c>, which cbindgen does not emit — see
+/// <c>rust/src/ffi/admin.rs:56-63</c>, which cbindgen does not emit — see
 /// <see cref="Interop.AdminCallbacks"/>.
 /// </para>
 /// </remarks>

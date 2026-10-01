@@ -46,7 +46,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </para>
 /// <para>
 /// The query ops resolve <b>instantaneously</b> on the mock (no blocking, source-verified in
-/// <c>src/consumer/mock_consumer.rs</c>), so they are called directly — no <see cref="TestTimeout"/>
+/// <c>rust/src/consumer/mock_consumer.rs</c>), so they are called directly — no <see cref="TestTimeout"/>
 /// wrapper (which would surface a synchronous throw as an <c>AggregateException</c>; the P8a
 /// throwing-Poll precedent). Assembly-wide serial execution is inherited (the D8.8 gate).
 /// </para>
@@ -134,7 +134,7 @@ public sealed class PublicSyncConsumerQueryTests
         // The mock's offsets_for_times returns unsupported_version UNCONDITIONALLY, with the
         // Java-verbatim message from UnsupportedOperationException("Not implemented yet.")
         // (Java line 534-537, admin-client.md §9 / DoD #3 — verified in
-        // src/consumer/mock_consumer.rs). The sync call THROWS a KafkaException (not a faulted
+        // rust/src/consumer/mock_consumer.rs). The sync call THROWS a KafkaException (not a faulted
         // Task). Assert the throw + the exact message + the UnsupportedVersion code (35). Do NOT
         // over-claim a success round-trip — the mock cannot reach one.
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);

@@ -21,7 +21,7 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// Thread-safe, per-client-id log of user-callback invocations — the C# port of
 /// <c>grpc_translate.py</c>'s <c>CallbackLog</c> (<c>:287-332</c>) and the C server's
-/// <c>CallbackLog</c> (<c>bindings/c/grpc_server/server.cc:214-252</c>). One instance per
+/// <c>CallbackLog</c> (<c>c/grpc_server/server.cc:214-252</c>). One instance per
 /// servicer, read back over the wire by that servicer's <c>GetCallbackLog</c> RPC.
 /// </summary>
 /// <remarks>
@@ -303,7 +303,7 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
 /// <c>(topic, partition)</c>, <c>offsets</c> maps that partition's shared
 /// <c>"&lt;topic&gt;-&lt;partition&gt;"</c> key (<see cref="Translate.OffsetKey"/>) to the
 /// offset, and <c>error</c> is the exception's message or the empty string. The Rust harness
-/// rebuilds the identical key (<c>tests/common/callback_log.rs</c>) and asserts
+/// rebuilds the identical key (<c>rust/tests/common/callback_log.rs</c>) and asserts
 /// <c>error.is_empty()</c> on the success path.
 /// </para>
 /// <para>

@@ -451,7 +451,7 @@ public sealed class SendAccumulatorTests
         // handled ENTIRELY on the batch thread — its future destroyed, its callback fired, its
         // awaiter faulted — and never also handed to the pump, which would fire the callback a
         // second time. A duplicate is strictly worse than a drop under the exactly-once obligation
-        // (root CLAUDE.md §9.5).
+        // (root CLAUDE.md §11.5).
         //
         // A mixed batch is not reachable broker-free: the injection closes the core, so from that
         // point EVERY record is rejected. The survivors are therefore an earlier batch, which is
@@ -1854,7 +1854,7 @@ public sealed class SendAccumulatorTests
 
         /// <summary>
         /// Resolves the OLDEST record the manual mock is still holding (its pending queue is a
-        /// FIFO: <c>src/producer/mock_producer.rs</c> pushes on send and pops the front here).
+        /// FIFO: <c>rust/src/producer/mock_producer.rs</c> pushes on send and pops the front here).
         /// Meaningless on an auto-completing mock.
         /// </summary>
         internal bool CompleteNext() => _producer.MockCompleteNext();

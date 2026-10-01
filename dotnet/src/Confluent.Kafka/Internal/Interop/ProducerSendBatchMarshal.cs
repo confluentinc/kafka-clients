@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <summary>
 /// The <c>unsafe</c> send-path marshalling for the async producer's <b>batch</b> send
 /// (<c>kafka_producer_Producer_send_batch</c>) — M11/P3.1, the Python binding's shape
-/// (<c>bindings/python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>). Fills the blittable
+/// (<c>python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>). Fills the blittable
 /// <see cref="ProducerRecordNative"/> array from already-pinned buffers, applies the ffi §A4
 /// absent / empty / present sentinels, and issues the call. The sibling of
 /// <see cref="ProducerSendMarshal"/>, which stays in place for the <b>sync</b> send path

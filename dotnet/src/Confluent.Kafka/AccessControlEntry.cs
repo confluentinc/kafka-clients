@@ -81,7 +81,7 @@ public sealed class AccessControlEntry
 
         if (operation == AclOperation.Any)
         {
-            // Java's text with the C# member spelling (bindings/CLAUDE.md §2.2 casing rule).
+            // Java's text with the C# member spelling (dotnet/.claude/rules/bindings.md §2.2 casing rule).
             throw new ArgumentException("operation must not be Any", nameof(operation));
         }
 

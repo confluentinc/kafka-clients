@@ -218,7 +218,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     //
     // There is NO clean broker-free operational-failure path for these two queries: the mock's
     // partitions_for ALWAYS returns a valid list (empty for an unregistered topic, populated
-    // after UpdatePartitions — src/consumer/mock_consumer.rs), and its list_topics always
+    // after UpdatePartitions — rust/src/consumer/mock_consumer.rs), and its list_topics always
     // returns a valid (possibly empty) map, so neither can fault broker-free. A real
     // AsyncKafkaConsumer against an unreachable broker does NOT fault quickly — a metadata fetch
     // retries until the request timeout (many seconds), so a "fault fast" assertion is not

@@ -30,7 +30,7 @@ namespace Confluent.Kafka.UnitTests;
 /// for all of them and the core mirrors it, so the marshalling is asserted at the submit seam
 /// (<c>AdminP8SubmitArgumentTests</c>) and the value readers over injected accessors
 /// (<c>AdminP8ResultMarshalTests</c>). The assertions below are ported from the C suite's
-/// coverage of this same RPC set (<c>bindings/c/tests/test_mock_admin.c:5858-6046</c>).
+/// coverage of this same RPC set (<c>c/tests/test_mock_admin.c:5858-6046</c>).
 /// </remarks>
 public sealed class PublicAdminP8Tests
 {

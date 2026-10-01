@@ -39,7 +39,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </para>
 /// <para>
 /// <b>Mock-poll determinism ceiling (documented, source-verified —
-/// <c>src/consumer/mock_consumer.rs</c> poll).</b> The mock <c>poll</c> runs to completion
+/// <c>rust/src/consumer/mock_consumer.rs</c> poll).</b> The mock <c>poll</c> runs to completion
 /// <em>synchronously</em> — it records the timeout, drains one poll task, then
 /// checks-and-clears the wakeup flag (Step 4), then drains records; it never awaits, so a
 /// <c>Poll(30s)</c> does <b>not</b> actually block for 30 s. A genuinely mid-flight interrupt

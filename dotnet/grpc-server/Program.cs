@@ -291,7 +291,7 @@ internal static class Program
     /// servicers; anything else (including unset) selects the sync servicers (the M8/P1
     /// default). Container mode: the flavor is baked per image (<c>ENV CONSUMER_FLAVOR</c> in
     /// Dockerfile.grpc / Dockerfile.grpc.async). Native mode (M17/P1): the harness sets it
-    /// explicitly per backend kind (<c>tests/common/backend_pool.rs</c> <c>native_command</c>).
+    /// explicitly per backend kind (<c>rust/tests/common/backend_pool.rs</c> <c>native_command</c>).
     /// </summary>
     private static bool ResolveAsyncFlavor()
     {

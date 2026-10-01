@@ -32,7 +32,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// one-shot <c>WakeupException</c> semantics, deterministically.
 /// </summary>
 /// <remarks>
-/// <b>Determinism note (source-verified against <c>src/consumer/mock_consumer.rs</c>).</b>
+/// <b>Determinism note (source-verified against <c>rust/src/consumer/mock_consumer.rs</c>).</b>
 /// The mock <c>poll</c> future runs to completion synchronously (no external-input
 /// await): it drains one poll task, then checks-and-clears the wakeup flag, then takes
 /// any injected poll error, then drains records. So the wakeup is observed regardless of
@@ -96,7 +96,7 @@ public sealed class ConsumerPollWakeupCancelTests
 
     // NOTE (Critic N=7, Finding 1): a "wakeup fired during an in-flight poll" test was
     // removed here. The mock poll checks-and-clears the wakeup flag in Step 4 and returns
-    // to completion synchronously (source-verified: src/consumer/mock_consumer.rs poll),
+    // to completion synchronously (source-verified: rust/src/consumer/mock_consumer.rs poll),
     // and no block hook is exposed at the C ABI — so a Wakeup() call issued *after* the
     // PollWithCallback() submit races the instant poll non-deterministically: when the poll wins,
     // the one-shot flag is left set and leaks into the *next* poll, faulting it. There is

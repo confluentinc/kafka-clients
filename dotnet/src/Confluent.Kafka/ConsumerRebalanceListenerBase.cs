@@ -31,7 +31,7 @@ namespace Confluent.Kafka;
 /// and this binding's floor is <b>netstandard2.0</b> (it must load on net462), so a default
 /// interface method is not expressible here. Dropping the default would make every
 /// implementer hand-write a delegating <c>OnPartitionsLost</c> — losing a Java behaviour the
-/// binding exists to restore (<c>bindings/CLAUDE.md</c> §2). This abstract base is the
+/// binding exists to restore (<c>dotnet/.claude/rules/bindings.md</c> §2). This abstract base is the
 /// idiomatic C# carrier for it, so the type exists <em>because of</em> a Java behaviour
 /// rather than adding one. Chosen as P6-D1 option (b).
 /// </para>

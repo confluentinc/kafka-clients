@@ -33,7 +33,7 @@ namespace Confluent.Kafka.Internal;
 /// <c>Utf8Marshal.Pin</c> and there was nothing to think about; once the send is deferred, a
 /// call-scoped topic pointer is a use-after-free. The Python anchor solves it with an owned
 /// <c>topic_owned</c> malloc <b>per record object</b>
-/// (<c>bindings/python/_confluentkafka.c</c>'s <c>ProducerRecordObject</c>); .NET cannot copy the
+/// (<c>python/_confluentkafka.c</c>'s <c>ProducerRecordObject</c>); .NET cannot copy the
 /// topic per record without adding exactly the per-record allocation CLAUDE.md §12 / ffi §A4 exist
 /// to prevent. Interning gives <b>O(distinct topics) permanent pins instead of O(records) transient
 /// ones</b>, which also drops the per-record pin count from 3 to ≤ 2.

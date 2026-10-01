@@ -50,7 +50,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// "<b>synchronously on the calling thread, before this function returns</b>" when the RPC
 /// cannot be submitted. The inline tests below reach it through the production submit seam
 /// with the <b>real</b> P/Invoke, so the callback that fires is the core's, not a stand-in's.
-/// The asserted messages are the core's own text (<c>src/ffi/admin.rs</c>); the header names
+/// The asserted messages are the core's own text (<c>rust/src/ffi/admin.rs</c>); the header names
 /// the triggers but not their messages, and their codes are not documented, so only the
 /// message is asserted.
 /// </para>
@@ -87,12 +87,12 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// <summary><c>alterConsumerGroupOffsets</c>' mock refusal, with Java's own typo.</summary>
     private const string NotImplementedTypo = "Not implement yet";
 
-    /// <summary>The core's message for a NULL admin handle (<c>src/ffi/admin.rs:782</c>).</summary>
+    /// <summary>The core's message for a NULL admin handle (<c>rust/src/ffi/admin.rs:782</c>).</summary>
     private const string NullAdmin = "admin handle must not be null";
 
     /// <summary>
     /// The core's message for a negative offset at entry 0 — Java's <c>OffsetAndMetadata</c>
-    /// constructor text behind an index prefix (<c>src/ffi/admin.rs:11062</c>, asserted by the
+    /// constructor text behind an index prefix (<c>rust/src/ffi/admin.rs:11062</c>, asserted by the
     /// core's own test at <c>:23604</c>).
     /// </summary>
     private const string NegativeOffsetAtZero = "offset at index 0: Invalid negative offset";

@@ -387,7 +387,7 @@ internal static partial class NativeMethods
 
     // Managed mirror of the value-kind discriminator returned by
     // MetricMap_get_value_kind (a plain int32_t — the generated header has no enums,
-    // src/ffi/consumer.rs KAFKA_CONSUMER_METRIC_VALUE_*). It selects which get_value_*
+    // rust/src/ffi/consumer.rs KAFKA_CONSUMER_METRIC_VALUE_*). It selects which get_value_*
     // accessor is valid, and thus the boxed CLR type of the public IMetric.Value.
 
     /// <summary>Value kind: use <see cref="MetricMapGetValueDouble"/> (<see cref="double"/>).</summary>
@@ -758,7 +758,7 @@ internal static partial class NativeMethods
     // arrays. All reuse the SAME void-result completion callback as
     // ConsumerSubscribeAsync (op_callback_t = (Error*, void*)) — NO new callback type
     // this phase. The core reads the topic strings + partition ints SYNCHRONOUSLY during the
-    // call (into an owned Vec<TopicPartition>, via read_topic_partitions in src/ffi/consumer.rs)
+    // call (into an owned Vec<TopicPartition>, via read_topic_partitions in rust/src/ffi/consumer.rs)
     // BEFORE spawning the op, so the pinned buffers + the partitions int[] are call-scoped —
     // freed once each returns (ffi §A4/§B4 call-scoped pin), matching ConsumerSubscribeAsync.
     // A count == 0 (empty collection) is a valid pass-through: assign([]) clears the
@@ -2208,7 +2208,7 @@ internal static partial class NativeMethods
     // both block. The sync Producer_flush is the teardown flush leg (M11/P3): it resolves pending
     // sends so the completion pump's in-flight get_all can return before the pump is joined (the
     // core's Producer_close only marks closed — it does NOT drive pending sends, unlike Java's
-    // close() which flushes; verified src/producer/mock_producer.rs close vs flush).
+    // close() which flushes; verified rust/src/producer/mock_producer.rs close vs flush).
 
     /// <summary>
     /// <c>kafka_producer_Producer_flush</c> — flushes all pending records synchronously, writing a
@@ -2252,7 +2252,7 @@ internal static partial class NativeMethods
     /// counterpart of <see cref="ProducerPartitionsForAsync"/>). Returns the error handle directly
     /// (null = success), writing an owned <c>PartitionInfoList_t</c> to <paramref name="outList"/> on
     /// success only — on failure it is left <see cref="IntPtr.Zero"/> (the C# <c>out</c> zero-inits
-    /// the temporary; the core writes it only on the <c>Ok</c> branch, verified <c>src/ffi/producer.rs</c>).
+    /// the temporary; the core writes it only on the <c>Ok</c> branch, verified <c>rust/src/ffi/producer.rs</c>).
     /// The caller copies the list out via <see cref="PartitionInfoListMarshal"/> and frees the root
     /// with <see cref="PartitionInfoListDestroy"/> (null-safe on the failure path).
     /// <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer read synchronously during the
@@ -2274,19 +2274,19 @@ internal static partial class NativeMethods
     //     UNCHANGED, and its original rationale still holds verbatim: the SINGULAR
     //     Producer_send is called INLINE
     //     on the caller thread, and the core copies key/value SYNCHRONOUSLY during the call
-    //     (verified src/ffi/producer.rs:347-368 — producer_send → rt.block_on(producer.send(
+    //     (verified rust/src/ffi/producer.rs:347-368 — producer_send → rt.block_on(producer.send(
     //     record, None)) at :366; the old "L262-281" cite in the superseded text is stale, that
     //     range is now the ProducerRecord_t struct), so the k/v pin stays CALL-SCOPED (ffi §A4).
     //     Deliberately kept inline: routing a blocking Send through the async path's 0-10 ms
     //     accumulator window would add that window to every sync send (M11/P3.1 §3.1).
     //   * ASYNC path (IAsyncProducer / AsyncKafkaProducer / AsyncMockProducer) — Option A
-    //     (Python-style pull; the anchor is bindings/python/_confluentkafka.c's send path,
+    //     (Python-style pull; the anchor is python/_confluentkafka.c's send path,
     //     Producer_send_thread at :523). Send pins the record's buffers, appends to a
     //     binding-side accumulator and returns its Task; a dedicated batch thread drains N
     //     records into a blittable ProducerRecord_t[] and calls the already-exported
     //     kafka_producer_Producer_send_batch. The pin is DEFERRED — held from Send until
     //     send_batch RETURNS, never across the returned Task, because send_batch copies
-    //     synchronously too (verified src/ffi/producer.rs:1557 — producer_send(&guard, record)
+    //     synchronously too (verified rust/src/ffi/producer.rs:1557 — producer_send(&guard, record)
     //     inside send_batch_inner; the topic is copied at :1515 via
     //     to_string_lossy().into_owned()). That is ffi §A4's own deferred-send carve-out
     //     ("a deferred-send design … would have to hold the buffer until the deferred send
@@ -2306,12 +2306,12 @@ internal static partial class NativeMethods
     // deliberately LOCAL, untracked design note, so that quote is the tracked copy of it).
     // That is still true FOR THROUGHPUT. What it never credited is the accepted Option-C
     // residual this partially fixes: under Option C an inline Producer_send blocks the CALLER
-    // inside the coarse Mutex<ProducerKind> (src/ffi/producer.rs:840) for up to max.block.ms,
+    // inside the coarse Mutex<ProducerKind> (rust/src/ffi/producer.rs:840) for up to max.block.ms,
     // and a concurrent close cannot wake it because close needs the same mutex. Option A turns
     // that native block into a managed, cancellable wait — closer to Java's send. PARTIAL only:
     // the batch thread still blocks in send_batch on the same mutex, and now holds it for a
     // whole chunk (:1500) rather than one record (M11/P3.1 §3.6). The complete fix is
-    // finer-grained locking in src/ffi/producer.rs — Mode B, out of scope.
+    // finer-grained locking in rust/src/ffi/producer.rs — Mode B, out of scope.
     //
     // ⚠ Lettering collision (M11/P3.1 §1.3): ffi §A7's "Option A / Option B" are pull-pump /
     // push-callback, so §A7's "Option A" IS the PLAN's Option C. The PLAN's Option A (this
@@ -2336,7 +2336,7 @@ internal static partial class NativeMethods
     /// non-null <c>FutureRecordMetadata_t</c> handle on success or null with a non-null
     /// <paramref name="outError"/> on a synchronous validation failure. The core copies
     /// <paramref name="key"/> / <paramref name="value"/> into the batch buffer
-    /// <b>synchronously during the call</b> (verified <c>src/ffi/producer.rs</c>), so the
+    /// <b>synchronously during the call</b> (verified <c>rust/src/ffi/producer.rs</c>), so the
     /// pinned buffers are <b>call-scoped</b> — freed once this returns (ffi §A4). Sentinels:
     /// <paramref name="key"/> / <paramref name="value"/> absent → <see cref="IntPtr.Zero"/> +
     /// <c>len -1</c>; empty → a non-null pointer + <c>len 0</c>; present → pointer + length.
@@ -2733,7 +2733,7 @@ internal static partial class NativeMethods
     //
     // 23 declarations: `Consumer_handle` plus the 22 `ConsumerHandle_*`. Three properties set
     // this family apart from every `Consumer_*` declaration above, and all three come from
-    // src/ffi/consumer_handle.rs:27-86 (quoted in the per-declaration docs):
+    // rust/src/ffi/consumer_handle.rs:27-86 (quoted in the per-declaration docs):
     //
     //   1. NO ACCESS GUARD, by design. "Nothing in this module acquires the single-owner
     //      access guard ... That is deliberate and is the whole reason the type exists." So a

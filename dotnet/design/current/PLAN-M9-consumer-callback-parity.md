@@ -17,14 +17,14 @@ sequence — highest used is 57; see §9).
 **Location note.** This is a multi-phase roadmap, so it lives in
 `design/current/` rather than a single `design/history/<M>/<P>/`. On approval the
 Manager splits it: one `PLAN.md` per phase under
-`design/history/M9/<Phase>/`, per `bindings/dotnet/CLAUDE.md §8.4`.
+`design/history/M9/<Phase>/`, per `dotnet/CLAUDE.md §8.4`.
 
 ---
 
 ## 0 · OPEN QUESTIONS — decisions needed before any phase starts
 
 Ordered by how much they change the plan. Q1 is a hard environmental blocker;
-Q5 is a genuine contradiction inside `bindings/dotnet/CLAUDE.md` that must be
+Q5 is a genuine contradiction inside `dotnet/CLAUDE.md` that must be
 resolved by a human, not by an Actor picking a side.
 
 ### Q1 — RESOLVED 2026-08-29 — stale header/natives. (⚠ The "no toolchain" diagnosis was WRONG.)
@@ -43,7 +43,7 @@ resolved by a human, not by an Actor picking a side.
 >
 > The *remedy* was nonetheless correct and necessary — the artifacts genuinely
 > were stale. `cargo build --features ffi` was run (green, 43 s) and
-> `target/include/confluent_kafka.h` regenerated (29 Aug 19:12, 159 563 bytes),
+> `rust/target/include/confluent_kafka.h` regenerated (29 Aug 19:12, 159 563 bytes),
 > now carrying **29** `ConsumerHandle_`, **31** `ConsumerRebalanceListener_`,
 > **2** `KafkaError_new`, **1** `MockConsumer_rebalance`, **10**
 > `commit_async_with_callback`, **11** `subscribe_with_listener`.
@@ -55,13 +55,13 @@ resolved by a human, not by an Actor picking a side.
 The original (now-superseded) reasoning is kept below because the artifact-staleness
 half of it is what made the rebuild necessary:
 
-- `target/include/confluent_kafka.h` is dated **27 Aug**, predates the merge, and
+- `rust/target/include/confluent_kafka.h` is dated **27 Aug**, predates the merge, and
   contains **zero** of the new symbols
   (`grep -c kafka_consumer_ConsumerHandle_` → 0; no `ConsumerRebalanceListener`,
   no `commit_async_with_callback`, no `Consumer_handle`, no
   `MockConsumer_rebalance`, no `KafkaError_new`).
-- `target/debug/libconfluent_kafka.dylib` (27 Aug) and
-  `target/release/libconfluent_kafka.dylib` (28 Aug) **also predate the merge**.
+- `rust/target/debug/libconfluent_kafka.dylib` (27 Aug) and
+  `rust/target/release/libconfluent_kafka.dylib` (28 Aug) **also predate the merge**.
   `nm -gU` finds 145 `kafka_consumer_*` exports but **none** matching
   `RebalanceListener|ConsumerHandle|with_callback|with_listener|MockConsumer_rebalance`.
 - Therefore **any new `[DllImport]` added in P6–P8 will throw
@@ -81,9 +81,9 @@ half of it is what made the rebuild necessary:
   - **(b)** Have the root `actor-executor` (which may have a toolchain elsewhere)
     produce and stage the header + natives as a prerequisite artifact, and treat
     the regen as a Rust-core dependency (§8).
-  - **(c)** Proceed "blind": author P6–P8 against `src/ffi/*.rs` as the source of
-    truth (which is legitimate per `bindings/dotnet/CLAUDE.md §1`, "Source of
-    truth for the surface = `src/ffi/*.rs` + `cbindgen.toml`"), build the C#,
+  - **(c)** Proceed "blind": author P6–P8 against `rust/src/ffi/*.rs` as the source of
+    truth (which is legitimate per `dotnet/CLAUDE.md §1`, "Source of
+    truth for the surface = `rust/src/ffi/*.rs` + `rust/cbindgen.toml`"), build the C#,
     and defer **every runtime test** to CI. **Not recommended** — it would defer
     the entire test obligation of three phases, and §7.4's mock round-trip is the
     binding's only real gate.
@@ -97,16 +97,16 @@ The break is a **compile** error, not a test failure (see §1.4). It breaks
 `make verify-rust` on **both** CI jobs (Linux amd64 `:106`, macOS arm64 `:149`),
 because `verify-rust` → `build-rust-all-features` / `test-rust-all-features` →
 `cargo build/test --all-features`, and `--all-features` turns on
-`multilanguage-tests`, which compiles `tests/common/backend_factory.rs`.
+`multilanguage-tests`, which compiles `rust/tests/common/backend_factory.rs`.
 `--skip __grpc` skips *running*, not *compiling*.
 
 The fix is two four-line method bodies. Everything else in this plan is weeks of
 work behind it.
 
-**Sub-question:** the file is Rust. `bindings/dotnet/CLAUDE.md §8.1` says the
+**Sub-question:** the file is Rust. `dotnet/CLAUDE.md §8.1` says the
 `dotnet-actor` "does not author Rust." But there is a standing precedent: M12/P1
-(N=34) had the **dotnet-actor author `tests/common/backend_factory.rs` and
-`tests/common/multilanguage_test_macro.rs` itself**, as an approved exception on
+(N=34) had the **dotnet-actor author `rust/tests/common/backend_factory.rs` and
+`rust/tests/common/multilanguage_test_macro.rs` itself**, as an approved exception on
 the M8 precedent, because harness glue is test infrastructure rather than core
 translation. Confirm the exception still applies, or route P5 to the root
 `actor-executor`.
@@ -172,7 +172,7 @@ by hand, as M9/P3 did.
 consumes it, and every alternative adds Rust churn that must then be reverted.
 If (a) is chosen, P5's commit message must state the window explicitly.
 
-### Q5 — `OffsetCommitCallback`: `bindings/dotnet/CLAUDE.md` contradicts itself. Which wins?
+### Q5 — `OffsetCommitCallback`: `dotnet/CLAUDE.md` contradicts itself. Which wins?
 
 Two rows in the same rulebook say opposite things:
 
@@ -184,7 +184,7 @@ Two rows in the same rulebook say opposite things:
 **Why it cannot be resolved by an Actor:** the harness contract requires the
 *offsets* the callback observed (`CallbackLogEntry.offsets` must contain
 `"<topic>-0" -> 2`, asserted at
-`tests/integration/multilanguage_consumer_test.rs:582-585`). A bare `Task` from
+`rust/tests/integration/multilanguage_consumer_test.rs:582-585`). A bare `Task` from
 `CommitAsync()` carries no offsets, so the "Task replaces the callback" reading
 would force either a `Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>`
 (no Java counterpart) or server-side reconstruction of the offsets (which would
@@ -205,17 +205,17 @@ is avoiding).
 
 **Manager's recommendation: (a), with a documented amendment to §4's row.**
 Note this is a rulebook edit — root `CLAUDE.md` forbids agents changing the
-prompt, and `bindings/dotnet/CLAUDE.md` is governed the same way, so the
+prompt, and `dotnet/CLAUDE.md` is governed the same way, so the
 maintainer must sanction the amendment text.
 
 ### Q6 — Is `IConsumerRebalanceListener` async or sync?
 
-`bindings/dotnet/CLAUDE.md §3` says "`IConsumerRebalanceListener` (async)", and
+`dotnet/CLAUDE.md §3` says "`IConsumerRebalanceListener` (async)", and
 `consumer-threading.md §31` defines the Rust trait as `#[async_trait]`. But at
 the FFI boundary the three listener callbacks are **synchronous C function
 pointers** invoked on the core's dispatcher thread, returning
-`kafka_common_KafkaError_t*` (`src/ffi/consumer.rs:2980-3004`), and the rebalance
-**does not proceed until the callback returns** (`src/ffi/consumer.rs:2967-2979`).
+`kafka_common_KafkaError_t*` (`rust/src/ffi/consumer.rs:2980-3004`), and the rebalance
+**does not proceed until the callback returns** (`rust/src/ffi/consumer.rs:2967-2979`).
 
 An `async` .NET listener means the trampoline must block the dispatcher thread on
 the `Task` — which is exactly what Python does
@@ -229,7 +229,7 @@ source, which is why *both* Python servers use plain synchronous methods.
     Java). Matches the ABI 1:1, no dispatcher blocking, no deadlock class. Note
     C# default interface methods require net8.0+; on the netstandard2.0 floor
     the delegation must be implemented in the trampoline instead (which is what
-    Rust does at `src/ffi/consumer.rs:3150-3157` when `on_lost` is null).
+    Rust does at `rust/src/ffi/consumer.rs:3150-3157` when `on_lost` is null).
   - **(b)** **Async** `Task`-returning, with the trampoline doing
     `.GetAwaiter().GetResult()` on the dispatcher thread. Matches §3's wording
     and consumer-threading §31's Rust-side shape, at the cost of a documented
@@ -237,14 +237,14 @@ source, which is why *both* Python servers use plain synchronous methods.
 
 **Manager's recommendation: (a) sync.** The ABI is synchronous; §3's "(async)"
 row describes the *Rust core's* trait, which the C ABI has already flattened
-(`bindings/CLAUDE.md §1.2` — the shape is flattened at the ABI and restored by
+(`dotnet/.claude/rules/bindings.md §1.2` — the shape is flattened at the ABI and restored by
 the binding, and here the faithful restoration of "blocks until it returns" *is*
 a sync method). This is a declared divergence (§3.2), not an oversight, and must
 be written down in the phase plan.
 
 ### Q7 — `ConsumerHandle` lifetime: ref-count, or document-and-hope?
 
-The ABI contract (`src/ffi/consumer_handle.rs:59-70`) is explicit: *"Destroy every
+The ABI contract (`rust/src/ffi/consumer_handle.rs:59-70`) is explicit: *"Destroy every
 handle **before** destroying the consumer."* .NET cannot force user ordering.
 
 **Options:**
@@ -306,12 +306,12 @@ claims in the briefing are corrected**; they are marked ⚠ and collected in §1
 ### 1.1 Layer 1 — Rust core C ABI: **COMPLETE. No Rust core work needed.** ✅
 
 `git diff master HEAD -- src/ffi/` is empty; the branch's FFI is byte-identical
-to master. `src/ffi/` = `common.rs` (798) · `consumer.rs` (5077) ·
+to master. `rust/src/ffi/` = `common.rs` (798) · `consumer.rs` (5077) ·
 `consumer_handle.rs` (1035, new in PR #143) · `producer.rs` (4261) · `mod.rs` (32).
 
 | Symbol | Location |
 |---|---|
-| `kafka_consumer_ConsumerRebalanceListener_t` (opaque) | `src/ffi/consumer.rs:3066-3069` |
+| `kafka_consumer_ConsumerRebalanceListener_t` (opaque) | `rust/src/ffi/consumer.rs:3066-3069` |
 | `…_on_partitions_revoked_callback_t` / `…_assigned_…` / `…_lost_…` | `:2980-2981` / `:2991-2992` / `:3003-3004` |
 | `…_user_data_destroy_t` | `:3056` |
 | `kafka_consumer_ConsumerRebalanceListener_new` (5 params) | `:3215-3236` |
@@ -323,15 +323,15 @@ to master. `src/ffi/` = `common.rs` (798) · `consumer.rs` (5077) ·
 | `kafka_consumer_Consumer_commit_async_with_callback` | `:3958-3963` |
 | `kafka_consumer_Consumer_commit_async_offsets_with_callback` | `:3989-4000` |
 | `kafka_consumer_MockConsumer_rebalance` | `:1399-1404` |
-| `kafka_consumer_Consumer_handle` | `src/ffi/consumer_handle.rs:230` |
+| `kafka_consumer_Consumer_handle` | `rust/src/ffi/consumer_handle.rs:230` |
 | `kafka_consumer_ConsumerHandle_t` (opaque) | `:118-120` |
 | the 22 `ConsumerHandle_*` functions | `:247`–`:685` (table in §5.4) |
-| ⚠ **`kafka_common_KafkaError_new(i32, const char*)`** | `src/ffi/common.rs:118-121` |
-| ⚠ `kafka_consumer_Consumer_seek_with_metadata_async` | `src/ffi/consumer.rs:3486` |
+| ⚠ **`kafka_common_KafkaError_new(i32, const char*)`** | `rust/src/ffi/common.rs:118-121` |
+| ⚠ `kafka_consumer_Consumer_seek_with_metadata_async` | `rust/src/ffi/consumer.rs:3486` |
 
 **⚠ Correction 1 — the briefing missed `kafka_common_KafkaError_new`.** It is
 required: a listener callback signals failure by *returning* a
-`kafka_common_KafkaError_t*` it constructed (`src/ffi/consumer.rs:2960-2965` —
+`kafka_common_KafkaError_t*` it constructed (`rust/src/ffi/consumer.rs:2960-2965` —
 ownership transfers to the client; do **not** destroy a handle you return). A
 .NET listener that throws must be marshalled into one of these, or the throw
 becomes an unwind into native (UB).
@@ -339,11 +339,11 @@ becomes an unwind into native (UB).
 **⚠ Correction 2 — `kafka_consumer_Consumer_seek_with_metadata_async` also
 landed in PR #143.** An unrelated gap-fill riding along; out of scope here but
 worth knowing it is now available (it was previously listed as a sync-only gap
-in `bindings/dotnet/CLAUDE.md §1`).
+in `dotnet/CLAUDE.md §1`).
 
 **Constraint that shapes the test plan (§6.3):** on a **MockConsumer-derived
 handle**, every *async* `ConsumerHandle_*` op fails with `UnsupportedVersionError`
-(`src/ffi/consumer_handle.rs:82-86`; corroborated by the phase-4 notes). Only
+(`rust/src/ffi/consumer_handle.rs:82-86`; corroborated by the phase-4 notes). Only
 `wakeup` and the three sync getters (`assignment`/`subscription`/`paused`) work.
 So in-callback reentrancy **cannot** be unit-tested against `MockConsumer`.
 
@@ -352,7 +352,7 @@ So in-callback reentrancy **cannot** be unit-tested against `MockConsumer`.
 | # | Gap | Evidence |
 |---|---|---|
 | 1 | No P/Invoke for any of the 9 new symbol families | `NativeMethods.cs` holds 147 `static extern` decls; **0** match. `ConsumerSubscribe` `:1021`, `ConsumerSubscribeAsync` `:230`, `ConsumerCommitAsync` `:1382` are the plain forms only |
-| 2 | No `IConsumerRebalanceListener` | `grep -rni rebalancelistener bindings/dotnet/src` → **0 hits**. Every `rebalance` hit is `EnforceRebalance`. Already flagged as pending at `IAsyncConsumer.cs:60` and `bindings/dotnet/CLAUDE.md §3` |
+| 2 | No `IConsumerRebalanceListener` | `grep -rni rebalancelistener dotnet/src` → **0 hits**. Every `rebalance` hit is `EnforceRebalance`. Already flagged as pending at `IAsyncConsumer.cs:60` and `dotnet/CLAUDE.md §3` |
 | 3 | No `Subscribe(topics, listener)` | Exactly one overload each: `IConsumer.cs:99` `void Subscribe(IReadOnlyCollection<string>)`, `IAsyncConsumer.cs:107` `Task Subscribe(IReadOnlyCollection<string>, CancellationToken)` |
 | 4 | No managed `ConsumerHandle` | 0 of 22 `ConsumerHandle_*` declared; no managed type |
 | 5 | `CommitAsync` not completion-observable | `IConsumerCommon.cs:160` → `void CommitAsync()`. `NativeConsumer.cs:1084-1097` calls only `NativeMethods.ConsumerCommitAsync` (`EntryPoint = "kafka_consumer_Consumer_commit_async"`). All four public classes are one-line forwarders (`KafkaConsumer.cs:200`, `AsyncKafkaConsumer.cs:207`, `MockConsumer.cs:201`, `AsyncMockConsumer.cs:193`) |
@@ -360,15 +360,15 @@ So in-callback reentrancy **cannot** be unit-tested against `MockConsumer`.
 
 **⚠ Correction 3 — the briefing's assumed producer precedent does not exist.**
 There is **no producer in the .NET binding on this branch**: no `*Producer*.cs`
-source file anywhere under `bindings/dotnet/src/`, no `SendCompletionPump`, no
-producer dispatcher. `bindings/dotnet/CLAUDE.md §3`'s producer sketch is a
+source file anywhere under `dotnet/src/`, no `SendCompletionPump`, no
+producer dispatcher. `dotnet/CLAUDE.md §3`'s producer sketch is a
 *target*, and `design/current/producer-send-completion-approaches.html` is a
 design doc. **The precedent to mirror is the consumer's own completion bridge**
 — see §2.3.
 
 ### 1.3 Layer 3 — .NET gRPC server: **all three claimed gaps CONFIRMED.**
 
-`bindings/dotnet/grpc-server/` = `Program.cs` (169) · `ConsumerServiceImpl.cs`
+`dotnet/grpc-server/` = `Program.cs` (169) · `ConsumerServiceImpl.cs`
 (669) · `AsyncConsumerServiceImpl.cs` (778) · `Translate.cs` (361) ·
 `Confluent.Kafka.GrpcServer.csproj` (68).
 
@@ -397,7 +397,7 @@ design doc. **The precedent to mirror is the consumer's own completion bridge**
 ### 1.4 Layer 4 — Rust harness: the compile break, precisely
 
 `ConsumerBackendFactory::create_with_callback_log`
-(`tests/common/backend_factory.rs:64-67`) is a **required** trait method with
+(`rust/tests/common/backend_factory.rs:64-67`) is a **required** trait method with
 **no default body**. `DotnetGrpcFactory` (`:423`) and `DotnetAsyncGrpcFactory`
 (`:463`) do not implement it → two `error[E0046]`.
 
@@ -429,7 +429,7 @@ GetCallbackLog RPC + callback coverage across backends"), plus the fixup
 `9465e197`. Cite `7eb83969` in commit messages, not `8de4dced`.
 
 **⚠ Correction 6 — the dotnet arms ARE generated for the consumer callback
-tests.** `tests/common/multilanguage_consumer_test_macro.rs:18-22` and `:91-117`
+tests.** `rust/tests/common/multilanguage_consumer_test_macro.rs:18-22` and `:91-117`
 emit **six** unconditional arms per test, including `__grpc_dotnet` and
 `__grpc_dotnet_async`. So after P5 there will be **4 new test wrappers** (2
 bodies × 2 dotnet backends) that panic until P9:
@@ -443,12 +443,12 @@ bodies × 2 dotnet backends) that panic until P9:
 
 Both surface as
 `IllegalState("dotnet gRPC backend transport error (Unimplemented): ")` via
-`tests/common/multilanguage_producer.rs:391-398`.
+`rust/tests/common/multilanguage_producer.rs:391-398`.
 
 ### 1.5 Was .NET deliberately deferred by phase 7?
 
 **No — it was invisible.** Zero commits in `7161aae9^1..7161aae9^2` touch
-`bindings/dotnet/**`; `git diff --stat bcd9e552 6f510a01 -- bindings/dotnet` is
+`dotnet/**`; `git diff --stat bcd9e552 6f510a01 -- bindings/dotnet` is
 empty. `DotnetGrpcFactory` was introduced by `afbd79c3` on a **parallel**
 branch that is neither an ancestor nor a descendant of PR #143. The phase-7
 commit body says "each fanned out to **all four** backends" — the author's world
@@ -485,7 +485,7 @@ finding must cite a specific anchor line or a declared divergence in §3.**
 
 ### 2.1 The wire contract (binding on all backends)
 
-`multilanguage-test-server/proto/producer_service.proto:197-241` and
+`rust/multilanguage-test-server/proto/producer_service.proto:197-241` and
 `consumer_service.proto:63-68, 102-106, 155-167, 244-252, 385-390`.
 
 - **`kind` vocabulary, exactly 5, lowercase:** `"assigned"`, `"revoked"`,
@@ -511,14 +511,14 @@ Each .NET deliverable must mirror the named Python symbol.
 
 | .NET deliverable | Python anchor | Cite |
 |---|---|---|
-| `IConsumerRebalanceListener` | duck-typed listener: `on_partitions_revoked` + `on_partitions_assigned` required, `on_partitions_lost` optional (delegates to revoked) | `bindings/python/consumer.py:962-985`, adapter `:263-317` |
+| `IConsumerRebalanceListener` | duck-typed listener: `on_partitions_revoked` + `on_partitions_assigned` required, `on_partitions_lost` optional (delegates to revoked) | `python/consumer.py:962-985`, adapter `:263-317` |
 | listener registration lifetime | `_subscribe_spec(topics, listener=None)` — `None` ⇒ plain subscribe **and drops** the adapter | `consumer.py:773-788` |
 | `Subscribe(topics, listener)` | `Consumer.subscribe(topics, listener=None)` / `AsyncConsumer.subscribe(...)` | `consumer.py:962`, `:1123` |
 | `IOffsetCommitCallback` + `CommitAsync` overloads | `_ConsumerBase.commit_async(offsets=None, callback=None)` — covers all three Java overloads; `callback(offsets, exception)` | `consumer.py:668-705`, adapter `:320-372` |
 | commit-callback error policy | adapter **swallows and logs** any exception (Java `onComplete` returns void) | `consumer.py:363-372` |
 | managed `ConsumerHandle` | `class ConsumerHandle` + `_ConsumerBase.handle()`; context manager; idempotent `destroy()`; **no** callback-taking commit | `consumer.py:378-545`, `:584-593` |
 | `MockConsumer.Rebalance` | `_MockConsumerMixin.rebalance(partitions)` | `consumer.py:868-886` |
-| server `CallbackLog` | `class CallbackLog` — `append(client_id, kind, partitions, offsets, error)` + `response(client_id)`; one `threading.Lock`; **no** `clear()`/`snapshot()` | `bindings/python/grpc_translate.py:287-332` |
+| server `CallbackLog` | `class CallbackLog` — `append(client_id, kind, partitions, offsets, error)` + `response(client_id)`; one `threading.Lock`; **no** `clear()`/`snapshot()` | `python/grpc_translate.py:287-332` |
 | server `_offset_key` | `f"{topic}-{partition}"` | `grpc_translate.py:282-284` |
 | server `LoggingRebalanceListener` | 3 plain (non-coroutine) methods; `on_partitions_lost` implemented **explicitly**, not left to the Java default, so lost ≠ revoked in the log | `grpc_translate.py:344-372` |
 | server logging commit callback | `make_logging_commit_callback(log, client_id)` — `partitions=list(offsets.keys())`, `offsets={_offset_key(...): oam.offset}`, `error="" if exception is None else str(exception)` | `grpc_translate.py:375-388` |
@@ -595,15 +595,15 @@ this list is a defect.
 
 | # | Divergence | Why | Governing rule |
 |---|---|---|---|
-| D1 | **`IConsumerRebalanceListener` is sync**, not `Task`-returning (subject to Q6) | The ABI callback is a sync C fn pointer returning `KafkaError*` and the rebalance blocks on it. Python's own logging listener uses plain methods for exactly this reason | `bindings/dotnet/CLAUDE.md §4` sync-vs-async; `ffi-marshalling.md §B6`; `src/ffi/consumer.rs:2967-2979` |
-| D2 | **`Subscribe` gains an overload**, not an optional parameter | .NET idiom is overloads; Python uses `listener=None`. Java has two `subscribe` overloads, so the overload is the *more* faithful form | `bindings/CLAUDE.md §2.2` |
-| D3 | **Listener callbacks run on the core's foreign dispatcher thread**, not "the caller's task" | `consumer-threading.md §31`'s caller's-task model is the **Rust core's** contract; the C ABI flattens it (`common.rs:276-280`). Python documents the identical divergence (`consumer.py:977-985`) | `bindings/CLAUDE.md §1.2`; `ffi-marshalling.md §B1/§B6` |
-| D4 | **`IOffsetCommitCallback` exists** despite `bindings/dotnet/CLAUDE.md §4`'s "do not add a callback-taking overload" row | Q5. Needs a maintainer-sanctioned amendment to that row | Q5 |
+| D1 | **`IConsumerRebalanceListener` is sync**, not `Task`-returning (subject to Q6) | The ABI callback is a sync C fn pointer returning `KafkaError*` and the rebalance blocks on it. Python's own logging listener uses plain methods for exactly this reason | `dotnet/CLAUDE.md §4` sync-vs-async; `ffi-marshalling.md §B6`; `rust/src/ffi/consumer.rs:2967-2979` |
+| D2 | **`Subscribe` gains an overload**, not an optional parameter | .NET idiom is overloads; Python uses `listener=None`. Java has two `subscribe` overloads, so the overload is the *more* faithful form | `dotnet/.claude/rules/bindings.md §2.2` |
+| D3 | **Listener callbacks run on the core's foreign dispatcher thread**, not "the caller's task" | `consumer-threading.md §31`'s caller's-task model is the **Rust core's** contract; the C ABI flattens it (`common.rs:276-280`). Python documents the identical divergence (`consumer.py:977-985`) | `dotnet/.claude/rules/bindings.md §1.2`; `ffi-marshalling.md §B1/§B6` |
+| D4 | **`IOffsetCommitCallback` exists** despite `dotnet/CLAUDE.md §4`'s "do not add a callback-taking overload" row | Q5. Needs a maintainer-sanctioned amendment to that row | Q5 |
 | D5 | **`ConsumerHandle` takes a `DangerousAddRef`** on the consumer `SafeHandle` (subject to Q7) — Python does not ref-count | .NET cannot enforce destroy-ordering; M9/P4 closed exactly this UAF class | `ffi-marshalling.md §B2` (ref-counted release); M9/P4 H1 |
-| D6 | **`CallbackLog` lives in its own `CallbackLog.cs`**, not in `Translate.cs` (subject to Q8) | `Translate.cs` is a pure-function static class; the log is stateful | `bindings/dotnet/CLAUDE.md §2` |
+| D6 | **`CallbackLog` lives in its own `CallbackLog.cs`**, not in `Translate.cs` (subject to Q8) | `Translate.cs` is a pure-function static class; the log is stateful | `dotnet/CLAUDE.md §2` |
 | D7 | **The server's per-consumer `GCHandle` + log state is session-lifetime**, never freed at `Close` (subject to Q9) | Mirrors C's `9465e197` UAF fix; `Consumer_destroy` does not join the dispatcher | §2.4 item 1 |
-| D8 | **Copy-out of the delivered `TopicPartitionList` / `OffsetMap` happens inside the trampoline**, before `_destroy`, exactly as the existing one-shot trampolines do | `bindings/dotnet/CLAUDE.md §6.4` copy-out default; borrowed views are never freed | `ffi-marshalling.md §B2` (Cat. 3/4), `§B4` |
-| D9 | **No `ConsumerHandle` commit-with-callback**, matching Python and the ABI (the handle family has no callback-taking commit) | `src/ffi/consumer_handle.rs:72-86` excludes them by design | anchor §2.2 |
+| D8 | **Copy-out of the delivered `TopicPartitionList` / `OffsetMap` happens inside the trampoline**, before `_destroy`, exactly as the existing one-shot trampolines do | `dotnet/CLAUDE.md §6.4` copy-out default; borrowed views are never freed | `ffi-marshalling.md §B2` (Cat. 3/4), `§B4` |
+| D9 | **No `ConsumerHandle` commit-with-callback**, matching Python and the ABI (the handle family has no callback-taking commit) | `rust/src/ffi/consumer_handle.rs:72-86` excludes them by design | anchor §2.2 |
 
 ---
 
@@ -635,7 +635,7 @@ at approval time.)
 
 ### 5.1 M9/P5 (N=58) — harness compile fix
 
-**Deliverable.** Two method bodies in `tests/common/backend_factory.rs`,
+**Deliverable.** Two method bodies in `rust/tests/common/backend_factory.rs`,
 mirroring `CGrpcFactory:389-394` exactly:
 
 ```rust
@@ -706,7 +706,7 @@ correctness or memory-safety defects. `COMMENTS.DONE.58.md` archived at
    lifetime rule (below).
 
 **The listener lifetime rule** (the one new invariant; ABI contract at
-`src/ffi/consumer.rs:3012-3048` and `:3281-3307`):
+`rust/src/ffi/consumer.rs:3012-3048` and `:3281-3307`):
 
 - `subscribe_with_listener` **consumes the listener handle unconditionally,
   including on failure** — so never `_destroy` a listener you passed in
@@ -716,7 +716,7 @@ correctness or memory-safety defects. `COMMENTS.DONE.58.md` archived at
   **not** by `close()` — verified in phase-5 notes item 1 and phase-6 notes
   item 5; the Rust `SubscriptionState::unsubscribe` deliberately leaves
   `rebalance_listener` in place, Java-faithfully.
-- `user_data_destroy` **may run on any thread** (`src/ffi/consumer.rs:3010`), so
+- `user_data_destroy` **may run on any thread** (`rust/src/ffi/consumer.rs:3010`), so
   the free hook must be thread-agnostic. The safest .NET shape mirrors C:
   keep the `GCHandle` **binding-lifetime**, pass `user_data_destroy = null`,
   and free at `NativeConsumer` teardown — the alternative (freeing from the
@@ -728,7 +728,7 @@ correctness or memory-safety defects. `COMMENTS.DONE.58.md` archived at
   contract: code **-1**, `str(exc)` verbatim as the message (phase-6 notes
   item 6). The returned handle's ownership transfers; do **not** destroy it.
 
-**`MockConsumer_rebalance` semantics to pin in tests** (`src/ffi/consumer.rs:1372-1397`,
+**`MockConsumer_rebalance` semantics to pin in tests** (`rust/src/ffi/consumer.rs:1372-1397`,
 phase-5 notes item 4, phase-6 notes item 6):
 requires an `AutoTopics` **subscription** (a manually-assigned consumer fails
 with "manual assignment in use"); fires `on_partitions_revoked` **only when
@@ -781,7 +781,7 @@ single most likely place to introduce a leak or a UAF.
 **ABI facts that force the shape** (verified; do not re-derive):
 
 - The callback typedef is `(OffsetMap*, KafkaError*, void*)`
-  (`src/ffi/consumer.rs:3829-3830`). `offsets` is **always non-null**; `error`
+  (`rust/src/ffi/consumer.rs:3829-3830`). `offsets` is **always non-null**; `error`
   null ⇒ success; **the callee owns both** and must
   `kafka_consumer_OffsetMap_destroy` / `kafka_common_KafkaError_destroy` them.
 - **`…_offsets_with_callback`'s `callback` param is NOT nullable, and there is no
@@ -837,7 +837,7 @@ the no-offsets form.
 **Contract facts:**
 
 - The handle is **caller-owned and arbitrarily long-lived** — *not*
-  callback-scoped (`src/ffi/consumer_handle.rs:59-70`). Handles are independent;
+  callback-scoped (`rust/src/ffi/consumer_handle.rs:59-70`). Handles are independent;
   destroying one does not affect another or the consumer. **Destroy every handle
   before destroying the consumer** — hence Q7/D5.
 - **It bypasses the access guard by design** (`:27-37`), which is the entire
@@ -918,7 +918,7 @@ must be updated in the same commit.
    can pass until they are rebuilt.** The host `.dylib` + header were refreshed
    under Q1; these were **not**. The M9/P3 Actor hit exactly this and had to
    re-cross-build before the image build.
-2. **`tests/common/callback_log.rs:41` says "all four backends" — there are now
+2. **`rust/tests/common/callback_log.rs:41` says "all four backends" — there are now
    six.** The module doc enumerates `python / python_async / c` and concludes "one
    generic test body asserts the same thing against all four backends". Introduced
    by merge `a7efb0d5`, **not** by P5 — it was correct when written, and P5's
@@ -998,7 +998,7 @@ Actor justified freeing the registration `GCHandle` from `user_data_destroy` on
 the grounds that an owned `Arc` is held across the callback. The Critic verified
 all three invocation sites repo-wide (correct — genuinely not a UAF), then showed
 the inference over-reaches: `FfiRebalanceListener::invoke`
-(`src/ffi/consumer.rs:3122`) **copies the pointer out before dispatching**, so the
+(`rust/src/ffi/consumer.rs:3122`) **copies the pointer out before dispatching**, so the
 closure carries a **raw copy, not the `Arc`**. A count ≥ 1 holds only while the
 awaiting *future* lives.
 
@@ -1133,7 +1133,7 @@ which is exactly why they belong together and away from a .NET phase.
 Deferred twice (P6 → P8) on two real blockers: the consumer's own `Commit()` is
 `ConcurrentModification` **by design**, and every **async** `ConsumerHandle_*` op
 returns `UnsupportedVersionError` on a mock-derived handle
-(`src/ffi/consumer_handle.rs:82-86`), while .NET unit tests are mock-only.
+(`rust/src/ffi/consumer_handle.rs:82-86`), while .NET unit tests are mock-only.
 
 **A mock-testable form of the load-bearing property does exist, and P8 ships it.**
 The header proves the asymmetry directly:
@@ -1198,7 +1198,7 @@ full to every phase. Notes:
 - **#12** (test-fixture fidelity, **added by this very merge**) — a fixture
   standing in for a listener must invoke the same primitives production does.
 
-`bindings/dotnet/CLAUDE.md §7.5`: builds on the TFM matrix
+`dotnet/CLAUDE.md §7.5`: builds on the TFM matrix
 (net462-via-netstandard2.0 / net8.0 / net10.0), unit tests pass against
 `MockConsumer`, lint/format clean, `ffi-marshalling.md` anti-patterns satisfied.
 **net8.0 execution is a standing CI-only gate here** (the .NET 8 runtime is not
@@ -1227,8 +1227,8 @@ installed; net10.0 is the execution gate, net8.0 build-only).
   the core's access guard — that is *by design*, and the sanctioned route is
   `ConsumerHandle` (P8); and (b) **every async `ConsumerHandle_*` op returns
   `UnsupportedVersionError` on a MockConsumer-derived handle**
-  (`src/ffi/consumer_handle.rs:82-86`), and .NET unit tests are Mock-only, no
-  broker (`bindings/dotnet/CLAUDE.md §7.3`).
+  (`rust/src/ffi/consumer_handle.rs:82-86`), and .NET unit tests are Mock-only, no
+  broker (`dotnet/CLAUDE.md §7.3`).
 
   **Options for #1:** a broker-backed integration test (Testcontainers — the
   M13/P1 precedent exists in the perf suite, but that suite lives on the
@@ -1245,14 +1245,14 @@ gate. **That is false and has been removed.** It has been false since `4fd1435f`
 (#139, 2026-08-05) — which *predates this plan*; the claim was inherited from the
 phase-7 actor notes, which were written before that change landed.
 
-`xtask/src/main.rs:154-167` runs clippy in **two** passes:
+`rust/xtask/src/main.rs:154-167` runs clippy in **two** passes:
 
 ```
 clippy --workspace --all-targets                  -- -D warnings
 clippy --workspace --all-targets --all-features   -- -D warnings
 ```
 
-The second pass covers `src/ffi/*` **and** both integration test binaries. So
+The second pass covers `rust/src/ffi/*` **and** both integration test binaries. So
 `cargo xtask lint` is sufficient on its own — and it is precisely why lint was
 one of the two gates that went **red** on the broken tree. **No phase should add
 a redundant clippy invocation.**
@@ -1313,16 +1313,16 @@ not an Actor's — flagged, not actioned.)*
 
 ## 8 · Rust-core dependencies vs. .NET work
 
-Per `bindings/dotnet/CLAUDE.md §8.1`, the `dotnet-actor` builds C# from the
+Per `dotnet/CLAUDE.md §8.1`, the `dotnet-actor` builds C# from the
 generated header down and does **not** author Rust; a feature needing a new ABI
 function is a Rust-core dependency on the root `actor-executor`.
 
 | Item | Owner |
 |---|---|
 | **New ABI functions** | **None needed.** Layer 1 is complete (§1.1). This whole plan is **Mode A** |
-| **Regenerating `target/include/confluent_kafka.h`** | A *build* step, not authorship: `cargo build --features ffi`, emitted by `build.rs:104-127` under `#[cfg(feature = "ffi")]` using `cbindgen.toml`. `cbindgen.toml`'s export allowlist **already names every new type**, so a rebuild emits them with no edit. **Blocked by Q1** |
+| **Regenerating `rust/target/include/confluent_kafka.h`** | A *build* step, not authorship: `cargo build --features ffi`, emitted by `rust/build.rs:104-127` under `#[cfg(feature = "ffi")]` using `rust/cbindgen.toml`. `rust/cbindgen.toml`'s export allowlist **already names every new type**, so a rebuild emits them with no edit. **Blocked by Q1** |
 | **Building the natives** (`.dylib` for local tests, a cross-built Linux `.so` for the images) | Same — blocked by Q1 |
-| **`tests/common/backend_factory.rs` (P5)** | Rust, but harness glue. Q2 — recommend the dotnet-actor under the standing M12/P1 exception |
+| **`rust/tests/common/backend_factory.rs` (P5)** | Rust, but harness glue. Q2 — recommend the dotnet-actor under the standing M12/P1 exception |
 | **Everything in P6–P9** | `dotnet-actor` / `dotnet-critic` |
 
 **Required reading for the Actors** (PR #143 committed no design doc, §1.5):
@@ -1336,22 +1336,22 @@ and the mock-handle `UnsupportedVersion` constraint.
 ## 9 · Numbering and mechanics
 
 - **Binding N sequence** (independent of the root repo's): highest used = **57**
-  (M11/P9). Verified by `ls bindings/dotnet/COMMENTS*`. Root-repo N=42–48 and
+  (M11/P9). Verified by `ls dotnet/COMMENTS*`. Root-repo N=42–48 and
   50–53 are deliberately skipped on the binding side.
 - **Assigned: N=58 (P5) · 59 (P6) · 60 (P7) · 61 (P8) · 62 (P9).** Next free
   after this plan: **63**.
 - `COMMENTS.<N>.md` / `COMMENTS.DONE.<N>.md` are **local working files at the
   binding root, never committed**. The tracked record is the Manager's archived
   copy at `design/history/M9/<Phase>/COMMENTS.DONE.<N>.md`
-  (`bindings/dotnet/CLAUDE.md §8.4`).
+  (`dotnet/CLAUDE.md §8.4`).
 - On approval: split this document into per-phase `PLAN.md` files under
   `design/history/M9/<Phase>/`, and add a `STATUS.md` entry per closed phase.
-- **Persona discovery**: `bindings/dotnet/.claude/agents/dotnet-{actor,critic}.md`
+- **Persona discovery**: `dotnet/.claude/agents/dotnet-{actor,critic}.md`
   must be copied to the repo-root `.claude/agents/` to be invocable, and those
   root copies must **never** be committed.
 - **Toolchain locations in this environment**: `dotnet` is **not** on `PATH` —
   `/usr/local/share/dotnet/dotnet` (SDK 10.0.302) or `~/.dotnet/dotnet`.
-  This branch's `bindings/dotnet/Makefile` has only `grpc-image` /
+  This branch's `dotnet/Makefile` has only `grpc-image` /
   `grpc-image-async`; there is **no** `test-dotnet` / `verify-dotnet` target
   here (those live on the producer/perf branches), so phase plans must spell out
   explicit `dotnet build` / `dotnet test -f net10.0` /

@@ -116,7 +116,7 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
         _targetSize = Math.Max(0, targetSize);
 
         // One pad buffer per serializer, sized once: the send path must not allocate a
-        // padding buffer per record (root CLAUDE.md §11 — this is the soak's own hot path
+        // padding buffer per record (root CLAUDE.md §13 — this is the soak's own hot path
         // even though the binding's allocation budget does not cover it).
         int repetitions = (_targetSize / s_padUnit.Length) + 1;
         var pad = new byte[repetitions * s_padUnit.Length];
@@ -131,7 +131,7 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
     /// <inheritdoc/>
     public byte[]? Serialize(string topic, SoakRecord data)
     {
-        // Java-faithful invoke-on-null (bindings/dotnet/CLAUDE.md §4): the producer calls
+        // Java-faithful invoke-on-null (dotnet/CLAUDE.md §4): the producer calls
         // the serializer even for a null value, and a null return is the tombstone
         // sentinel. The soak never sends one; handling it keeps this total.
         if (data is null)
@@ -165,7 +165,7 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 /// TOTAL: it never throws.</b>
 /// <para>
 /// ⚠ That is the single highest-risk contract in this client, and it is not an
-/// optimization. <c>bindings/dotnet/CLAUDE.md §4</c>: any <c>IDeserializer&lt;T&gt;</c>
+/// optimization. <c>dotnet/CLAUDE.md §4</c>: any <c>IDeserializer&lt;T&gt;</c>
 /// throw is wrapped in a <c>SerializationException</c> and <b>faults the whole
 /// <c>Poll</c></b>. The Python soak catches its <c>ValueError</c> <i>per record</i>,
 /// counts <c>consumer.msgerr</c> and continues with the rest of the batch — so a

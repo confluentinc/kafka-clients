@@ -18,7 +18,7 @@ namespace Confluent.Kafka.Performance;
 
 /// <summary>
 /// Numeric formatting for the shared <c>metrics.jsonl</c> schema, kept byte-compatible with the
-/// Python (<c>performance_common.py</c>) and Rust (<c>tests/performance/producer_perf_test.rs</c>)
+/// Python (<c>performance_common.py</c>) and Rust (<c>rust/tests/performance/producer_perf_test.rs</c>)
 /// siblings so <c>tools/performance_metrics_plot</c> parses every language's output identically.
 /// </summary>
 /// <remarks>

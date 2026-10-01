@@ -37,7 +37,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <c>MockConsumer</c>-derived handle <c>wakeup</c> and the three sync getters work (the
 /// getters return <b>empty</b>) while every async operation fails with
 /// <c>UnsupportedVersionError</c> — "the mock has no event pipeline … This is core behavior,
-/// not an FFI limitation" (<c>src/ffi/consumer_handle.rs:82-86</c>). Asserting it is coverage.
+/// not an FFI limitation" (<c>rust/src/ffi/consumer_handle.rs:82-86</c>). Asserting it is coverage.
 /// </para>
 /// <para>
 /// <b><c>consumer-threading.md</c> §31 test #1 is satisfied in two parts.</b> The
@@ -92,7 +92,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     /// <para>
     /// No broker, no threads, no sleeps. <c>MockConsumer_rebalance</c> acquires the core's
     /// single-owner access guard and holds it across the listener invocation
-    /// (<c>src/ffi/consumer.rs:1400-1417</c> — <c>acquire(h)</c> then a <c>ReleaseGuard</c>
+    /// (<c>rust/src/ffi/consumer.rs:1400-1417</c> — <c>acquire(h)</c> then a <c>ReleaseGuard</c>
     /// spanning <c>block_on(mock.rebalance(..))</c>). So inside the callback:
     /// <c>kafka_consumer_Consumer_assignment</c> takes the guard, fails to acquire it, and
     /// returns <b>null</b>, which the binding maps to <see cref="InvalidOperationException"/>;

@@ -15,7 +15,7 @@
 // Soak test producer-consumer end-to-end client for long term validation of the Rust
 // Kafka client through its .NET binding.
 //
-// Modelled on bindings/python/soak/soakclient.py, which is itself modelled on
+// Modelled on python/soak/soakclient.py, which is itself modelled on
 // confluent-kafka-python's tests/soak/soakclient.py. The structure (SoakRecord, the two
 // loops, prefix-routed configuration, per-partition high-water-mark bookkeeping,
 // counters/gauges, resource sampling, periodic status lines) is ported faithfully; the

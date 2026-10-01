@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <summary>
 /// The <c>unsafe</c> send-path marshalling for the producer's inline pull-pump (ffi §A4,
 /// PLAN §3 Option C): pins the key / value bytes <b>call-scoped</b> (the core copies them
-/// synchronously during <c>Producer_send</c>, verified <c>src/ffi/producer.rs</c>), applies the
+/// synchronously during <c>Producer_send</c>, verified <c>rust/src/ffi/producer.rs</c>), applies the
 /// absent / empty / present sentinel logic, and returns the future handle — or throws a
 /// <see cref="KafkaException"/> on a synchronous <c>out_error</c>. Lives in
 /// <c>Internal/Interop/</c> because it is the only send-path code that needs <c>unsafe</c>

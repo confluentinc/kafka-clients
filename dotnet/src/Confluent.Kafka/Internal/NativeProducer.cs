@@ -405,7 +405,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// free-running window — into a blittable <see cref="Interop.ProducerRecordNative"/> array,
     /// issues <c>kafka_producer_Producer_send_batch</c> per chunk, unpins, and hands the resulting
     /// futures to the <b>unchanged</b> <see cref="SendCompletionPump"/>. The anchor is
-    /// <c>bindings/python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>.
+    /// <c>python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>.
     /// </para>
     /// <para>
     /// <b>The SYNC <see cref="Send"/> is deliberately NOT moved</b> (M11/P3.1 §3.1): it returns a
@@ -1186,7 +1186,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// inside a <c>FutureRecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
     /// cannot be interrupted, so <c>_thread.Join()</c> would hang until that future resolves. The
     /// core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks the producer
-    /// closed (verified <c>src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only
+    /// closed (verified <c>rust/src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only
     /// <c>flush</c> drains and completes the pending completions) — so close cannot unblock the
     /// in-flight <c>get_all</c>. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
     /// completes pending sends (their futures resolve, so <c>get_all</c> returns); for a real

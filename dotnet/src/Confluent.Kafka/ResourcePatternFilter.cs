@@ -32,7 +32,7 @@ namespace Confluent.Kafka;
 /// <para>
 /// Java's matching family (<c>matches</c>, <c>matchesAtMostOne</c>, <c>findIndefiniteField</c>)
 /// is deliberately <b>not</b> ported: ACL pattern-matching semantics are Kafka behavior and
-/// live once, in the Rust core (<c>bindings/CLAUDE.md §2.6</c>). Recorded deviation,
+/// live once, in the Rust core (<c>dotnet/.claude/rules/bindings.md §2.6</c>). Recorded deviation,
 /// <c>definition-of-done.md</c> §7.
 /// </para>
 /// <para>

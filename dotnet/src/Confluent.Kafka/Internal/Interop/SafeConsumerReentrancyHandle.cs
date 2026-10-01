@@ -30,7 +30,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <para>
 /// <b>Why this handle ref-counts its parent (P8-D1 / roadmap Q7-D5).</b> The ABI contract is
 /// explicit — "A handle is usable only while its consumer is alive. Destroy every handle
-/// <b>before</b> destroying the consumer" (<c>src/ffi/consumer_handle.rs:67-70</c>) — and .NET
+/// <b>before</b> destroying the consumer" (<c>rust/src/ffi/consumer_handle.rs:67-70</c>) — and .NET
 /// cannot force user ordering. Python documents the ordering and relies on the user
 /// (<c>consumer.py:591-592</c>); .NET deliberately does not, because a long-lived raw pointer
 /// outliving a concurrent destroy is exactly the use-after-free class M9/P4 closed for every
@@ -95,7 +95,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// An arbitrary-thread destroy is in any case the <em>contracted</em> case: the core states a
 /// release hook "may fire on <b>any thread</b> — whichever one drops the adapter (a tokio
 /// worker ..., the dispatcher thread, or the C thread calling <c>_destroy</c>)"
-/// (<c>src/ffi/common.rs:422-425</c>), which is why both hook free sites
+/// (<c>rust/src/ffi/common.rs:422-425</c>), which is why both hook free sites
 /// (<c>ListenerRegistration.Release</c>, <c>CommitCallbackRegistration.Release</c>) are
 /// already <c>Interlocked</c>-guarded and thread-agnostic.
 /// </para>

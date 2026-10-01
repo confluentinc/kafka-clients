@@ -101,7 +101,7 @@ public sealed class SendCompletionGroupingTests
         // completed.
         //
         // Determinism rests on two verified facts, not on timing:
-        //   * the mock's pending queue is FIFO — src/producer/mock_producer.rs holds a VecDeque,
+        //   * the mock's pending queue is FIFO — rust/src/producer/mock_producer.rs holds a VecDeque,
         //     send pushes the back and complete_next pops the front — so CompleteNext() resolves the
         //     OLDEST record; and
         //   * group 1's send_batch precedes group 2's, because SendChain walks a node's chunks in

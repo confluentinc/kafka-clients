@@ -72,7 +72,7 @@ public sealed class DescribeTopicsOptions
     /// <para>
     /// Must not be negative — <b>stricter than Java</b>, which accepts any <c>int</c>.
     /// The ABI maps a negative back to Java's 2000 default (the private helper
-    /// <c>describe_topics_options</c> in <c>src/ffi/admin.rs</c>, whose doc the generated
+    /// <c>describe_topics_options</c> in <c>rust/src/ffi/admin.rs</c>, whose doc the generated
     /// header does not carry), so a negative would be silently reinterpreted. That is the
     /// same reasoning, and the same <see cref="System.ArgumentOutOfRangeException"/>, as
     /// <see cref="TimeoutMs"/>.

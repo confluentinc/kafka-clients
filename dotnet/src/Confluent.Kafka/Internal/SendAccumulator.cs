@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// The async producer's binding-side send accumulator and its batch thread — the .NET realization of
 /// the Python binding's <c>Producer_send_thread</c> (M11/P3.1, anchor
-/// <c>bindings/python/_confluentkafka.c:523-655</c>). <c>Send</c> pins the record's buffers, appends
+/// <c>python/_confluentkafka.c:523-655</c>). <c>Send</c> pins the record's buffers, appends
 /// them to a node chain and returns immediately; this thread waits for a threshold or a free-running
 /// window, takes the whole chain, and drives one <c>kafka_producer_Producer_send_batch</c> per node,
 /// then unpins and hands the resulting futures to the existing <see cref="SendCompletionPump"/>.
@@ -1294,7 +1294,7 @@ internal sealed class SendAccumulator
             // must still see a live future at each of these indices and free it. Nulling first would
             // make those indices look like "the core never saw this record", and FaultNode would
             // then fire delivery callbacks the pump is also about to fire — DUPLICATES, which the
-            // exactly-once obligation makes strictly worse than the drop (root CLAUDE.md §9.5).
+            // exactly-once obligation makes strictly worse than the drop (root CLAUDE.md §11.5).
             //
             // Unchanged in substance from the pre-grouping form, which nulled one slot after one
             // per-record Enqueue: same invariant, one enqueue per send_batch call instead of one per

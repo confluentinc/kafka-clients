@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// The async send accumulator's tuning constants (M11/P3.1 §3.2). <b>Every value with a Python
 /// counterpart takes Python's value, and keeps Python's name</b>
-/// (<c>bindings/python/_confluentkafka.c:19-27</c> and the bare <c>10 ms</c> literal in
+/// (<c>python/_confluentkafka.c:19-27</c> and the bare <c>10 ms</c> literal in
 /// <c>Producer_send_thread</c>), so the two bindings can be diffed line for line. Read <b>once, at
 /// construction</b>, from environment variables that exist only as an escape hatch — the defaults
 /// are the shipped behavior.

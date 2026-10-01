@@ -85,7 +85,7 @@ public enum GroupState
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>This is a named, deliberate exception to <c>bindings/CLAUDE.md</c> §2.6 ("shape,
+/// ⚠⚠ <b>This is a named, deliberate exception to <c>dotnet/.claude/rules/bindings.md</c> §2.6 ("shape,
 /// not logic"), not a case that satisfies it.</b> The four sets below are Kafka knowledge
 /// — which states each group type can be in — and they are hardcoded here rather than
 /// asked of the Rust core, because the ABI exports nothing that answers the question: it

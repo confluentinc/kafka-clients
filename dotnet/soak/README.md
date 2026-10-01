@@ -5,7 +5,7 @@ driven through the **.NET binding's public API**. It produces at a fixed rate,
 consumes what it produced, and adjudicates one question: **were any messages
 lost?**
 
-It is the sibling of `bindings/python/soak/`, which drives the same Rust core
+It is the sibling of `python/soak/`, which drives the same Rust core
 through the Python binding. The structure is ported faithfully — the payload
 format, the per-partition duplicate/gap accounting, the prefix-routed
 configuration, the counters and gauges, the JSONL metrics schema, the supervisor
@@ -19,7 +19,7 @@ mirrors the **Java** API. Every intentional difference is listed under
 ## Layout
 
 ```
-bindings/dotnet/soak/
+dotnet/soak/
 ├─ README.md                  this file
 ├─ ccloud.config.example      client config template (copy to ccloud.config)
 ├─ create-ec2.sh              provisions the EC2 box (AWS CLI)
@@ -35,7 +35,7 @@ bindings/dotnet/soak/
 Both projects are deliberately **outside** `Confluent.Kafka.sln`, following the
 `grpc-server` / `PerfV2` / `PerfV3` precedent: an operational tool with extra
 dependencies must not sit on the functional gate's critical path. They are built,
-formatted and tested **by path** — `bindings/dotnet/Makefile`'s
+formatted and tested **by path** — `dotnet/Makefile`'s
 `test-soak-dotnet`, which `test-dotnet` invokes.
 
 ---
@@ -136,7 +136,7 @@ Two sinks, and the first is always written:
    pipeline could actually be built*. See below.
 
 The JSONL record schema is deliberately **identical to the performance
-harness's** (`bindings/dotnet/tests/Performance/PerformanceCommon/`) — the
+harness's** (`dotnet/tests/Performance/PerformanceCommon/`) — the
 `rss` / `cpu` / `latency` / `bytes` / `messages` blocks, the window bounds and
 the `-inf` sentinel — so soak and perf numbers are directly comparable across
 clients and languages. The soak adds four keys of its own: `prefix`, `tags`,
@@ -229,7 +229,7 @@ git archive "$SHA" | ssh -i ~/.ssh/NJC-KEY.pem ubuntu@<ip> \
     'mkdir -p ~/confluent-kafka-rust && tar -x -C ~/confluent-kafka-rust'
 
 # 3. On the box: fill in otel-config.yaml, then bootstrap once.
-cd ~/confluent-kafka-rust/bindings/dotnet/soak
+cd ~/confluent-kafka-rust/dotnet/soak
 $EDITOR otel-config.yaml
 ./bootstrap.sh "$SHA" njc-rust-dotnet-soak-tests
 
@@ -280,7 +280,7 @@ one rather than rejected.
 **The soak refuses to start on a key neither client recognises**, naming every
 offending key and printing the accepted set. That is deliberate: the Rust client
 only *warns* on an unknown configuration key
-(`src/producer/producer_config.rs`, `src/consumer/consumer_config.rs`), so a typo
+(`rust/src/producer/producer_config.rs`, `rust/src/consumer/consumer_config.rs`), so a typo
 would otherwise start a multi-day run on the default value — e.g. an
 unauthenticated PLAINTEXT connection. `run.sh` runs this validation in its
 `--check` preflight, before anything is created.
@@ -365,7 +365,7 @@ over the single `.prev.bz2` and delete the evidence of why the child died.
 ## Tests
 
 ```bash
-cd bindings/dotnet && make test-soak-dotnet      # format check + both TFMs
+cd dotnet && make test-soak-dotnet      # format check + both TFMs
 ```
 
 No broker, no Docker. The suites cover the parts a two-week run depends on being

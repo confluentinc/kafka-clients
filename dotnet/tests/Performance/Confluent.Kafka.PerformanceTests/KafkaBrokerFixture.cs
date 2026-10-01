@@ -48,7 +48,7 @@ namespace Confluent.Kafka.Performance.Tests;
 /// </summary>
 public sealed class KafkaBrokerFixture : IAsyncLifetime
 {
-    // Matches bindings/python/test/performance/conftest.py (which matches tests/common/kafka_cluster.rs).
+    // Matches python/test/performance/conftest.py (which matches rust/tests/common/kafka_cluster.rs).
     private const string KafkaImage = "apache/kafka:4.2.0";
     private const string ClusterId = "5L6g3nShT-eMCtK--X86sw";
 

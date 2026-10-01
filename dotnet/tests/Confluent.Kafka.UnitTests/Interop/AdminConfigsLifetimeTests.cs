@@ -45,7 +45,7 @@ public sealed class AdminConfigsLifetimeTests
 
     /// <summary>
     /// The core's rejection of an unknown op-type code at row 0 (<c>read_alter_config_ops</c>,
-    /// <c>src/ffi/admin.rs</c>), copied from an actual run rather than composed from the
+    /// <c>rust/src/ffi/admin.rs</c>), copied from an actual run rather than composed from the
     /// format string.
     /// </summary>
     private const string UnknownOpTypeMessage = "unknown AlterConfigOp op type id 99 at index 0";

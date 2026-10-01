@@ -160,7 +160,7 @@ public sealed class AdminOperationLifetimeTests
     /// without <c>RunContinuationsAsynchronously</c> a caller's own P/Invoke would
     /// execute arbitrary continuation code. (For P1's two entry points the header's
     /// documented trigger is a NULL <c>admin</c> handle; the wider "ordinary bad input"
-    /// trigger set is stated in <c>src/ffi/admin.rs:56-63</c>, which cbindgen does not
+    /// trigger set is stated in <c>rust/src/ffi/admin.rs:56-63</c>, which cbindgen does not
     /// emit, and belongs to later-phase entry points.)
     /// </summary>
     /// <remarks>

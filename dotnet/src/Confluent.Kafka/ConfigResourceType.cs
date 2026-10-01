@@ -47,7 +47,7 @@ namespace Confluent.Kafka;
 /// from <c>confluent-kafka-dotnet</c>, which places its <c>ConfigResource</c> under
 /// <c>Confluent.Kafka.Admin</c>; the divergence is deliberate, since this binding targets
 /// the <b>Java</b> shape rather than the ecosystem client's
-/// (<c>bindings/CLAUDE.md</c> §2).
+/// (<c>dotnet/.claude/rules/bindings.md</c> §2).
 /// </para>
 /// </remarks>
 public enum ConfigResourceType

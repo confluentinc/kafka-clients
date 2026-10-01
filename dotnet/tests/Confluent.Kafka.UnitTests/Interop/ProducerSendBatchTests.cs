@@ -43,7 +43,7 @@ public sealed class ProducerSendBatchTests
 {
     private const string Topic = "send-batch-topic";
 
-    // src/common/protocol/errors.rs: InvalidRequest = 42 — the code send_batch_inner reports for a
+    // rust/src/common/protocol/errors.rs: InvalidRequest = 42 — the code send_batch_inner reports for a
     // null topic and for a null key/value pointer with a non-negative length.
     private const int InvalidRequestCode = 42;
 
@@ -73,7 +73,7 @@ public sealed class ProducerSendBatchTests
         if (IntPtr.Size == 8)
         {
             // The exact 64-bit layout Rust's #[repr(C)] produces for
-            // kafka_producer_ProducerRecord_t (src/ffi/producer.rs): 8/4+pad/8/8/4+pad/8/4+pad.
+            // kafka_producer_ProducerRecord_t (rust/src/ffi/producer.rs): 8/4+pad/8/8/4+pad/8/4+pad.
             Assert.Equal(8, partition);
             Assert.Equal(16, timestamp);
             Assert.Equal(24, key);

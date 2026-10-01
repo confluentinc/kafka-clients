@@ -712,7 +712,7 @@ internal static class ConsumerCallbacks
     //
     //   * the ~8 one-shot completions free the per-op GCHandle in the trampoline's `finally`.
     //     Doing that here LEAKS, because this callback is NOT invoked when the call fails:
-    //     src/ffi/consumer.rs:4001-4009 builds the adapter (which owns `user_data`) at :4004
+    //     rust/src/ffi/consumer.rs:4001-4009 builds the adapter (which owns `user_data`) at :4004
     //     BEFORE the fallible read_offset_map at :4005, so the early return at :4007 drops it
     //     — firing the hook without ever calling the callback. The header says so outright.
     //   * the multi-shot listener fires N times; this fires at most once.
@@ -777,7 +777,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The rooted <b>discard</b> thunk — the .NET equivalent of C's
-    /// <c>discard_commit_complete</c> (<c>bindings/c/grpc_server/server.cc:376-380</c>). It
+    /// <c>discard_commit_complete</c> (<c>c/grpc_server/server.cc:376-380</c>). It
     /// exists because the ABI's <c>callback</c> parameter is <b>not nullable</b> and there is
     /// no plain <c>Consumer_commit_async_offsets</c>, so Java's legal
     /// <c>commitAsync(Map, null)</c> can only be expressed by supplying a no-op that still

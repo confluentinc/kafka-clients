@@ -49,7 +49,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Why freeing from the hook is safe (the P6-D3 evidence chain).</b> The hook can only
 /// fire from the Rust <c>CallbackTarget</c>'s <c>Drop</c>
-/// (<c>src/ffi/common.rs:442-451</c>), i.e. when the last reference to the listener object
+/// (<c>rust/src/ffi/common.rs:442-451</c>), i.e. when the last reference to the listener object
 /// is dropped. The load-bearing guarantee is the <b>ref-counted
 /// <c>SafeConsumerHandle</c></b> (M9/P4 H1) plus the core's <b>single serialised
 /// dispatcher thread</b> — see the two paragraphs below. Read them in that order; the
@@ -59,13 +59,13 @@ namespace Confluent.Kafka.Internal;
 /// <b>What the <c>Arc</c> argument does and does not prove.</b> Every core invocation site
 /// clones the listener <c>Arc</c> out of its mutex into a local binding and holds that
 /// owned clone <b>across the await</b> of the callback
-/// (<c>src/consumer/mock_consumer.rs:260-262</c> and <c>:271-272</c>;
-/// <c>src/consumer/async_kafka_consumer.rs:3273-3297</c> and <c>:5317-5333</c> — the
+/// (<c>rust/src/consumer/mock_consumer.rs:260-262</c> and <c>:271-272</c>;
+/// <c>rust/src/consumer/async_kafka_consumer.rs:3273-3297</c> and <c>:5317-5333</c> — the
 /// complete production set). That rules out a <b>replacing subscribe</b> firing the hook
 /// mid-callback, because a replacement does not drop the invoking future. It does
 /// <b>not</b> rule out the hook firing while a dispatched job is still pending:
 /// <c>FfiRebalanceListener::invoke</c> copies the pointer out first
-/// (<c>src/ffi/consumer.rs:3122</c>, <c>let user_data = SendUserData(self.target.user_data)</c>),
+/// (<c>rust/src/ffi/consumer.rs:3122</c>, <c>let user_data = SendUserData(self.target.user_data)</c>),
 /// so the job handed to <c>dispatch_and_wait</c> carries only a <b>raw</b> <c>user_data</c>
 /// copy — no reference that keeps this registration alive. <c>dispatch_and_wait</c>
 /// enqueues and <em>then</em> awaits, and the dispatcher runs every queued job before
@@ -77,7 +77,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>What actually closes the window.</b> Dropping that future means destroying the
 /// consumer, and <c>Consumer_destroy</c> is governed by an explicit ABI precondition —
 /// "destroying concurrently with an in-flight op is a C lifetime precondition the caller
-/// must uphold" (<c>src/ffi/consumer.rs:513-517</c>) — which this binding upholds
+/// must uphold" (<c>rust/src/ffi/consumer.rs:513-517</c>) — which this binding upholds
 /// structurally: release is <b>ref-counted</b>, and a <b>listener</b> callback only ever
 /// runs inside a consumer operation that holds a count (the rebalance blocks on it), so
 /// <c>ReleaseHandle</c> → <c>Consumer_destroy</c> cannot run while one is in flight. That

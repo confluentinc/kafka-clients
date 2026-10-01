@@ -23,7 +23,7 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Pure value &lt;-&gt; proto translation helpers for the .NET consumer gRPC backend — the
-/// C# port of <c>bindings/python/grpc_translate.py</c>. Converts between the generated
+/// C# port of <c>python/grpc_translate.py</c>. Converts between the generated
 /// protobuf messages and the binding's public value types.
 /// </summary>
 /// <remarks>
@@ -394,7 +394,7 @@ internal static class Translate
     /// One entry of a <c>metrics()</c> snapshot
     /// (<c>(MetricName, IMetric)</c>) -&gt; proto <c>Metric</c> — the C# port of
     /// <c>grpc_translate.py</c>'s <c>_metric_to_proto</c> and the C++ server's <c>Metrics</c>
-    /// value switch (<c>bindings/c/grpc_server/server.cc</c>).
+    /// value switch (<c>c/grpc_server/server.cc</c>).
     /// </summary>
     /// <remarks>
     /// <para>

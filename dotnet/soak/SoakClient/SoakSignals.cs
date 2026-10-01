@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// PROVENANCE: forked from bindings/dotnet/tests/Performance/PerformanceCommon/PerfSignals.cs
+// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/PerfSignals.cs
 // (see MetricPrimitives.cs's header for why the soak forks rather than references), with a
 // callback added: the soak's SIGINT/SIGTERM handler must also drive the shutdown watchdog
 // and the client's own stop path, which the perf harness's flag-only shape cannot express.

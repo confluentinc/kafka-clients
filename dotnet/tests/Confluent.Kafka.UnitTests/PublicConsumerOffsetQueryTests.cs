@@ -224,7 +224,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_EmptyMap_StillFaultsOnMock()
     {
-        // Verified against src/ffi/consumer.rs: offsets_for_times_async does NOT short-circuit
+        // Verified against rust/src/ffi/consumer.rs: offsets_for_times_async does NOT short-circuit
         // empty — it always calls c.offsets_for_times(req), which the mock rejects with
         // unsupported_version even for an empty request (PLAN §7 case 11: the Actor verifies
         // and documents which; the FFI does NOT short-circuit).

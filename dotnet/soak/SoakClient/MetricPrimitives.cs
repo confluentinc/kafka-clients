@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// PROVENANCE: forked from bindings/dotnet/tests/Performance/PerformanceCommon/
+// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/
 // (Bucket.cs, LatencyHistogram.cs, PerfFormat.cs) and DELIBERATELY DUPLICATED rather
 // than referenced. Two independent reasons, either sufficient:
 //
@@ -23,7 +23,7 @@
 //     them would mean widening a TEST-harness assembly's surface to serve an
 //     operational tool.
 //  2. It is what the Python sibling deliberately did, for a stated reason
-//     (bindings/python/soak/soak_metrics.py's PROVENANCE header): a two-week run must
+//     (python/soak/soak_metrics.py's PROVENANCE header): a two-week run must
 //     not break because a performance-test refactor changed a shared helper, and the
 //     soak's own needs (append mode, a promptly-stoppable collector) must not distort
 //     code the perf tests depend on.

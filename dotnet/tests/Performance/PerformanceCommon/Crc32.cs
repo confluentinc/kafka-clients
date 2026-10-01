@@ -19,9 +19,9 @@ namespace Confluent.Kafka.Performance;
 
 /// <summary>
 /// Port of the Rust core's default key-partitioner hash — the C# analog of
-/// <c>bindings/python/test/performance/partitioner.py</c>. Mirrors
+/// <c>python/test/performance/partitioner.py</c>. Mirrors
 /// <c>BuiltInPartitioner::partition_for_key</c> under <c>KeyHasher::Crc32</c>
-/// (<c>src/producer/internals/built_in_partitioner.rs</c>): IEEE 802.3 / zlib CRC-32
+/// (<c>rust/src/producer/internals/built_in_partitioner.rs</c>): IEEE 802.3 / zlib CRC-32
 /// (<c>crc32fast::hash</c>, == librdkafka's <c>rd_crc32</c>, == Python's <c>zlib.crc32</c>),
 /// taken <b>unsigned</b> with no sign-bit masking, so the perf suite can verify that a
 /// keyed record landed in the partition the client's actual default partitioner would

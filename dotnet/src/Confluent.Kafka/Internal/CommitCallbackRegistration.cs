@@ -39,7 +39,7 @@ namespace Confluent.Kafka.Internal;
 /// have no <c>user_data_destroy</c> hook at all, and their callback fires on <em>every</em>
 /// path including the core's inline guard rejection — so "the callback frees it" is total for
 /// them. This registration has a hook, and its callback is <b>not</b> invoked on failure:
-/// <c>src/ffi/consumer.rs:4001-4009</c> builds the callback adapter (which takes ownership of
+/// <c>rust/src/ffi/consumer.rs:4001-4009</c> builds the callback adapter (which takes ownership of
 /// <c>user_data</c>) at <c>:4004</c>, <em>before</em> the fallible <c>read_offset_map</c> at
 /// <c>:4005</c>, precisely so that the early return at <c>:4007</c> drops the adapter and
 /// fires the hook. The header states the consequence outright: "if the offsets fail to marshal
@@ -59,7 +59,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>Why freeing from the hook is safe.</b> Same two properties as
 /// <see cref="ListenerRegistration"/>, and for the same reason — <b>not</b> an owned
 /// <c>Arc</c> held across the callback, which is disproved (<c>FfiRebalanceListener::invoke</c>
-/// copies the pointer out before dispatching, <c>src/ffi/consumer.rs:3122</c>): (1) the
+/// copies the pointer out before dispatching, <c>rust/src/ffi/consumer.rs:3122</c>): (1) the
 /// <b>ref-counted <c>SafeConsumerHandle</c></b> (M9/P4 H1) — the submitting call takes a
 /// call-scoped marshaller AddRef, and on a <c>MockConsumer</c> the callback fires inline
 /// inside that call; and (2) the core's <b>single serialised dispatcher thread</b> — a real

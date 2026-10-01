@@ -32,7 +32,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 /// <remarks>
 /// <b>Mock reachability limit (verified).</b> The mock's <c>seek_with_metadata</c>
-/// (<c>src/consumer/mock_consumer.rs:746-755</c>) uses <b>only</b> <c>.offset()</c> and
+/// (<c>rust/src/consumer/mock_consumer.rs:746-755</c>) uses <b>only</b> <c>.offset()</c> and
 /// <b>discards</b> the metadata + leader epoch, so their <em>values</em> are not observable
 /// broker-free (the M5/P4 <c>Committed</c> value read-back precedent). For
 /// <c>Seek(tp, OffsetAndMetadata)</c> this asserts the OFFSET round-trips and the

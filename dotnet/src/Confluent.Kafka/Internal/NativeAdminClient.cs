@@ -1286,7 +1286,7 @@ internal sealed class NativeAdminClient : IDisposable
             if (options.PartitionSizeLimitPerResponse < 0)
             {
                 // The ABI reads a negative as "keep Java's 2000 default"
-                // (describe_topics_options in src/ffi/admin.rs), so a negative would be
+                // (describe_topics_options in rust/src/ffi/admin.rs), so a negative would be
                 // silently reinterpreted as that default — the same reasoning as the
                 // timeout guard. See DescribeTopicsOptions.PartitionSizeLimitPerResponse
                 // for why the value currently has no effect on any request.
@@ -2563,13 +2563,13 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>ReplicaLogDirInfo</c> when the broker said nothing about it
     /// (<c>KafkaAdminClient.java:3103-3106</c> seeds <c>replicaDirInfoByPartition</c>, and
     /// <c>:3155-3160</c> completes every entry) — and the <b>Rust core does the same</b>
-    /// (<c>src/admin/kafka_admin_client.rs:3705-3708</c> inserts a future for every
+    /// (<c>rust/src/admin/kafka_admin_client.rs:3705-3708</c> inserts a future for every
     /// requested replica). So against a real client every requested key gets an entry and
     /// <c>FailUncompleted</c> never fires.
     /// </para>
     /// <para>
     /// The <b>mock</b> is the exception: it omits replicas of unknown topics outright
-    /// (<c>src/admin/mock_admin_client.rs:1352-1355</c>), so a broker-less test can reach
+    /// (<c>rust/src/admin/mock_admin_client.rs:1352-1355</c>), so a broker-less test can reach
     /// the missing-key path. There <c>FailUncompleted</c> faults that key with a message
     /// naming it. That is deliberately <b>not</b> smoothed over by completing locally with a
     /// default: the key here is genuinely sent and the answer genuinely absent, so

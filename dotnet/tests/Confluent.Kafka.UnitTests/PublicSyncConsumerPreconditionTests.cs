@@ -31,7 +31,7 @@ namespace Confluent.Kafka.UnitTests;
 /// another thread while one is in flight is rejected by the core's access guard (a
 /// ConcurrentModification <see cref="KafkaException"/>, thrown synchronously — ffi §B5). But
 /// the mock poll runs to completion synchronously (source-verified,
-/// <c>src/consumer/mock_consumer.rs</c>) and holds the guard only for that instant, so a second
+/// <c>rust/src/consumer/mock_consumer.rs</c>) and holds the guard only for that instant, so a second
 /// op cannot deterministically observe the guard held — the same ceiling the async M5 phases
 /// recorded. The mapping (concurrent sync op → synchronous ConcurrentModification
 /// <see cref="KafkaException"/>; concurrent sync state read → <see cref="InvalidOperationException"/>)

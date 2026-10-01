@@ -88,7 +88,7 @@ namespace Confluent.Kafka.Internal;
 /// sends (the sync <c>Producer_flush</c> on the blocking <c>Dispose</c> path, or an awaited
 /// <c>Producer_flush_async</c> on the async paths — ffi §A7) <b>before</b> calling
 /// <see cref="Stop"/>: the core's <c>Producer_close</c> does <b>not</b> drive pending sends (it only
-/// marks the producer closed — verified <c>src/producer/mock_producer.rs</c>), so close cannot
+/// marks the producer closed — verified <c>rust/src/producer/mock_producer.rs</c>), so close cannot
 /// unblock <c>get_all</c>; <c>flush</c> can, and does — completing a <c>MockProducer</c>'s pending
 /// sends (their futures resolve), or delivering-or-timing-out a real producer's (the accepted
 /// Option-C bounded residual, ffi §A7). Once the flush has resolved the pending sends, the in-flight
@@ -862,7 +862,7 @@ internal sealed class SendCompletionPump
     /// is load-bearing above) and keeps no per-index record of which callbacks already fired, so
     /// firing here would deliver a <em>duplicate</em> notification for every index that completed
     /// before the throw — trading a rare dropped notification for a rare double invocation, which
-    /// the exactly-once-per-record obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. A
+    /// the exactly-once-per-record obligation (root <c>CLAUDE.md</c> §11.5) makes strictly worse. A
     /// per-index "already fired" latch is what would close that, at the cost of per-send state on a
     /// path reachable only under an unexpected managed or native failure in the batch read; the drop
     /// is recorded on the public surface instead (ffi §A6 form C's at-most-once boundary).

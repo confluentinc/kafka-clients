@@ -46,7 +46,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// handle</em>. The family-wide trigger set is larger and does include
 /// argument-marshaling failure on ordinary bad input — an unparseable base64 topic id,
 /// an unknown <c>AlterConfigOp.OpType</c> code — but that statement lives in
-/// <c>src/ffi/admin.rs:56-63</c>, a <c>//!</c> module doc <b>cbindgen does not emit</b>,
+/// <c>rust/src/ffi/admin.rs:56-63</c>, a <c>//!</c> module doc <b>cbindgen does not emit</b>,
 /// and its triggers belong to entry points later phases will declare. This class is the
 /// family-wide one, so it is written for the wider set deliberately: every consequence
 /// below is a no-cost invariant, and being ready for an inline callback that cannot

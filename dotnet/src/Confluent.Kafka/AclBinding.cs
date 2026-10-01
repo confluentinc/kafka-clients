@@ -25,7 +25,7 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Nested, although the C ABI is flat.</b> The ABI exposes seven flat accessors and no
 /// <c>ResourcePattern</c> / <c>AccessControlEntry</c> types at all; restoring Java's two-level
-/// shape is the binding's job (PLAN D36, <c>bindings/CLAUDE.md §1.2</c>). Read
+/// shape is the binding's job (PLAN D36, <c>dotnet/.claude/rules/bindings.md §1.2</c>). Read
 /// <c>binding.Pattern.Name</c>, never a flattened <c>binding.ResourceName</c>.
 /// </para>
 /// <para>

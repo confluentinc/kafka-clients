@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Performance.Tests;
 /// Self-check for the <see cref="Crc32"/> port against the exact
 /// <c>built_in_partitioner.rs::test_crc32_golden_vectors</c> /
 /// <c>test_crc32_key_to_partition_table</c> vectors (also carried by
-/// <c>bindings/python/test/performance/partitioner.py</c>'s <c>__main__</c> self-check). This is the
+/// <c>python/test/performance/partitioner.py</c>'s <c>__main__</c> self-check). This is the
 /// Slice-1 automated gate — it needs no broker and no client, and stays a plain
 /// <see cref="FactAttribute"/>/<see cref="TheoryAttribute"/> class (not <c>[SkippableFact]</c> — M13/P3
 /// D-8 kept this class un-skippable since it needs no broker; the same applies here).

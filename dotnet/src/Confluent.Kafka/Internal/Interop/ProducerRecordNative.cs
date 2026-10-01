@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// The blittable <see cref="LayoutKind.Sequential"/> mirror of the ABI's
-/// <c>kafka_producer_ProducerRecord_t</c> (<c>src/ffi/producer.rs</c>, <c>#[repr(C)]</c>) — the one
+/// <c>kafka_producer_ProducerRecord_t</c> (<c>rust/src/ffi/producer.rs</c>, <c>#[repr(C)]</c>) — the one
 /// input struct <c>kafka_producer_Producer_send_batch</c> reads (M11/P3.1 slice S1, PLAN §4.1).
 /// Every field is a fixed-width scalar or a raw pointer, so the C# sequential layout is byte-identical
 /// to the Rust <c>repr(C)</c> one and the runtime marshals it by <b>blitting</b>, with no per-field
@@ -35,7 +35,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <item><see cref="KeyLength"/> / <see cref="ValueLength"/> — <c>-1</c> means <b>absent</b>
 /// (no key / a tombstone); <c>&gt;= 0</c> means the matching pointer must be
 /// <b>non-null</b> and valid for that many bytes. The core rejects a null pointer with a
-/// non-negative length as <c>InvalidRequest</c> (<c>src/ffi/producer.rs</c> — the null-key and
+/// non-negative length as <c>InvalidRequest</c> (<c>rust/src/ffi/producer.rs</c> — the null-key and
 /// null-value guards inside <c>send_batch_inner</c>), which is why an <b>empty</b> (zero-length)
 /// key/value must pass a non-null sentinel pointer rather than the null a <c>fixed</c> over an
 /// empty span yields (ffi §A4; <see cref="ProducerSendBatchMarshal"/> applies it).</item>

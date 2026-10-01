@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// PROVENANCE: forked from bindings/dotnet/tests/Performance/PerformanceCommon/PerfEnv.cs
+// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/PerfEnv.cs
 // (see MetricPrimitives.cs's header for why the soak forks rather than references), with
 // GetDouble added — the soak carries several float-valued tunables (rate, poll timeout,
 // commit interval) that the perf harness has no counterpart for.
