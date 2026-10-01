@@ -1,6 +1,6 @@
 # The layered network stack, from the client API down to the socket.
 #
-# Source of truth for design/current/network-stack.svg.
+# Source of truth for design/current/img/network-stack.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: the layer boundaries are the same as Java's;
@@ -9,11 +9,11 @@
 
 direction: down
 
-client: "Client layer — src/*.rs (flat, NO src/clients/)\nKafkaClient trait, NetworkClient<S, H>, Metadata,\nApiVersions, InFlightRequests, ClusterConnectionStates" {
+client: "Client layer — rust/src/*.rs (flat, NO src/clients/), pub(crate)\nKafkaClient trait, NetworkClient<S, H>, Metadata,\nApiVersions, InFlightRequests, ClusterConnectionStates" {
   style.fill: "#eef6ff"
 }
 
-reqres: "Request/Response layer — src/common/requests/\nRequestBuilder trait, ConcreteRequest / ConcreteResponse (48 variants),\nRequestHeader, ResponseHeader, SendBuilder" {
+reqres: "Request/Response layer — src/common/requests/ (pub(crate))\nRequestBuilder trait, AbstractRequest / ConcreteResponse (52 variants each),\nRequestHeader, ResponseHeader, SendBuilder" {
   style.fill: "#e8f0fe"
 }
 
@@ -35,7 +35,7 @@ sock: "tokio::net::TcpStream / tokio_rustls::TlsStream" {
 
 client -> reqres -> proto -> net -> sec -> sock
 
-gen: "generator/ crate (was src/message/)\n197 JSON specs -> OUT_DIR/generated/ at build time" {
+gen: "rust/generator/ crate\n198 JSON specs (Kafka 4.3.1) -> OUT_DIR/generated/ at build time" {
   style.fill: "#e8f5e9"
   style.stroke-dash: 3
 }
