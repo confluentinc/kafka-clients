@@ -34,7 +34,6 @@ use tokio::task::JoinHandle;
 
 use crate::ClientUtils;
 use crate::KafkaClient;
-use crate::MetadataRecoveryStrategy;
 use crate::NetworkClient;
 use crate::common::Cluster;
 use crate::common::Error;
@@ -957,8 +956,10 @@ impl<K, V> KafkaProducer<K, V> {
             true, // discover_broker_versions
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            config.metadata_max_age_ms, // rebootstrap_trigger_ms
-            MetadataRecoveryStrategy::None,
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // both from the config; the default strategy is `rebootstrap`.
+            config.metadata_recovery_rebootstrap_trigger_ms,
+            config.metadata_recovery_strategy,
             log_context.clone(),
         );
 
