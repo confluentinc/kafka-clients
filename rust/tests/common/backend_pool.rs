@@ -111,10 +111,10 @@ pub enum BackendKind {
     C,
     /// The .NET binding's synchronous backend (consumer M8/P1, producer M12/P1, admin
     /// M15/P12). The image serves `ConsumerService`, `ProducerService` and
-    /// `AdminService` (see `bindings/dotnet/Dockerfile.grpc`).
+    /// `AdminService` (see `dotnet/Dockerfile.grpc`).
     Dotnet,
     /// The .NET binding's asynchronous `AsyncKafkaConsumer` backend (M8/P2). Distinct
-    /// image from [`BackendKind::Dotnet`] (see `bindings/dotnet/Dockerfile.grpc.async`),
+    /// image from [`BackendKind::Dotnet`] (see `dotnet/Dockerfile.grpc.async`),
     /// which bakes `CONSUMER_FLAVOR=async`. Serves `ConsumerService` and, since the producer
     /// M12/P1 work, `ProducerService`; there is no async admin surface, so no `AdminService`.
     DotnetAsync,
