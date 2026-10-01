@@ -282,6 +282,8 @@ promotions:
     pipeline_file: plan-approve.yml
   - name: Publish to crates.io
     pipeline_file: publish-crates-io.yml
+  - name: Build, test and package Rust client
+    pipeline_file: rust-verify.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
