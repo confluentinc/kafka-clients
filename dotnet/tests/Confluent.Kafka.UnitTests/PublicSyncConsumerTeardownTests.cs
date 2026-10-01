@@ -29,6 +29,10 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicSyncConsumerTeardownTests
 {
+    // A hang guard. It equals the real consumer's sync-close bound since D2 (M17/P2:
+    // Consumer_close, the core's 30 s default, was 5 s), but that bound is not in play:
+    // every consumer here is a MockConsumer, whose close has no broker or coordinator to
+    // wait on and returns in milliseconds.
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
 

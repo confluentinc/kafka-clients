@@ -728,6 +728,11 @@ internal sealed class SoakClient : IDisposable
 
         _disposed = true;
         _producer.Dispose();
+
+        // Normally a no-op: the consume loop's finally has already closed the consumer
+        // (async Close). If it did not, this sync Dispose runs the graceful close itself,
+        // bounded by the core's 30 s default since M17/P2 D2 (was 5 s), so it can block
+        // shutdown that long against an unreachable group coordinator.
         _consumer.Dispose();
         _metrics.Dispose();
         _stop.Dispose();

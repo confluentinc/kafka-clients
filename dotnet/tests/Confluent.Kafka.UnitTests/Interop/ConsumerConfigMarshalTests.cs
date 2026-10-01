@@ -30,6 +30,10 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 public sealed class ConsumerConfigMarshalTests
 {
+    // ⚠ Equal to the sync Dispose's close bound since D2 (M17/P2: Consumer_close, the
+    // core's 30 s default, was 5 s) — kept, not raised: these real consumers are never
+    // subscribed, so their graceful close has nothing to wait on and returns in
+    // milliseconds. A close that ran to its bound is itself the regression here.
     private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
 
     [Fact]

@@ -38,6 +38,12 @@ namespace Confluent.Kafka.UnitTests.Interop;
 public sealed class SafeConsumerHandleTests
 {
     // A blocked broker-less close must surface as a test failure quickly, not hang.
+    // ⚠ Since D2 (M17/P2) the sync Dispose closes through Consumer_close, bounded by the
+    // core's 30 s default (was 5 s), so this deadline now EQUALS that bound — kept, not
+    // raised: these consumers (mocks, and one real consumer that never joins a group) have
+    // nothing for the graceful close to wait on and return in milliseconds. A close that
+    // ran to its 30 s bound is itself the regression here, and it lands at or past this
+    // deadline rather than safely inside it.
     private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
 
     // The Kafka protocol code for UNSUPPORTED_VERSION (org.apache.kafka Errors),
