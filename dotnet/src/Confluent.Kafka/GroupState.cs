@@ -37,11 +37,6 @@ namespace Confluent.Kafka;
 /// do not persist it.
 /// </para>
 /// <para>
-/// ⚠ <b><see cref="ConsumerGroupState"/> is a separate, deprecated axis — not a subset
-/// view of this one.</b> A group listing or description carries both, each read from its
-/// own ABI entry point; neither is derived from the other.
-/// </para>
-/// <para>
 /// <b>Java's <c>parse(String)</c> is deliberately not published</b>, for the reason given
 /// on <see cref="GroupType"/>: it decodes a wire spelling the caller never sees.
 /// </para>

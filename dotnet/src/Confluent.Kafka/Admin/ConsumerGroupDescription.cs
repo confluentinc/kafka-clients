@@ -24,23 +24,30 @@ namespace Confluent.Kafka.Admin;
 /// A detailed description of a single consumer group in the cluster — the .NET realization
 /// of Java's <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>
 /// (<c>ConsumerGroupDescription.java:37, :103, :126, :143, :151, :158, :165, :172, :180,
-/// :190, :197, :204, :211, :220, :229, :234</c>).
+/// :197, :204, :211, :220, :229, :234</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The type is not deprecated</b>, although one of its members is: Java's class carries
-/// no <c>@Deprecated</c>, so no <see cref="ObsoleteAttribute"/> appears on it — only on
-/// <see cref="State"/>, which Java deprecates at <c>:189</c>.
+/// <b>The type is not deprecated</b>: Java's class carries no <c>@Deprecated</c>, so no
+/// <see cref="ObsoleteAttribute"/> appears on it.
+/// </para>
+/// <para>
+/// ⚠ <b>Java's deprecated <c>state()</c> accessor is deliberately not translated.</b> It is
+/// <c>@Deprecated(since = "4.0", forRemoval = true)</c> (<c>:189</c>) and is only a lossy
+/// projection of <see cref="GroupState"/> onto Java's equally deprecated
+/// <c>ConsumerGroupState</c> (<c>ConsumerGroupState.parse(groupState.toString())</c>,
+/// <c>:191</c>), and the C ABI no longer exports it. Read <see cref="GroupState"/>, which is
+/// what Java's own deprecation note points callers at.
 /// </para>
 /// <para>
 /// ⚠ <b>Java's three deprecated constructors are deliberately not translated</b> — the
 /// standing ruling this phase applied to <see cref="MemberDescription"/>'s four, for the
-/// same reason. All three (<c>:54</c>,
-/// <c>:68</c> and <c>:83</c>, every one <c>since = "4.0", forRemoval = true</c>) take the
-/// superseded <see cref="Confluent.Kafka.ConsumerGroupState"/> and fill the arguments they
-/// omit with fixed values — <c>Collections.emptySet()</c>, <c>GroupType.CLASSIC</c> and two
-/// <c>Optional.empty()</c>. A caller can pass those same values to the current constructor
-/// and get the identical object. Nothing expressible is lost.
+/// same reason. All three (<c>:54</c>, <c>:68</c> and <c>:83</c>, every one
+/// <c>since = "4.0", forRemoval = true</c>) take Java's superseded <c>ConsumerGroupState</c>,
+/// which this binding does not carry, and fill the arguments they omit with fixed values —
+/// <c>Collections.emptySet()</c>, <c>GroupType.CLASSIC</c> and two <c>Optional.empty()</c>.
+/// A caller can pass those same values to the current constructor and get the identical
+/// object. Nothing expressible is lost.
 /// </para>
 /// <para>
 /// ⚠ <b><see cref="Type"/> and <see cref="GroupState"/> are <em>not</em> optional here,
@@ -232,45 +239,6 @@ public sealed class ConsumerGroupDescription
     public int? TargetAssignmentEpoch { get; }
 
     /// <summary>
-    /// The group state on the superseded <see cref="Confluent.Kafka.ConsumerGroupState"/>
-    /// axis — Java's deprecated <c>state()</c> (<c>:190</c>).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <b>This is a lossy, one-way <em>projection</em> of <see cref="GroupState"/>, not a
-    /// second stored field</b>, exactly as Java computes it at <c>:191</c>:
-    /// <c>ConsumerGroupState.parse(groupState.toString())</c>. It takes no constructor
-    /// argument for the same reason Java's takes none, and it is absent from
-    /// <see cref="Equals(object)"/> because Java's <c>equals</c> omits it too
-    /// (<c>:130-139</c>) — including it would state the same fact twice. The C ABI exports
-    /// it as a second entry point beside the group state, but two exported accessors are
-    /// not two independent fields: C cannot express Java's <c>parse</c>-of-<c>toString</c>
-    /// composition, so the flattened boundary spells the projection as its own function.
-    /// </para>
-    /// <para>
-    /// <b>The two agree everywhere except one member, where they must not.</b>
-    /// <see cref="Confluent.Kafka.GroupState.NotReady"/> has no counterpart on
-    /// <see cref="Confluent.Kafka.ConsumerGroupState"/> (Java never added one), so it
-    /// projects to <see cref="Confluent.Kafka.ConsumerGroupState.Unknown"/> — Java's
-    /// <c>parse</c> answering <c>UNKNOWN</c> for a name it does not recognise
-    /// (<c>ConsumerGroupState.java:53-56</c>), which is what the accessor's own javadoc
-    /// means by "or UNKNOWN if the state is too new for us to parse". That is why this
-    /// member is kept rather than collapsed into <see cref="GroupState"/>: the projection
-    /// loses information and cannot be run backwards.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>Unlike <c>ConsumerGroupListing.State</c> this one is not nullable</b>,
-    /// because the member it projects is not: Java maps an <c>Optional</c> there and parses
-    /// a bare value here. Routing through <c>GroupMarshal</c> — Java's <c>toString()</c>
-    /// then its <c>parse</c>, composed — keeps the name table in one place rather than
-    /// adding a second mapping that could drift from the one the ABI path uses.
-    /// </para>
-    /// </remarks>
-    [Obsolete("Deprecated in Kafka since 4.0. Use GroupState instead.")]
-    public ConsumerGroupState State =>
-        GroupMarshal.ParseConsumerState(GroupMarshal.NameFromState(GroupState) ?? "Unknown");
-
-    /// <summary>
     /// Compares all ten stored members — Java's <c>equals</c> (<c>:126</c>).
     /// </summary>
     /// <param name="obj">The object to compare against.</param>
@@ -279,8 +247,7 @@ public sealed class ConsumerGroupDescription
     /// <para>
     /// Java's <c>getClass() != o.getClass()</c> check (<c>:128</c>) is met by the type being
     /// <see langword="sealed"/>. Strings compare ordinally, as Java's <c>String.equals</c>
-    /// does. <see cref="State"/> is deliberately absent — it is derived; see its own
-    /// remarks.
+    /// does.
     /// </para>
     /// <para>
     /// ⚠ <b><see cref="Coordinator"/> is compared field-by-field here rather than through

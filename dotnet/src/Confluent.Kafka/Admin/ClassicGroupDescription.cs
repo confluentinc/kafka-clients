@@ -78,11 +78,11 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠ <b><see cref="State"/> is not optional, and there is no <c>GroupState</c> member
 /// beside it.</b> Java exposes exactly one state accessor here (<c>:126</c>) and does not
-/// deprecate it, where <see cref="ConsumerGroupDescription"/> exposes a current
-/// <c>groupState()</c> plus a deprecated <c>state()</c>; the asymmetry is Java's and is
-/// mirrored rather than normalized. Java's field could still hold <see langword="null"/> —
-/// the constructor stores it raw — but a C# enum is a value type with no null to store, so
-/// the difference is unreachable from this surface.
+/// deprecate it, where <see cref="ConsumerGroupDescription"/> exposes
+/// <see cref="ConsumerGroupDescription.GroupState"/> (Java's <c>groupState()</c>); the
+/// asymmetry is Java's and is mirrored rather than normalized. Java's field could still
+/// hold <see langword="null"/> — the constructor stores it raw — but a C# enum is a value
+/// type with no null to store, so the difference is unreachable from this surface.
 /// </para>
 /// </remarks>
 public sealed class ClassicGroupDescription

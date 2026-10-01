@@ -37,7 +37,8 @@ namespace Confluent.Kafka.UnitTests;
 /// ⚠ <b>Two of the three things this class draws against
 /// <see cref="ConsumerGroupDescription"/> are invisible to a behavioural test</b> — that
 /// both constructors ship here where only one does there, and that the state member is
-/// stored and current here where it is a deprecated projection there. Those halves are
+/// stored and current here where the sibling has only <c>GroupState</c> (Java's deprecated
+/// <c>state()</c> projection is not translated there). Those halves are
 /// therefore reflection assertions against the sibling, not prose.
 /// </para>
 /// </remarks>
@@ -277,12 +278,13 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     /// <summary>
     /// ⚠ <b><see cref="ClassicGroupDescription.State"/> is a stored member and there is no
     /// <c>GroupState</c> beside it</b>, where <see cref="ConsumerGroupDescription"/> carries
-    /// a current <c>GroupState</c> plus a deprecated <c>State</c> projection. Being stored, it
+    /// <c>GroupState</c> and no <c>State</c> (Java's deprecated <c>state()</c> projection is
+    /// not translated there). Being stored, it
     /// round-trips every value — including one no member defines, which a parse-based
     /// projection would have normalized to <c>Unknown</c>.
     /// </summary>
     [Fact]
-    public void State_IsStoredAndCurrent_UnlikeTheSiblingsProjection()
+    public void State_IsStoredAndCurrent_NotAProjection()
     {
         Assert.Null(typeof(ClassicGroupDescription).GetProperty("GroupState"));
         Assert.NotNull(typeof(ConsumerGroupDescription).GetProperty("GroupState"));
@@ -290,9 +292,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Null(typeof(ClassicGroupDescription)
             .GetProperty("State")!
             .GetCustomAttribute<ObsoleteAttribute>());
-        Assert.NotNull(typeof(ConsumerGroupDescription)
-            .GetProperty("State")!
-            .GetCustomAttribute<ObsoleteAttribute>());
+        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State"));
 
         ClassicGroupState[] states =
         {

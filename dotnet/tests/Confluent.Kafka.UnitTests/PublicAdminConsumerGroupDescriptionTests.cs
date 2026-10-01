@@ -23,8 +23,6 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-#pragma warning disable CS0618 // Java deprecates the State projection and its enum; exercising them is the point.
-
 /// <summary>
 /// Pins the shape and the behaviour of <see cref="ConsumerGroupDescription"/> against Java's
 /// <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>.
@@ -171,71 +169,14 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     }
 
     /// <summary>
-    /// ⚠ <b><see cref="ConsumerGroupDescription.State"/> is a projection of
-    /// <see cref="ConsumerGroupDescription.GroupState"/>, not a stored member.</b> Setting the
-    /// group state is the only thing that makes it read back, so the two cannot disagree —
-    /// there is no constructor parameter and no setter that could desynchronize them.
-    /// </summary>
-    [Fact]
-    public void State_IsAProjectionOfGroupState_NotAnIndependentMember()
-    {
-        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State")!.SetMethod);
-
-        var pairs = new (GroupState Group, ConsumerGroupState Projected)[]
-        {
-            (GroupState.Unknown, ConsumerGroupState.Unknown),
-            (GroupState.PreparingRebalance, ConsumerGroupState.PreparingRebalance),
-            (GroupState.CompletingRebalance, ConsumerGroupState.CompletingRebalance),
-            (GroupState.Stable, ConsumerGroupState.Stable),
-            (GroupState.Dead, ConsumerGroupState.Dead),
-            (GroupState.Empty, ConsumerGroupState.Empty),
-            (GroupState.Assigning, ConsumerGroupState.Assigning),
-            (GroupState.Reconciling, ConsumerGroupState.Reconciling),
-        };
-
-        foreach ((GroupState group, ConsumerGroupState projected) in pairs)
-        {
-            var description = WithGroupState(group);
-
-            Assert.Equal(group, description.GroupState);
-            Assert.Equal(projected, description.State);
-        }
-    }
-
-    /// <summary>
-    /// The projection is lossy and one-way: <see cref="GroupState.NotReady"/> has no
-    /// counterpart on the deprecated enum and lands on <c>Unknown</c>, so two descriptions
-    /// that report the same <c>State</c> can still differ in <c>GroupState</c>. Running the
-    /// projection backwards is therefore not possible, which is why <c>GroupState</c> — and
-    /// not <c>State</c> — is the member equality compares.
-    /// </summary>
-    [Fact]
-    public void State_LosesNotReady_SoItCannotBeRunBackwards()
-    {
-        var notReady = WithGroupState(GroupState.NotReady);
-        var unknown = WithGroupState(GroupState.Unknown);
-
-        Assert.Equal(ConsumerGroupState.Unknown, notReady.State);
-        Assert.Equal(ConsumerGroupState.Unknown, unknown.State);
-
-        Assert.NotEqual(notReady.GroupState, unknown.GroupState);
-        Assert.False(notReady.Equals(unknown));
-    }
-
-    /// <summary>
     /// Java deprecates <c>state()</c> in favour of <c>groupState()</c> but not the class
-    /// itself — unlike <c>ConsumerGroupListing</c>, where the whole type carries the
-    /// attribute.
+    /// itself. The deprecated accessor is not translated, and neither the class nor
+    /// <see cref="ConsumerGroupDescription.GroupState"/> carries the attribute.
     /// </summary>
     [Fact]
-    public void State_IsObsolete_AndGroupStateAndTheClassAreNot()
+    public void State_IsNotTranslated_AndGroupStateAndTheClassAreNotObsolete()
     {
-        ObsoleteAttribute onState = typeof(ConsumerGroupDescription)
-            .GetProperty("State")!
-            .GetCustomAttribute<ObsoleteAttribute>()!;
-
-        Assert.NotNull(onState);
-        Assert.Equal("Deprecated in Kafka since 4.0. Use GroupState instead.", onState.Message);
+        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State"));
 
         Assert.Null(typeof(ConsumerGroupDescription)
             .GetProperty("GroupState")!
@@ -333,9 +274,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     }
 
     /// <summary>
-    /// Equality covers the ten constructor members. The <c>State</c> projection is absent from
-    /// it, as it is from Java's <c>equals</c> — it carries no information <c>GroupState</c>
-    /// does not.
+    /// Equality covers the ten constructor members, as Java's <c>equals</c> does.
     /// </summary>
     [Fact]
     public void Equality_CoversAllTenMembers()
@@ -458,11 +397,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
             GroupState.Stable, s_coordinatorNode, Operations(), 7, 9);
 
-    private static ConsumerGroupDescription WithGroupState(GroupState groupState) =>
-        Describe(
-            "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer, groupState,
-            s_coordinatorNode, Operations(), 7, 9);
-
     private static ConsumerGroupDescription WithOperations(IEnumerable<AclOperation>? operations) =>
         Describe(
             "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer, GroupState.Stable,
@@ -504,5 +438,3 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     private static Type PropertyType(string name) =>
         typeof(ConsumerGroupDescription).GetProperty(name)!.PropertyType;
 }
-
-#pragma warning restore CS0618

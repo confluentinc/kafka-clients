@@ -1989,15 +1989,6 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool ConsumerGroupDescriptionTargetAssignmentEpoch(IntPtr description, out int outEpoch);
 
-    // kafka_admin_ConsumerGroupDescription_state is deliberately NOT declared, the same
-    // call ConsumerGroupListing's state accessor gets a few lines above and for the same
-    // reason: the header documents it as Java's deprecated state(), which "maps
-    // groupState() through ConsumerGroupState.parse(...)" — one field reached by two entry
-    // points, because C cannot express Optional.map. ConsumerGroupDescription.State is that
-    // projection, derived in managed code from GroupState, so reading the projection back
-    // out of the ABI would give a native-built description and a caller-built one two ways
-    // to disagree on one axis. See ConsumerGroupDescription.cs.
-
     // ---- kafka_admin_MemberDescription_t ----
 
     /// <summary>
@@ -2257,11 +2248,10 @@ internal static partial class NativeMethods
     /// <c>ClassicGroupState.toString()</c> name.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>One state accessor here, not the two on
-    /// <see cref="ConsumerGroupDescriptionGroupState"/>'s class.</b> Java exposes a single,
-    /// non-deprecated <c>state()</c> on this type and there is no second projection beside
-    /// it, so this decodes through <c>GroupMarshal.ClassicStateFromName</c> — a
-    /// <c>ClassicGroupState</c>, never a <c>GroupState</c> or a <c>ConsumerGroupState</c>.
+    /// Java exposes a single, non-deprecated <c>state()</c> on this type, a stored field
+    /// rather than a projection, so this decodes through
+    /// <c>GroupMarshal.ClassicStateFromName</c> — a <c>ClassicGroupState</c>, never the
+    /// <c>GroupState</c> <see cref="ConsumerGroupDescriptionGroupState"/> reads.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_state", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ClassicGroupDescriptionState(IntPtr description);

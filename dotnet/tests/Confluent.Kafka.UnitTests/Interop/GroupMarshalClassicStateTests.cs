@@ -46,14 +46,14 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </para>
 /// <para>
 /// ⚠ <b>The second defect is a table copied from the wrong sibling.</b>
-/// <see cref="ConsumerGroupState"/> and <see cref="GroupState"/> carry members this enum
-/// does not, and <em>their</em> spellings are exactly what a copied table would accept. So
+/// <see cref="GroupState"/> carries members this enum does not, and <em>its</em> spellings
+/// are exactly what a copied table would accept. So
 /// <c>"Assigning"</c>, <c>"Reconciling"</c> and <c>"NotReady"</c> are asserted to decode to
 /// <c>Unknown</c>, and the member list is asserted to exclude all three.
 /// </para>
 /// <para>
-/// ⚠ <b>Non-deprecation is asserted, not assumed.</b> Java marks
-/// <see cref="ConsumerGroupState"/> <c>@Deprecated</c> and marks this enum not at all, so
+/// ⚠ <b>Non-deprecation is asserted, not assumed.</b> Java marks its
+/// <c>ConsumerGroupState</c> <c>@Deprecated</c> and marks this enum not at all, so
 /// an <see cref="ObsoleteAttribute"/> copied across with the rest of the template would be
 /// a real fidelity defect — and a silent one, since it compiles.
 /// </para>
@@ -83,8 +83,8 @@ public sealed class GroupMarshalClassicStateTests
     /// <summary>
     /// The enum declares exactly Java's six constants, in Java's order — no member added,
     /// none dropped, and in particular none of <c>Assigning</c> / <c>Reconciling</c> /
-    /// <c>NotReady</c>, which belong to the other two group-state axes
-    /// (<c>GroupState.java:50-57</c>).
+    /// <c>NotReady</c>, which belong to <see cref="GroupState"/>
+    /// (<c>GroupState.java:55-57</c>).
     /// </summary>
     [Fact]
     public void TheEnum_DeclaresExactlyJavasSixConstantsInOrder()
@@ -102,8 +102,8 @@ public sealed class GroupMarshalClassicStateTests
     /// <summary>
     /// The enum is <b>not</b> obsolete: Java carries no <c>@Deprecated</c> on
     /// <c>ClassicGroupState</c> and none on <c>ClassicGroupDescription.state()</c>, unlike
-    /// <see cref="ConsumerGroupState"/>, whose Java <c>@Deprecated(since = "4.0")</c> the
-    /// binding mirrors. Marking this one would overstate the Java contract.
+    /// Java's <c>ConsumerGroupState</c> (<c>@Deprecated(since = "4.0", forRemoval = true)</c>,
+    /// not carried by this binding). Marking this one would overstate the Java contract.
     /// </summary>
     [Fact]
     public void TheEnum_IsNotMarkedObsolete()

@@ -28,28 +28,28 @@ namespace Confluent.Kafka;
 /// to parse".
 /// </para>
 /// <para>
-/// ⚠ <b>Nothing here is deprecated, unlike <see cref="ConsumerGroupState"/>.</b> Java
+/// ⚠ <b>Nothing here is deprecated, unlike Java's <c>ConsumerGroupState</c>.</b> Java
 /// carries no <c>@Deprecated</c> on this enum, and none on
 /// <c>ClassicGroupDescription.state()</c>, which returns it. So this type takes no
 /// <see cref="System.ObsoleteAttribute"/>, and no caller of it needs a <c>CS0618</c>
-/// suppression — the two states look alike and are on opposite sides of that line.
+/// suppression. (<c>ConsumerGroupState</c> is deprecated for removal since 4.0, which is why
+/// this binding does not carry it.)
 /// </para>
 /// <para>
-/// ⚠ <b>This is a third axis, not a view of either of the other two.</b>
+/// ⚠ <b>This is a separate axis, not a view of <see cref="GroupState"/>.</b>
 /// <c>ClassicGroupDescription.state()</c> is a <em>stored field</em>
 /// (<c>ClassicGroupDescription.java:38</c>, and it participates in <c>equals</c> /
 /// <c>hashCode</c> / <c>toString</c>), not a projection over a <c>groupState()</c>
-/// accessor — the shape <c>ConsumerGroupListing</c> and <c>ConsumerGroupDescription</c>
-/// use for <see cref="ConsumerGroupState"/>. Correspondingly <c>ClassicGroupDescription</c>
-/// has <c>state()</c> and <b>no</b> <c>groupState()</c>. The asymmetry with the
+/// accessor — the shape Java's deprecated <c>ConsumerGroupDescription.state()</c> has.
+/// Correspondingly <c>ClassicGroupDescription</c> has <c>state()</c> and <b>no</b>
+/// <c>groupState()</c>. The asymmetry with the
 /// consumer-group description is Java's; it is mirrored, not smoothed over.
 /// </para>
 /// <para>
-/// ⚠ <b>Nor is it member-for-member equal to either.</b> <see cref="GroupState.NotReady"/>,
+/// ⚠ <b>Nor is it member-for-member equal to it.</b> <see cref="GroupState.NotReady"/>,
 /// <c>Assigning</c> and <c>Reconciling</c> have no counterpart here, because Java's
-/// <c>ClassicGroupState</c> never gained them. The three enums are therefore not
-/// intercastable, and the underlying <c>int</c> of a member of one says nothing about the
-/// others.
+/// <c>ClassicGroupState</c> never gained them. The enums are therefore not intercastable,
+/// and the underlying <c>int</c> of a member of one says nothing about the other.
 /// </para>
 /// <para>
 /// ⚠ <b>The name is the contract, not an ordinal.</b> Java's <c>ClassicGroupState</c>
@@ -62,8 +62,8 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// <b>Java's <c>parse(String)</c> is deliberately not published</b>, for the reason given on
-/// <see cref="GroupType"/>, <see cref="GroupState"/> and <see cref="ConsumerGroupState"/>:
-/// it decodes a wire spelling the caller never sees.
+/// <see cref="GroupType"/> and <see cref="GroupState"/>: it decodes a wire spelling the
+/// caller never sees.
 /// </para>
 /// </remarks>
 public enum ClassicGroupState

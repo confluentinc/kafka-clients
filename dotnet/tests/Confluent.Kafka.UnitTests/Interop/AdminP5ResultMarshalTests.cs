@@ -613,29 +613,20 @@ public sealed class AdminP5ResultMarshalTests
     }
 
     /// <summary>
-    /// <c>State</c> and <c>GroupState</c> cannot disagree across the marshalling path: the
-    /// ABI names exactly one state, and <c>State</c> is a computed projection of whatever
-    /// that name decoded to — there is no second field for it to drift from.
+    /// The state the ABI names decodes as a <see cref="GroupState"/> and survives the walk —
+    /// for every member of the enum, not a sampled one.
     /// </summary>
     /// <remarks>
-    /// The value-level projection is already pinned in
-    /// <c>PublicAdminConsumerGroupDescriptionTests</c>. What is added here is the path:
-    /// the name is encoded, pinned as UTF-8, decoded back through
+    /// The name is encoded, pinned as UTF-8, decoded back through
     /// <see cref="GroupMarshal.StateFromName"/> exactly as the value reader does, carried
-    /// through the walk, and only then compared — plus the structural reason the two can
-    /// never diverge.
+    /// through the walk, and only then compared. <c>GroupState</c> is the description's only
+    /// state accessor: Java's deprecated <c>state()</c> projection is not translated.
     /// </remarks>
     [Fact]
-    public void Describe_State_IsAProjectionOfTheGroupStateTheAbiNamed()
+    public void Describe_GroupState_IsTheGroupStateTheAbiNamed()
     {
-#pragma warning disable CS0618 // The projection is deprecated in Java; mirrored, not avoided.
-        // There is no ConsumerGroupState parameter to set independently, and State is
-        // get-only, so no caller and no walk can give the two different origins.
-        Assert.DoesNotContain(
-            typeof(ConsumerGroupDescription).GetConstructors().Single().GetParameters(),
-            parameter => parameter.ParameterType == typeof(ConsumerGroupState));
-#pragma warning restore CS0618
-        Assert.False(typeof(ConsumerGroupDescription).GetProperty("State")!.CanWrite);
+        Assert.False(typeof(ConsumerGroupDescription).GetProperty("GroupState")!.CanWrite);
+        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State"));
 
         foreach (GroupState state in Enum.GetValues(typeof(GroupState)).Cast<GroupState>())
         {
@@ -646,13 +637,9 @@ public sealed class AdminP5ResultMarshalTests
             GroupState? decoded = GroupMarshal.StateFromName(pinned.Pointer);
             Assert.Equal(state, decoded);
 
-            ConsumerGroupDescription description =
-                WalkDescribeOne(Described("g", state: decoded!.Value));
-
-            Assert.Equal(state, description.GroupState);
-#pragma warning disable CS0618 // The projection is deprecated in Java; mirrored, not avoided.
-            Assert.Equal(GroupMarshal.ParseConsumerState(name!), description.State);
-#pragma warning restore CS0618
+            Assert.Equal(
+                state,
+                WalkDescribeOne(Described("g", state: decoded!.Value)).GroupState);
         }
     }
 
@@ -811,8 +798,8 @@ public sealed class AdminP5ResultMarshalTests
     //
     //   - isSimpleConsumerGroup is DERIVED from protocol, where the consumer class stores
     //     it. The ABI exports a flag for it and this RPC deliberately does not declare it.
-    //   - there is ONE state accessor and it is a ClassicGroupState, where the consumer
-    //     class carries a GroupState plus a deprecated projection.
+    //   - its state accessor is a ClassicGroupState, where the consumer class carries a
+    //     GroupState.
     //
     // ⚠ Why here and not end-to-end: the same reason the section above gives — the Rust
     // MockAdminClient fails every key, so a described classic value is unreachable through
@@ -1004,16 +991,14 @@ public sealed class AdminP5ResultMarshalTests
     /// </summary>
     /// <remarks>
     /// ⚠ The decoder is <see cref="GroupMarshal.ClassicStateFromName"/>, <b>not</b> the
-    /// <c>StateFromName</c> / <c>ConsumerStateFromName</c> the consumer description uses:
-    /// the three enums have overlapping but non-identical members, so a value reader wired
-    /// to the wrong one would still round-trip the states they share and fail only on the
-    /// ones they do not.
+    /// <c>StateFromName</c> the consumer description uses: the enums have overlapping but
+    /// non-identical members, so a value reader wired to the wrong one would still
+    /// round-trip the states they share and fail only on the ones they do not.
     /// </remarks>
     [Fact]
     public void DescribeClassic_State_IsTheClassicStateTheAbiNamed()
     {
-        // One state accessor on this class, and it is get-only — there is no second field
-        // for a projection to drift from, unlike ConsumerGroupDescription's pair.
+        // One state accessor on this class, and it is get-only.
         Assert.False(typeof(ClassicGroupDescription).GetProperty("State")!.CanWrite);
         Assert.Null(typeof(ClassicGroupDescription).GetProperty("GroupState"));
 
