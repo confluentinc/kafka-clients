@@ -1,0 +1,117 @@
+version: v1.0
+name: verify-crates-io-release
+# Auto-promoted from publish-crates-io.yml when "Publish to crates.io" passes.
+# (TEST MODE: publish-crates-io.yml has no publish block for now, so this runs
+# against the version already on crates.io; see its header.)
+# It checks the crate as users get it: the bytes crates.io serves are the bytes
+# that were uploaded, and a fresh project that depends on the version from
+# crates.io builds and passes the smoke test (xtask/smoke/main.rs) on Linux and
+# macOS, on the MSRV and on the latest stable toolchain.
+#
+# No token here, and no tip-of-master guard: master may have moved on since the
+# release, and the release is already done. A failure means the published
+# version is broken for users, so fix forward with a new version (and yank this
+# one if it cannot be used at all).
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+global_job_config:
+  env_vars:
+    - name: CRATE
+      value: confluent-kafka
+  prologue:
+    commands:
+      - checkout
+
+blocks:
+  - name: "crates.io serves the uploaded crate"
+    dependencies: []
+    task:
+      jobs:
+        - name: "checksum"
+          commands:
+            # Same commit as the release, so the manifest has the released version.
+            - version=$(/usr/bin/python3 -c 'import tomllib; print(tomllib.load(open("rust/Cargo.toml", "rb"))["package"]["version"])')
+            # TEST MODE: publish-crates-io.yml currently uploads nothing, so
+            # there may be no upload record. Without one, the index checksum
+            # stands in for it: the download must still match the index.
+            - |
+              if artifact pull workflow "crates-io/${CRATE}-${version}.sha256" --destination /tmp/uploaded.sha256 --force; then
+                uploaded=$(cut -d' ' -f1 /tmp/uploaded.sha256)
+              else
+                echo "No upload record in this workflow (nothing was published); comparing crates.io's index with its download only"
+                uploaded=""
+              fi
+            # The sparse index entry for the version: retried, because a
+            # just-published version takes a little while to appear.
+            - |
+              index_url="https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/${CRATE}"
+              indexed=""
+              for attempt in $(seq 1 20); do
+                indexed=$(curl -fsS "${index_url}" | /usr/bin/python3 -c '
+              import json, sys
+              entries = [json.loads(line) for line in sys.stdin if line.strip()]
+              match = [e for e in entries if e["vers"] == sys.argv[1]]
+              if match:
+                  print(match[0]["cksum"], "yanked" if match[0]["yanked"] else "live")
+              ' "${version}") && [ -n "${indexed}" ] && break
+                echo "${CRATE} ${version} not in the crates.io index yet (attempt ${attempt}/20), retrying in 30s..."
+                sleep 30
+              done
+              if [ -z "${indexed}" ]; then
+                echo "${CRATE} ${version} never appeared in the crates.io index (${index_url})" >&2
+                exit 1
+              fi
+              read -r index_sha index_state <<< "${indexed}"
+              [ -n "${uploaded}" ] || uploaded="${index_sha}"
+              curl -fsSL -o /tmp/downloaded.crate "https://static.crates.io/crates/${CRATE}/${CRATE}-${version}.crate" \
+                || { echo "could not download ${CRATE}-${version}.crate from static.crates.io" >&2; exit 1; }
+              downloaded=$(sha256sum /tmp/downloaded.crate | cut -d' ' -f1)
+              echo "uploaded:   ${uploaded}"
+              echo "index:      ${index_sha} (${index_state})"
+              echo "downloaded: ${downloaded}"
+              if [ "${index_state}" != "live" ] || [ "${index_sha}" != "${uploaded}" ] || [ "${downloaded}" != "${uploaded}" ]; then
+                echo "${CRATE} ${version} on crates.io is not the crate that was uploaded, or it is yanked" >&2
+                exit 1
+              fi
+              echo "crates.io serves exactly the uploaded ${CRATE} ${version}"
+
+  - name: "From crates.io: Linux amd64"
+    # Each job depends on the released version from crates.io (exactly, `=`)
+    # in a fresh project, starts a throwaway apache/kafka broker and runs the
+    # smoke test's offline checks and broker round trip.
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - sudo apt install -y cmake rustup
+          - cd rust
+      jobs:
+        - name: "Rust 1.95 (MSRV), broker round trip"
+          commands:
+            - cargo xtask package-smoke-test --registry --with-broker
+        - name: "Rust stable, release, broker round trip"
+          commands:
+            - rustup toolchain install stable --profile minimal
+            - cargo xtask package-smoke-test --registry --with-broker --toolchain stable --release
+
+  - name: "From crates.io: macOS arm64"
+    # Build and offline smoke test only: the broker round trip already runs on
+    # Linux, and skipping Colima keeps this job short.
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: MACOS_SKIP_COLIMA
+          value: "true"
+      prologue:
+        commands:
+          - source ./.semaphore/dependencies-macos.sh
+          - cd rust
+      jobs:
+        - name: "Rust 1.95 (MSRV), offline smoke test"
+          commands:
+            - cargo xtask package-smoke-test --registry
