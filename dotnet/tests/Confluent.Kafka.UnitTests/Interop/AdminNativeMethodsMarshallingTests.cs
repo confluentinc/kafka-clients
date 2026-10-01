@@ -176,6 +176,11 @@ public sealed class AdminNativeMethodsMarshallingTests
         Assert.True(boolParameters >= 10, $"expected admin bool parameters, found {boolParameters}");
         Assert.True(boolReturns >= 3, $"expected admin bool returns, found {boolReturns}");
 
+        // The bool returns #209 moved out of the kafka_admin_ prefix are still swept
+        // (see AdminImports); the floors above cannot see them leave.
+        Assert.Contains(imports, method => EntryPointOf(method) == "kafka_common_TopicPartitionInfo_has_elr");
+        Assert.Contains(imports, method => EntryPointOf(method) == "kafka_common_TopicPartitionInfo_has_last_known_elr");
+
         // Every declaration is Cdecl, matching the Rust exports' extern "C".
         Assert.All(
             imports,
@@ -191,14 +196,36 @@ public sealed class AdminNativeMethodsMarshallingTests
                 $"{method.Name} must set EntryPoint"));
     }
 
+    /// <summary>
+    /// The admin P/Invoke surface: every <c>kafka_admin_*</c> declaration, plus the
+    /// <c>kafka_common_TopicPartitionInfo_*</c> accessors.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The second prefix keeps the sweep's reach unchanged across master #209, which
+    /// renamed the C ABI to Java package names and so moved <c>TopicPartitionInfo</c>
+    /// (Java <c>org.apache.kafka.common.TopicPartitionInfo</c>) from
+    /// <c>kafka_admin_TopicPartitionInfo_*</c> to <c>kafka_common_TopicPartitionInfo_*</c>.
+    /// They are still admin-surface declarations (<c>describeTopics</c>' partition rows),
+    /// and two of them — <c>has_elr</c> / <c>has_last_known_elr</c> — are <c>bool</c>
+    /// returns, so a <c>kafka_admin_</c>-only filter would silently drop them from
+    /// <see cref="EveryAdminBoolReturn_IsMarshalledAsI1"/>. The trailing underscore keeps
+    /// <c>kafka_common_TopicPartitionInfoMap_*</c> (the consumer's <c>listTopics</c> map,
+    /// never part of this sweep) out.
+    /// </remarks>
     private static MethodInfo[] AdminImports() =>
         typeof(NativeMethods)
             .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
             .Where(method => method.Attributes.HasFlag(MethodAttributes.PinvokeImpl))
-            .Where(method =>
-                method.GetCustomAttribute<DllImportAttribute>()?.EntryPoint?.StartsWith(
-                    "kafka_admin_", System.StringComparison.Ordinal) == true)
+            .Where(method => IsAdminSurface(EntryPointOf(method)))
             .ToArray();
+
+    private static string? EntryPointOf(MethodInfo method) =>
+        method.GetCustomAttribute<DllImportAttribute>()?.EntryPoint;
+
+    private static bool IsAdminSurface(string? entryPoint) =>
+        entryPoint is not null
+        && (entryPoint.StartsWith("kafka_admin_", System.StringComparison.Ordinal)
+            || entryPoint.StartsWith("kafka_common_TopicPartitionInfo_", System.StringComparison.Ordinal));
 
     /// <summary>
     /// A <c>bool</c> passed by value or by reference — <b>not</b> a <c>bool[]</c>, whose
