@@ -27,22 +27,30 @@ name: build-test-release
 # pipeline's SHA):
 #   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
-#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
+#      verify-dotnet, each over PLAINTEXT, SSL and SASL_SSL, including the gRPC
+#      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet). The .NET
+#      gRPC images are built for linux/amd64: Grpc.Tools' linux_arm64 protoc
+#      SIGSEGVs during C# codegen inside an arm64 Linux container, so they need
+#      an amd64 Linux agent (which this block uses anyway).
 #   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
-#      verify-python (pytest test/unit), followed by the gRPC multilanguage arm
-#      with the gRPC servers running as native host processes
-#      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
-#      binding. The broker runs in Docker via Colima.
+#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest),
+#      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
+#      net10.0), each followed by the gRPC multilanguage arm with the gRPC
+#      server running as a native host process (MULTILANG_BACKEND_MODE=native),
+#      which tests the macOS build of each binding. The broker runs in Docker via
+#      Colima. The native .NET server is the net10.0 build; Grpc.Tools has no
+#      macOS arm64 protoc and runs its macosx_x64 one under Rosetta 2, which is
+#      unaffected by the linux_arm64 SIGSEGV in item 2.
 #   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
 #      crate with warnings denied.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
-# pipeline's default limit.
+# pipeline's default limit. The two full verify-dotnet jobs set a longer
+# job-level limit (see the Linux bindings block).
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -138,18 +146,26 @@ blocks:
     #
     # Each binding runs across the three protocols, following the same pattern
     # as the "Verify Rust" block. The gRPC multilanguage container arm
-    # (__grpc_c / __grpc_python) connects to the broker over the CONTAINER
-    # listener for the active protocol:
-    #   - PLAINTEXT: `make verify-c` / `make verify-python` — the full binding
-    #     gate (ctest / pytest unit tests, the PLAINTEXT gRPC arm, check-bindings,
-    #     and the Python perf suite).
+    # (__grpc_c / __grpc_python / __grpc_dotnet) connects to the broker over the
+    # CONTAINER listener for the active protocol:
+    #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
+    #     — the full binding gate (ctest / pytest / dotnet test unit tests, the
+    #     PLAINTEXT gRPC arm, check-bindings, and the Python and .NET perf
+    #     suites).
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
-    #     ctest / pytest unit tests, check-bindings and perf are
-    #     protocol-independent, so running them once in the PLAINTEXT job is
-    #     enough.
+    #     unit tests, check-bindings and perf are protocol-independent, so
+    #     running them once in the PLAINTEXT job is enough. The .NET protocol
+    #     jobs install no host .NET: the gRPC images build inside the .NET SDK
+    #     image, and the harness is Rust.
     #
-    # Each job is a separate VM with its own broker, so the six jobs do not
+    # The two full verify-dotnet jobs (Linux plaintext here, macOS below) set a
+    # job-level execution_time_limit of 60 minutes over the block's 30: each runs
+    # the .NET build, format, unit tests on two frameworks and soak tests before
+    # its gRPC arm (and, on Linux, two image builds and the perf stage). Tighten
+    # it to about twice the measured duration after the first green run.
+    #
+    # Each job is a separate VM with its own broker, so the nine jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
@@ -179,6 +195,23 @@ blocks:
         - name: "verify-python (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-python-sasl-ssl
+        - name: "verify-dotnet (Linux amd64) — plaintext"
+          execution_time_limit:
+            minutes: 60
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - which dotnet
+            - dotnet --list-runtimes
+            - make verify-dotnet
+        - name: "verify-dotnet (Linux amd64) — ssl"
+          commands:
+            - make test-integration-dotnet-ssl
+        - name: "verify-dotnet (Linux amd64) — sasl_ssl (plain)"
+          commands:
+            - make test-integration-dotnet-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
@@ -207,11 +240,15 @@ blocks:
             - make verify-rust-macos-docker
 
   - name: "Verify language bindings (macOS arm64)"
-    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. Each
-    # job then runs its binding's gRPC multilanguage arm (__grpc_c /
-    # __grpc_python) with the gRPC server as a native host process rather than
-    # a container. Containers on macOS run Linux, so a container would only test
-    # the Linux build of the binding. The broker runs in Docker via Colima.
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
+    # verify-dotnet runs the .NET unit tests. Each job then runs its binding's
+    # gRPC multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet) with the
+    # gRPC server as a native host process rather than a container. Containers
+    # on macOS run Linux, so a container would only test the Linux build of the
+    # binding. The broker runs in Docker via Colima. The verify-dotnet job sets
+    # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
+    # Grpc.Tools' macosx_x64 protoc under Rosetta 2, and a job-level 60-minute
+    # limit (see the Linux block).
     #
     # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
     # run on Linux. The TLS and SASL code paths are in the Rust client and are
@@ -245,6 +282,21 @@ blocks:
         - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
+        - name: "verify-dotnet (macOS arm64)"
+          env_vars:
+            # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc.
+            - name: MACOS_ENSURE_ROSETTA
+              value: "true"
+          execution_time_limit:
+            minutes: 60
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - which dotnet
+            - dotnet --list-runtimes
+            - make verify-dotnet-macos-docker
 
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
