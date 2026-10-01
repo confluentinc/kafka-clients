@@ -201,8 +201,12 @@ test-integration-grpc-c-native:
 # AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
 # transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
 # AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
-# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
-# at all yet -- IAsyncProducer's own docs record it as deferred.
+# so those arms return gRPC UNIMPLEMENTED. Nor do ConsumerServiceImpl /
+# AsyncConsumerServiceImpl implement the GroupMetadata / ReleaseGroupMetadata
+# RPCs that consumer_service.proto added, which
+# test_consume_transform_produce_with_offsets reaches through
+# Consumer::group_metadata(). The binding has no transaction surface at all yet
+# -- IAsyncProducer's own docs record it as deferred.
 #
 # The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
 # dotnet targets below (test-integration-grpc-dotnet, which the root
@@ -216,8 +220,11 @@ test-integration-grpc-c-native:
 # .NET producer reaches transaction parity with Python (the 10 transaction
 # P/Invokes, the public surface on IProducer/IAsyncProducer and the four producer
 # types, the three MockProducer transaction controls, and the five RPCs in both
-# producer servicers). Deleting it is the last step of that phase, not a
-# follow-up to it.
+# producer servicers, plus the GroupMetadata / ReleaseGroupMetadata
+# ConsumerService RPCs in both consumer servicers -- ConsumerServiceImpl and
+# AsyncConsumerServiceImpl -- which test_consume_transform_produce_with_offsets
+# reaches through Consumer::group_metadata()). Deleting it is the last step of
+# that phase, not a follow-up to it.
 DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
 	--skip test_aborted_transaction_records_are_discarded \
 	--skip test_consume_transform_produce_with_offsets
