@@ -58,7 +58,13 @@ name: build-test-release
 # run either manually or automatically.
 #
 # "Publish to crates.io" is a manual promotion (publish-crates-io.yml) run on a
-# master build to publish the confluent-kafka version in Cargo.toml.
+# green build of the current master tip to publish the confluent-kafka version
+# in rust/Cargo.toml. It asks for that version (CRATE_VERSION) as a
+# confirmation. Every job that passes leaves a `ci-passed/<job name>` marker
+# in the workflow's artifacts (the global epilogue below), and the publish
+# pipeline refuses unless every job it lists
+# in REQUIRED_CI_JOBS left one. Adding or renaming a job here means updating
+# that list.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -84,6 +90,21 @@ global_job_config:
           git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
         fi
       - sem-version python 3.10
+  epilogue:
+    on_pass:
+      commands:
+        # The green-build evidence publish-crates-io.yml checks before it
+        # publishes: one marker per passed job, in this workflow's artifacts.
+        # Written on every build, not only master, so the gate can be
+        # exercised from a branch; which builds may publish is decided by the
+        # publish pipeline's own guards. The name is reduced to bytes safe in
+        # an artifact path, with LC_ALL=C so Linux and macOS (BSD tr) map
+        # multibyte characters such as the em dash identically;
+        # publish-crates-io.yml applies the same mapping.
+        - |
+          marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+          echo "${SEMAPHORE_JOB_ID}" > /tmp/ci-passed
+          artifact push workflow /tmp/ci-passed --destination "ci-passed/${marker}" --force
 
 blocks:
   - name: "Verify Rust (Linux amd64)"
@@ -282,6 +303,16 @@ promotions:
     pipeline_file: plan-approve.yml
   - name: Publish to crates.io
     pipeline_file: publish-crates-io.yml
+    parameters:
+      env_vars:
+        # A typed confirmation, not the source of the version: the pipeline
+        # refuses unless it equals [package] version in rust/Cargo.toml, so a
+        # stray click cannot publish.
+        - name: CRATE_VERSION
+          required: true
+          description: "The confluent-kafka version being released. Must equal
+            [package] version in rust/Cargo.toml at this commit, or nothing is
+            published."
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:

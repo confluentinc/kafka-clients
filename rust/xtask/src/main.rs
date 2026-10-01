@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
         Some("test-multilanguage") => test_multilanguage()?,
         Some("producer-perf-test") => producer_perf_test()?,
         Some("package-check") => package_check()?,
+        Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
         _ => print_help(),
     }
 
@@ -643,10 +644,113 @@ const PACKAGE_NAME: &str = "confluent-kafka";
 /// The largest `.crate` accepted, compressed: 3 MiB (crates.io allows 10 MiB).
 const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
 const PACKAGE_CHECK_DIR: &str = "target/package-check";
+const PACKAGE_SMOKE_DIR: &str = "target/package-smoke";
+/// The smoke test, built as the `main.rs` of the fresh project. It lives
+/// outside every workspace so it can only use the crate's public API.
+const SMOKE_MAIN_RS: &str = include_str!("../smoke/main.rs");
+/// The broker `--with-broker` starts. Same image and tag as the integration
+/// tests (`tests/common/kafka_cluster.rs`'s `KAFKA_TAG`); keep them in step.
+const SMOKE_KAFKA_IMAGE: &str = "apache/kafka:4.2.0";
+/// How long `--with-broker` waits for the broker to report it has started.
+const SMOKE_BROKER_STARTUP: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long `--registry` keeps retrying while a just-published version is not
+/// yet visible in the crates.io index.
+const REGISTRY_VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn package_check() -> anyhow::Result<()> {
+    let (version, package_dir) = package_and_unpack(PACKAGE_CHECK_DIR)?;
+
+    println!("📥 Installing the package in a fresh project...");
+    let project = SmokeProject::create(
+        PathBuf::from(PACKAGE_CHECK_DIR),
+        &format!("{{ path = {:?} }}", package_dir.display().to_string()),
+        true,
+    )?;
+    // Offline only, even when the caller's shell has a broker configured: this
+    // runs on every PR, where no broker is available.
+    project.run(None, false, None)?;
+
+    println!("✅ {PACKAGE_NAME} {version} packages within the size limit, builds as a dependency and passes the offline smoke test");
+    Ok(())
+}
+
+/// `cargo xtask package-smoke-test`: the smoke test against the local package
+/// (before a release) or against a version on crates.io (after one).
+fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
+    let mut from_registry = false;
+    let mut version_override = None;
+    let mut toolchain = None;
+    let mut with_broker = false;
+    let mut release = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--registry" => from_registry = true,
+            "--version" => {
+                version_override =
+                    Some(args.next().ok_or_else(|| anyhow::anyhow!("--version needs a version"))?.clone())
+            },
+            "--toolchain" => {
+                toolchain = Some(args.next().ok_or_else(|| anyhow::anyhow!("--toolchain needs a name"))?.clone())
+            },
+            "--with-broker" => with_broker = true,
+            "--release" => release = true,
+            other => anyhow::bail!("package-smoke-test: unknown argument {other:?} (see `cargo xtask` for usage)"),
+        }
+    }
+
+    if version_override.is_some() && !from_registry {
+        anyhow::bail!(
+            "package-smoke-test: --version only applies with --registry; the local package has the manifest's version"
+        );
+    }
+
+    let smoke_dir = PathBuf::from(PACKAGE_SMOKE_DIR);
+    let (version, dependency) = if from_registry {
+        // The manifest's version by default: after a release, the commit that
+        // was published is the one checked out.
+        let version = match version_override {
+            Some(version) => version,
+            None => package_version()?,
+        };
+        // `=`: exactly the version under test, never a newer compatible one.
+        println!("📥 Depending on {PACKAGE_NAME} {version} from crates.io...");
+        let dependency = format!("{{ version = \"={version}\" }}");
+        (version, dependency)
+    } else {
+        let (version, package_dir) = package_and_unpack(PACKAGE_SMOKE_DIR)?;
+        println!("📥 Depending on the local package of {PACKAGE_NAME} {version}...");
+        (version, format!("{{ path = {:?} }}", package_dir.display().to_string()))
+    };
+    let project = SmokeProject::create(smoke_dir, &dependency, !from_registry)?;
+    if from_registry {
+        project.wait_for_registry(toolchain.as_deref(), &version)?;
+    }
+    project.check_resolved_version(toolchain.as_deref(), &version, from_registry)?;
+
+    // Kept alive until the smoke test returns; dropping it removes the container.
+    let broker = if with_broker { Some(SmokeBroker::start()?) } else { None };
+    let bootstrap_servers = match &broker {
+        Some(broker) => Some(broker.bootstrap_servers.clone()),
+        None => env::var("KAFKA_BOOTSTRAP_SERVERS").ok(),
+    };
+    project.run(toolchain.as_deref(), release, bootstrap_servers.as_deref())?;
+
+    let source = if from_registry {
+        "crates.io"
+    } else {
+        "the local package"
+    };
+    let round_trip = if bootstrap_servers.is_some() { "with" } else { "without" };
+    println!("✅ {PACKAGE_NAME} {version} from {source} passes the smoke test {round_trip} the broker round trip");
+    Ok(())
+}
+
+/// Packages [`PACKAGE_NAME`], enforces [`MAX_PACKAGE_BYTES`] and unpacks the
+/// `.crate` under `work_dir`. Returns the version and the unpacked directory.
+fn package_and_unpack(work_dir: &str) -> anyhow::Result<(String, PathBuf)> {
     println!("📦 Packaging {PACKAGE_NAME}...");
-    // `--no-verify`: the install below builds the packaged crate anyway.
+    // `--no-verify`: the fresh project builds the packaged crate anyway.
     // `--allow-dirty`: check the working tree as it is, so the task also runs
     // before a commit; CI works on a clean checkout.
     run_command("cargo", &["package", "-p", PACKAGE_NAME, "--no-verify", "--allow-dirty"])?;
@@ -661,20 +765,18 @@ fn package_check() -> anyhow::Result<()> {
         MAX_PACKAGE_BYTES as f64 / (1024.0 * 1024.0)
     );
     if size > MAX_PACKAGE_BYTES {
-        eprintln!(
-            "❌ {} is {size} bytes, above the {MAX_PACKAGE_BYTES}-byte limit. \
+        anyhow::bail!(
+            "{} is {size} bytes, above the {MAX_PACKAGE_BYTES}-byte limit. \
              Check the `include` list in Cargo.toml for files that should not ship.",
             crate_file.display()
         );
-        exit(1);
     }
 
-    println!("📥 Installing the package in a fresh project...");
-    let check_dir = PathBuf::from(PACKAGE_CHECK_DIR);
-    if check_dir.exists() {
-        fs::remove_dir_all(&check_dir)?;
+    let work_dir = PathBuf::from(work_dir);
+    if work_dir.exists() {
+        fs::remove_dir_all(&work_dir)?;
     }
-    let unpacked = check_dir.join("unpacked");
+    let unpacked = work_dir.join("unpacked");
     fs::create_dir_all(&unpacked)?;
     run_command(
         "tar",
@@ -686,35 +788,208 @@ fn package_check() -> anyhow::Result<()> {
         ],
     )?;
     let package_dir = fs::canonicalize(unpacked.join(format!("{PACKAGE_NAME}-{version}")))?;
+    Ok((version, package_dir))
+}
 
-    let consumer = check_dir.join("consumer");
-    fs::create_dir_all(consumer.join("src"))?;
-    // The empty `[workspace]` makes the project its own workspace root, so the
-    // enclosing `rust/` workspace neither claims it nor lends it its lock file.
-    fs::write(
-        consumer.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
-             [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {{ path = {:?} }}\n",
-            package_dir.display().to_string()
-        ),
-    )?;
-    fs::write(
-        consumer.join("src/main.rs"),
-        "fn main() {\n    let error: Option<confluent_kafka::common::Error> = None;\n    assert!(error.is_none());\n}\n",
-    )?;
-    let manifest = consumer.join("Cargo.toml").display().to_string();
-    let status = Command::new("cargo")
-        .args(["build", "--manifest-path", &manifest])
-        .env("CARGO_TARGET_DIR", check_dir.join("target"))
-        .status()?;
-    if !status.success() {
-        eprintln!("❌ A project depending on the packaged {PACKAGE_NAME} does not build");
-        exit(1);
+/// The fresh project that depends on the crate and runs [`SMOKE_MAIN_RS`].
+///
+/// It sits under `rust/target`, so cargo still finds `rust/rust-toolchain.toml`
+/// and builds with the pinned toolchain, which is also the crate's
+/// `rust-version` (MSRV); `--toolchain` overrides it.
+struct SmokeProject {
+    dir: PathBuf,
+    /// Whether the crate comes from a path, not a registry. Cargo caps the
+    /// lints of registry dependencies (`--cap-lints allow`) but not of path
+    /// ones, so the crate's own `deny`s would fail a newer toolchain here
+    /// although they cannot fail a user's build.
+    local_path: bool,
+}
+
+impl SmokeProject {
+    fn create(work_dir: PathBuf, dependency: &str, local_path: bool) -> anyhow::Result<Self> {
+        let dir = work_dir.join("consumer");
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        fs::create_dir_all(dir.join("src"))?;
+        // The empty `[workspace]` makes the project its own workspace root, so the
+        // enclosing `rust/` workspace neither claims it nor lends it its lock file.
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+                 [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {dependency}\n\
+                 tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }}\n"
+            ),
+        )?;
+        fs::write(dir.join("src/main.rs"), SMOKE_MAIN_RS)?;
+        Ok(Self { dir, local_path })
     }
 
-    println!("✅ {PACKAGE_NAME} {version} packages within the size limit and builds as a dependency");
-    Ok(())
+    fn cargo(&self, toolchain: Option<&str>) -> Command {
+        let mut command = Command::new("cargo");
+        if let Some(toolchain) = toolchain {
+            command.arg(format!("+{toolchain}"));
+        }
+        // Run from the project directory, so cargo resolves its toolchain and
+        // config from there rather than from wherever xtask was started.
+        command.current_dir(&self.dir).env("CARGO_TARGET_DIR", self.dir.join("target"));
+        if self.local_path {
+            // Build the path dependency the way cargo builds a crates.io one.
+            command.env("RUSTFLAGS", "--cap-lints=warn");
+        }
+        command
+    }
+
+    /// Retries resolving the dependency until crates.io serves the version: a
+    /// just-published version takes a little while to reach the index.
+    fn wait_for_registry(&self, toolchain: Option<&str>, version: &str) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + REGISTRY_VISIBILITY_TIMEOUT;
+        loop {
+            let status = self.cargo(toolchain).arg("generate-lockfile").status()?;
+            if status.success() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "{PACKAGE_NAME} {version} is still not resolvable from crates.io after {REGISTRY_VISIBILITY_TIMEOUT:?}"
+                );
+            }
+            println!("   {PACKAGE_NAME} {version} not in the crates.io index yet, retrying in 30s...");
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    /// Fails unless cargo resolved exactly `version` of [`PACKAGE_NAME`], from
+    /// crates.io when `from_registry` (a path dependency prints its path after
+    /// the version, a registry one prints nothing).
+    fn check_resolved_version(
+        &self,
+        toolchain: Option<&str>,
+        version: &str,
+        from_registry: bool,
+    ) -> anyhow::Result<()> {
+        let output = self
+            .cargo(toolchain)
+            .args(["tree", "-p", PACKAGE_NAME, "--depth", "0", "--prefix", "none"])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "cargo tree -p {PACKAGE_NAME} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let resolved = String::from_utf8(output.stdout)?.trim().to_string();
+        let expected = format!("{PACKAGE_NAME} v{version}");
+        let matches = if from_registry {
+            resolved == expected
+        } else {
+            resolved.starts_with(&format!("{expected} ("))
+        };
+        if !matches {
+            anyhow::bail!(
+                "the smoke project resolved `{resolved}`, expected {expected} from {}",
+                if from_registry {
+                    "crates.io"
+                } else {
+                    "the local package"
+                }
+            );
+        }
+        println!("   resolved {resolved}");
+        Ok(())
+    }
+
+    fn run(&self, toolchain: Option<&str>, release: bool, bootstrap_servers: Option<&str>) -> anyhow::Result<()> {
+        let mut command = self.cargo(toolchain);
+        command.arg("run");
+        if release {
+            command.arg("--release");
+        }
+        match bootstrap_servers {
+            Some(servers) => command.env("KAFKA_BOOTSTRAP_SERVERS", servers),
+            None => command.env_remove("KAFKA_BOOTSTRAP_SERVERS"),
+        };
+        if !command.status()?.success() {
+            anyhow::bail!("the smoke test failed in a project depending on {PACKAGE_NAME} (see its output above)");
+        }
+        Ok(())
+    }
+}
+
+/// A single-node KRaft broker in Docker for the smoke test's round trip,
+/// removed when dropped. It listens on a free host port and advertises that
+/// same port, so the client can follow the metadata it returns.
+struct SmokeBroker {
+    container: String,
+    bootstrap_servers: String,
+}
+
+impl SmokeBroker {
+    fn start() -> anyhow::Result<Self> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let container = format!("confluent-kafka-smoke-{}-{port}", std::process::id());
+        println!("🐳 Starting {SMOKE_KAFKA_IMAGE} as {container} on localhost:{port}...");
+        let env = [
+            "KAFKA_NODE_ID=1".to_string(),
+            "KAFKA_PROCESS_ROLES=broker,controller".to_string(),
+            format!("KAFKA_LISTENERS=PLAINTEXT://:{port},CONTROLLER://:9093"),
+            format!("KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:{port}"),
+            "KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER".to_string(),
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT".to_string(),
+            "KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093".to_string(),
+            "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1".to_string(),
+            "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1".to_string(),
+            "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1".to_string(),
+            "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0".to_string(),
+            "KAFKA_HEAP_OPTS=-Xmx512m -Xms256m".to_string(),
+        ];
+        let mut args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--name".to_string(),
+            container.clone(),
+        ];
+        args.extend(["-p".to_string(), format!("127.0.0.1:{port}:{port}")]);
+        for var in env {
+            args.extend(["-e".to_string(), var]);
+        }
+        args.push(SMOKE_KAFKA_IMAGE.to_string());
+        let output = Command::new("docker").args(&args).output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker run {SMOKE_KAFKA_IMAGE} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        // From here on the container exists, so dropping `broker` removes it,
+        // including when startup times out below.
+        let broker = Self { container, bootstrap_servers: format!("localhost:{port}") };
+
+        let deadline = std::time::Instant::now() + SMOKE_BROKER_STARTUP;
+        loop {
+            let logs = Command::new("docker").args(["logs", &broker.container]).output()?;
+            if String::from_utf8_lossy(&logs.stdout).contains("Kafka Server started") {
+                println!("   broker ready at {}", broker.bootstrap_servers);
+                return Ok(broker);
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "broker {} did not start within {SMOKE_BROKER_STARTUP:?}; last output:\n{}{}",
+                    broker.container,
+                    String::from_utf8_lossy(&logs.stdout),
+                    String::from_utf8_lossy(&logs.stderr)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+}
+
+impl Drop for SmokeBroker {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "-f", &self.container]).output();
+    }
 }
 
 /// The version of [`PACKAGE_NAME`], from `cargo pkgid`
@@ -1105,7 +1380,15 @@ fn print_help() {
   coverage-all    Run all test coverage including integration (requires Docker)
   test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
-  package-check   Package the crate, fail above 3 MiB, and build a fresh project depending on it
+  package-check   Package the crate, fail above 3 MiB, and build and run the offline smoke test
+                  (xtask/smoke/main.rs) in a fresh project depending on it
+  package-smoke-test  Run the smoke test in a fresh project depending on the crate, the way a user does:
+                    --registry            depend on the manifest's version from crates.io instead of the local package
+                    --version <version>   with --registry, depend on this version instead
+                    --with-broker         start a throwaway apache/kafka broker in Docker for the round trip
+                                          (otherwise the round trip runs only if KAFKA_BOOTSTRAP_SERVERS is set)
+                    --toolchain <name>    build with `cargo +<name>` instead of the pinned (MSRV) toolchain
+                    --release             build and run the smoke test in release mode
 
 Usage:
   cargo xtask format
@@ -1122,6 +1405,7 @@ Usage:
   cargo xtask coverage-all
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
-  cargo xtask package-check"
+  cargo xtask package-check
+  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name>] [--release]"
     );
 }
