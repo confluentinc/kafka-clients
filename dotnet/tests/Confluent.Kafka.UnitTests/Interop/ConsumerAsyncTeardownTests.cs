@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// Single-owner teardown (ffi-marshalling.md §B7): <c>DisposeAsync</c> closes
 /// asynchronously (<c>close_async</c> joins the bg task) before destroy;
-/// <c>Dispose</c> is the blocking fallback (<c>close_with_timeout → destroy</c>).
+/// <c>Dispose</c> is the blocking fallback (<c>close → destroy</c>).
 /// Under the not-thread-safe contract the awaiter of an op is its disposer, so
 /// neither path drains a <em>separately-submitted</em> op; the regression these
 /// tests guard is that teardown <b>returns without hanging</b> even with an
@@ -69,7 +69,7 @@ public sealed class ConsumerAsyncTeardownTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
         // Submit and do NOT await. Under single-owner the sync Dispose does not drain
-        // a separately-submitted op — it closes gracefully (close_with_timeout) then
+        // a separately-submitted op — it closes gracefully (close) then
         // destroys. The regression is that Dispose RETURNS without hanging even with
         // an unawaited op in flight. The op's Task is an accepted strand+leak residual
         // (misuse case), so it is deliberately NOT observed to a terminal state.

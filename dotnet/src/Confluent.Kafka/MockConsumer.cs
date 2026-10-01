@@ -158,20 +158,6 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Close() => _native.CloseSync();
 
     /// <inheritdoc/>
-    public void Close(TimeSpan timeout)
-    {
-        // Precondition BEFORE any native call (ffi §B5), thrown even when closed: a negative
-        // timeout is a programmer error. TimeSpan.Zero is valid.
-        if (timeout < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(timeout), timeout, "Timeout must not be negative.");
-        }
-
-        _native.CloseSyncWithTimeout((long)timeout.TotalMilliseconds);
-    }
-
-    /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>
         _native.Seek(partition.Topic, partition.Partition, offset);
 

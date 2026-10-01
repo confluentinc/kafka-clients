@@ -41,10 +41,15 @@ namespace Confluent.Kafka;
 /// safe. Do not share one instance across threads without external synchronization.
 /// </para>
 /// <para>
-/// <b>Disposal.</b> <see cref="Close()"/> / <see cref="Close(TimeSpan)"/> are the explicit
-/// graceful closes that <em>surface</em> a close failure; <see cref="Dispose"/> is the
-/// blocking teardown that swallows it. All are idempotent and gated by a single atomic closed
-/// flag. There is no <c>DisposeAsync</c> — this is the synchronous surface.
+/// <b>Disposal.</b> <see cref="Close()"/> is the explicit graceful close that <em>surfaces</em>
+/// a close failure; <see cref="Dispose"/> is the blocking teardown that swallows it. They are
+/// idempotent and gated by a single atomic closed flag. There is no <c>DisposeAsync</c> — this
+/// is the synchronous surface. Both close through the same core call, bounded by the core's
+/// default close timeout of 30 seconds (Java's <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>,
+/// the bound Java's <c>close()</c> applies). ⚠ <b>Behavior change (M17/P2):</b>
+/// <see cref="Dispose"/> used to bound its graceful close at a fixed 5 seconds; it now uses the
+/// same 30-second default, so a <see cref="Dispose"/> whose graceful close cannot complete can
+/// block up to 30 seconds instead of 5.
 /// <b>Deterministic native release requires that no operation is in flight — let your
 /// operations return before disposing</b> (use <see cref="IConsumerCommon.Wakeup"/> from
 /// another thread to interrupt a blocked <see cref="Poll"/> first). Tearing down while a
@@ -155,20 +160,6 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <inheritdoc/>
     public void Close() => _native.CloseSync();
-
-    /// <inheritdoc/>
-    public void Close(TimeSpan timeout)
-    {
-        // Precondition BEFORE any native call (ffi §B5), thrown even when closed: a negative
-        // timeout is a programmer error. TimeSpan.Zero is valid.
-        if (timeout < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(timeout), timeout, "Timeout must not be negative.");
-        }
-
-        _native.CloseSyncWithTimeout((long)timeout.TotalMilliseconds);
-    }
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>

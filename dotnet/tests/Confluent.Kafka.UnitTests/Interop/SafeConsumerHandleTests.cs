@@ -24,7 +24,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Category-1 owned-handle lifecycle over <c>SafeConsumerHandle</c> (ffi §B2):
-/// create → assert valid → graceful <c>Dispose</c> (close_with_timeout → destroy)
+/// create → assert valid → graceful <c>Dispose</c> (close → destroy)
 /// → no crash. Double-dispose is safe; use-after-dispose throws
 /// <see cref="ObjectDisposedException"/>. A broker-less close that blocks fails
 /// fast via <see cref="TestTimeout"/> rather than hanging the run.
@@ -64,7 +64,7 @@ public sealed class SafeConsumerHandleTests
     public void KafkaConsumer_CreateThenDispose_HandleValidThenReleased()
     {
         // A real KIP-848 consumer is constructed broker-free; the graceful close
-        // (close_with_timeout → destroy) must return without a broker present.
+        // (close → destroy) must return without a broker present.
         NativeConsumer consumer = NativeConsumer.Create(ValidConsumerConfig());
 
         Assert.False(consumer.Handle.IsInvalid);

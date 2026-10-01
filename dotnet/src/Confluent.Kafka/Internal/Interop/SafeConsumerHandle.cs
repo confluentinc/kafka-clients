@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <see cref="ReleaseHandle"/> is the <b>last-resort</b> bare
 /// <c>Consumer_destroy</c>, which is fire-and-forget: it cancels any in-flight op
 /// and does NOT join the background task. The <b>graceful</b> teardown — a
-/// <c>Consumer_close</c> / <c>close_with_timeout</c> that joins the task, followed
+/// <c>Consumer_close</c> / <c>close_async</c> that joins the task, followed
 /// by destroy — is orchestrated by the owning lifecycle wrapper before this handle
 /// is disposed (ffi §B2/§B7). A bare destroy on its own is correct for freeing the
 /// native memory but skips the join; the wrapper's <c>Dispose</c> is the normal

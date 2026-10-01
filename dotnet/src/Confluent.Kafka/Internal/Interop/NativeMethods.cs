@@ -47,9 +47,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// previously the use-after-free. The convention extends to the M9/P8
 /// <see cref="SafeConsumerReentrancyHandle"/> family: all 21 non-destroy
 /// <c>ConsumerHandle_*</c> declarations are synchronous and take that
-/// <c>SafeHandle</c> as their parameter. <b>Four</b> declarations deliberately keep
-/// <see cref="IntPtr"/> — see <see cref="ConsumerClose"/>,
-/// <see cref="ConsumerCloseWithTimeout"/>, <see cref="ConsumerDestroy"/> and
+/// <c>SafeHandle</c> as their parameter. Some declarations deliberately keep
+/// <see cref="IntPtr"/> — see <see cref="ConsumerClose"/>, <see cref="ConsumerDestroy"/> and
 /// <see cref="ConsumerHandleDestroy"/> (the last two structurally: each is called
 /// from its own <c>SafeHandle</c>'s <c>ReleaseHandle</c>, where passing <c>this</c>
 /// would AddRef a handle already mid-release). The 18
@@ -80,7 +79,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// frees the handle (ffi §A5/§B5) — the first runtime validation of their
 /// <c>EntryPoint</c>s and the <c>I1</c> bool. M2/P1 adds the consumer client
 /// lifecycle (<c>KafkaConsumer_new</c> / <c>MockConsumer_new</c> / <c>close</c> /
-/// <c>close_with_timeout</c> / <c>destroy</c>, ffi §B2) plus the group-metadata
+/// <c>destroy</c>, ffi §B2) plus the group-metadata
 /// getter trio used to round-trip a UTF-8 config value (ffi §B3).
 ///
 /// <b><c>partial</c> (M15/P1).</b> CA1060 requires the P/Invoke declarations to live
@@ -201,8 +200,8 @@ internal static partial class NativeMethods
     internal static extern SafeConsumerHandle MockConsumerNew(IntPtr autoOffsetReset);
 
     // ⚠ THE CLOSE FAMILY IS DELIBERATELY EXEMPT FROM THE SafeHandle-PARAM CONVENTION
-    // (M9/P4 decision Q2, plan §3.4). Consumer_close and Consumer_close_with_timeout keep
-    // IntPtr, and Consumer_destroy is structurally excluded. Do NOT "finish the job" here —
+    // (M9/P4 decision Q2, plan §3.4). Consumer_close keeps IntPtr, and Consumer_destroy is
+    // structurally excluded. Do NOT "finish the job" here —
     // converting them would change invariant I2 (close-before-destroy teardown ordering),
     // which is the main design constraint on H1. The per-declaration reasons are on each
     // one below.
@@ -215,40 +214,26 @@ internal static partial class NativeMethods
     /// </summary>
     /// <remarks>
     /// <b>EXEMPT from the <c>SafeHandle</c>-param convention (decision Q2) — do not
-    /// convert.</b> Its only caller is <c>NativeConsumer.CloseSync</c>, which has already
-    /// won the one-shot <c>TryBeginClose</c> latch and then releases the handle in its own
-    /// <c>finally</c>, on the same thread in program order. The close therefore provably
-    /// precedes its own destroy, and since <c>Consumer_destroy</c> is reachable only from
+    /// convert.</b> Its callers are <c>NativeConsumer.CloseSync</c> and
+    /// <c>NativeConsumer.Dispose</c>, each of which has already won the one-shot
+    /// <c>TryBeginClose</c> latch and then releases the handle in its own <c>finally</c>, on
+    /// the same thread in program order. The close therefore provably precedes its own
+    /// destroy, and since <c>Consumer_destroy</c> is reachable only from
     /// <c>SafeConsumerHandle.ReleaseHandle</c> ← <c>_handle.Dispose()</c> ← the latch
     /// winner, no concurrent destroy can race it — the thing H1 protects against does not
-    /// exist here. Converting would buy nothing and would cost the <c>Dispose</c>
-    /// must-not-throw contract on the shared teardown path.
+    /// exist here. Converting would buy nothing, and on the <c>Dispose</c> path it would break
+    /// the .NET <c>Dispose</c> must-not-throw contract: a marshaller
+    /// <see cref="ObjectDisposedException"/> thrown from inside that <c>try</c> would
+    /// propagate out of <c>Dispose</c> (the existing <c>finally</c> does not swallow).
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerClose(IntPtr consumer);
 
     /// <summary>
-    /// <c>kafka_consumer_Consumer_close_with_timeout</c> — graceful close bounded by
-    /// <paramref name="timeoutMs"/> (sync; joins the background task). Returns a
-    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
-    /// </summary>
-    /// <remarks>
-    /// <b>EXEMPT from the <c>SafeHandle</c>-param convention (decision Q2) — do not
-    /// convert.</b> Same latch argument as <see cref="ConsumerClose"/>, and additionally
-    /// this one is called from <c>NativeConsumer.Dispose</c>: if the marshaller threw
-    /// <see cref="ObjectDisposedException"/> from inside that <c>try</c>, it would
-    /// propagate out of <c>Dispose</c> (the existing <c>finally</c> does not swallow),
-    /// violating the .NET <c>Dispose</c> must-not-throw contract.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close_with_timeout", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerCloseWithTimeout(IntPtr consumer, long timeoutMs);
-
-    /// <summary>
     /// <c>kafka_consumer_Consumer_destroy</c> — fire-and-forget free (cancels any
     /// in-flight op, does NOT join the background task). Graceful teardown routes
-    /// through <see cref="ConsumerClose"/> / <see cref="ConsumerCloseWithTimeout"/>
-    /// first (ffi §B2); this is the last-resort release. Null-safe (no-op).
+    /// through <see cref="ConsumerClose"/> (or the async close) first (ffi §B2); this is
+    /// the last-resort release. Null-safe (no-op).
     /// </summary>
     /// <remarks>
     /// <b>STRUCTURALLY EXCLUDED from the <c>SafeHandle</c>-param convention — it cannot be
@@ -1140,8 +1125,8 @@ internal static partial class NativeMethods
     // KafkaException.FromHandle; poll additionally returns a ConsumerRecords_t* + an
     // out_error; position writes the offset to an out param. The parallel-array input
     // shapes are IDENTICAL to the async DllImports above (same call-scoped pinning).
-    // Consumer_assign (sync), Consumer_close, and Consumer_close_with_timeout are declared
-    // above and reused. The blocking sync Consumer_poll observes Consumer_wakeup — its
+    // Consumer_assign (sync) and Consumer_close are declared above and reused. The
+    // blocking sync Consumer_poll observes Consumer_wakeup — its
     // block_on drives the SAME poll() future the async path awaits, and wakeup fires the
     // same rotating token — so a cross-thread Wakeup() faults a blocking Poll (one-shot).
 
@@ -2202,7 +2187,7 @@ internal static partial class NativeMethods
     // ---- kafka_producer_Producer_t — sync flush + close (M11/P2.1 + M11/P3, teardown) ----
     //
     // The synchronous flush/close counterparts, used by the graceful teardown. There is no
-    // Producer_close_with_timeout ABI (unlike the consumer), so the producer has no timed close —
+    // Producer_close_with_timeout ABI, so the producer has no timed close —
     // the M11/P2 Close(TimeSpan) overload was dropped in M11/P2.1 for Python-producer parity.
     // Each writes an error handle via out_error (null = success) which the caller reads-and-frees;
     // both block. The sync Producer_flush is the teardown flush leg (M11/P3): it resolves pending

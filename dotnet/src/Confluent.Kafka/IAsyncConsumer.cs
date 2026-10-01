@@ -471,10 +471,11 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// a no-op.
     /// </summary>
     /// <remarks>
-    /// No timeout overload this phase: the C ABI has no async-close-with-timeout
-    /// (<c>Consumer_close_async</c> takes only a callback). A faithful
-    /// <c>Close(TimeSpan)</c> is deferred to an additive overload once the core
-    /// exposes one (rather than silently ignoring a <see cref="TimeSpan"/>).
+    /// No timeout overload: Java's <c>close(Duration)</c> is deprecated and not translated, and
+    /// its replacement <c>close(CloseOptions)</c> is not exposed by the C ABI
+    /// (<c>Consumer_close_async</c> takes only a callback). The graceful close is bounded by the
+    /// core's default close timeout, 30 seconds — Java's
+    /// <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>, the bound Java's <c>close()</c> applies.
     /// </remarks>
     /// <param name="cancellationToken">
     /// Observed before the close is submitted (an already-canceled token throws);

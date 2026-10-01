@@ -352,22 +352,18 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
 
     /// <summary>
-    /// Closes the consumer gracefully with the default timeout (Java <c>close()</c>), joining
-    /// the background task, then releases native resources. Unlike <see cref="IDisposable.Dispose"/>,
-    /// this <b>surfaces</b> a close failure. Idempotent with disposal — a subsequent
-    /// <see cref="Close(TimeSpan)"/> / <see cref="IDisposable.Dispose"/> is a no-op.
+    /// Closes the consumer gracefully (Java <c>close()</c>), joining the background task, then
+    /// releases native resources. Unlike <see cref="IDisposable.Dispose"/>, this <b>surfaces</b>
+    /// a close failure. Idempotent with disposal — a subsequent
+    /// <see cref="IDisposable.Dispose"/> is a no-op.
     /// </summary>
+    /// <remarks>
+    /// The graceful close is bounded by the core's default close timeout, 30 seconds — Java's
+    /// <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>, the bound Java's <c>close()</c> applies.
+    /// Java's deprecated <c>close(Duration)</c> is not translated (the C ABI no longer exports a
+    /// timed close), and its replacement <c>close(CloseOptions)</c> is not exposed by the C ABI,
+    /// so the bound is not configurable here.
+    /// </remarks>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     void Close();
-
-    /// <summary>
-    /// Closes the consumer gracefully with a bounded <paramref name="timeout"/> (Java
-    /// <c>close(Duration)</c>), joining the background task, then releases native resources.
-    /// Unlike <see cref="IDisposable.Dispose"/>, this <b>surfaces</b> a close failure.
-    /// Idempotent with disposal.
-    /// </summary>
-    /// <param name="timeout">The maximum time to wait for a graceful close (<see cref="TimeSpan.Zero"/> is valid).</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="KafkaException">The core reported a close failure.</exception>
-    void Close(TimeSpan timeout);
 }

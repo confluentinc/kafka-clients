@@ -71,8 +71,8 @@ namespace Confluent.Kafka.Internal;
 /// <see cref="_closed"/> flag. <see cref="DisposeAsync"/> is <b>primary</b>
 /// (<c>close_async → destroy</c>): it closes gracefully — <c>close_async</c> joins
 /// the background task via the completion bridge — before destroy.
-/// <see cref="Dispose"/> is the blocking fallback (<c>close_with_timeout →
-/// destroy</c>). Under the single-owner model the awaiter of an op <b>is</b> its
+/// <see cref="Dispose"/> is the blocking fallback (<c>close → destroy</c>). Under the
+/// single-owner model the awaiter of an op <b>is</b> its
 /// disposer, so neither path drains a <em>separately-submitted</em> op — there is no
 /// concurrent submitter to drain. This matches the Python sibling (<c>close()</c>
 /// drains its <em>own</em> awaited op, then bare <c>_destroy</c>).
@@ -113,11 +113,11 @@ namespace Confluent.Kafka.Internal;
 /// marshaller holds a reference for the whole native call (ffi §A2); <see cref="Wakeup"/>
 /// additionally swallows the marshaller's <see cref="ObjectDisposedException"/> to preserve its
 /// documented no-op contract. What remains is <b>not</b> a residual: the close family
-/// (<c>Consumer_close</c> / <c>_close_with_timeout</c>) deliberately keeps a raw pointer, and is
-/// safe by the one-shot <see cref="TryBeginClose"/> latch — the winner closes and then releases
-/// the handle on the same thread in program order, and <c>Consumer_destroy</c> is reachable only
-/// from that release, so no concurrent destroy can race those three sites. Each is commented in
-/// place; do not "finish the job" there (it would change close-before-destroy ordering).
+/// (<c>Consumer_close</c>) deliberately keeps a raw pointer, and is safe by the one-shot
+/// <see cref="TryBeginClose"/> latch — the winner closes and then releases the handle on the
+/// same thread in program order, and <c>Consumer_destroy</c> is reachable only from that
+/// release, so no concurrent destroy can race those sites. Each is commented in place; do not
+/// "finish the job" there (it would change close-before-destroy ordering).
 /// </item>
 /// <item>
 /// <b>#3 — Submit-vs-<c>destroy</c> handle race: CLOSED, and its text was already obsolete when
@@ -140,11 +140,6 @@ namespace Confluent.Kafka.Internal;
 /// </remarks>
 internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 {
-    // Fixed graceful-close budget for the synchronous Dispose. A never-joined
-    // consumer closes near-instantly; a user-supplied timeout arrives with the
-    // future public Close(TimeSpan) overload.
-    private const long DefaultCloseTimeoutMilliseconds = 5_000;
-
     private readonly SafeConsumerHandle _handle;
 
     // Thread-safe closed flag (invariant #3, the teardown gate — NOT the removed
@@ -2200,40 +2195,6 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Graceful <b>synchronous</b> close with a timeout (Java <c>close(Duration)</c>) that
-    /// <b>surfaces</b> the close error — the public sync <c>Close(TimeSpan)</c>'s worker. The
-    /// timed analog of <see cref="CloseSync"/>: same one-shot latch + <c>finally</c>-destroy,
-    /// over the sync ABI <c>Consumer_close_with_timeout</c>.
-    /// </summary>
-    /// <param name="timeoutMs">The close timeout in milliseconds (non-negative; validated by the caller).</param>
-    /// <exception cref="KafkaException">The core reported a close failure.</exception>
-    internal void CloseSyncWithTimeout(long timeoutMs)
-    {
-        if (!TryBeginClose())
-        {
-            return;
-        }
-
-        try
-        {
-            // ⚠ DELIBERATELY NOT the SafeHandle-param form (M9/P4 decision Q2, plan §3.4) —
-            // same latch argument as CloseSync above: the latch is already won and the
-            // finally below releases the handle on this thread, so no concurrent destroy can
-            // race this call. Do NOT convert (it would change invariant I2).
-            KafkaException? failure = KafkaException.FromHandle(
-                NativeMethods.ConsumerCloseWithTimeout(_handle.DangerousGetHandle(), timeoutMs));
-            if (failure is not null)
-            {
-                throw failure;
-            }
-        }
-        finally
-        {
-            _handle.Dispose();
-        }
-    }
-
-    /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/> (async; Java
     /// <c>partitionsFor(String)</c>) — the M5/P5 owned-handle <c>PartitionInfoList_t</c>
     /// completion (Category E2). The returned <see cref="Task{TResult}"/> resolves with an
@@ -2941,12 +2902,20 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Graceful synchronous teardown (blocking fallback): <c>Consumer_close_with_timeout</c>
-    /// then releases the handle (→ <c>Consumer_destroy</c>). Idempotent and safe under
-    /// concurrent / double calls (the atomic closed flag). The async teardown
-    /// (<see cref="DisposeAsync"/>) is the primary path.
+    /// Graceful synchronous teardown (blocking fallback): <c>Consumer_close</c> then releases
+    /// the handle (→ <c>Consumer_destroy</c>). Idempotent and safe under concurrent / double
+    /// calls (the atomic closed flag). The async teardown (<see cref="DisposeAsync"/>) is the
+    /// primary path.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>The close is bounded by the core's default close timeout, 30 seconds</b> (Java's
+    /// <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>) — the bound <see cref="CloseSync"/>,
+    /// <see cref="DisposeAsync"/> and Java's <c>close()</c> apply. Until M17/P2 this used a
+    /// fixed 5-second budget over the ABI's timed sync close, which #209 removed together with
+    /// Java's deprecated <c>close(Duration)</c>; a close that cannot complete can therefore
+    /// now hold <see cref="Dispose"/> for up to 30 seconds.
+    /// </para>
     /// <para>
     /// <b>Deterministic native release requires that no operation is in flight — await
     /// your operations before disposing.</b> Releasing the
@@ -3103,9 +3072,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // marshaller would throw ObjectDisposedException from inside this try, and the
             // finally does not swallow — so it would propagate out of Dispose, violating the
             // .NET Dispose must-not-throw contract.
-            IntPtr error = NativeMethods.ConsumerCloseWithTimeout(
-                _handle.DangerousGetHandle(),
-                DefaultCloseTimeoutMilliseconds);
+            IntPtr error = NativeMethods.ConsumerClose(_handle.DangerousGetHandle());
             _ = KafkaException.FromHandle(error);
         }
         finally
@@ -3190,13 +3157,13 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// teardown that already won the latch is a no-op (returns without closing again).
     /// </summary>
     /// <remarks>
-    /// <b>No timeout (ABI-verified, PLAN decision 6).</b> The ABI has no async close
-    /// with a timeout — <c>Consumer_close_async</c> takes only a callback; the only
-    /// timeout-accepting close is the sync <c>Consumer_close_with_timeout</c>. So this
-    /// takes only a <see cref="CancellationToken"/>; a faithful <c>Close(TimeSpan)</c>
-    /// is deferred to an additive overload once a Rust-core <c>close_async_with_timeout</c>
-    /// exists (Mode-B, out of scope). Unlike <see cref="DisposeAsync"/> (which swallows
-    /// the close error), this <b>throws</b> it — <c>close()</c> reports failures.
+    /// <b>No timeout (ABI-verified, PLAN decision 6).</b> The ABI has no timed close —
+    /// <c>Consumer_close_async</c> takes only a callback, and the timed sync close was removed
+    /// in #209 together with Java's deprecated <c>close(Duration)</c>. So this takes only a
+    /// <see cref="CancellationToken"/>, and the close is bounded by the core's default close
+    /// timeout (30 seconds, Java's <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>). Unlike
+    /// <see cref="DisposeAsync"/> (which swallows the close error), this <b>throws</b> it —
+    /// <c>close()</c> reports failures.
     /// </remarks>
     /// <param name="cancellationToken">
     /// Cancellation is observed only before the close is submitted (a canceled token

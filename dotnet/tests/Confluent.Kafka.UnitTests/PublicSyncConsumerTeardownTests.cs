@@ -21,11 +21,11 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// M5/P8a — synchronous-consumer teardown (PLAN §8): <see cref="IConsumer.Close()"/> /
-/// <see cref="IConsumer.Close(TimeSpan)"/> / <see cref="IDisposable.Dispose"/> return without
-/// hanging, are idempotent under double / mixed calls (the shared <c>TryBeginClose</c> latch),
-/// and every public op throws <see cref="ObjectDisposedException"/> after teardown. Every close
-/// / dispose runs under a <see cref="TestTimeout"/> hang guard (the teardown-returns
-/// regression). There is no <c>DisposeAsync</c> — this is the synchronous surface.
+/// <see cref="IDisposable.Dispose"/> return without hanging, are idempotent under double /
+/// mixed calls (the shared <c>TryBeginClose</c> latch), and every public op throws
+/// <see cref="ObjectDisposedException"/> after teardown. Every close / dispose runs under a
+/// <see cref="TestTimeout"/> hang guard (the teardown-returns regression). There is no
+/// <c>DisposeAsync</c> — this is the synchronous surface.
 /// </summary>
 public sealed class PublicSyncConsumerTeardownTests
 {
@@ -46,20 +46,6 @@ public sealed class PublicSyncConsumerTeardownTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(() => consumer.Close(), s_deadline);
-    }
-
-    [Fact]
-    public void CloseWithTimeout_ReturnsWithoutHang()
-    {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TestTimeout.Run(() => consumer.Close(TimeSpan.FromSeconds(5)), s_deadline);
-    }
-
-    [Fact]
-    public void CloseWithTimeout_Zero_ReturnsWithoutHang()
-    {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TestTimeout.Run(() => consumer.Close(TimeSpan.Zero), s_deadline);
     }
 
     [Fact]
@@ -87,15 +73,6 @@ public sealed class PublicSyncConsumerTeardownTests
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         consumer.Close();
-    }
-
-    [Fact]
-    public void CloseWithTimeout_ThenClose_IsIdempotent()
-    {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Close(TimeSpan.FromSeconds(1));
-        consumer.Close();
-        consumer.Dispose();
     }
 
     [Fact]

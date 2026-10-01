@@ -67,7 +67,7 @@ namespace Confluent.Kafka.Internal;
 /// <item><see cref="CloseWithCallback"/> — async graceful close then destroy, <b>surfacing</b> the close error
 /// (Java <c>Producer.close()</c>; behind the public <c>Close(CancellationToken)</c>).</item>
 /// </list>
-/// There is no <c>Producer_close_with_timeout</c> ABI (unlike the consumer), so the producer has no
+/// There is no <c>Producer_close_with_timeout</c> ABI, so the producer has no
 /// timed-close flavor — the M11/P2 <c>Close(TimeSpan)</c> overload + its .NET-side timer race were
 /// removed in M11/P2.1 for strict Python-producer parity (Python's producer <c>close</c> has no
 /// timeout param). The <see cref="CloseWithCallbackInternal"/> async bridge and the inline sync
@@ -1573,7 +1573,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // Graceful sync close first (best-effort, swallow): Producer_destroy alone joins the
             // Sender but skips the graceful Producer_close. The handle is not released until the
             // finally below, so its raw value is valid here (single-owner: no concurrent destroy).
-            // No Producer_close_with_timeout ABI (unlike the consumer) → the plain Producer_close.
+            // No Producer_close_with_timeout ABI → the plain Producer_close.
             // Read+free the error via FromHandle, then swallow — Dispose must not throw, and a
             // best-effort teardown has no caller to hand a failure to. Mirrors NativeConsumer.Dispose.
             NativeMethods.ProducerClose(_handle.DangerousGetHandle(), out IntPtr error);
