@@ -365,9 +365,9 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
-                "kafka_admin_DeleteAclsFilterResults_count",
-                "kafka_admin_DeleteAclsFilterResults_get_binding",
-                "kafka_admin_DeleteAclsFilterResults_get_error",
+                "kafka_admin_FilterResults_count",
+                "kafka_admin_FilterResults_get_binding",
+                "kafka_admin_FilterResults_get_error",
             },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue))));
 
@@ -577,13 +577,13 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
-                "ResourceType=kafka_common_AclBindingFilter_resource_type",
-                "ResourceName=kafka_common_AclBindingFilter_resource_name",
-                "PatternType=kafka_common_AclBindingFilter_pattern_type",
-                "Principal=kafka_common_AclBindingFilter_principal",
-                "Host=kafka_common_AclBindingFilter_host",
-                "Operation=kafka_common_AclBindingFilter_operation",
-                "PermissionType=kafka_common_AclBindingFilter_permission_type",
+                "ResourceType=kafka_common_acl_AclBindingFilter_resource_type",
+                "ResourceName=kafka_common_acl_AclBindingFilter_resource_name",
+                "PatternType=kafka_common_acl_AclBindingFilter_pattern_type",
+                "Principal=kafka_common_acl_AclBindingFilter_principal",
+                "Host=kafka_common_acl_AclBindingFilter_host",
+                "Operation=kafka_common_acl_AclBindingFilter_operation",
+                "PermissionType=kafka_common_acl_AclBindingFilter_permission_type",
             },
             new[]
             {
@@ -613,9 +613,9 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
-                "EntryCount=kafka_common_ClientQuotaEntity_entry_count",
-                "GetEntryType=kafka_common_ClientQuotaEntity_get_entry_type",
-                "GetEntryName=kafka_common_ClientQuotaEntity_get_entry_name",
+                "EntryCount=kafka_common_quota_ClientQuotaEntity_entry_count",
+                "GetEntryType=kafka_common_quota_ClientQuotaEntity_get_entry_type",
+                "GetEntryName=kafka_common_quota_ClientQuotaEntity_get_entry_name",
             },
             new[]
             {

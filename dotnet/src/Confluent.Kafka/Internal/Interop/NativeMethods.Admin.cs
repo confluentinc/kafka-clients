@@ -477,7 +477,7 @@ internal static partial class NativeMethods
 
     // ---- kafka_admin_TopicPartitionInfo_t — a borrowed child of the description ----
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoPartition(IntPtr info);
 
     /// <summary>
@@ -485,22 +485,22 @@ internal static partial class NativeMethods
     /// if there is none. The same <c>kafka_common_Node_t</c> the consumer surface already
     /// marshals, so <see cref="NodeMarshal"/> is reused unchanged.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoLeader(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoReplicaCount(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoReplica(IntPtr info, int index);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_isr_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_isr_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoIsrCount(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_isr", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_isr", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoIsr(IntPtr info, int index);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_elr_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_elr_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoElrCount(IntPtr info);
 
     /// <summary>
@@ -508,22 +508,22 @@ internal static partial class NativeMethods
     /// <b>discriminant</b> for the eligible-leader-replica set, exactly as
     /// <see cref="TopicDescriptionHasAuthorizedOperations"/> is for authorized operations.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_has_elr", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_has_elr", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool TopicPartitionInfoHasElr(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_elr", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_elr", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoElr(IntPtr info, int index);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_last_known_elr_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_last_known_elr_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoLastKnownElrCount(IntPtr info);
 
     /// <inheritdoc cref="TopicPartitionInfoHasElr"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_has_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_has_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool TopicPartitionInfoHasLastKnownElr(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfo_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoLastKnownElr(IntPtr info, int index);
 
     // ---- listTopics (M15/P2b) — result shape 3: ONE aggregate future, no per-key error ----
@@ -2966,45 +2966,45 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_common_AclBinding_resource_type</c> — <c>pattern().resourceType().code()</c>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_resource_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_resource_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingResourceType(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_resource_name</c> — <c>pattern().name()</c>, borrowed and
     /// NUL-terminated. Never null on a binding (unlike the filter accessor).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_resource_name", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_resource_name", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingResourceName(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_pattern_type</c> — <c>pattern().patternType().code()</c>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_pattern_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_pattern_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingPatternType(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_principal</c> — <c>entry().principal()</c>, borrowed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_principal", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_principal", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingPrincipal(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_host</c> — <c>entry().host()</c>, borrowed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_host", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_host", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingHost(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_operation</c> — <c>entry().operation().code()</c>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_operation", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_operation", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingOperation(IntPtr binding);
 
     /// <summary>
     /// <c>kafka_common_AclBinding_permission_type</c> —
     /// <c>entry().permissionType().code()</c>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_permission_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_permission_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingPermissionType(IntPtr binding);
 
     // ---- M15/P6: createAcls (result shape 2) ----
@@ -3116,49 +3116,49 @@ internal static partial class NativeMethods
     /// <c>kafka_common_AclBindingFilter_resource_type</c> —
     /// <c>patternFilter().resourceType().code()</c>; may be ANY.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_resource_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_resource_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingFilterResourceType(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_resource_name</c> — <c>patternFilter().name()</c>,
     /// borrowed, or <b>null when the filter matches any name</b>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_resource_name", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_resource_name", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingFilterResourceName(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_pattern_type</c> —
     /// <c>patternFilter().patternType().code()</c>; may be ANY or MATCH.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_pattern_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_pattern_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingFilterPatternType(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_principal</c> — <c>entryFilter().principal()</c>,
     /// borrowed, or null when the filter matches any principal.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_principal", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_principal", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingFilterPrincipal(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_host</c> — <c>entryFilter().host()</c>, borrowed, or
     /// null when the filter matches any host.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_host", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_host", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr AclBindingFilterHost(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_operation</c> —
     /// <c>entryFilter().operation().code()</c>; may be ANY.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_operation", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_operation", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingFilterOperation(IntPtr filter);
 
     /// <summary>
     /// <c>kafka_common_AclBindingFilter_permission_type</c> —
     /// <c>entryFilter().permissionType().code()</c>; may be ANY.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_permission_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_permission_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AclBindingFilterPermissionType(IntPtr filter);
 
     // ---- M15/P6: deleteAcls (result shape 1, two-level nested value) ----
@@ -3315,14 +3315,14 @@ internal static partial class NativeMethods
     /// <c>kafka_common_ClientQuotaEntity_entry_count</c> — the size of Java's
     /// <c>entries()</c> map.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_entry_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaEntity_entry_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int ClientQuotaEntityEntryCount(IntPtr entity);
 
     /// <summary>
     /// <c>kafka_common_ClientQuotaEntity_get_entry_type</c> — <c>"user"</c> / <c>"client-id"</c>
     /// / <c>"ip"</c>, borrowed, sorted by type.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_get_entry_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaEntity_get_entry_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ClientQuotaEntityGetEntryType(IntPtr entity, int index);
 
     /// <summary>
@@ -3330,7 +3330,7 @@ internal static partial class NativeMethods
     /// <b>or when the entry names the built-in default entity</b>
     /// (header, <c>kafka_common_ClientQuotaEntity_get_entry_name</c>).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_get_entry_name", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaEntity_get_entry_name", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ClientQuotaEntityGetEntryName(IntPtr entity, int index);
 
     // ---- M15/P6: describeClientQuotas (result shape 3 — one future over a map) ----
@@ -3498,41 +3498,41 @@ internal static partial class NativeMethods
     // Every accessor below is `const` → BORROWED: never destroyed, and dead once the
     // owning *Result_t root is destroyed.
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_principal_type", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_auth_KafkaPrincipal_principal_type", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr KafkaPrincipalPrincipalType(IntPtr principal);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_name", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_auth_KafkaPrincipal_name", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr KafkaPrincipalName(IntPtr principal);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_token_authenticated", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_auth_KafkaPrincipal_token_authenticated", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool KafkaPrincipalTokenAuthenticated(IntPtr principal);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_token_id", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_token_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TokenInformationTokenId(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_owner", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_owner", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TokenInformationOwner(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_token_requester", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_token_requester", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TokenInformationTokenRequester(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_renewer_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_renewer_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TokenInformationRenewerCount(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_get_renewer", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_get_renewer", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TokenInformationGetRenewer(IntPtr info, int index);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_issue_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_issue_timestamp", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long TokenInformationIssueTimestamp(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_expiry_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_expiry_timestamp", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long TokenInformationExpiryTimestamp(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_max_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_max_timestamp", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long TokenInformationMaxTimestamp(IntPtr info);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_DelegationToken_token_info", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_DelegationToken_token_info", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DelegationTokenTokenInfo(IntPtr token);
 
     /// <summary>
@@ -3546,7 +3546,7 @@ internal static partial class NativeMethods
     /// truncation round-trips into a broker-side rejection rather than a local failure.
     /// </para>
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_DelegationToken_hmac", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_DelegationToken_hmac", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DelegationTokenHmac(IntPtr token, out int outLength);
 
     // ---- M15/P7: describeUserScramCredentials (result shape 1, nested inline values) ----
@@ -4195,39 +4195,39 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_admin_DeleteAclsFilterResults_t</c> — <c>delete_acls</c>'s per-filter value.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_admin_FilterResults_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DeleteAclsFilterResultsDestroy(IntPtr value);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_admin_FilterResults_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int DeleteAclsFilterResultsCount(IntPtr value);
 
     /// <summary>Borrowed; dies with the filter-results handle. Never freed here.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_get_binding", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_admin_FilterResults_get_binding", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DeleteAclsFilterResultsGetBinding(IntPtr value, int index);
 
     /// <inheritdoc cref="DeleteAclsFilterResultsGetBinding"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_get_error", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_admin_FilterResults_get_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DeleteAclsFilterResultsGetError(IntPtr value, int index);
 
     /// <summary>
     /// Destroys a per-key <c>kafka_common_AclBindingFilter_t</c> KEY handed to a
     /// <c>delete_acls</c> callback. Null-safe.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBindingFilter_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AclBindingFilterDestroy(IntPtr filter);
 
     /// <summary>
     /// Destroys a per-key <c>kafka_common_AclBinding_t</c> KEY handed to a
     /// <c>create_acls</c> callback. Null-safe.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_acl_AclBinding_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AclBindingDestroy(IntPtr binding);
 
     /// <summary>
     /// Destroys a per-key <c>kafka_common_ClientQuotaEntity_t</c> KEY handed to an
     /// <c>alter_client_quotas</c> callback. Null-safe.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaEntity_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ClientQuotaEntityDestroy(IntPtr entity);
 
     // ---- kafka_admin_MockAdminClient_t — mock-only seeding (M15/P12) ----

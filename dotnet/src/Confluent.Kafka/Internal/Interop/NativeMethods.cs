@@ -1399,7 +1399,7 @@ internal static partial class NativeMethods
     /// <c>kafka_consumer_TopicPartitionList_count</c> — the number of topic-partitions in
     /// the owned list.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionList_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionListCount(IntPtr list);
 
     /// <summary>
@@ -1408,7 +1408,7 @@ internal static partial class NativeMethods
     /// destroyed, or <see cref="IntPtr.Zero"/> if out of range. Never freed by the binding
     /// (the list root's <see cref="TopicPartitionListDestroy"/> invalidates it).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_get", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionList_get", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionListGet(IntPtr list, int index);
 
     /// <summary>
@@ -1416,7 +1416,7 @@ internal static partial class NativeMethods
     /// topic-partition-list root (every borrowed element from it is invalidated).
     /// Null-safe (no-op).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionList_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void TopicPartitionListDestroy(IntPtr list);
 
     /// <summary>
@@ -1426,14 +1426,14 @@ internal static partial class NativeMethods
     /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy — this is the
     /// NUL-terminated form (§B3), NOT the length-delimited receive-path form.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartition_topic", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartition_topic", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionTopic(IntPtr tp);
 
     /// <summary>
     /// <c>kafka_consumer_TopicPartition_partition</c> — the partition of a borrowed
     /// topic-partition element.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartition_partition", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartition_partition", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionPartition(IntPtr tp);
 
     // ---- StringList_t — owned borrow-root + borrowed elements (ffi §B2/§B3) ----
@@ -1864,7 +1864,7 @@ internal static partial class NativeMethods
     /// entries in the owned list. NOT null-safe (only <c>_destroy</c> is) — call only on a
     /// non-null root (the success branch of the trampoline).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfoList_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoListCount(IntPtr list);
 
     /// <summary>
@@ -1874,7 +1874,7 @@ internal static partial class NativeMethods
     /// freed by the binding (there is a <c>PartitionInfo_destroy</c>, but it is only for a
     /// standalone-owned info — a list element is a borrowed view; freeing it is a UAF).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_get", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfoList_get", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoListGet(IntPtr list, int index);
 
     /// <summary>
@@ -1883,7 +1883,7 @@ internal static partial class NativeMethods
     /// invalidated). Null-safe (no-op). Called by the trampoline <b>after</b> the copy-out
     /// completes.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfoList_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void PartitionInfoListDestroy(IntPtr list);
 
     // ---- TopicPartitionInfoMap_t — owned borrow-root + borrowed topic / list elements (ffi §B2) ----
@@ -1892,7 +1892,7 @@ internal static partial class NativeMethods
     /// <c>kafka_consumer_TopicPartitionInfoMap_count</c> — the number of topics in the owned
     /// map. NOT null-safe (only <c>_destroy</c> is).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfoMap_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoMapCount(IntPtr map);
 
     /// <summary>
@@ -1903,7 +1903,7 @@ internal static partial class NativeMethods
     /// NUL-terminated form (§B3), NOT the length-delimited form (contrast
     /// <see cref="NodeHost"/> / <see cref="NodeRack"/>, which ARE length-delimited).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfoMap_get_topic", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoMapGetTopic(IntPtr map, int index);
 
     /// <summary>
@@ -1915,7 +1915,7 @@ internal static partial class NativeMethods
     /// map root is destroyed; <b>never</b> <c>PartitionInfoList_destroy</c>'d as a map value
     /// (it is borrowed here — only the map root is destroyed).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_get_partitions", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfoMap_get_partitions", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoMapGetPartitions(IntPtr map, int index);
 
     /// <summary>
@@ -1924,7 +1924,7 @@ internal static partial class NativeMethods
     /// elements are invalidated). Null-safe (no-op). Called by the trampoline <b>after</b>
     /// the copy-out completes.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfoMap_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void TopicPartitionInfoMapDestroy(IntPtr map);
 
     // ---- PartitionInfo_t accessors — borrowed views into the owning root (ffi §B2 Category 4) ----
@@ -1940,13 +1940,13 @@ internal static partial class NativeMethods
     /// <c>const char*</c> owned by the handle (§B3 NUL-scan form). Copy via
     /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before the owning root is destroyed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_topic", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_topic", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoTopic(IntPtr info);
 
     /// <summary>
     /// <c>kafka_consumer_PartitionInfo_partition</c> — the partition id (by value).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoPartition(IntPtr info);
 
     /// <summary>
@@ -1955,13 +1955,13 @@ internal static partial class NativeMethods
     /// freed (there is no <c>Node_destroy</c>). A null pointer maps to a null
     /// <see cref="Node"/>.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoLeader(IntPtr info);
 
     /// <summary>
     /// <c>kafka_consumer_PartitionInfo_replica_count</c> — the number of replica nodes.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoReplicaCount(IntPtr info);
 
     /// <summary>
@@ -1969,14 +1969,14 @@ internal static partial class NativeMethods
     /// <paramref name="index"/>, <b>borrowed</b> (Category 4), or <see cref="IntPtr.Zero"/>
     /// if out of range. Never freed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoReplica(IntPtr info, int index);
 
     /// <summary>
     /// <c>kafka_consumer_PartitionInfo_in_sync_replica_count</c> — the number of in-sync
     /// replica nodes.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_in_sync_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_in_sync_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoInSyncReplicaCount(IntPtr info);
 
     /// <summary>
@@ -1984,14 +1984,14 @@ internal static partial class NativeMethods
     /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
     /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_in_sync_replica", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_in_sync_replica", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoInSyncReplica(IntPtr info, int index);
 
     /// <summary>
     /// <c>kafka_consumer_PartitionInfo_offline_replica_count</c> — the number of offline
     /// replica nodes.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_offline_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_offline_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoOfflineReplicaCount(IntPtr info);
 
     /// <summary>
@@ -1999,7 +1999,7 @@ internal static partial class NativeMethods
     /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
     /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_offline_replica", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_offline_replica", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr PartitionInfoOfflineReplica(IntPtr info, int index);
 
     // ---- Node_t (kafka_common_Node) accessors — borrowed views (ffi §B2 Category 4) ----
@@ -2416,7 +2416,7 @@ internal static partial class NativeMethods
     /// pool (ffi §A1). The two output arrays are blittable <see cref="IntPtr"/> arrays the
     /// callee writes in place (<c>[Out]</c>; the runtime pins them).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_get_all", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_get_all", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataGetAll(
         IntPtr[] futures,
         int count,
@@ -2429,7 +2429,7 @@ internal static partial class NativeMethods
     /// skipped). Called by the pump after <see cref="FutureRecordMetadataGetAll"/> reads each
     /// result (<c>get_all</c> does not consume the futures, ffi §A2).
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy_all", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_destroy_all", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroyAll(IntPtr[] futures, int count);
 
     // ---- kafka_producer_Producer_t — the SYNC SEND path (M11/P4, ffi §A1/§A5, PLAN §3 decision #2) ----
@@ -2457,7 +2457,7 @@ internal static partial class NativeMethods
     /// transient, ffi §A2 Category 2), not the producer handle — the future is Arc-backed and
     /// independent of the producer's lifetime.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_get", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_get", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr FutureRecordMetadataGet(IntPtr future, out IntPtr outError);
 
     /// <summary>
@@ -2472,7 +2472,7 @@ internal static partial class NativeMethods
     /// allocation <c>catch</c> (<c>SendCompletionPump.ProcessBatch</c>) — the latter two reachable
     /// only under out-of-memory, where allocating in order to free would risk leaking the handle.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroy(IntPtr future);
 
     // ---- kafka_producer_RecordMetadata_t — flat transient result (ffi §A2 Category 2) ----
