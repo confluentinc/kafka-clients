@@ -41,8 +41,7 @@ namespace Confluent.Kafka.Admin;
 /// <b>Every accessor is a property although Java spells them as methods</b> — each is a
 /// pure managed field read that does no P/Invoke and cannot throw (CLAUDE.md §3's
 /// "non-blocking getter → sync property" row), the same reading
-/// <see cref="ClientMetricsResourceListing.Name"/> and <see cref="TopicListing.Name"/>
-/// already make.
+/// <see cref="TopicListing.Name"/> already makes.
 /// </para>
 /// </remarks>
 public sealed class GroupListing
@@ -65,7 +64,7 @@ public sealed class GroupListing
     /// ⚠ The two null guards are <b>deliberately stricter than Java</b>, which guards
     /// neither. <see cref="GroupId"/> and <see cref="Protocol"/> are non-nullable
     /// <c>string</c> under <c>#nullable enable</c>, so accepting null would falsify the
-    /// annotation — the call <see cref="ClientMetricsResourceListing"/> already makes. Java
+    /// annotation — the call <see cref="TopicListing"/> already makes. Java
     /// is not permissive here by design either: its own
     /// <see cref="IsSimpleConsumerGroup"/> dereferences <c>protocol</c> unguarded
     /// (<c>:82</c>), so a null protocol is a latent <c>NullPointerException</c> there.

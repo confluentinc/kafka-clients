@@ -37,10 +37,9 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠ <b>A null argument is accepted and becomes an empty assignment</b>, which is
 /// <em>not</em> the strict <see cref="ArgumentNullException"/> guard
-/// <see cref="ConsumerGroupListing"/> and <see cref="TopicDescription"/> apply. The
-/// difference is Java's, not this binding's: Java coalesces here
-/// (<c>topicPartitions == null ? Collections.emptySet() : ...</c>, <c>:38</c>) where those
-/// classes reject, so mirroring the guard would reject a call Java accepts.
+/// <see cref="TopicDescription"/> applies. The difference is Java's, not this binding's: Java
+/// coalesces here (<c>topicPartitions == null ? Collections.emptySet() : ...</c>, <c>:38</c>)
+/// where that class rejects, so mirroring the guard would reject a call Java accepts.
 /// </para>
 /// <para>
 /// ⚠ <b>The collection is copied defensively</b>, mirroring Java's <c>Set.copyOf</c>

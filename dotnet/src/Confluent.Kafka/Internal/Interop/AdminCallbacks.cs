@@ -187,15 +187,6 @@ internal static class AdminCallbacks
     internal delegate void ListConfigResourcesCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for
-    /// <c>kafka_admin_AdminClient_list_client_metrics_resources_callback_t</c> (result
-    /// sub-shape 3b). ⚠ <paramref name="error"/> is the <b>only</b> failure channel: the
-    /// result type has no <c>get_error</c>, and no key either.
-    /// </summary>
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListClientMetricsResourcesCallback(IntPtr result, IntPtr error, IntPtr userData);
-
-    /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_describe_configs_callback_t</c>:
     /// <c>void (*)(int32_t resource_type, const char* resource_name,
     /// kafka_admin_Config_t* value, kafka_common_KafkaError_t* error, void* user_data)</c>
@@ -364,25 +355,15 @@ internal static class AdminCallbacks
     /// a non-null <paramref name="error"/> means the request could not be submitted at all
     /// and is <b>owned</b>.
     /// </summary>
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
-
-    /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_list_consumer_groups_callback_t</c>
-    /// (result shape 1). ⚠ A <b>per-broker</b> listing failure arrives inside
-    /// <paramref name="result"/> (<c>kafka_admin_ListConsumerGroupsResult_get_error</c>),
-    /// borrowed; a non-null <paramref name="error"/> means the request could not be
-    /// submitted at all and is <b>owned</b>.
-    /// </summary>
     /// <remarks>
-    /// A separate delegate type from <see cref="ListGroupsCallback"/> although the three
-    /// parameters are identical: each is the managed spelling of one C typedef, and the two
+    /// A separate delegate type from <see cref="ListConfigResourcesCallback"/> although the
+    /// three parameters are identical: each is the managed spelling of one C typedef, and the
     /// result roots they carry are different types that must be destroyed by different
-    /// functions. Sharing one delegate would let a <c>listGroups</c> root reach
-    /// <c>ListConsumerGroupsResultDestroy</c>.
+    /// functions. Sharing one delegate would let a <c>listGroups</c> root reach another RPC's
+    /// destroy.
     /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void ListGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
@@ -393,7 +374,7 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
+    /// <see cref="ListGroupsCallback"/>: each is the managed spelling of one C
     /// typedef, and the values they carry are different native types destroyed by
     /// different functions. Sharing one would let a <c>describeConsumerGroups</c> value
     /// reach another RPC's destroy.
@@ -413,7 +394,7 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>. Sharing the structurally identical
+    /// <see cref="ListGroupsCallback"/>. Sharing the structurally identical
     /// <see cref="DescribeConsumerGroupsCallback"/> would let a
     /// <c>ClassicGroupDescription_t</c> reach
     /// <c>kafka_admin_ConsumerGroupDescription_destroy</c>.
@@ -433,7 +414,7 @@ internal static class AdminCallbacks
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>: sharing a structurally identical sibling
+    /// <see cref="ListGroupsCallback"/>: sharing a structurally identical sibling
     /// would let an <c>OffsetAndMetadataMap_t</c> reach some other RPC's destroy.
     /// ⚠ No result root. <paramref name="key"/> is borrowed for the call only;
     /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
@@ -905,13 +886,6 @@ internal static class AdminCallbacks
     internal static readonly ListConfigResourcesCallback ListConfigResources = OnListConfigResources;
 
     /// <summary>
-    /// The rooted instance passed to every <c>list_client_metrics_resources_async</c>
-    /// submission (result sub-shape 3b).
-    /// </summary>
-    internal static readonly ListClientMetricsResourcesCallback ListClientMetricsResources =
-        OnListClientMetricsResources;
-
-    /// <summary>
     /// The rooted instance passed to every <c>describe_configs_async</c> submission
     /// (result shape 1, composite key).
     /// </summary>
@@ -960,19 +934,6 @@ internal static class AdminCallbacks
         static (result, index) => new ConfigResource(
             ConfigResourceMarshal.TypeFromId(NativeMethods.ListConfigResourcesResultGetType(result, index)),
             KeyedResultMarshal.ReadStringKey(NativeMethods.ListConfigResourcesResultGetName(result, index)));
-
-#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
-
-    /// <summary>
-    /// <c>listClientMetricsResources</c>' element reader — the whole listing <em>is</em>
-    /// the name, so <c>get_name(i)</c> is the result's only per-index accessor.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, ClientMetricsResourceListing> ClientMetricsResourceListingValue =
-        static (result, index) => new ClientMetricsResourceListing(
-            KeyedResultMarshal.ReadStringKey(
-                NativeMethods.ListClientMetricsResourcesResultGetName(result, index)));
-
-#pragma warning restore CS0618
 
     /// <summary>
     /// The rooted instance passed to every <c>elect_leaders_async</c> submission (result
@@ -1458,7 +1419,7 @@ internal static class AdminCallbacks
     /// <c>kafka_admin_AdminClient_force_terminate_transaction_callback_t</c> (header).
     /// Its own delegate type although the signature matches
     /// <see cref="AbortTransactionCallback"/>, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>.
+    /// <see cref="ListGroupsCallback"/>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ForceTerminateTransactionCallback(IntPtr error, IntPtr userData);
@@ -2154,13 +2115,6 @@ internal static class AdminCallbacks
     internal static readonly ListGroupsCallback ListGroups = OnListGroups;
 
     /// <summary>
-    /// The rooted instance passed to every <c>list_consumer_groups_async</c> submission
-    /// (sub-shape 3c, the same as <see cref="ListGroups"/> — one aggregate future over two
-    /// independent lists, so no accessor set).
-    /// </summary>
-    internal static readonly ListConsumerGroupsCallback ListConsumerGroups = OnListConsumerGroups;
-
-    /// <summary>
     /// The rooted instance passed to every <c>describe_consumer_groups_async</c> submission
     /// (shape 1 — a keyed map, one future per requested group id).
     /// </summary>
@@ -2270,77 +2224,6 @@ internal static class AdminCallbacks
             KafkaException.FromBorrowedHandle(NativeMethods.ListGroupsResultGetError(result, index))
             ?? throw new KafkaException(
                 "The listGroups result produced no error for an index within its own error count.");
-
-#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
-
-    /// <summary>
-    /// <c>listConsumerGroups</c>' <b>first</b>-list reader: <c>get_valid(i)</c> yields a
-    /// borrowed <c>ConsumerGroupListing_t</c>, whose four fields are copied out before the
-    /// root dies.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <c>group_state</c> and <c>group_type</c> return <b>null for Java's
-    /// <c>Optional.empty()</c></b> and are mapped by the same two
-    /// <see cref="GroupMarshal"/> entries <see cref="GroupListingValue"/> uses, with the
-    /// same reading: null is <em>absence</em>, distinct from the <c>Unknown</c> an
-    /// unrecognised name decodes to, and neither is rejected. <c>group_id</c> is the
-    /// opposite case — the header says it is never null and the constructor rejects null —
-    /// so a null there is an ABI contract violation and faults the call.
-    /// </para>
-    /// <para>
-    /// ⚠⚠ <b>The two accessors this reads and skips are the <em>mirror image</em> of
-    /// <see cref="GroupListingValue"/>'s.</b> <c>is_simple_consumer_group</c> is read here
-    /// and deliberately not declared there; <c>state</c> is skipped here although the ABI
-    /// exports it. Both follow from which value the managed class stores and which it
-    /// derives, and the two classes differ: <c>ConsumerGroupListing</c> stores the simple
-    /// flag (it has no protocol to compute one from) and derives <c>State</c> as a lossy
-    /// projection of <c>GroupState</c>, exactly as Java does. Reading the projection back
-    /// out of the ABI would give a native-built listing and a caller-built one two ways to
-    /// disagree on one axis.
-    /// </para>
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, ConsumerGroupListing> ConsumerGroupListingValue =
-        static (result, index) =>
-        {
-            IntPtr listing = NativeMethods.ListConsumerGroupsResultGetValid(result, index);
-            if (listing == IntPtr.Zero)
-            {
-                throw new KafkaException(
-                    "The listConsumerGroups result produced no listing for an index within its own "
-                    + "valid count.");
-            }
-
-            return new ConsumerGroupListing(
-                Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupListingGroupId(listing))
-                    ?? throw new KafkaException(
-                        "The listConsumerGroups result produced a listing with no group id."),
-                GroupMarshal.StateFromName(NativeMethods.ConsumerGroupListingGroupState(listing)),
-                GroupMarshal.TypeFromName(NativeMethods.ConsumerGroupListingGroupType(listing)),
-                NativeMethods.ConsumerGroupListingIsSimpleConsumerGroup(listing));
-        };
-
-#pragma warning restore CS0618
-
-    /// <summary>
-    /// <c>listConsumerGroups</c>' <b>second</b>-list reader: one broker's failure, read from
-    /// <c>get_error(i)</c> — a value on a <b>successful</b> call, never a fault.
-    /// </summary>
-    /// <remarks>
-    /// ⚠⚠ <b>BORROWED</b>, for the reasons stated at length on
-    /// <see cref="ListGroupsBrokerError"/>: the header returns
-    /// <c>const kafka_common_Error_t *</c> and says "Do not destroy it", so this reads
-    /// through <see cref="KafkaException.FromBorrowedHandle"/> and never
-    /// <see cref="KafkaException.FromHandle"/>, which would free a handle the result root
-    /// still owns. It is a <em>value</em> for the same reason too — Java publishes it
-    /// through <c>ListConsumerGroupsResult.errors()</c> and only <c>all()</c> rethrows the
-    /// first of them, so errors alongside listings are a normal partial success.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, KafkaException> ListConsumerGroupsBrokerError =
-        static (result, index) =>
-            KafkaException.FromBorrowedHandle(NativeMethods.ListConsumerGroupsResultGetError(result, index))
-            ?? throw new KafkaException(
-                "The listConsumerGroups result produced no error for an index within its own error count.");
 
     /// <summary>
     /// <c>describeConsumerGroups</c>' key reader: the group id at one index.
@@ -2469,10 +2352,6 @@ internal static class AdminCallbacks
         NativeMethods.ListConfigResourcesResultDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyListClientMetricsResourcesResult =
-        NativeMethods.ListClientMetricsResourcesResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyListTopicsResult = NativeMethods.ListTopicsResultDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
@@ -2491,15 +2370,11 @@ internal static class AdminCallbacks
         NativeMethods.RemoveMembersFromConsumerGroupResultDestroy;
 
     /// <summary>
-    /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
-    /// everything else here.
+    /// The count accessor the <c>listConfigResources</c> sub-shape-3b walk reads, hoisted
+    /// for the same reason as everything else here.
     /// </summary>
     private static readonly KeyedResultMarshal.CountAccessor s_listConfigResourcesCount =
         NativeMethods.ListConfigResourcesResultCount;
-
-    /// <inheritdoc cref="s_listConfigResourcesCount"/>
-    private static readonly KeyedResultMarshal.CountAccessor s_listClientMetricsResourcesCount =
-        NativeMethods.ListClientMetricsResourcesResultCount;
 
     /// <summary>
     /// A count accessor a <b>shape-3</b> aggregate walk reads, hoisted for the same reason
@@ -2541,28 +2416,6 @@ internal static class AdminCallbacks
     /// </remarks>
     private static readonly KeyedResultMarshal.CountAccessor s_listGroupsErrorCount =
         NativeMethods.ListGroupsResultErrorCount;
-
-    /// <summary>
-    /// The count bounding <c>listConsumerGroups</c>' <b>listing</b> walk, hoisted for the
-    /// same reason as everything else here.
-    /// </summary>
-    private static readonly KeyedResultMarshal.CountAccessor s_listConsumerGroupsValidCount =
-        NativeMethods.ListConsumerGroupsResultValidCount;
-
-    /// <summary>
-    /// The count bounding <c>listConsumerGroups</c>' <b>error</b> walk — its own, separate
-    /// count.
-    /// </summary>
-    /// <remarks>
-    /// ⚠⚠ <b>Not <see cref="s_listConsumerGroupsValidCount"/></b>, and not
-    /// <see cref="s_listGroupsErrorCount"/> either — the neighbouring RPC's count reads a
-    /// different result type through the same-shaped accessor, so a mis-wire there is a
-    /// read against a foreign root. The header states this RPC's two lists are not parallel
-    /// and are generally of different lengths, so each walk is bounded by the count
-    /// belonging to the list it reads.
-    /// </remarks>
-    private static readonly KeyedResultMarshal.CountAccessor s_listConsumerGroupsErrorCount =
-        NativeMethods.ListConsumerGroupsResultErrorCount;
 
     /// <summary>
     /// <c>ConsumerGroupDescription</c>'s three authorized-operation accessors, hoisted so a
@@ -3284,7 +3137,7 @@ internal static class AdminCallbacks
     }
 
     /// <summary>
-    /// The one completion body both <b>sub-shape-3b</b> trampolines delegate to: one
+    /// The one completion body every <b>sub-shape-3b</b> trampoline delegates to: one
     /// awaiter over an ordered collection, with no key and no per-key error channel.
     /// </summary>
     /// <remarks>
@@ -3371,17 +3224,6 @@ internal static class AdminCallbacks
             EqualityComparer<ClientQuotaEntity>.Default,
             s_destroyDescribeClientQuotasResult);
 
-#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
-    private static void OnListClientMetricsResources(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteListRpc(
-            result,
-            error,
-            userData,
-            s_listClientMetricsResourcesCount,
-            ClientMetricsResourceListingValue,
-            s_destroyListClientMetricsResourcesResult);
-#pragma warning restore CS0618
-
     /// <summary>
     /// <c>listGroups</c>' <b>sub-shape-3c</b> trampoline: one awaiter over two independent
     /// lists — the listings the responding brokers returned, and the failures the others
@@ -3452,80 +3294,6 @@ internal static class AdminCallbacks
             context?.FreeGcHandle();
         }
     }
-
-#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
-
-    /// <summary>
-    /// <c>listConsumerGroups</c>' <b>sub-shape-3c</b> trampoline: one awaiter over two
-    /// independent lists — the listings the responding brokers returned, and the failures
-    /// the others reported.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠⚠ <b>Two errors of opposite ownership meet in this one body</b>, exactly as they do
-    /// in <see cref="OnListGroups"/>. <paramref name="error"/> — the callback's own
-    /// parameter, non-const, meaning the RPC could not be submitted at all — is
-    /// <b>OWNED</b> and freed by <see cref="KafkaException.FromHandle"/>. The per-broker
-    /// errors reached through <see cref="ListConsumerGroupsBrokerError"/> are
-    /// <b>BORROWED</b> from the result root and must never be freed. Swapping the two costs
-    /// a leak in one direction and a double-free process abort in the other.
-    /// </para>
-    /// <para>
-    /// ⚠ The <c>finally</c> destroys <b>this</b> RPC's root — a <c>listGroups</c> result and
-    /// a <c>listConsumerGroups</c> result are different native types, so the neighbouring
-    /// <c>ListGroupsResultDestroy</c> is not interchangeable with this one although the two
-    /// bodies are otherwise line-for-line. It discharges the usual three obligations:
-    /// destroy the owned root (null-safe, so the submit-failure branch is a no-op) strictly
-    /// after the copy-out, fault an awaiter nothing completed, and release the
-    /// <c>GCHandle</c> plus the span-the-op client reference.
-    /// </para>
-    /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
-    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    private static void OnListConsumerGroups(IntPtr result, IntPtr error, IntPtr userData)
-    {
-        SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid,
-            IReadOnlyCollection<KafkaException> Errors)>? context = null;
-        try
-        {
-            GCHandle handle = GCHandle.FromIntPtr(userData);
-            context =
-                (SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid,
-                    IReadOnlyCollection<KafkaException> Errors)>)handle.Target!;
-
-            if (error != IntPtr.Zero)
-            {
-                // ⚠ OWNED — FromHandle frees it exactly once (the mirror image of the
-                // per-broker errors inside the result, which are borrowed).
-                context.SetException(KafkaException.FromHandle(error)!);
-            }
-            else
-            {
-                KeyedResultMarshal.CompleteTwoLists(
-                    result,
-                    s_listConsumerGroupsValidCount,
-                    s_listConsumerGroupsErrorCount,
-                    context,
-                    ConsumerGroupListingValue,
-                    ListConsumerGroupsBrokerError);
-            }
-        }
-        catch (Exception exception)
-        {
-            // No-throw boundary. On the inline path there is not even a caller frame that
-            // would catch this, so it must be absorbed here and surfaced through the Task.
-            context?.SetException(exception);
-        }
-        finally
-        {
-            NativeMethods.ListConsumerGroupsResultDestroy(result);
-            context?.FailUncompleted();
-            context?.FreeGcHandle();
-        }
-    }
-
-#pragma warning restore CS0618
 
     /// <summary>
     /// <c>describeConsumerGroups</c>' <b>shape-4a</b> trampoline: one callback per group,

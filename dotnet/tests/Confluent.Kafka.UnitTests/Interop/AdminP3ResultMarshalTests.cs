@@ -29,7 +29,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Drives M15/P3 Stage 1's marshallers over <b>real</b> native result roots — the
-/// <c>DescribeClusterResult_t</c> (result shape 5) and the two sub-shape-3b list results.
+/// <c>DescribeClusterResult_t</c> (result shape 5) and the sub-shape-3b
+/// <c>listConfigResources</c> result.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -53,7 +54,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </para>
 /// <para>
 /// ⚠ <b>The error ownership here is the INVERSE of every earlier admin phase.</b> None of
-/// these three result types declares a <c>get_error</c> of any kind, so there is no
+/// these result types declares a <c>get_error</c> of any kind, so there is no
 /// <em>borrowed</em> error anywhere on these paths: the only error they can ever see is the
 /// callback's own <c>error</c> parameter, which is <b>owned</b> and freed by
 /// <see cref="KafkaException.FromHandle"/>. Reaching for
@@ -75,9 +76,6 @@ public sealed class AdminP3ResultMarshalTests
 
     /// <inheritdoc cref="s_captureCluster"/>
     private static readonly AdminCallbacks.ListConfigResourcesCallback s_captureConfigResources = OnCapture;
-
-    /// <inheritdoc cref="s_captureCluster"/>
-    private static readonly AdminCallbacks.ListClientMetricsResourcesCallback s_captureClientMetrics = OnCapture;
 
     /// <summary>
     /// ⚠ <b>THE discriminator for this stage.</b> The gate — not the count — decides
@@ -354,49 +352,6 @@ public sealed class AdminP3ResultMarshalTests
     }
 
     /// <summary>
-    /// The client-metrics walk yields an empty collection against a fresh mock — the listing
-    /// type's only per-index accessor is its name, and a mock with no client-metrics
-    /// resource has none.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The seeded case is Stage 2's debt, not an omission here.</b> The Rust mock
-    /// creates a client-metrics resource only as a side effect of an
-    /// <c>incrementalAlterConfigs</c> against a <c>CLIENT_METRICS</c> resource, which is not
-    /// bound until Stage 2 — so Stage 2 must add the seeded-listing test.
-    /// </remarks>
-    [Fact]
-    public async Task ListClientMetricsResources_WalksToAnEmptyCollection_OnAFreshMock()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        IntPtr result = SubmitAndCaptureClientMetrics(admin);
-
-#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
-        SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>>(
-                "listClientMetricsResources");
-        try
-        {
-            Assert.Equal(0, NativeMethods.ListClientMetricsResourcesResultCount(result));
-
-            KeyedResultMarshal.CompleteList(
-                result,
-                NativeMethods.ListClientMetricsResourcesResultCount,
-                operation,
-                AdminCallbacks.ClientMetricsResourceListingValue);
-        }
-        finally
-        {
-            NativeMethods.ListClientMetricsResourcesResultDestroy(result);
-        }
-
-        IReadOnlyCollection<ClientMetricsResourceListing> listings =
-            await TestTimeout.Run(() => operation.Task, s_deadline);
-#pragma warning restore CS0618
-
-        Assert.Empty(listings);
-    }
-
-    /// <summary>
     /// The element reader routes its type id through
     /// <see cref="ConfigResourceMarshal.TypeFromId"/>, so the ABI's out-of-range <c>-1</c>
     /// is <b>rejected</b> rather than folded into <see cref="ConfigResourceType.Unknown"/>.
@@ -527,16 +482,6 @@ public sealed class AdminP3ResultMarshalTests
                 s_captureConfigResources,
                 callbackUserData),
             "listConfigResources");
-
-    /// <inheritdoc cref="SubmitAndCaptureCluster"/>
-    private static IntPtr SubmitAndCaptureClientMetrics(NativeAdminClient admin) =>
-        Capture(
-            (callbackUserData) => NativeMethods.AdminClientListClientMetricsResourcesAsync(
-                admin.Handle.DangerousGetHandle(),
-                -1,
-                s_captureClientMetrics,
-                callbackUserData),
-            "listClientMetricsResources");
 
     private static IntPtr Capture(Action<IntPtr> submit, string operationName)
     {

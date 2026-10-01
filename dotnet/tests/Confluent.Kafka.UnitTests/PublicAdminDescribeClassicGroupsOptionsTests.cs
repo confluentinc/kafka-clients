@@ -28,10 +28,9 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>This class is <em>not</em> deprecated in Java</b>, unlike its neighbour
-/// <see cref="ListConsumerGroupsOptions"/> — <c>describeClassicGroups</c> is itself the
-/// accessor for the older group generation, so it has no generation-newer replacement. The
-/// absence of <see cref="ObsoleteAttribute"/> is asserted rather than left implicit,
+/// ⚠ <b>This class is <em>not</em> deprecated in Java</b> — <c>describeClassicGroups</c> is
+/// itself the accessor for the older group generation, so it has no generation-newer
+/// replacement. The absence of <see cref="ObsoleteAttribute"/> is asserted rather than left implicit,
 /// because an attribute nothing asserts is one a later slice can add or drop without
 /// anything going red.
 /// </para>
@@ -154,8 +153,7 @@ public sealed class PublicAdminDescribeClassicGroupsOptionsTests
 
     /// <summary>
     /// Java carries no <c>@Deprecated</c> on this class or on its accessor, so nothing here
-    /// carries <see cref="ObsoleteAttribute"/> — the mirror image of the deprecation
-    /// <see cref="ListConsumerGroupsOptions"/> does carry.
+    /// carries <see cref="ObsoleteAttribute"/>.
     /// </summary>
     [Fact]
     public void NothingIsDeprecated_BecauseJavaDeprecatesNothingHere()

@@ -227,16 +227,6 @@ internal sealed class NativeAdminClient : IDisposable
         IntPtr userData);
 
     /// <summary>
-    /// The <c>list_client_metrics_resources_async</c> submit shape, injectable for the same
-    /// reason as <see cref="NativeCreateTopicsSubmit"/>. No arrays at all.
-    /// </summary>
-    internal delegate void NativeListClientMetricsResourcesSubmit(
-        IntPtr admin,
-        int timeoutMs,
-        AdminCallbacks.ListClientMetricsResourcesCallback callback,
-        IntPtr userData);
-
-    /// <summary>
     /// The <c>describe_log_dirs_async</c> submit shape — <b>one</b> array of broker ids,
     /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
     /// </summary>
@@ -453,31 +443,6 @@ internal sealed class NativeAdminClient : IDisposable
         int typeCount,
         int timeoutMs,
         AdminCallbacks.ListGroupsCallback callback,
-        IntPtr userData);
-
-    /// <summary>
-    /// The <c>list_consumer_groups_async</c> submit shape — <b>two</b> name arrays, each with
-    /// its own count, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠⚠ <b>Two axes, not three.</b> The deprecated predecessor of <c>listGroups</c> filters on
-    /// group state and group type only — there is no protocol-type axis
-    /// (<c>ListConsumerGroupsOptions.java</c> carries no such filter). Copying
-    /// <see cref="NativeListGroupsSubmit"/>'s argument list here would feed <c>types</c> into the
-    /// ABI's second array and shift every argument after it, including the callback pointer.
-    /// <br/>
-    /// ⚠ <b>The two arrays are NOT parallel</b>, exactly as in the three-axis case: their counts
-    /// are unrelated and each axis is read against its own. An axis whose count is <c>0</c> is
-    /// Java's empty <c>Set</c>, "do not filter on this one", not "match nothing".
-    /// </remarks>
-    internal delegate void NativeListConsumerGroupsSubmit(
-        IntPtr admin,
-        IntPtr[] groupStates,
-        int groupStateCount,
-        IntPtr[] types,
-        int typeCount,
-        int timeoutMs,
-        AdminCallbacks.ListConsumerGroupsCallback callback,
         IntPtr userData);
 
     /// <summary>
@@ -1880,65 +1845,6 @@ internal sealed class NativeAdminClient : IDisposable
 
         return new ListConfigResourcesResult(operation.Task);
     }
-
-#pragma warning disable CS0618 // Java deprecates this RPC and its three types; mirrored, not avoided.
-
-    internal ListClientMetricsResourcesResult ListClientMetricsResources(
-        ListClientMetricsResourcesOptions? options) =>
-        ListClientMetricsResources(options, NativeMethods.AdminClientListClientMetricsResourcesAsync);
-
-    /// <summary>
-    /// Submits <c>listClientMetricsResources</c> and returns immediately with the
-    /// <b>single</b> awaitable Java's <c>ListClientMetricsResourcesResult</c> wraps (result
-    /// sub-shape 3b).
-    /// </summary>
-    /// <remarks>
-    /// Java deprecates this RPC in favour of <c>listConfigResources</c> filtered to
-    /// <c>CLIENT_METRICS</c> (<c>Admin.java:1821-1824</c>); it is bound for parity, and the
-    /// deprecation is carried onto the public surface rather than dropped.
-    /// </remarks>
-    internal ListClientMetricsResourcesResult ListClientMetricsResources(
-        ListClientMetricsResourcesOptions? options,
-        NativeListClientMetricsResourcesSubmit submit)
-    {
-        ThrowIfClosed();
-
-        int timeoutMs = UnsetTimeoutMs;
-        if (options is not null)
-        {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListClientMetricsResourcesOptions));
-        }
-
-        SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>>(
-                "listClientMetricsResources");
-        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
-        operation.SetGcHandle(gcHandle);
-        try
-        {
-            bool handleRefAdded = false;
-            _handle.DangerousAddRef(ref handleRefAdded);
-            if (handleRefAdded)
-            {
-                operation.SetHandleRef(_handle);
-            }
-
-            submit(
-                _handle.DangerousGetHandle(),
-                timeoutMs,
-                AdminCallbacks.ListClientMetricsResources,
-                GCHandle.ToIntPtr(gcHandle));
-        }
-        catch
-        {
-            operation.AbandonBeforeSubmit();
-            throw;
-        }
-
-        return new ListClientMetricsResourcesResult(operation.Task);
-    }
-
-#pragma warning restore CS0618
 
     internal DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options) =>
@@ -5856,145 +5762,6 @@ internal sealed class NativeAdminClient : IDisposable
         return new ListGroupsResult(operation.Task);
     }
 
-#pragma warning disable CS0618 // Java deprecates this RPC and its three types; mirrored, not avoided.
-
-    internal ListConsumerGroupsResult ListConsumerGroups(ListConsumerGroupsOptions? options) =>
-        ListConsumerGroups(options, NativeMethods.AdminClientListConsumerGroupsAsync);
-
-    /// <summary>
-    /// Submits <c>listConsumerGroups</c> and returns immediately with the <b>single</b> awaitable
-    /// Java's <c>ListConsumerGroupsResult</c> wraps over its two independent collections (result
-    /// sub-shape 3c).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠⚠ <b>Two filter axes, not three.</b> This is the generation-older sibling of
-    /// <c>ListGroups</c>, and <c>ListConsumerGroupsOptions.java</c> carries no protocol-type
-    /// filter — so the ABI takes group state and group type only. Copying the three-axis argument
-    /// list across would feed the type axis into the ABI's <em>second</em> array and shift every
-    /// argument after it, including the callback pointer.
-    /// </para>
-    /// <para>
-    /// ⚠ <b><see cref="ListConsumerGroupsOptions.States"/> is not a second state axis.</b> It is
-    /// the same set of states projected into the older <see cref="ConsumerGroupState"/> spelling —
-    /// Java defines the deprecated <c>inStates(Set&lt;ConsumerGroupState&gt;)</c> in terms of
-    /// <c>inGroupStates(...)</c> — so there is nothing extra to submit, and submitting it as well
-    /// would filter one axis twice.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The two arrays are never parallel.</b> Each travels with its own count, and an axis
-    /// left empty is Java's empty <c>Set</c> — "do not filter on this one" — not "match nothing".
-    /// So the no-options call submits two empty arrays and two zero counts, which the ABI reads as
-    /// an unfiltered listing; sizing either axis from the other's count would silently narrow or
-    /// widen the request.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The enums cross as Java's <c>toString()</c> names, not as ordinals</b> — neither
-    /// <see cref="GroupState"/> nor <see cref="GroupType"/> has a numeric id in Java. A value no
-    /// member defines is reachable in C# only by a cast; it is rejected here, before the operation
-    /// is rooted and before anything is pinned, because <see cref="GroupMarshal"/>'s encode
-    /// direction is deliberately partial and the caller's parameter is what names the blame
-    /// (ffi §B5).
-    /// </para>
-    /// <para>
-    /// Every name is pinned only for the call (ffi §A4): the core copies each one out during the
-    /// submit, so nothing native holds them afterwards and the <c>finally</c> unpins on every path
-    /// — including the inline-callback one, which has already run to completion by the time the
-    /// P/Invoke returns.
-    /// </para>
-    /// </remarks>
-    internal ListConsumerGroupsResult ListConsumerGroups(
-        ListConsumerGroupsOptions? options, NativeListConsumerGroupsSubmit submit)
-    {
-        ThrowIfClosed();
-
-        int timeoutMs = UnsetTimeoutMs;
-        IReadOnlyCollection<GroupState> groupStates = Array.Empty<GroupState>();
-        IReadOnlyCollection<GroupType> types = Array.Empty<GroupType>();
-        if (options is not null)
-        {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConsumerGroupsOptions));
-
-            // Each getter already hands back a de-duplicated, immutable copy. States is
-            // deliberately not read — see the remarks above.
-            groupStates = options.GroupStates;
-            types = options.Types;
-        }
-
-        // Encoded BEFORE the operation is rooted and before anything is pinned (ffi §B5), so
-        // an undefined cast value throws with nothing to unwind.
-        List<string> stateNames = FilterNames(
-            groupStates,
-            GroupMarshal.NameFromState,
-            nameof(ListConsumerGroupsOptions),
-            nameof(ListConsumerGroupsOptions.GroupStates));
-        List<string> typeNames = FilterNames(
-            types,
-            GroupMarshal.NameFromType,
-            nameof(ListConsumerGroupsOptions),
-            nameof(ListConsumerGroupsOptions.Types));
-
-        // ---- Publish everything the callback needs BEFORE the call ----
-        SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>
-            operation =
-                new SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
-                    "listConsumerGroups");
-        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
-        operation.SetGcHandle(gcHandle);
-
-        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
-        try
-        {
-            pinned = new List<Utf8Marshal.PinnedUtf8String>(stateNames.Count + typeNames.Count);
-
-            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
-            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
-            bool handleRefAdded = false;
-            _handle.DangerousAddRef(ref handleRefAdded);
-            if (handleRefAdded)
-            {
-                operation.SetHandleRef(_handle);
-            }
-
-            IntPtr[] statePointers = PinNames(stateNames, pinned);
-            IntPtr[] typePointers = PinNames(typeNames, pinned);
-
-            // ⚠ Each axis carries ITS OWN length. Reusing one count for the other axis is the
-            // defect this shape invites.
-            submit(
-                _handle.DangerousGetHandle(),
-                statePointers,
-                statePointers.Length,
-                typePointers,
-                typePointers.Length,
-                timeoutMs,
-                AdminCallbacks.ListConsumerGroups,
-                GCHandle.ToIntPtr(gcHandle));
-        }
-        catch
-        {
-            // Native never ran → the callback can never fire → we own the cleanup.
-            operation.AbandonBeforeSubmit();
-            throw;
-        }
-        finally
-        {
-            // Pinned only for the call (ffi §A4's call-scoped rule): the ABI copies every
-            // name out during the submit.
-            if (pinned is not null)
-            {
-                foreach (Utf8Marshal.PinnedUtf8String name in pinned)
-                {
-                    name.Dispose();
-                }
-            }
-        }
-
-        return new ListConsumerGroupsResult(operation.Task);
-    }
-
-#pragma warning restore CS0618
-
     internal DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options) =>
         DescribeConsumerGroups(groupIds, options, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
@@ -6419,12 +6186,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see langword="null"/> for an undefined value rather than throwing — it does not know
     /// which property to blame.
     /// </param>
-    /// <param name="optionsName">
-    /// The options type to name in the error. Passed rather than fixed because two generations of
-    /// the same RPC share this helper — <c>listGroups</c> and its deprecated predecessor
-    /// <c>listConsumerGroups</c> — and naming the wrong one sends the caller to a property that
-    /// does not exist on the type they passed.
-    /// </param>
+    /// <param name="optionsName">The options type to name in the error.</param>
     /// <param name="propertyName">The options property to name in the error.</param>
     private static List<string> FilterNames<T>(
         IReadOnlyCollection<T> values, Func<T, string?> name, string optionsName, string propertyName)

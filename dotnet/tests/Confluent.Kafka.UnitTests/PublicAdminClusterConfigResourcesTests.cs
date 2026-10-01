@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public behaviour of M15/P3 Stage 1's three RPCs, driven end to end through
+/// The public behaviour of M15/P3 Stage 1's RPCs, driven end to end through
 /// <see cref="MockAdminClient"/> — the real marshalling, the real bridge, the real
 /// teardown, with no broker.
 /// </summary>
@@ -198,42 +198,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     /// <summary>
-    /// <c>listClientMetricsResources</c> is bound and returns an empty listing against a
-    /// fresh mock.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The seeded case is Stage 2's debt.</b> The Rust mock creates a client-metrics
-    /// resource only as a side effect of an <c>incrementalAlterConfigs</c> against a
-    /// <c>CLIENT_METRICS</c> resource, which is not bound until Stage 2 — so Stage 2 owes
-    /// the seeded-listing test that also cross-checks
-    /// <see cref="IAdmin.ListConfigResources"/> filtered to
-    /// <see cref="ConfigResourceType.ClientMetrics"/>.
-    /// </remarks>
-    [Fact]
-    public async Task ListClientMetricsResources_IsEmptyOnAFreshMock()
-    {
-        using MockAdminClient admin = new MockAdminClient();
-
-#pragma warning disable CS0618 // Java deprecates this RPC; exercising it is the point.
-        ListClientMetricsResourcesResult result = admin.ListClientMetricsResources();
-        Assert.Same(result.All(), result.All());
-
-        IReadOnlyCollection<ClientMetricsResourceListing> listings =
-            await TestTimeout.Run(result.All, s_deadline);
-#pragma warning restore CS0618
-
-        Assert.Empty(listings);
-
-        // …and the non-deprecated replacement agrees, which is what the deprecation asks
-        // callers to switch to.
-        IReadOnlyCollection<ConfigResource> clientMetrics = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All(), s_deadline);
-        Assert.Empty(clientMetrics);
-    }
-
-    /// <summary>
-    /// A negative <c>TimeoutMs</c> is rejected <b>before</b> any native call, on all three
-    /// RPCs — the ABI reads a negative timeout as "unset", so forwarding one would silently
+    /// A negative <c>TimeoutMs</c> is rejected <b>before</b> any native call, on every RPC
+    /// — the ABI reads a negative timeout as "unset", so forwarding one would silently
     /// substitute the client default for the value asked for (ffi §B5).
     /// </summary>
     [Fact]
@@ -253,16 +219,6 @@ public sealed class PublicAdminClusterConfigResourcesTests
             "ListConfigResourcesOptions.TimeoutMs must not be negative",
             configResources.Message,
             StringComparison.Ordinal);
-
-#pragma warning disable CS0618 // Java deprecates this RPC; mirrored, not avoided.
-        ArgumentOutOfRangeException clientMetrics = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListClientMetricsResources(new ListClientMetricsResourcesOptions { TimeoutMs = -2 }));
-#pragma warning restore CS0618
-        Assert.Equal("options", clientMetrics.ParamName);
-        Assert.Contains(
-            "ListClientMetricsResourcesOptions.TimeoutMs must not be negative",
-            clientMetrics.Message,
-            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -277,13 +233,10 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeCluster());
         Assert.Throws<ObjectDisposedException>(() => admin.ListConfigResources());
-#pragma warning disable CS0618 // Java deprecates this RPC; mirrored, not avoided.
-        Assert.Throws<ObjectDisposedException>(() => admin.ListClientMetricsResources());
-#pragma warning restore CS0618
     }
 
     /// <summary>
-    /// The TFM-matrix smoke leg for M15/P3 Stage 1: the three new RPCs load and round-trip
+    /// The TFM-matrix smoke leg for M15/P3 Stage 1: the new RPCs load and round-trip
     /// on whichever framework is executing (net462 via netstandard2.0, net8.0, net10.0).
     /// </summary>
     /// <remarks>
@@ -291,30 +244,24 @@ public sealed class PublicAdminClusterConfigResourcesTests
     /// locally even though its <em>run</em> is Windows/CI-only.
     /// </remarks>
     [Fact]
-    public async Task TfmSmoke_TheThreeNewRpcsWorkOnThisFramework()
+    public async Task TfmSmoke_TheNewRpcsWorkOnThisFramework()
     {
         await using MockAdminClient admin = new MockAdminClient(1);
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All(), s_deadline));
-#pragma warning disable CS0618 // Java deprecates this RPC; exercising it on every TFM is the point.
-        Assert.Empty(await TestTimeout.Run(() => admin.ListClientMetricsResources().All(), s_deadline));
-#pragma warning restore CS0618
     }
 
     /// <summary>
-    /// The three RPCs work through the <see cref="IAdmin"/> interface, not only the concrete
+    /// The RPCs work through the <see cref="IAdmin"/> interface, not only the concrete
     /// mock — the surface a caller actually programs against.
     /// </summary>
     [Fact]
-    public async Task TheThreeRpcs_AreReachableThroughIAdmin()
+    public async Task TheRpcs_AreReachableThroughIAdmin()
     {
         using IAdmin admin = new MockAdminClient();
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All(), s_deadline));
-#pragma warning disable CS0618 // Java deprecates this RPC; mirrored, not avoided.
-        Assert.Empty(await TestTimeout.Run(() => admin.ListClientMetricsResources().All(), s_deadline));
-#pragma warning restore CS0618
     }
 }

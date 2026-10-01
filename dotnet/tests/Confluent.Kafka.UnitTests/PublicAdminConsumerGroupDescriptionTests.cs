@@ -38,7 +38,7 @@ namespace Confluent.Kafka.UnitTests;
 /// ⚠ <b>C# upcasts and widens silently, so the shape half has to be reflection
 /// assertions.</b> A behavioural test passes equally against <c>GroupType</c> and
 /// <c>GroupType?</c>, which is precisely the distinction this class draws against
-/// <see cref="ConsumerGroupListing"/>.
+/// <see cref="GroupListing"/>.
 /// </para>
 /// </remarks>
 public sealed class PublicAdminConsumerGroupDescriptionTests
@@ -86,7 +86,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
 
     /// <summary>
     /// ⚠ <b><see cref="ConsumerGroupDescription.Type"/> is non-optional here, unlike on
-    /// <see cref="ConsumerGroupListing"/>.</b> Java's description carries a plain
+    /// <see cref="GroupListing"/>.</b> Java's description carries a plain
     /// <c>GroupType</c> while its listing carries an <c>Optional&lt;GroupType&gt;</c>, and the
     /// contrast is asserted against the sibling rather than stated, because a behavioural test
     /// cannot see it — a <c>GroupType</c> widens into a <c>GroupType?</c> silently.
@@ -97,8 +97,8 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(typeof(GroupType), PropertyType("Type"));
         Assert.Equal(typeof(GroupState), PropertyType("GroupState"));
 
-        Assert.Equal(typeof(GroupType?), typeof(ConsumerGroupListing).GetProperty("Type")!.PropertyType);
-        Assert.Equal(typeof(GroupState?), typeof(ConsumerGroupListing).GetProperty("GroupState")!.PropertyType);
+        Assert.Equal(typeof(GroupType?), typeof(GroupListing).GetProperty("Type")!.PropertyType);
+        Assert.Equal(typeof(GroupState?), typeof(GroupListing).GetProperty("GroupState")!.PropertyType);
     }
 
     /// <summary>
@@ -224,7 +224,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
 
     /// <summary>
     /// Java deprecates <c>state()</c> in favour of <c>groupState()</c> but not the class
-    /// itself — unlike <see cref="ConsumerGroupListing"/>, where the whole type carries the
+    /// itself — unlike <c>ConsumerGroupListing</c>, where the whole type carries the
     /// attribute.
     /// </summary>
     [Fact]

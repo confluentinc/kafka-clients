@@ -26,7 +26,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The span-the-op reference contract for M15/P3 Stage 1's three RPCs — the P3 twin of
+/// The span-the-op reference contract for M15/P3 Stage 1's RPCs — the P3 twin of
 /// <see cref="AdminP2bOperationLifetimeTests"/>. <c>kafka_admin_AdminClient_destroy</c> is
 /// <b>not</b> ref-counted and does <b>not</b> drain, so every new submit needs its own
 /// proof rather than inheriting an earlier one's.
@@ -43,7 +43,7 @@ public sealed class AdminP3OperationLifetimeTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// The three-way differential for all three new submits. A single-case assertion
+    /// The three-way differential for every new submit. A single-case assertion
     /// cannot tell a working reference count from a permanently unbalanced one — both read
     /// "not released" — so each RPC gets all three cases: nothing in flight →
     /// <c>Dispose</c> releases; one in flight → it does <b>not</b>; the operation
@@ -52,7 +52,6 @@ public sealed class AdminP3OperationLifetimeTests
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public async Task DisposeRacingAnInFlightOperation_DefersTheNativeDestroy(Rpc rpc)
     {
         // ---- (1) Nothing in flight: Dispose releases immediately. ----
@@ -93,20 +92,20 @@ public sealed class AdminP3OperationLifetimeTests
     }
 
     /// <summary>
-    /// Many operations of all three kinds leave the reference count <b>balanced</b>: each
+    /// Many operations of every kind leave the reference count <b>balanced</b>: each
     /// completion releases exactly the one reference its submit took. An over-release would
     /// have thrown out of the <see cref="System.Runtime.InteropServices.SafeHandle"/>; an
     /// under-release would leave <c>IsClosed</c> false forever.
     /// </summary>
     [Fact]
-    public async Task ManyOperationsOfAllThreeKinds_LeaveTheReferenceCountBalanced()
+    public async Task ManyOperationsOfEveryKind_LeaveTheReferenceCountBalanced()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
         for (int i = 0; i < 25; i++)
         {
-            foreach (Rpc rpc in new[] { Rpc.DescribeCluster, Rpc.ListConfigResources, Rpc.ListClientMetricsResources })
+            foreach (Rpc rpc in new[] { Rpc.DescribeCluster, Rpc.ListConfigResources })
             {
                 IntPtr userData = IntPtr.Zero;
                 Func<Task> outcome = SubmitCapturing(admin, rpc, captured => userData = captured);
@@ -118,19 +117,18 @@ public sealed class AdminP3OperationLifetimeTests
         }
 
         TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(handle.IsClosed, "75 operations must leave the reference count balanced");
+        Assert.True(handle.IsClosed, "50 operations must leave the reference count balanced");
     }
 
     /// <summary>
     /// A submit that throws before native ran must not root the operation forever: the
     /// abandon path frees the <c>GCHandle</c> and releases the reference, so the very next
-    /// <c>Dispose</c> still releases the handle. All three RPCs, since each has its own
+    /// <c>Dispose</c> still releases the handle. Every RPC, since each has its own
     /// submit body.
     /// </summary>
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public void SubmitThatThrows_AbandonsTheOperationAndLeavesTheHandleReleasable(Rpc rpc)
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
@@ -161,7 +159,6 @@ public sealed class AdminP3OperationLifetimeTests
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public void InlineCallback_FreesTheGcHandleExactlyOnce(Rpc rpc)
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
@@ -180,14 +177,14 @@ public sealed class AdminP3OperationLifetimeTests
     }
 
     /// <summary>
-    /// The callback's <c>error</c> parameter is <b>OWNED</b>, and for these three RPCs it is
+    /// The callback's <c>error</c> parameter is <b>OWNED</b>, and for these RPCs it is
     /// the <em>only</em> error channel that exists — so the trampoline frees it via
     /// <see cref="KafkaException.FromHandle"/> and it must never be freed again.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>Stage 1 is the inverse of every earlier admin phase.</b> The keyed RPCs carry a
     /// <em>borrowed</em> per-key error inside the result, where
-    /// <see cref="KafkaException.FromBorrowedHandle"/> is mandatory; none of these three
+    /// <see cref="KafkaException.FromBorrowedHandle"/> is mandatory; none of these
     /// result types declares a <c>get_error</c> at all, so the reflex to reach for the
     /// borrowed form here would leak this handle on every failed call. What the loop catches
     /// is the opposite mistake, a <em>second</em> free, which aborts the run; the value
@@ -198,7 +195,6 @@ public sealed class AdminP3OperationLifetimeTests
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public async Task TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce(Rpc rpc)
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
@@ -232,7 +228,6 @@ public sealed class AdminP3OperationLifetimeTests
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public void EveryTrampoline_IsATotalNoThrowBoundary(Rpc rpc)
     {
         // Deliberately the wrong type for every trampoline, so the context cast throws.
@@ -258,13 +253,11 @@ public sealed class AdminP3OperationLifetimeTests
         /// <summary>Result sub-shape 3b — one aggregate awaiter over a collection.</summary>
         ListConfigResources,
 
-        /// <summary>Result sub-shape 3b, with no input array at all.</summary>
-        ListClientMetricsResources,
     }
 
     /// <summary>
     /// Submits one RPC with the native call replaced by <paramref name="onSubmit"/>, and
-    /// returns a closure over an awaiter that RPC's result exposes — so the three shapes can
+    /// returns a closure over an awaiter that RPC's result exposes — so the shapes can
     /// be asserted uniformly.
     /// </summary>
     private static Func<Task> SubmitCapturing(NativeAdminClient admin, Rpc rpc, Action<IntPtr> onSubmit)
@@ -284,23 +277,13 @@ public sealed class AdminP3OperationLifetimeTests
                     return result.Nodes;
                 }
 
-            case Rpc.ListConfigResources:
+            default:
                 {
                     ListConfigResourcesResult result = admin.ListConfigResources(
                         new[] { ConfigResourceType.Topic },
                         options: null,
                         (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) => onSubmit(userData));
                     return result.All;
-                }
-
-            default:
-                {
-#pragma warning disable CS0618 // Java deprecates this RPC; mirrored, not avoided.
-                    ListClientMetricsResourcesResult result = admin.ListClientMetricsResources(
-                        options: null,
-                        (nativeHandle, timeoutMs, callback, userData) => onSubmit(userData));
-                    return result.All;
-#pragma warning restore CS0618
                 }
         }
     }
@@ -316,28 +299,19 @@ public sealed class AdminP3OperationLifetimeTests
                         userData) => throw new InvalidOperationException("submit failed"));
                 break;
 
-            case Rpc.ListConfigResources:
+            default:
                 admin.ListConfigResources(
                     new[] { ConfigResourceType.Topic },
                     options: null,
                     (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) =>
                         throw new InvalidOperationException("submit failed"));
                 break;
-
-            default:
-#pragma warning disable CS0618 // Java deprecates this RPC; mirrored, not avoided.
-                admin.ListClientMetricsResources(
-                    options: null,
-                    (nativeHandle, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
-#pragma warning restore CS0618
-                break;
         }
     }
 
     /// <summary>
     /// Drives the <b>production</b> trampoline for one RPC with a top-level submit failure
-    /// — for these three shapes that is the only failure channel there is.
+    /// — for these shapes that is the only failure channel there is.
     /// </summary>
     private static void Complete(Rpc rpc, IntPtr userData, IntPtr error)
     {
@@ -347,12 +321,8 @@ public sealed class AdminP3OperationLifetimeTests
                 AdminCallbacks.DescribeCluster(IntPtr.Zero, error, userData);
                 break;
 
-            case Rpc.ListConfigResources:
-                AdminCallbacks.ListConfigResources(IntPtr.Zero, error, userData);
-                break;
-
             default:
-                AdminCallbacks.ListClientMetricsResources(IntPtr.Zero, error, userData);
+                AdminCallbacks.ListConfigResources(IntPtr.Zero, error, userData);
                 break;
         }
     }

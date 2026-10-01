@@ -40,8 +40,7 @@ namespace Confluent.Kafka.Admin;
 /// partition, never anything here.
 /// </para>
 /// <para>
-/// ⚠ <b>Java's class is <em>not</em> deprecated</b>, unlike
-/// <see cref="ListConsumerGroupsOptions"/>: <c>listConsumerGroupOffsets</c> has no
+/// ⚠ <b>Java's class is <em>not</em> deprecated</b>: <c>listConsumerGroupOffsets</c> has no
 /// generation-newer replacement — the newer group protocol reads its committed offsets
 /// through this same call. So no <see cref="System.ObsoleteAttribute"/> appears here, and a
 /// test asserts that absence rather than leaving it implicit.

@@ -50,22 +50,19 @@ namespace Confluent.Kafka.UnitTests;
 public sealed class PublicAdminP3ShapeParityTests
 {
     /// <summary>
-    /// The three new RPCs return their <c>*Result</c> <b>synchronously</b> — Java's
+    /// The new RPCs return their <c>*Result</c> <b>synchronously</b> — Java's
     /// <c>Admin</c> methods do not block, so the <see cref="Task"/> mapping belongs on the
     /// futures inside the result, never on the method (<c>admin-client.md</c> §1). This is
     /// DoD §11's spirit for admin.
     /// </summary>
     [Fact]
-    public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
+    public void IAdmin_TheNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
         MethodInfo describeCluster = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeCluster))!;
         MethodInfo listConfigResources = typeof(IAdmin).GetMethod(nameof(IAdmin.ListConfigResources))!;
-#pragma warning disable CS0618 // Java deprecates this RPC; the deprecation is what is asserted.
-        MethodInfo listClientMetrics = typeof(IAdmin).GetMethod(nameof(IAdmin.ListClientMetricsResources))!;
 
         Assert.Equal(typeof(DescribeClusterResult), describeCluster.ReturnType);
         Assert.Equal(typeof(ListConfigResourcesResult), listConfigResources.ReturnType);
-        Assert.Equal(typeof(ListClientMetricsResourcesResult), listClientMetrics.ReturnType);
 
         // describeCluster(DescribeClusterOptions)
         Assert.Equal(
@@ -78,13 +75,7 @@ public sealed class PublicAdminP3ShapeParityTests
             new[] { typeof(IReadOnlyCollection<ConfigResourceType>), typeof(ListConfigResourcesOptions) },
             listConfigResources.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // listClientMetricsResources(ListClientMetricsResourcesOptions)
-        Assert.Equal(
-            new[] { typeof(ListClientMetricsResourcesOptions) },
-            listClientMetrics.GetParameters().Select(parameter => parameter.ParameterType));
-
-        foreach (MethodInfo rpc in new[] { describeCluster, listConfigResources, listClientMetrics })
-#pragma warning restore CS0618
+        foreach (MethodInfo rpc in new[] { describeCluster, listConfigResources })
         {
             foreach (ParameterInfo parameter in rpc.GetParameters())
             {
@@ -94,7 +85,7 @@ public sealed class PublicAdminP3ShapeParityTests
         }
 
         // Close remains the ONLY Task-returning member on IAdmin — the P1/P2a/P2b
-        // invariant, re-asserted because three new members just landed beside it.
+        // invariant, re-asserted because new members just landed beside it.
         Assert.Equal(
             new[] { nameof(IAdmin.Close) },
             typeof(IAdmin).GetMethods()
@@ -187,11 +178,11 @@ public sealed class PublicAdminP3ShapeParityTests
     }
 
     /// <summary>
-    /// The two list results publish Java's <b>single</b> accessor each, over a
-    /// <em>collection</em>, and neither invents a second view.
+    /// The list result publishes Java's <b>single</b> accessor, over a <em>collection</em>,
+    /// and invents no second view.
     /// </summary>
     [Fact]
-    public void TheTwoListResults_PublishExactlyJavasSingleAccessor()
+    public void TheListResult_PublishesExactlyJavasSingleAccessor()
     {
         MethodInfo configResources = typeof(ListConfigResourcesResult).GetMethod(
             nameof(ListConfigResourcesResult.All), Type.EmptyTypes)!;
@@ -203,62 +194,6 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Empty(typeof(ListConfigResourcesResult).GetProperties());
         Assert.Empty(typeof(ListConfigResourcesResult).GetConstructors());
         Assert.Single(DeclaredPublicMethods(typeof(ListConfigResourcesResult)));
-
-#pragma warning disable CS0618 // Java deprecates this result type; the deprecation is what is asserted.
-        MethodInfo clientMetrics = typeof(ListClientMetricsResourcesResult).GetMethod(
-            nameof(ListClientMetricsResourcesResult.All), Type.EmptyTypes)!;
-        Assert.Equal(typeof(Task<IReadOnlyCollection<ClientMetricsResourceListing>>), clientMetrics.ReturnType);
-        Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(clientMetrics.ReturnParameter));
-        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(clientMetrics.ReturnParameter, 1));
-        Assert.Empty(typeof(ListClientMetricsResourcesResult).GetProperties());
-        Assert.Empty(typeof(ListClientMetricsResourcesResult).GetConstructors());
-        Assert.Single(DeclaredPublicMethods(typeof(ListClientMetricsResourcesResult)));
-#pragma warning restore CS0618
-    }
-
-    /// <summary>
-    /// Java's <c>@Deprecated(since = "4.1")</c> is carried onto <b>every</b> member and type
-    /// Java marks, not only the RPC — so a later refactor cannot silently drop the
-    /// deprecation.
-    /// </summary>
-    /// <remarks>
-    /// Java deprecates the RPC with <c>forRemoval = true</c>
-    /// (<c>Admin.java:1821-1824</c>, <c>:1833-1836</c>) and the three supporting types
-    /// without it (<c>ListClientMetricsResourcesResult.java:30</c>,
-    /// <c>ListClientMetricsResourcesOptions.java:24</c>,
-    /// <c>ClientMetricsResourceListing.java:21</c>). All four carry
-    /// <see cref="ObsoleteAttribute"/> here, each naming
-    /// <c>ListConfigResources</c> as the replacement — the guidance Java's own
-    /// <c>@deprecated</c> tag gives.
-    /// </remarks>
-    [Fact]
-    public void TheDeprecatedClientMetricsSurface_IsMarkedObsolete()
-    {
-        MemberInfo[] deprecated =
-        {
-            typeof(IAdmin).GetMethod(nameof(IAdmin.ListClientMetricsResources))!,
-            typeof(KafkaAdminClient).GetMethod(nameof(KafkaAdminClient.ListClientMetricsResources))!,
-            typeof(MockAdminClient).GetMethod(nameof(MockAdminClient.ListClientMetricsResources))!,
-#pragma warning disable CS0618 // These types being obsolete is exactly the assertion.
-            typeof(ListClientMetricsResourcesResult),
-            typeof(ListClientMetricsResourcesOptions),
-            typeof(ClientMetricsResourceListing),
-#pragma warning restore CS0618
-        };
-
-        foreach (MemberInfo member in deprecated)
-        {
-            ObsoleteAttribute? obsolete = member.GetCustomAttribute<ObsoleteAttribute>();
-            Assert.NotNull(obsolete);
-            Assert.Contains("4.1", obsolete!.Message, StringComparison.Ordinal);
-            Assert.Contains("ListConfigResources", obsolete.Message, StringComparison.Ordinal);
-        }
-
-        // …and the replacement surface is NOT deprecated.
-        Assert.Null(
-            typeof(IAdmin).GetMethod(nameof(IAdmin.ListConfigResources))!
-                .GetCustomAttribute<ObsoleteAttribute>());
-        Assert.Null(typeof(ListConfigResourcesResult).GetCustomAttribute<ObsoleteAttribute>());
     }
 
     /// <summary>
@@ -413,36 +348,7 @@ public sealed class PublicAdminP3ShapeParityTests
     }
 
     /// <summary>
-    /// <see cref="ClientMetricsResourceListing"/> mirrors Java's constructor, its one
-    /// accessor and its value equality.
-    /// </summary>
-    [Fact]
-    public void ClientMetricsResourceListing_MirrorsJavasShape()
-    {
-#pragma warning disable CS0618 // Java deprecates the listing type; mirrored, not avoided.
-        ConstructorInfo only = Assert.Single(typeof(ClientMetricsResourceListing).GetConstructors());
-        Assert.Equal(
-            new[] { typeof(string) }, only.GetParameters().Select(parameter => parameter.ParameterType));
-
-        Assert.Equal(
-            typeof(string),
-            typeof(ClientMetricsResourceListing).GetProperty(nameof(ClientMetricsResourceListing.Name))!.PropertyType);
-
-        ClientMetricsResourceListing listing = new ClientMetricsResourceListing("sub-1");
-        Assert.Equal("sub-1", listing.Name);
-        Assert.Equal(new ClientMetricsResourceListing("sub-1"), listing);
-        Assert.Equal(new ClientMetricsResourceListing("sub-1").GetHashCode(), listing.GetHashCode());
-        Assert.NotEqual(new ClientMetricsResourceListing("sub-2"), listing);
-
-        // Java's toString() leaves the opening quote unclosed (:48-50); mirrored verbatim.
-        Assert.Equal("ClientMetricsResourceListing(name='sub-1)", listing.ToString());
-
-        Assert.Throws<ArgumentNullException>(() => new ClientMetricsResourceListing(null!));
-#pragma warning restore CS0618
-    }
-
-    /// <summary>
-    /// The three new options types match Java's fields and defaults exactly, so
+    /// The new options types match Java's fields and defaults exactly, so
     /// <c>options: null</c> at a call site behaves like a freshly constructed instance.
     /// </summary>
     [Fact]
@@ -464,18 +370,11 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Null(configResources.TimeoutMs);
         AssertOptionNames(typeof(ListConfigResourcesOptions), nameof(configResources.TimeoutMs));
 
-#pragma warning disable CS0618 // Java deprecates this options type; mirrored, not avoided.
-        ListClientMetricsResourcesOptions clientMetrics = new ListClientMetricsResourcesOptions();
-        Assert.Null(clientMetrics.TimeoutMs);
-        AssertOptionNames(typeof(ListClientMetricsResourcesOptions), nameof(clientMetrics.TimeoutMs));
-
         foreach (Type type in new[]
                  {
                      typeof(DescribeClusterOptions),
                      typeof(ListConfigResourcesOptions),
-                     typeof(ListClientMetricsResourcesOptions),
                  })
-#pragma warning restore CS0618
         {
             PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
             Assert.Equal(typeof(int?), timeout.PropertyType);

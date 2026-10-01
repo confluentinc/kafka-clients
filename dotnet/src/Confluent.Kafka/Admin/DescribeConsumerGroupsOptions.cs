@@ -34,8 +34,7 @@ namespace Confluent.Kafka.Admin;
 /// every sibling options type already makes.
 /// </para>
 /// <para>
-/// ⚠ <b>Java's class is <em>not</em> deprecated</b>, unlike
-/// <see cref="ListConsumerGroupsOptions"/>: <c>describeConsumerGroups</c> has no
+/// ⚠ <b>Java's class is <em>not</em> deprecated</b>: <c>describeConsumerGroups</c> has no
 /// generation-newer replacement, so no <see cref="System.ObsoleteAttribute"/> appears here.
 /// The RPC's <em>result</em> element, <see cref="ConsumerGroupDescription"/>, does carry one
 /// deprecated member (<c>state()</c>), but that is a property of the description, not of

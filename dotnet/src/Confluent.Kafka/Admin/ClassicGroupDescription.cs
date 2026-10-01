@@ -30,9 +30,9 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠ <b>Both of Java's constructors ship, unlike on the sibling description types.</b>
 /// Neither carries <c>@Deprecated</c> — this file has no deprecation anywhere — so the
-/// standing ruling that omitted <see cref="ConsumerGroupDescription"/>'s three,
-/// <see cref="MemberDescription"/>'s four and <see cref="ConsumerGroupListing"/>'s two does
-/// not reach here: that ruling turns on the omitted constructors being <em>deprecated</em>
+/// standing ruling that omitted <see cref="ConsumerGroupDescription"/>'s three and
+/// <see cref="MemberDescription"/>'s four does not reach here: that ruling turns on the
+/// omitted constructors being <em>deprecated</em>
 /// forwarders, not on their being forwarders. The six-argument form (<c>:42</c>) is current
 /// Java API, so it is translated as a current C# overload.
 /// </para>
@@ -64,7 +64,7 @@ namespace Confluent.Kafka.Admin;
 /// is copied (<c>:61</c>). The remaining four are stored exactly as given, which is what
 /// makes the absent-versus-empty distinction above survive. As on
 /// <see cref="MemberDescription"/> and <see cref="ConsumerGroupDescription"/>, this differs
-/// from the <see cref="ArgumentNullException"/> guard <see cref="ConsumerGroupListing"/>
+/// from the <see cref="ArgumentNullException"/> guard <see cref="GroupListing"/>
 /// applies because Java itself differs — coalescing here, rejecting there. No guards Java
 /// does not have.
 /// </para>

@@ -31,9 +31,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// ⚠ <b>The timeout and <c>DescribeCluster</c>'s two booleans are invisible to a
 /// behavioural test.</b> The Rust <c>MockAdminClient</c> ignores the <em>options</em> it is
 /// handed — <c>fn describe_cluster(&amp;self, _options: DescribeClusterOptions)</c>, and
-/// <c>_options</c> likewise on <c>list_config_resources</c> and
-/// <c>list_client_metrics_resources</c> — so their values are read here, at the seam, where
-/// they are facts rather than inferences. Measured on the un-fixed commit: swapping
+/// <c>_options</c> likewise on <c>list_config_resources</c> — so their values are read here,
+/// at the seam, where they are facts rather than inferences. Measured on the un-fixed commit: swapping
 /// <c>DescribeCluster</c>'s two booleans, and discarding the validated timeout on all
 /// three RPCs, both left the whole suite green (M15/P3 round 1, finding 69.1).
 /// </para>
@@ -71,7 +70,6 @@ public sealed class AdminP3SubmitArgumentTests
     [Theory]
     [InlineData(Rpc.DescribeCluster)]
     [InlineData(Rpc.ListConfigResources)]
-    [InlineData(Rpc.ListClientMetricsResources)]
     public void NullTimeout_MapsToANegative_NotZero(Rpc rpc)
     {
         Assert.True(
@@ -93,8 +91,6 @@ public sealed class AdminP3SubmitArgumentTests
     [InlineData(Rpc.DescribeCluster, 12_345)]
     [InlineData(Rpc.ListConfigResources, 0)]
     [InlineData(Rpc.ListConfigResources, 23_456)]
-    [InlineData(Rpc.ListClientMetricsResources, 0)]
-    [InlineData(Rpc.ListClientMetricsResources, 34_567)]
     public void ExplicitTimeout_IsForwardedVerbatim(Rpc rpc, int timeoutMs) =>
         Assert.Equal(timeoutMs, Capture(rpc, timeoutMs, useOptions: true).TimeoutMs);
 
@@ -164,18 +160,14 @@ public sealed class AdminP3SubmitArgumentTests
 
         /// <summary>Result sub-shape 3b — a type-id array plus the timeout.</summary>
         ListConfigResources,
-
-        /// <summary>Result sub-shape 3b — the timeout is the whole input.</summary>
-        ListClientMetricsResources,
     }
 
     private static Captured Capture(Rpc rpc, int? timeoutMs, bool useOptions) => rpc switch
     {
         Rpc.DescribeCluster =>
             CaptureDescribeCluster(useOptions ? new DescribeClusterOptions { TimeoutMs = timeoutMs } : null),
-        Rpc.ListConfigResources =>
+        _ =>
             CaptureListConfigResources(useOptions ? new ListConfigResourcesOptions { TimeoutMs = timeoutMs } : null),
-        _ => CaptureListClientMetricsResources(useOptions, timeoutMs),
     };
 
     /// <summary>
@@ -235,30 +227,6 @@ public sealed class AdminP3SubmitArgumentTests
         Assert.NotNull(result.All().Exception);
         return captured;
     }
-
-#pragma warning disable CS0618 // Java deprecates this RPC and its options type; mirrored, not avoided.
-
-    /// <inheritdoc cref="CaptureDescribeCluster"/>
-    private static Captured CaptureListClientMetricsResources(bool useOptions, int? timeoutMs)
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        Captured captured = new Captured();
-        ListClientMetricsResourcesResult result = admin.ListClientMetricsResources(
-            useOptions ? new ListClientMetricsResourcesOptions { TimeoutMs = timeoutMs } : null,
-            (nativeHandle, submittedTimeoutMs, callback, userData) =>
-            {
-                captured.TimeoutMs = submittedTimeoutMs;
-                captured.UserData = userData;
-            });
-
-        AdminCallbacks.ListClientMetricsResources(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        Assert.NotNull(result.All().Exception);
-        return captured;
-    }
-
-#pragma warning restore CS0618
 
     /// <summary>
     /// An <b>owned</b> error for the trampoline to consume, standing in for the one native

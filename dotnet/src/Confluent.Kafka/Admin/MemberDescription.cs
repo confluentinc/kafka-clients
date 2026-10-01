@@ -27,14 +27,12 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// <b>The type is not deprecated</b>, although the RPC family around it has deprecated
 /// members: Java's class carries no <c>@Deprecated</c>, so no
-/// <see cref="ObsoleteAttribute"/> appears here. Contrast
-/// <see cref="ConsumerGroupListing"/>, whose Java class <em>is</em> deprecated and which
-/// mirrors that.
+/// <see cref="ObsoleteAttribute"/> appears here.
 /// </para>
 /// <para>
 /// ⚠ <b>Java's four deprecated constructors are deliberately not translated</b> — the
-/// standing ruling this phase applied to <see cref="ConsumerGroupListing"/>'s two, for the
-/// same reason. All four (<c>:66</c> since 4.2, <c>:93</c>, <c>:117</c> and <c>:138</c>
+/// standing ruling this phase applied to <see cref="ConsumerGroupDescription"/>'s three,
+/// for the same reason. All four (<c>:66</c> since 4.2, <c>:93</c>, <c>:117</c> and <c>:138</c>
 /// since 4.0, every one <c>forRemoval = true</c>) are pure forwarders that pass
 /// <c>Optional.empty()</c> for the arguments they omit; a caller can pass
 /// <see langword="null"/> for those same arguments to the current constructor and get the
@@ -62,7 +60,7 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="ConsumerId"/>, <see cref="ClientId"/> and <see cref="Host"/> become the empty
 /// string and <see cref="Assignment"/> becomes an empty <see cref="MemberAssignment"/>,
 /// mirroring Java <c>:50-56</c>. As on <see cref="MemberAssignment"/>, this differs from
-/// the <see cref="ArgumentNullException"/> guard <see cref="ConsumerGroupListing"/> applies
+/// the <see cref="ArgumentNullException"/> guard <see cref="GroupListing"/> applies
 /// because Java itself differs — coalescing here, rejecting there.
 /// </para>
 /// </remarks>
@@ -249,7 +247,7 @@ public sealed class MemberDescription
     /// The value label is <c>memberId</c>, not <c>consumerId</c> — see the naming note in
     /// the type remarks. A present <see cref="Upgraded"/> renders lowercase
     /// <c>true</c>/<c>false</c>, as Java's <c>Boolean.toString()</c> does and as
-    /// <see cref="ConsumerGroupListing"/> already spells it.
+    /// <see cref="ConsumerGroupDescription"/> already spells it.
     /// </para>
     /// </remarks>
     public override string ToString() =>

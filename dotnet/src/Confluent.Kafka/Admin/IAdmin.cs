@@ -342,37 +342,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         ListConfigResourcesOptions? options = null);
 
     /// <summary>
-    /// Lists the cluster's client-metrics resources — Java's
-    /// <c>listClientMetricsResources(ListClientMetricsResourcesOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
-    /// </summary>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
-    /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole listing — see
-    /// <see cref="ListConfigResources"/>.
-    /// </returns>
-    /// <remarks>
-    /// ⚠ <b>Deprecated in Kafka since 4.1, and the deprecation is carried through rather
-    /// than dropped</b> (<c>Admin.java:1821-1824</c>:
-    /// <c>@Deprecated(since = "4.1", forRemoval = true)</c>). Java deprecates the result,
-    /// options and listing types on the same grounds, so all four carry
-    /// <see cref="ObsoleteAttribute"/> here. Prefer
-    /// <see cref="ListConfigResources"/> filtered to
-    /// <see cref="ConfigResourceType.ClientMetrics"/>.
-    /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    [Obsolete(
-        "Deprecated in Kafka since 4.1. Use ListConfigResources filtered to "
-        + "ConfigResourceType.ClientMetrics instead.")]
-    ListClientMetricsResourcesResult ListClientMetricsResources(
-        ListClientMetricsResourcesOptions? options = null);
-
-    /// <summary>
     /// Describes the configuration of the given resources — Java's
     /// <c>describeConfigs(Collection&lt;ConfigResource&gt;, DescribeConfigsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
@@ -784,52 +753,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListGroupsResult ListGroups(ListGroupsOptions? options = null);
-
-    /// <summary>
-    /// Lists the consumer groups available in the cluster — Java's
-    /// <c>listConsumerGroups(ListConsumerGroupsOptions)</c>. Returns <b>immediately</b>,
-    /// without waiting for the broker.
-    /// </summary>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ <b>Two filter axes,
-    /// not three</b> — this is the generation-older sibling of <see cref="ListGroups"/> and
-    /// <c>ListConsumerGroupsOptions.java</c> carries no protocol-type filter. Each axis left
-    /// empty — the default — means "do not filter on that axis", never "match nothing"; so
-    /// the no-options call lists consumer groups of every state and type.
-    /// </param>
-    /// <returns>
-    /// ⚠ <b>One</b> awaitable carrying <em>two independent</em> collections — the listings
-    /// that were returned and the failures of the brokers that could not be queried, exactly
-    /// as <see cref="ListGroups"/> does. They are not parallel, so
-    /// <see cref="ListConsumerGroupsResult.Valid"/> and
-    /// <see cref="ListConsumerGroupsResult.Errors"/> each have their own length, and only
-    /// <see cref="ListConsumerGroupsResult.All"/> turns the first error into a fault.
-    /// </returns>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <b>Deprecated in Kafka since 4.1, and the deprecation is carried through rather than
-    /// dropped</b> (<c>Admin.java:889-890</c>: <c>@Deprecated(since = "4.1", forRemoval =
-    /// true)</c>). Java deprecates the result, options and listing types on the same grounds,
-    /// so all four carry <see cref="ObsoleteAttribute"/> here. Prefer
-    /// <see cref="ListGroups"/>.
-    /// </para>
-    /// <para>
-    /// Java also declares a no-argument <c>listConsumerGroups()</c> convenience overload
-    /// (<c>Admin.java:902-903</c>, deprecated alike), collapsed here into the optional
-    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
-    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
-    /// this binding's floor).
-    /// </para>
-    /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/> — or a filter holds
-    /// a <see cref="GroupState"/> / <see cref="GroupType"/> value no member defines, which
-    /// Java's enum-typed <c>Set</c> cannot express but a C# cast can.
-    /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    [Obsolete(
-        "Deprecated in Kafka since 4.1. Use ListGroups instead.")]
-    ListConsumerGroupsResult ListConsumerGroups(ListConsumerGroupsOptions? options = null);
 
     /// <summary>
     /// Describes some consumer groups in the cluster — Java's

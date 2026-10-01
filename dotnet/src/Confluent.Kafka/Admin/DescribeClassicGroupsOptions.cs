@@ -40,8 +40,7 @@ namespace Confluent.Kafka.Admin;
 /// may grow an option the other does not. Do not collapse them into an alias.
 /// </para>
 /// <para>
-/// ⚠ <b>Java's class is <em>not</em> deprecated</b>, unlike
-/// <see cref="ListConsumerGroupsOptions"/>: <c>describeClassicGroups</c> has no
+/// ⚠ <b>Java's class is <em>not</em> deprecated</b>: <c>describeClassicGroups</c> has no
 /// generation-newer replacement — it is itself the accessor for the older group generation.
 /// So no <see cref="System.ObsoleteAttribute"/> appears here, and a test asserts that
 /// absence rather than leaving it implicit.

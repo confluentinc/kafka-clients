@@ -171,22 +171,22 @@ public sealed class PublicAdminConfigsTests
     /// <summary>
     /// ⚠ <b>Stage 1's test debt, paid.</b> The Rust mock creates a client-metrics resource
     /// only as a <em>side effect</em> of an <c>incrementalAlterConfigs</c> against a
-    /// <see cref="ConfigResourceType.ClientMetrics"/> resource, so until this stage
-    /// <c>ListClientMetricsResources</c> could only ever be exercised <b>empty</b>. Now it
-    /// can be seeded, and both the deprecated listing and its non-deprecated replacement
-    /// must agree.
+    /// <see cref="ConfigResourceType.ClientMetrics"/> resource, so until this stage a
+    /// client-metrics listing could only ever be exercised <b>empty</b>. Now it can be
+    /// seeded, and <see cref="IAdmin.ListConfigResources"/> filtered to
+    /// <see cref="ConfigResourceType.ClientMetrics"/> — the replacement Java's deprecated
+    /// <c>listClientMetricsResources</c> points callers at — must report it.
     /// </summary>
     [Fact]
-    public async Task ListClientMetricsResources_ReturnsASeededResource_AndListConfigResourcesAgrees()
+    public async Task ListConfigResources_ReportsASeededClientMetricsResource()
     {
         using MockAdminClient admin = new MockAdminClient();
 
         ConfigResource subscription = new ConfigResource(ConfigResourceType.ClientMetrics, "sub-1");
 
         // Empty before — the state Stage 1 was limited to asserting.
-#pragma warning disable CS0618 // Java deprecates this RPC; exercising it is the point.
-        Assert.Empty(await TestTimeout.Run(() => admin.ListClientMetricsResources().All(), s_deadline));
-#pragma warning restore CS0618
+        Assert.Empty(await TestTimeout.Run(
+            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All(), s_deadline));
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -200,14 +200,7 @@ public sealed class PublicAdminConfigsTests
                 }).All(),
             s_deadline);
 
-        // The deprecated listing now reports it…
-#pragma warning disable CS0618 // Java deprecates this RPC; exercising it is the point.
-        IReadOnlyCollection<ClientMetricsResourceListing> listings =
-            await TestTimeout.Run(() => admin.ListClientMetricsResources().All(), s_deadline);
-        Assert.Equal("sub-1", Assert.Single(listings).Name);
-#pragma warning restore CS0618
-
-        // …and so does the replacement Java's deprecation points callers at.
+        // The listing now reports it…
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));

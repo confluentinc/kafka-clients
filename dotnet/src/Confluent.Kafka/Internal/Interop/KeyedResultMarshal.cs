@@ -113,10 +113,10 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </item>
 /// <item>
 /// <b>Sub-shape 3b</b> — Java gives one future over a <b>collection</b>
-/// (<c>KafkaFuture&lt;Collection&lt;V&gt;&gt;</c>: <c>ListConfigResourcesResult.java:42</c>,
-/// <c>ListClientMetricsResourcesResult.java:45</c>) — a LIST, not a map, so there is no key
-/// to report an outcome against. Goes through <see cref="CompleteList{TValue}"/>, which
-/// has <b>no accessor set, no key reader and no error channel</b>.
+/// (<c>KafkaFuture&lt;Collection&lt;V&gt;&gt;</c>: <c>ListConfigResourcesResult.java:42</c>)
+/// — a LIST, not a map, so there is no key to report an outcome against. Goes through
+/// <see cref="CompleteList{TValue}"/>, which has <b>no accessor set, no key reader and no
+/// error channel</b>.
 /// </item>
 /// <item>
 /// <b>Sub-shape 3c</b> — Java gives one future over a <b>heterogeneous</b> collection that
@@ -483,8 +483,6 @@ internal static class KeyedResultMarshal
     /// accessors yield a <c>Collection</c>. Forcing a map — say
     /// <c>IReadOnlyDictionary&lt;ConfigResource, bool&gt;</c> — would invent a public
     /// surface Java does not have (<c>definition-of-done.md</c> §7).
-    /// <c>listClientMetricsResources</c> makes that plainest: its only per-index accessor
-    /// is <c>get_name(i)</c>, and the listing <em>is</em> the name.
     /// </para>
     /// <para>
     /// <b>Any failure faults the one task.</b> There is no per-key channel to fault into,
@@ -494,8 +492,7 @@ internal static class KeyedResultMarshal
     /// </para>
     /// <para>
     /// <b>Order is preserved exactly as the ABI delivers it.</b> The header documents
-    /// <c>listConfigResources</c> entries "sorted by <c>(type id, name)</c>" and
-    /// <c>listClientMetricsResources</c> "sorted by name". Java returns a
+    /// <c>listConfigResources</c> entries "sorted by <c>(type id, name)</c>". Java returns a
     /// <c>Collection</c>, so order is not part of the contract — but neither shuffle it
     /// nor sort it again.
     /// </para>

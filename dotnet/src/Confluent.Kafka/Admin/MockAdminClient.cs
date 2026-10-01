@@ -98,15 +98,6 @@ public sealed class MockAdminClient : IAdmin
         _native.ListConfigResources(configResourceTypes, options);
 
     /// <inheritdoc/>
-    [Obsolete(
-        "Deprecated in Kafka since 4.1. Use ListConfigResources filtered to "
-        + "ConfigResourceType.ClientMetrics instead.")]
-    public ListClientMetricsResourcesResult ListClientMetricsResources(
-        ListClientMetricsResourcesOptions? options = null) =>
-        _native.ListClientMetricsResources(options);
-
-
-    /// <inheritdoc/>
     public DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
         _native.DescribeConfigs(resources, options);
@@ -177,13 +168,6 @@ public sealed class MockAdminClient : IAdmin
     /// <inheritdoc/>
     public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
         _native.ListGroups(options);
-
-    /// <inheritdoc/>
-    [Obsolete(
-        "Deprecated in Kafka since 4.1. Use ListGroups instead.")]
-    public ListConsumerGroupsResult ListConsumerGroups(
-        ListConsumerGroupsOptions? options = null) =>
-        _native.ListConsumerGroups(options);
 
     /// <inheritdoc/>
     public DescribeConsumerGroupsResult DescribeConsumerGroups(

@@ -321,7 +321,6 @@ public sealed class AdminKeySeamShapeTests
     [InlineData(nameof(AdminCallbacks.TopicListingValue))]
     [InlineData(nameof(AdminCallbacks.DeleteRecordsKey))]
     [InlineData(nameof(AdminCallbacks.ConfigResourceValue))]
-    [InlineData(nameof(AdminCallbacks.ClientMetricsResourceListingValue))]
     public void EveryReader_IsAHoistedStaticReadonlyField(string fieldName)
     {
         FieldInfo field = Assert.IsAssignableFrom<FieldInfo>(

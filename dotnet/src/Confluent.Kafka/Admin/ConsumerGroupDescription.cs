@@ -30,14 +30,12 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// <b>The type is not deprecated</b>, although one of its members is: Java's class carries
 /// no <c>@Deprecated</c>, so no <see cref="ObsoleteAttribute"/> appears on it — only on
-/// <see cref="State"/>, which Java deprecates at <c>:189</c>. Contrast
-/// <see cref="ConsumerGroupListing"/>, whose Java class <em>is</em> deprecated and which
-/// mirrors that.
+/// <see cref="State"/>, which Java deprecates at <c>:189</c>.
 /// </para>
 /// <para>
 /// ⚠ <b>Java's three deprecated constructors are deliberately not translated</b> — the
-/// standing ruling this phase applied to <see cref="ConsumerGroupListing"/>'s two and
-/// <see cref="MemberDescription"/>'s four, for the same reason. All three (<c>:54</c>,
+/// standing ruling this phase applied to <see cref="MemberDescription"/>'s four, for the
+/// same reason. All three (<c>:54</c>,
 /// <c>:68</c> and <c>:83</c>, every one <c>since = "4.0", forRemoval = true</c>) take the
 /// superseded <see cref="Confluent.Kafka.ConsumerGroupState"/> and fill the arguments they
 /// omit with fixed values — <c>Collections.emptySet()</c>, <c>GroupType.CLASSIC</c> and two
@@ -46,7 +44,7 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// ⚠ <b><see cref="Type"/> and <see cref="GroupState"/> are <em>not</em> optional here,
-/// although the same two members are optional on <see cref="ConsumerGroupListing"/>.</b>
+/// although the same two members are optional on <see cref="GroupListing"/>.</b>
 /// Java's accessors return a bare <c>GroupType</c> / <c>GroupState</c> (<c>:180</c>,
 /// <c>:197</c>) where that class returns <c>Optional</c>, so these are non-nullable enums.
 /// The asymmetry is Java's and is mirrored rather than normalized. Java's field could still
@@ -80,7 +78,7 @@ namespace Confluent.Kafka.Admin;
 /// <c>:113-116</c>. The remaining six are stored exactly as given, which is what makes the
 /// absent-versus-empty and absent-versus-zero distinctions above survive. As on
 /// <see cref="MemberDescription"/>, this differs from the
-/// <see cref="ArgumentNullException"/> guard <see cref="ConsumerGroupListing"/> applies
+/// <see cref="ArgumentNullException"/> guard <see cref="GroupListing"/> applies
 /// because Java itself differs — coalescing here, rejecting there.
 /// </para>
 /// </remarks>
@@ -261,7 +259,7 @@ public sealed class ConsumerGroupDescription
     /// loses information and cannot be run backwards.
     /// </para>
     /// <para>
-    /// ⚠ <b>Unlike <see cref="ConsumerGroupListing.State"/> this one is not nullable</b>,
+    /// ⚠ <b>Unlike <c>ConsumerGroupListing.State</c> this one is not nullable</b>,
     /// because the member it projects is not: Java maps an <c>Optional</c> there and parses
     /// a bare value here. Routing through <c>GroupMarshal</c> — Java's <c>toString()</c>
     /// then its <c>parse</c>, composed — keeps the name table in one place rather than
@@ -357,8 +355,8 @@ public sealed class ConsumerGroupDescription
     /// (<c>:241-242</c>), because Java is concatenating a null <em>reference</em>. The two
     /// epochs go through <c>orElse(null)</c> (<c>:243-244</c>), whose null result
     /// concatenates as that same text — the same spelling reached by a different route, and
-    /// <b>not</b> the <c>Optional.empty</c> that <see cref="ConsumerGroupListing"/> and
-    /// <see cref="MemberDescription"/> emit for members Java concatenates raw. Normalizing
+    /// <b>not</b> the <c>Optional.empty</c> that <see cref="MemberDescription"/> emits for
+    /// members Java concatenates raw. Normalizing
     /// any of them would produce a diagnostic string that no longer matches the Java
     /// client's.
     /// </para>

@@ -918,39 +918,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_ListConfigResourcesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ListConfigResourcesResultDestroy(IntPtr result);
 
-    // ---- M15/P3 Stage 1: listClientMetricsResources (result sub-shape 3b) ----
-
-    /// <summary>
-    /// <c>kafka_admin_AdminClient_list_client_metrics_resources_async</c> — Java's
-    /// <c>listClientMetricsResources(options)</c>, which Java deprecates
-    /// (<c>@Deprecated(since = "4.1", forRemoval = true)</c>, <c>Admin.java:1821-1824</c>)
-    /// in favour of <c>listConfigResources</c> filtered to <c>CLIENT_METRICS</c>. No
-    /// arrays at all: the only inputs are the timeout and the completion.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_client_metrics_resources_async", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AdminClientListClientMetricsResourcesAsync(
-        IntPtr admin,
-        int timeoutMs,
-        AdminCallbacks.ListClientMetricsResourcesCallback callback,
-        IntPtr userData);
-
-    // ---- kafka_admin_ListClientMetricsResourcesResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListClientMetricsResourcesResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_ListClientMetricsResourcesResult_get_name</c> — the resource name at
-    /// <paramref name="index"/>, borrowed and NUL-terminated, or null if out of range.
-    /// Entries are sorted by name. This is the result's <b>only</b> per-index accessor:
-    /// the listing <em>is</em> the name.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_get_name", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListClientMetricsResourcesResultGetName(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ListClientMetricsResourcesResultDestroy(IntPtr result);
-
     // ---- M15/P3 Stage 2: kafka_admin_Config_t / kafka_admin_ConfigEntry_t ----
     //
     // Both are BORROWED views hanging off a result root (ffi §B2 Category 4): a
@@ -1816,155 +1783,6 @@ internal static partial class NativeMethods
     // GroupListing derives the flag from Type and Protocol, as Java does, so that a
     // caller-built listing and a native-built one cannot disagree. See GroupListing.cs.
 
-    // ---- listConsumerGroups ----
-
-    /// <summary>
-    /// <c>kafka_admin_AdminClient_list_consumer_groups_async</c> — Java's
-    /// <c>Admin.listConsumerGroups(ListConsumerGroupsOptions)</c>, deprecated since 4.1 in
-    /// favour of <see cref="AdminClientListGroupsAsync"/>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠⚠ <b>Two filter arrays, not the three <see cref="AdminClientListGroupsAsync"/>
-    /// takes.</b> This RPC has no protocol-type axis — Java's
-    /// <c>ListConsumerGroupsOptions</c> declares none — so the argument list is group states
-    /// then types, and nothing else between them. The two declarations otherwise look alike,
-    /// and copying that one wholesale would leave <c>types</c> read as
-    /// <c>protocol_types</c> and shift every argument after it, including the callback
-    /// pointer.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>One state axis here, although Java's options expose two.</b> The header states
-    /// that Java's deprecated <c>inStates(Set&lt;ConsumerGroupState&gt;)</c> is defined as
-    /// <c>inGroupStates(...)</c> over <c>GroupState.parse(...)</c> of those same names, so a
-    /// caller holding <c>ConsumerGroupState</c> names passes them through
-    /// <paramref name="groupStates"/> too. There is no second array to fill.
-    /// </para>
-    /// <para>
-    /// Both are <c>const char *const *</c> of Java <c>toString()</c> names, matched
-    /// case-insensitively; a name this cluster does not recognise is not an error. A null
-    /// pointer with count <c>0</c> — which an empty <see cref="IntPtr"/><c>[]</c> marshals
-    /// to — means "no filter on that axis", exactly Java's empty <c>Set</c>.
-    /// </para>
-    /// <para>
-    /// ⚠ Declared <c>IntPtr[]</c>, never <c>string[]</c>: the default marshaller would
-    /// emit ANSI, and the whole admin surface is UTF-8 (ffi-marshalling.md §A2). The
-    /// caller pins each name with <c>Utf8Marshal.Pin</c> for the duration of the call and
-    /// disposes in a <c>finally</c> — the core copies every name before returning, so the
-    /// pins are call-scoped (§A4).
-    /// </para>
-    /// <para>
-    /// A negative <paramref name="timeoutMs"/> selects the client's configured default.
-    /// </para>
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_consumer_groups_async", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AdminClientListConsumerGroupsAsync(
-        IntPtr admin,
-        IntPtr[] groupStates,
-        int groupStateCount,
-        IntPtr[] types,
-        int typeCount,
-        int timeoutMs,
-        AdminCallbacks.ListConsumerGroupsCallback callback,
-        IntPtr userData);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupsResult_valid_count</c> — how many listings the call
-    /// returned, Java's <c>ListConsumerGroupsResult.valid()</c> size.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_valid_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListConsumerGroupsResultValidCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupsResult_get_valid</c> — one listing, <b>borrowed</b>
-    /// from the result root.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_get_valid", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListConsumerGroupsResultGetValid(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupsResult_error_count</c> — how many brokers failed,
-    /// Java's <c>ListConsumerGroupsResult.errors()</c> size.
-    /// </summary>
-    /// <remarks>
-    /// ⚠⚠ <b>This count is NOT <see cref="ListConsumerGroupsResultValidCount"/>, and the two
-    /// lists are NOT parallel</b> — the header says so verbatim, pointing at
-    /// <see cref="ListGroupsResultGetError"/> as having the same shape. One list holds the
-    /// groups that were listed, the other the per-broker failures; index <c>i</c> of one has
-    /// nothing to do with index <c>i</c> of the other. A single loop bounded by the valid
-    /// count silently truncates the errors (or reads past their end) and still passes every
-    /// round-trip test, because a mock that reports no failures makes the bug invisible.
-    /// Walk each list in its own loop, bounded by its own count.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_error_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListConsumerGroupsResultErrorCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupsResult_get_error</c> — one broker's failure.
-    /// <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The header returns <c>const kafka_common_Error_t *</c> and says "Do not destroy
-    /// it", so this goes through <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>.
-    /// Putting it through <see cref="KafkaException.FromHandle(IntPtr)"/> would free a
-    /// handle the result root still owns and then free it again at
-    /// <see cref="ListConsumerGroupsResultDestroy"/> — a double free, which aborts the host.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListConsumerGroupsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ListConsumerGroupsResultDestroy(IntPtr result);
-
-    // ---- kafka_admin_ConsumerGroupListing_t ----
-
-    /// <summary>
-    /// <c>kafka_admin_ConsumerGroupListing_group_id</c> — Java's <c>groupId()</c>. Borrowed
-    /// UTF-8, never null.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerGroupListingGroupId(IntPtr listing);
-
-    /// <summary>
-    /// <c>kafka_admin_ConsumerGroupListing_is_simple_consumer_group</c> — Java's
-    /// <c>isSimpleConsumerGroup()</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>Declared here, unlike its <c>GroupListing</c> namesake a few lines above</b>,
-    /// which is deliberately absent — see the comment closing that block. The two Java classes
-    /// genuinely differ: <c>GroupListing</c> computes the answer from its type and protocol,
-    /// so the managed class derives it and must not be told a second answer, whereas
-    /// <c>ConsumerGroupListing</c> stores what the broker reported and has no protocol to
-    /// derive from — so the value can only come from here.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_is_simple_consumer_group", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool ConsumerGroupListingIsSimpleConsumerGroup(IntPtr listing);
-
-    /// <summary>
-    /// <c>kafka_admin_ConsumerGroupListing_group_state</c> — Java's <c>groupState()</c> as
-    /// its <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
-    /// </summary>
-    /// <inheritdoc cref="GroupListingGroupType" path="/remarks"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_state", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerGroupListingGroupState(IntPtr listing);
-
-    /// <summary>
-    /// <c>kafka_admin_ConsumerGroupListing_group_type</c> — Java's <c>type()</c> as its
-    /// <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
-    /// </summary>
-    /// <inheritdoc cref="GroupListingGroupType" path="/remarks"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_type", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerGroupListingGroupType(IntPtr listing);
-
-    // kafka_admin_ConsumerGroupListing_state is deliberately NOT declared, the same call
-    // GroupListing's is_simple_consumer_group makes above and for the same reason:
-    // ConsumerGroupListing.State is a lossy one-way projection of GroupState (Java computes
-    // it as groupState().map(s -> ConsumerGroupState.parse(s.toString())), and the header
-    // documents this accessor as exactly that map), so the managed class derives it. Reading
-    // it here would give a caller-built listing and a native-built one two ways to disagree
-    // on one axis. See ConsumerGroupListing.cs.
-
     // ---- describeConsumerGroups ----
 
     /// <summary>
@@ -2011,7 +1829,7 @@ internal static partial class NativeMethods
     /// <remarks>
     /// ⚠ This is a <b>keyed map</b>, not two independent lists: one key list, each key
     /// carrying <em>either</em> a value <em>or</em> an error. Unlike
-    /// <see cref="ListConsumerGroupsResultErrorCount"/>'s RPC there is exactly one count,
+    /// <see cref="ListGroupsResultErrorCount"/>'s RPC there is exactly one count,
     /// and index <c>i</c> of the key, value and error walks all name the same group.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
@@ -2094,7 +1912,7 @@ internal static partial class NativeMethods
     /// </summary>
     /// <remarks>
     /// ⚠ <b>Non-optional here</b>, unlike the same-named accessor on
-    /// <see cref="ConsumerGroupListingGroupType"/>, which returns null for Java's
+    /// <see cref="GroupListingGroupType"/>, which returns null for Java's
     /// <c>Optional.empty()</c>: the header says <c>type()</c> "is non-optional here", so a
     /// null is an ABI contract violation rather than an absence to model.
     /// </remarks>
