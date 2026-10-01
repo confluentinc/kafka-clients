@@ -160,7 +160,7 @@
 - [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice 46/46; 4 questions that overturn "unreachable"; script truncation trap
 - [M11 Critic r17 claim accuracy](m11_round17_claim_accuracy_patterns.md) — expand predicates before claiming STRONGER; check-generated exit-1 trap
 - [Metadata-propagation races](integration_metadata_propagation_races.md) — create_topic proves ONE broker; coordinator-routed RPCs still race; retry idiom
-- [Integration flake hunting](integration_flake_hunting.md) — full target 534 tests/~80s so repeat it; prove lifetime fixes by reverting to HEAD~1; suite can kill the Docker engine + user broker; docker rm is user's call
+- [Integration flake hunting](integration_flake_hunting.md) — full target 534 tests/~80s so repeat it; prove lifetime fixes by reverting to HEAD~1
 - [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; python unit tests via the gRPC image
 - [Merge reconciliation test/impl hazard](merge_reconciliation_test_impl_hazard.md) — adopting side A's impl can break side B's auto-merged tests; run B's suite too
 - [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — build+run the C-extension + pytest locally; setuptools/pip workarounds

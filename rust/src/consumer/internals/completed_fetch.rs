@@ -285,6 +285,25 @@ enum RecordSource {
     Owned(bytes::Bytes),
 }
 
+/// Where a batch's record bytes live *before* the batch is installed: the
+/// descriptor [`CompletedFetch::load_next_batch`] carries through the
+/// READ_COMMITTED skip and the record-count check, and turns into a
+/// [`RecordSource`] only once both have passed. So a compressed batch is not
+/// inflated for its count to be refused, nor when it is skipped as aborted —
+/// Java's cost too: `compressedIterator` wraps the records in a decompression
+/// stream but reads nothing through it until `RecordIterator`'s constructor
+/// has accepted the count (`DefaultRecordBatch.java:279-297, 579-588`), and
+/// a skipped batch never gets an iterator (`CompletedFetch.java:212-221`).
+#[derive(Debug)]
+enum PendingRecordSource {
+    /// Uncompressed: the records section is `memory_records.buffer()[range]`,
+    /// borrowed as-is once installed.
+    Borrowed(std::ops::Range<usize>),
+    /// Compressed: the whole batch is `memory_records.buffer()[range]`, still
+    /// to be inflated.
+    Compressed(std::ops::Range<usize>),
+}
+
 impl CompletedFetch {
     /// Constructs a `CompletedFetch` for the given partition.
     ///
@@ -1055,7 +1074,7 @@ impl CompletedFetch {
         &self,
         batch: &BatchMetadata,
         records_count: i32,
-        source: &RecordSource,
+        source: &PendingRecordSource,
     ) -> Result<bool, Error> {
         if !batch.is_control_batch {
             return Ok(false);
@@ -1073,10 +1092,23 @@ impl CompletedFetch {
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(false);
         };
-        let records_bytes = match source {
-            RecordSource::None => return Ok(false),
-            RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
-            RecordSource::Owned(buf) => &buf[..],
+        // Java's `batch.iterator()` reads the control batch on its own, apart from
+        // the `streamingIterator` that `load_next_batch` installs afterwards
+        // (`DefaultRecordBatch.java:321-337`, `CompletedFetch.java:221`); so does
+        // this, inflating a compressed control batch here and again at install.
+        // The broker writes control batches uncompressed, so in practice neither
+        // inflation happens.
+        let inflated;
+        let records_bytes: &[u8] = match source {
+            PendingRecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
+            PendingRecordSource::Compressed(range) => {
+                inflated = decompress_batch(
+                    &self.partition,
+                    &cursor.memory_records.buffer()[range.clone()],
+                    batch.base_offset,
+                )?;
+                &inflated
+            },
         };
         // Java's `if (!batchIterator.hasNext()) return false` — an empty control
         // batch carries no marker.
@@ -1141,8 +1173,9 @@ impl CompletedFetch {
             // O(N²) over a fetch and copied every batch into an owned `Vec`).
             // For uncompressed batches we record the byte *range* of the
             // batch's records section and borrow it lazily per record (no
-            // copy). For compressed batches we decompress once into an owned
-            // buffer held by the cursor.
+            // copy). For compressed batches we record the batch's range and,
+            // once the checks below have passed, decompress it once into an
+            // owned buffer held by the cursor.
             let (batch_meta, source, records_count) = {
                 let cursor = match &mut self.cursor {
                     Some(c) => c,
@@ -1226,20 +1259,16 @@ impl CompletedFetch {
                     magic: batch.magic(),
                 };
 
-                // Build the record-source descriptor for this batch.
+                // Describe where this batch's records live; they are materialized
+                // below, after the READ_COMMITTED skip and the count check.
                 // `try_is_compressed`, not `is_compressed`: this batch came off
                 // the wire, and an unknown codec id must fail as Java's
                 // `CompressionType.forId` does rather than be read as
                 // uncompressed (which would parse compressed bytes as records).
                 let source = if batch.try_is_compressed()? {
-                    // Decompress once per batch into an owned buffer; records
-                    // then borrow from it.
-                    let decompressed = batch
-                        .decompress_records()
-                        .map_err(|e| invalid_batch_error(&self.partition, meta.base_offset, e.message()))?;
-                    // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
-                    // without copying; records then slice_ref from it (§27).
-                    RecordSource::Owned(bytes::Bytes::from(decompressed))
+                    // Inflated once per batch into an owned buffer when the batch
+                    // is installed; records then borrow from it.
+                    PendingRecordSource::Compressed(batch_start..batch_start + batch_size)
                 } else {
                     // Borrow the records section directly from the canonical
                     // buffer. `batch_size` includes AbstractRecords::LOG_OVERHEAD, so the
@@ -1247,7 +1276,7 @@ impl CompletedFetch {
                     // [batch_start + RECORD_BATCH_OVERHEAD, batch_start + size).
                     let records_start = batch_start + RecordBatch::RECORD_BATCH_OVERHEAD;
                     let records_end = batch_start + batch_size;
-                    RecordSource::Borrowed(records_start..records_end)
+                    PendingRecordSource::Borrowed(records_start..records_end)
                 };
 
                 let records_count = batch.records_count();
@@ -1278,8 +1307,8 @@ impl CompletedFetch {
                         self.partition, batch_meta.producer_id, batch_meta.base_offset, batch_meta.last_offset
                     );
                     self.next_fetch_offset = batch_meta.next_offset;
-                    // `source` (incl. any decompression buffer) is dropped
-                    // here — we never decode this aborted batch's records.
+                    // `source` is dropped here still pending — an aborted batch's
+                    // records are never decoded, nor inflated.
                     continue;
                 }
             }
@@ -1289,7 +1318,10 @@ impl CompletedFetch {
             // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:221`),
             // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
             // dropped without its count being looked at. Installing it instead would
-            // treat the batch as empty.
+            // treat the batch as empty. It also comes before the records are
+            // materialized, so a compressed batch with a bad count is refused for
+            // the price of reading its header: Java's `compressedIterator` has
+            // built the decompression stream by then but read nothing through it.
             if records_count < 0 {
                 return Err(Error::InvalidRecord(DefaultRecordBatch::invalid_record_count_error(
                     records_count,
@@ -1297,15 +1329,32 @@ impl CompletedFetch {
                 )));
             }
 
+            let Some(cursor) = self.cursor.as_mut() else {
+                return Ok(false);
+            };
+            // Materialize the records: borrow them in place, or inflate a
+            // compressed batch once into an owned buffer. `Bytes::from(Vec<u8>)`
+            // adopts that allocation without copying; records then slice_ref
+            // from it (§27).
+            let source = match source {
+                PendingRecordSource::Borrowed(range) => RecordSource::Borrowed(range),
+                PendingRecordSource::Compressed(range) => {
+                    let decompressed = decompress_batch(
+                        &self.partition,
+                        &cursor.memory_records.buffer()[range],
+                        batch_meta.base_offset,
+                    )?;
+                    RecordSource::Owned(bytes::Bytes::from(decompressed))
+                },
+            };
+
             // Install the batch as the current one. We use the batch
             // header's declared record count (not the offset span, which can
             // exceed the record count after log compaction).
-            if let Some(cursor) = &mut self.cursor {
-                cursor.record_source = source;
-                cursor.record_byte_offset = 0;
-                cursor.records_remaining = records_count;
-                cursor.current_batch = Some(batch_meta);
-            }
+            cursor.record_source = source;
+            cursor.record_byte_offset = 0;
+            cursor.records_remaining = records_count;
+            cursor.current_batch = Some(batch_meta);
             return Ok(true);
         }
     }
@@ -1406,6 +1455,16 @@ fn wrap_deserialization_error(
 ///
 /// Every per-batch check in [`CompletedFetch::load_next_batch`] reports through
 /// it: the magic (D7), the minimum size (D2), the checksum, and decompression.
+/// Inflates a compressed batch — `batch_bytes` is the whole batch, header
+/// included — into a fresh owned buffer, once. Called only for a batch whose
+/// record count has passed [`CompletedFetch::load_next_batch`]'s check; a
+/// corrupt stream is reported as an [`invalid_batch_error`].
+fn decompress_batch(partition: &TopicPartition, batch_bytes: &[u8], base_offset: i64) -> Result<Vec<u8>, Error> {
+    DefaultRecordBatchRef::new(batch_bytes)
+        .and_then(|batch| batch.decompress_records())
+        .map_err(|e| invalid_batch_error(partition, base_offset, e.message()))
+}
+
 fn invalid_batch_error(partition: &TopicPartition, base_offset: i64, cause: &str) -> Error {
     Error::kafka_message(format!(
         "Record batch for partition {partition} at offset {base_offset} is invalid, cause: {cause}"
@@ -1461,6 +1520,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::internal::AbstractRecords;
+    use crate::common::record::internal::CompressionType;
     use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::AutoOffsetResetStrategy;
@@ -2868,6 +2928,76 @@ mod tests {
         let cause = cause(&err);
         assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
         assert_eq!("Found invalid record count -1 in magic v2 batch", cause.message());
+    }
+
+    /// Marks a batch's header gzip-compressed and overwrites its records with
+    /// bytes no gzip stream starts with, so inflating it must fail. The codec
+    /// id sits in the low byte of the two-byte attributes field.
+    fn garble_as_compressed(batch: &mut [u8]) {
+        batch[RecordBatch::ATTRIBUTES_OFFSET + 1] |= CompressionType::Gzip.id();
+        batch[RecordBatch::RECORD_BATCH_OVERHEAD..].fill(0xFF);
+    }
+
+    /// The count check comes before the records are inflated: a compressed
+    /// batch whose count is negative *and* whose stream is garbage fails on the
+    /// count, as in Java, where `RecordIterator`'s constructor runs before
+    /// `StreamRecordIterator` reads anything through the decompression stream
+    /// (`DefaultRecordBatch.java:279-297, 579-588`). The control case first
+    /// shows the garbage alone is refused by the inflation, so the order is
+    /// what the second case proves.
+    #[test]
+    fn test_negative_record_count_in_a_compressed_batch_is_refused_before_inflating() {
+        for check_crcs in [false, true] {
+            let (mut buf, second) = two_batches();
+            garble_as_compressed(&mut buf[second..]);
+            if check_crcs {
+                recompute_crc(&mut buf[second..]);
+            }
+            let err = fault_after_first_batch(buf.clone(), check_crcs);
+            assert!(
+                cause(&err).message().contains("Failed to decompress record stream"),
+                "{:?}",
+                cause(&err)
+            );
+
+            put_i32(&mut buf, second + RecordBatch::RECORDS_COUNT_OFFSET, -1);
+            if check_crcs {
+                recompute_crc(&mut buf[second..]);
+            }
+            let err = fault_after_first_batch(buf, check_crcs);
+            let cause = cause(&err);
+            assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+            assert_eq!("Found invalid record count -1 in magic v2 batch", cause.message());
+        }
+    }
+
+    /// The READ_COMMITTED skip comes before the records are inflated too: an
+    /// aborted compressed batch is dropped without its stream being read, as
+    /// Java never builds an iterator for a batch it skips
+    /// (`CompletedFetch.java:212-221`).
+    #[test]
+    fn test_aborted_compressed_batch_is_skipped_without_inflating() {
+        let aborted_pid = 42;
+        let mut buf = batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false);
+        let aborted_start = buf.len();
+        buf.extend_from_slice(&batch_full(2, 2, aborted_pid, true, false));
+        garble_as_compressed(&mut buf[aborted_start..]);
+        recompute_crc(&mut buf[aborted_start..]);
+        buf.extend_from_slice(&batch_full(4, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+
+        let mut cf = CompletedFetch::with_full(
+            make_subscriptions(),
+            Arc::new(BufferSupplier::create()),
+            tp("test", 0),
+            partition_data_with_aborted_txn(buf, aborted_pid, 2),
+            test_aggregator(),
+            0,
+        );
+        let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let records = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect("the aborted batch is skipped, not inflated");
+        assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
     }
 
     /// Declares a batch's first record 63 bytes long where 13 remain, by

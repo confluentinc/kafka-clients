@@ -193,17 +193,24 @@ impl DefaultRecordBatch {
     ///
     /// The buffer must contain exactly one complete v2 record batch starting at
     /// index 0 — at least [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes, which
-    /// [`as_ref`](Self::as_ref)'s header accessors rely on. The only production
-    /// source is `BatchIterator` (in `memory_records.rs`),
-    /// which copies batches that
-    /// [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
-    /// has already validated; the rest are this client's own builders.
+    /// [`as_ref`](Self::as_ref)'s header accessors rely on. Like Java's
+    /// constructor (`DefaultRecordBatch.java:141-143`), neither this nor
+    /// [`with_slice`](Self::with_slice) checks that; the callers do. Batches
+    /// read off the wire reach this type only through `with_slice`, and `new`
+    /// has no production caller: it takes buffers built by hand, in tests.
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#DefaultRecordBatch")]
     pub fn new(buffer: Vec<u8>) -> Self {
         Self { buffer }
     }
 
     /// Create a `DefaultRecordBatch` from a byte slice (copies the data).
+    ///
+    /// The same rule as for [`new`](Self::new) applies to the slice — exactly one
+    /// complete v2 batch, at least `RECORD_BATCH_OVERHEAD` bytes — and is not
+    /// checked here either. The one production caller is `BatchIterator` (in
+    /// `memory_records.rs`), which passes batches that
+    /// [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
+    /// has already validated.
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#DefaultRecordBatch")]
     pub fn with_slice(data: &[u8]) -> Self {
         Self { buffer: data.to_vec() }
