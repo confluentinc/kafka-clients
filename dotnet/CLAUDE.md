@@ -7,9 +7,10 @@ idiomatic C# on top of the Rust core's C ABI. It holds the .NET binding's
 `.claude/rules/ffi-marshalling.md`.
 
 **How it loads.** Working anywhere under `bindings/dotnet/` stacks three
-rulebooks: root `CLAUDE.md` → `bindings/CLAUDE.md` → this file. Heavy deep-dives
+rulebooks: root `CLAUDE.md` → `dotnet/.claude/rules/bindings.md` → this file. Heavy deep-dives
 live in `.claude/rules/*.md` and are read **on demand** — this rulebook links
 them explicitly (never rely on nested auto-loading).
+The shared cross-binding rulebook (moved from `bindings/CLAUDE.md` in M17/P2) is [`dotnet/.claude/rules/bindings.md`](.claude/rules/bindings.md) — read it explicitly.
 
 **The one law:** the binding restores the Java **shape** in C# **idiom** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
@@ -485,7 +486,7 @@ its C# realization, and where the enforcing rule lives.
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)`; passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback returns `void` and fires on the core's **dispatcher thread**. See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `RecordMetadata` / `Task<RecordMetadata>` (M14/P1 — **shipped**) | ⚠ **not the caller's task, and NOT an ABI callback at all** — it is **managed-only** (ffi §A6 **form C**: nothing crosses the C boundary, zero new `[DllImport]`, the pull-pump unchanged). Fires on the **pump thread** (async) or **inline on the caller's** (sync), **before** the awaiter is released, with **non-null** `-1` placeholder metadata on failure. See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
-| method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling | §4 |
+| method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
@@ -495,7 +496,7 @@ its C# realization, and where the enforcing rule lives.
 
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
 delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
-**Java** client, per `bindings/CLAUDE.md §2`.
+**Java** client, per `dotnet/.claude/rules/bindings.md §2`.
 
 ⚠ **"delivery-report handlers" above is about ckd's shape, not about Java's
 `Callback` (M14/P1).** The shipped `IDeliveryCallback` +
@@ -520,9 +521,9 @@ comment).
 |---|---|---|
 | **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
 | **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` (no `Async` suffix — mirrors Java; the timed *consumer* close is deferred, §1). *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
-| **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
+| **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `dotnet/.claude/rules/bindings.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
-| **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
+| **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
 | **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `byte[]?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and wrapping any serializer throw in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread — Java-contract fidelity, not a foreign-thread UB guard). No per-record callback through the ABI (`CLAUDE.md §11`) — M14/P1's delivery callback is **managed-only** and does not change that (ffi §A6 form C). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) |
@@ -604,7 +605,7 @@ function pointers** returning `kafka_common_KafkaError_t*`, and the rebalance (a
 operation that triggered it) **does not proceed until the callback returns**
 (`confluent_kafka.h:209-213`). §3's idiom-map row previously read "(async)"; that
 described the **Rust core's** `#[async_trait]` trait, which the C ABI has already
-flattened (`bindings/CLAUDE.md §1.2`), and the faithful restoration of "blocks until it
+flattened (`dotnet/.claude/rules/bindings.md §1.2`), and the faithful restoration of "blocks until it
 returns" in C# is a sync method. An async listener would force the trampoline to block
 the dispatcher thread on a `Task` — the deadlock class both Python reference servers
 avoid by using plain sync methods. Settled as roadmap Q6 / divergence D1.
@@ -773,7 +774,7 @@ simply captures the `consumer` variable and calls `consumer.commitSync()` from
 its single-owner access guard is held for the whole operation that fired the
 callback, so the consumer's own API is rejected with `ConcurrentModification` from
 inside one. The handle is the sanctioned route around it, and it exists **because**
-the shape was flattened at the ABI (`bindings/CLAUDE.md §1.2`), which is exactly the
+the shape was flattened at the ABI (`dotnet/.claude/rules/bindings.md §1.2`), which is exactly the
 "scaffolding that supports the shape and adds no Kafka behavior" the mental model
 allows. **Python has the identical type for the identical reason**
 (`bindings/python/consumer.py:378-545`, `_ConsumerBase.handle()` at `:584-593`), so
@@ -1033,7 +1034,7 @@ points at them.
 
 Review a change against the **C ABI header** (`confluent_kafka.h`) and the **Kafka
 Java public API shape** — **not** Rust internals, and **not** Java implementation
-logic (`bindings/CLAUDE.md §2`).
+logic (`dotnet/.claude/rules/bindings.md §2`).
 
 ### 8.3 The Critic's lens (.NET-specific)
 

@@ -1014,7 +1014,7 @@ only managed refs, not the native thunk (→ keep-alive); the CLR can't propagat
 exception through a Rust frame (→ no-throw); `user_data` is C's only per-call
 context channel (→ `GCHandle`). Form C needs none of that precisely because it
 never becomes a native function pointer: it is host scaffolding restoring a Java
-signature (`bindings/CLAUDE.md §1.2`) over a completion the binding already reads,
+signature (`dotnet/.claude/rules/bindings.md §1.2`) over a completion the binding already reads,
 which is why it is Mode A and why the pull-pump stays the engine underneath it.
 
 **Anti-patterns:**
