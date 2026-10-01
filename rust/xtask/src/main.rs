@@ -17,7 +17,7 @@ mod lint_custom;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
@@ -632,54 +632,79 @@ fn run_grcov_html() -> anyhow::Result<()> {
 // Published-package check
 // ---------------------------------------------------------------------------
 //
-// `cargo package` only compiles the unpacked crate on its own. This check goes
-// one step further and uses the `.crate` the way a user does: it depends on it
-// from a fresh project outside the workspace, resolving the dependencies anew,
-// so a file missing from the `include` list in `Cargo.toml`, or a dependency
-// that only resolves through the workspace lock file, fails here and not after
-// a release. It also bounds the compressed size, so the package cannot grow
-// back unnoticed (tests, the C FFI, generated output, ...).
+// `cargo package` verifies only that the unpacked crate compiles in isolation.
+// This check consumes the `.crate` as a downstream user would: a new project
+// outside the workspace declares it as a dependency and resolves the dependency
+// graph from scratch. A file omitted from the `include` list in `Cargo.toml`, or
+// a dependency that resolves only through the workspace lock file, is therefore
+// detected before a release rather than after it. The check also enforces a
+// limit on the compressed size, so that excluded content (tests, the C FFI,
+// generated output) cannot be reintroduced unnoticed.
 
 const PACKAGE_NAME: &str = "confluent-kafka";
-/// The largest `.crate` accepted, compressed: 3 MiB (crates.io allows 10 MiB).
+/// Maximum compressed size of the `.crate`: 3 MiB (the crates.io limit is 10 MiB).
 const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
 const PACKAGE_CHECK_DIR: &str = "target/package-check";
 const PACKAGE_SMOKE_DIR: &str = "target/package-smoke";
-/// The smoke test, built as the `main.rs` of the fresh project. It lives
-/// outside every workspace so it can only use the crate's public API.
+/// Source of the smoke test, compiled as the `main.rs` of the generated project.
+/// The project is outside every workspace, so the test can use only the crate's
+/// public API.
 const SMOKE_MAIN_RS: &str = include_str!("../smoke/main.rs");
-/// The broker `--with-broker` starts. Same image and tag as the integration
-/// tests (`tests/common/kafka_cluster.rs`'s `KAFKA_TAG`); keep them in step.
+/// Broker image started by `--with-broker`. It must match the image and tag used
+/// by the integration tests (`KAFKA_TAG` in `tests/common/kafka_cluster.rs`).
 const SMOKE_KAFKA_IMAGE: &str = "apache/kafka:4.2.0";
-/// How long `--with-broker` waits for the broker to report it has started.
+/// Maximum time `--with-broker` waits for the broker to report that it has started.
 const SMOKE_BROKER_STARTUP: std::time::Duration = std::time::Duration::from_secs(120);
-/// How long `--registry` keeps retrying while a just-published version is not
-/// yet visible in the crates.io index.
+/// Maximum time `--registry` retries while a newly published version is not yet
+/// visible in the crates.io index.
 const REGISTRY_VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Number of attempts `--with-broker` makes to pull [`SMOKE_KAFKA_IMAGE`], so
+/// that a transient registry error or rate limit does not fail the run.
+const SMOKE_IMAGE_PULL_ATTEMPTS: u32 = 3;
+/// Files the package must contain, including the license, which the Apache 2.0
+/// license requires to accompany the code, and the README displayed on crates.io.
+const PACKAGE_REQUIRED_FILES: &[&str] = &["LICENSE", "README.md", "Cargo.toml", "Cargo.lock"];
+/// File names and extensions that must never be published: private keys,
+/// certificates and credential stores, such as the fixtures used by the SSL and
+/// SASL integration tests.
+const PACKAGE_FORBIDDEN_NAMES: &[&str] = &[".env", ".netrc", "credentials", "id_rsa", "id_ed25519"];
+const PACKAGE_FORBIDDEN_EXTENSIONS: &[&str] = &[
+    "pem",
+    "key",
+    "crt",
+    "csr",
+    "p12",
+    "pfx",
+    "jks",
+    "keystore",
+    "truststore",
+];
 
 fn package_check() -> anyhow::Result<()> {
     let (version, package_dir) = package_and_unpack(PACKAGE_CHECK_DIR)?;
 
-    println!("📥 Installing the package in a fresh project...");
+    println!("📥 Installing the package in a new project...");
     let project = SmokeProject::create(
         PathBuf::from(PACKAGE_CHECK_DIR),
         &format!("{{ path = {:?} }}", package_dir.display().to_string()),
         true,
     )?;
-    // Offline only, even when the caller's shell has a broker configured: this
-    // runs on every PR, where no broker is available.
+    // Run the offline checks only, even if the environment configures a broker:
+    // this check runs on every pull request, where no broker is available.
     project.run(None, false, None)?;
 
     println!("✅ {PACKAGE_NAME} {version} packages within the size limit, builds as a dependency and passes the offline smoke test");
     Ok(())
 }
 
-/// `cargo xtask package-smoke-test`: the smoke test against the local package
-/// (before a release) or against a version on crates.io (after one).
+/// `cargo xtask package-smoke-test`: runs the smoke test against the local
+/// package before a release, or against a published version on crates.io after
+/// one.
 fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
     let mut from_registry = false;
     let mut version_override = None;
     let mut toolchain = None;
+    let mut msrv = false;
     let mut with_broker = false;
     let mut release = false;
     let mut args = args.iter();
@@ -693,6 +718,7 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
             "--toolchain" => {
                 toolchain = Some(args.next().ok_or_else(|| anyhow::anyhow!("--toolchain needs a name"))?.clone())
             },
+            "--msrv" => msrv = true,
             "--with-broker" => with_broker = true,
             "--release" => release = true,
             other => anyhow::bail!("package-smoke-test: unknown argument {other:?} (see `cargo xtask` for usage)"),
@@ -704,16 +730,28 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
             "package-smoke-test: --version only applies with --registry; the local package has the manifest's version"
         );
     }
+    if msrv {
+        if toolchain.is_some() {
+            anyhow::bail!("package-smoke-test: --msrv and --toolchain are mutually exclusive");
+        }
+        // Use the `rust-version` declared to users, which may differ from the
+        // toolchain pinned in `rust-toolchain.toml`.
+        let rust_version = package_rust_version()?;
+        println!("🦀 Installing Rust {rust_version}, the minimum supported Rust version of {PACKAGE_NAME}...");
+        run_command("rustup", &["toolchain", "install", &rust_version, "--profile", "minimal"])?;
+        toolchain = Some(rust_version);
+    }
 
     let smoke_dir = PathBuf::from(PACKAGE_SMOKE_DIR);
     let (version, dependency) = if from_registry {
-        // The manifest's version by default: after a release, the commit that
-        // was published is the one checked out.
+        // Defaults to the manifest version, since after a release the checked-out
+        // commit is the one that was published.
         let version = match version_override {
             Some(version) => version,
             None => package_version()?,
         };
-        // `=`: exactly the version under test, never a newer compatible one.
+        // The `=` requirement pins the version under test and excludes newer
+        // semver-compatible releases.
         println!("📥 Depending on {PACKAGE_NAME} {version} from crates.io...");
         let dependency = format!("{{ version = \"={version}\" }}");
         (version, dependency)
@@ -728,7 +766,7 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
     }
     project.check_resolved_version(toolchain.as_deref(), &version, from_registry)?;
 
-    // Kept alive until the smoke test returns; dropping it removes the container.
+    // Held until the smoke test completes; dropping it removes the container.
     let broker = if with_broker { Some(SmokeBroker::start()?) } else { None };
     let bootstrap_servers = match &broker {
         Some(broker) => Some(broker.bootstrap_servers.clone()),
@@ -750,9 +788,9 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
 /// `.crate` under `work_dir`. Returns the version and the unpacked directory.
 fn package_and_unpack(work_dir: &str) -> anyhow::Result<(String, PathBuf)> {
     println!("📦 Packaging {PACKAGE_NAME}...");
-    // `--no-verify`: the fresh project builds the packaged crate anyway.
-    // `--allow-dirty`: check the working tree as it is, so the task also runs
-    // before a commit; CI works on a clean checkout.
+    // `--no-verify`: the generated project builds the packaged crate itself.
+    // `--allow-dirty`: package the working tree as is, so that the task can run
+    // before changes are committed. CI always runs on a clean checkout.
     run_command("cargo", &["package", "-p", PACKAGE_NAME, "--no-verify", "--allow-dirty"])?;
 
     let version = package_version()?;
@@ -771,6 +809,8 @@ fn package_and_unpack(work_dir: &str) -> anyhow::Result<(String, PathBuf)> {
             crate_file.display()
         );
     }
+
+    check_package_contents(&crate_file)?;
 
     let work_dir = PathBuf::from(work_dir);
     if work_dir.exists() {
@@ -791,17 +831,67 @@ fn package_and_unpack(work_dir: &str) -> anyhow::Result<(String, PathBuf)> {
     Ok((version, package_dir))
 }
 
-/// The fresh project that depends on the crate and runs [`SMOKE_MAIN_RS`].
+/// Fails if the `.crate` is missing any of [`PACKAGE_REQUIRED_FILES`] or contains
+/// a file that may hold a secret ([`PACKAGE_FORBIDDEN_NAMES`],
+/// [`PACKAGE_FORBIDDEN_EXTENSIONS`]). The `include` list in `Cargo.toml` already
+/// excludes such files; this check protects against a future change to that
+/// list, since a published crate cannot be deleted, only yanked.
+fn check_package_contents(crate_file: &Path) -> anyhow::Result<()> {
+    let output = Command::new("tar").args(["-tzf"]).arg(crate_file).output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "could not list {}: {}",
+            crate_file.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let listing = String::from_utf8(output.stdout)?;
+    // Each entry has the form `<name>-<version>/<path>`.
+    let files: Vec<&str> = listing
+        .lines()
+        .filter_map(|entry| entry.split_once('/').map(|(_, path)| path))
+        .filter(|path| !path.is_empty() && !path.ends_with('/'))
+        .collect();
+
+    let missing: Vec<&str> = PACKAGE_REQUIRED_FILES
+        .iter()
+        .copied()
+        .filter(|required| !files.contains(required))
+        .collect();
+    let forbidden: Vec<&str> = files
+        .iter()
+        .copied()
+        .filter(|path| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let extension = name.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase());
+            PACKAGE_FORBIDDEN_NAMES.contains(&name)
+                || extension.is_some_and(|extension| PACKAGE_FORBIDDEN_EXTENSIONS.contains(&extension.as_str()))
+        })
+        .collect();
+    if !missing.is_empty() || !forbidden.is_empty() {
+        anyhow::bail!(
+            "{} has unexpected contents. Missing: [{}]. Must not be shipped: [{}]. \
+             Review the `include` list in Cargo.toml.",
+            crate_file.display(),
+            missing.join(", "),
+            forbidden.join(", ")
+        );
+    }
+    println!("   {} files, including {}", files.len(), PACKAGE_REQUIRED_FILES.join(", "));
+    Ok(())
+}
+
+/// A generated project that depends on the crate and runs [`SMOKE_MAIN_RS`].
 ///
-/// It sits under `rust/target`, so cargo still finds `rust/rust-toolchain.toml`
-/// and builds with the pinned toolchain, which is also the crate's
-/// `rust-version` (MSRV); `--toolchain` overrides it.
+/// It is created under `rust/target`, so cargo picks up `rust/rust-toolchain.toml`
+/// and builds with the pinned toolchain unless `--toolchain` or `--msrv` selects
+/// a different one.
 struct SmokeProject {
     dir: PathBuf,
-    /// Whether the crate comes from a path, not a registry. Cargo caps the
-    /// lints of registry dependencies (`--cap-lints allow`) but not of path
-    /// ones, so the crate's own `deny`s would fail a newer toolchain here
-    /// although they cannot fail a user's build.
+    /// Whether the crate is a path dependency rather than a registry one. Cargo
+    /// caps lints for registry dependencies (`--cap-lints allow`) but not for
+    /// path dependencies, so the crate's own `deny` lints could fail the build
+    /// on a newer toolchain here, although they cannot fail a user's build.
     local_path: bool,
 }
 
@@ -819,7 +909,7 @@ impl SmokeProject {
             format!(
                 "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
                  [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {dependency}\n\
-                 tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }}\n"
+                 tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"time\"] }}\n"
             ),
         )?;
         fs::write(dir.join("src/main.rs"), SMOKE_MAIN_RS)?;
@@ -831,18 +921,18 @@ impl SmokeProject {
         if let Some(toolchain) = toolchain {
             command.arg(format!("+{toolchain}"));
         }
-        // Run from the project directory, so cargo resolves its toolchain and
-        // config from there rather than from wherever xtask was started.
+        // Run from the project directory, so that cargo resolves the toolchain
+        // and configuration from there rather than from the xtask directory.
         command.current_dir(&self.dir).env("CARGO_TARGET_DIR", self.dir.join("target"));
         if self.local_path {
-            // Build the path dependency the way cargo builds a crates.io one.
+            // Apply the lint cap that cargo uses for crates.io dependencies.
             command.env("RUSTFLAGS", "--cap-lints=warn");
         }
         command
     }
 
-    /// Retries resolving the dependency until crates.io serves the version: a
-    /// just-published version takes a little while to reach the index.
+    /// Retries dependency resolution until crates.io serves the version, since a
+    /// newly published version takes some time to appear in the index.
     fn wait_for_registry(&self, toolchain: Option<&str>, version: &str) -> anyhow::Result<()> {
         let deadline = std::time::Instant::now() + REGISTRY_VISIBILITY_TIMEOUT;
         loop {
@@ -860,9 +950,9 @@ impl SmokeProject {
         }
     }
 
-    /// Fails unless cargo resolved exactly `version` of [`PACKAGE_NAME`], from
-    /// crates.io when `from_registry` (a path dependency prints its path after
-    /// the version, a registry one prints nothing).
+    /// Fails unless cargo resolved exactly `version` of [`PACKAGE_NAME`], and from
+    /// crates.io when `from_registry` is set. Cargo prints the path after the
+    /// version for a path dependency and nothing for a registry dependency.
     fn check_resolved_version(
         &self,
         toolchain: Option<&str>,
@@ -917,9 +1007,9 @@ impl SmokeProject {
     }
 }
 
-/// A single-node KRaft broker in Docker for the smoke test's round trip,
-/// removed when dropped. It listens on a free host port and advertises that
-/// same port, so the client can follow the metadata it returns.
+/// A single-node KRaft broker in Docker for the smoke test round trip, removed
+/// when dropped. It listens on a free host port and advertises the same port,
+/// so that the client can connect to the addresses returned in metadata.
 struct SmokeBroker {
     container: String,
     bootstrap_servers: String,
@@ -927,6 +1017,7 @@ struct SmokeBroker {
 
 impl SmokeBroker {
     fn start() -> anyhow::Result<Self> {
+        Self::pull_image()?;
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let container = format!("confluent-kafka-smoke-{}-{port}", std::process::id());
         println!("🐳 Starting {SMOKE_KAFKA_IMAGE} as {container} on localhost:{port}...");
@@ -962,8 +1053,8 @@ impl SmokeBroker {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        // From here on the container exists, so dropping `broker` removes it,
-        // including when startup times out below.
+        // The container now exists, so dropping `broker` removes it, including
+        // when startup times out below.
         let broker = Self { container, bootstrap_servers: format!("localhost:{port}") };
 
         let deadline = std::time::Instant::now() + SMOKE_BROKER_STARTUP;
@@ -973,16 +1064,47 @@ impl SmokeBroker {
                 println!("   broker ready at {}", broker.bootstrap_servers);
                 return Ok(broker);
             }
-            if std::time::Instant::now() >= deadline {
+            // A broker that exits during startup (invalid configuration, port
+            // already in use, out of memory) cannot recover, so report the
+            // failure immediately rather than at the deadline.
+            let state = Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", &broker.container])
+                .output()?;
+            let running = String::from_utf8_lossy(&state.stdout).trim() == "true";
+            if !running || std::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "broker {} did not start within {SMOKE_BROKER_STARTUP:?}; last output:\n{}{}",
+                    "broker {} {}; last output:\n{}{}",
                     broker.container,
+                    if running {
+                        format!("did not start within {SMOKE_BROKER_STARTUP:?}")
+                    } else {
+                        "exited during startup".to_string()
+                    },
                     String::from_utf8_lossy(&logs.stdout),
                     String::from_utf8_lossy(&logs.stderr)
                 );
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
+    }
+
+    /// Pulls [`SMOKE_KAFKA_IMAGE`], making up to [`SMOKE_IMAGE_PULL_ATTEMPTS`]
+    /// attempts, because the image registry occasionally fails or rate-limits a
+    /// pull.
+    fn pull_image() -> anyhow::Result<()> {
+        for attempt in 1..=SMOKE_IMAGE_PULL_ATTEMPTS {
+            let output = Command::new("docker").args(["pull", "--quiet", SMOKE_KAFKA_IMAGE]).output()?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let error = String::from_utf8_lossy(&output.stderr);
+            if attempt == SMOKE_IMAGE_PULL_ATTEMPTS {
+                anyhow::bail!("docker pull {SMOKE_KAFKA_IMAGE} failed {SMOKE_IMAGE_PULL_ATTEMPTS} times: {error}");
+            }
+            println!("   docker pull {SMOKE_KAFKA_IMAGE} failed (attempt {attempt}/{SMOKE_IMAGE_PULL_ATTEMPTS}), retrying in 15s: {}", error.trim());
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        }
+        Ok(())
     }
 }
 
@@ -1003,6 +1125,25 @@ fn package_version() -> anyhow::Result<String> {
     let pkgid = String::from_utf8(output.stdout)?;
     let fragment = pkgid.trim().rsplit('#').next().unwrap_or_default();
     Ok(fragment.rsplit('@').next().unwrap_or(fragment).to_string())
+}
+
+/// Returns the `rust-version` from the `[package]` table of `Cargo.toml`, the
+/// minimum supported Rust version declared to users.
+fn package_rust_version() -> anyhow::Result<String> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    let mut in_package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+        } else if in_package {
+            if let Some(value) = line.strip_prefix("rust-version").map(str::trim_start) {
+                if let Some(value) = value.strip_prefix('=') {
+                    return Ok(value.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    anyhow::bail!("Cargo.toml declares no rust-version in [package], which --msrv requires")
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -1380,14 +1521,15 @@ fn print_help() {
   coverage-all    Run all test coverage including integration (requires Docker)
   test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
-  package-check   Package the crate, fail above 3 MiB, and build and run the offline smoke test
-                  (xtask/smoke/main.rs) in a fresh project depending on it
-  package-smoke-test  Run the smoke test in a fresh project depending on the crate, the way a user does:
+  package-check   Package the crate, validate its contents and its 3 MiB size limit, then build and
+                  run the offline smoke test (xtask/smoke/main.rs) in a new project that depends on it
+  package-smoke-test  Run the smoke test in a new project that depends on the crate as a user would:
                     --registry            depend on the manifest's version from crates.io instead of the local package
                     --version <version>   with --registry, depend on this version instead
-                    --with-broker         start a throwaway apache/kafka broker in Docker for the round trip
+                    --with-broker         start a temporary apache/kafka broker in Docker for the round trip
                                           (otherwise the round trip runs only if KAFKA_BOOTSTRAP_SERVERS is set)
-                    --toolchain <name>    build with `cargo +<name>` instead of the pinned (MSRV) toolchain
+                    --toolchain <name>    build with `cargo +<name>` instead of the toolchain in rust-toolchain.toml
+                    --msrv                install and build with the crate's minimum supported Rust version
                     --release             build and run the smoke test in release mode
 
 Usage:
@@ -1406,6 +1548,6 @@ Usage:
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
   cargo xtask package-check
-  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name>] [--release]"
+  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name> | --msrv] [--release]"
     );
 }
