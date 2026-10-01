@@ -42,7 +42,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <c>""</c>.</b> On a filter row a null name means "match any resource name" and must
 /// travel as <see cref="IntPtr.Zero"/>; <c>""</c> is a filter on the literal empty name and
 /// must travel as a <b>non-null</b> pointer to a NUL byte
-/// (header, <c>kafka_common_AclBindingFilter_resource_name</c>). A helper mapping both to
+/// (header, <c>kafka_common_acl_AclBindingFilter_resource_name</c>). A helper mapping both to
 /// <see cref="IntPtr.Zero"/> turns a filter on <c>""</c> into match-everything, which on
 /// <c>delete_acls</c> deletes ACLs the caller never named. It is asserted here, on the
 /// <b>pointer</b>, where it is a fact rather than an inference — twice: once on the projector
@@ -345,7 +345,7 @@ public sealed class AdminP6SubmitArgumentTests
 
     /// <summary>
     /// ⚠ <b>Submitted from inside the stand-in (PLAN §4.5 case 2).</b> Since M15/P9 CP6 this
-    /// RPC's key is an owned <c>kafka_common_AclBinding_t</c> only the core can mint, so the
+    /// RPC's key is an owned <c>kafka_common_acl_AclBinding_t</c> only the core can mint, so the
     /// callback cannot be hand-fired and a whole-call failure is fanned out <b>once per
     /// binding</b> rather than delivered once. Issuing the real submit from inside the
     /// stand-in must not deadlock, every binding's awaitable must fault, and the
@@ -505,7 +505,7 @@ public sealed class AdminP6SubmitArgumentTests
         AclBindingFilter alpha = DeleteFilter("inline-alpha");
         AclBindingFilter beta = DeleteFilter("inline-beta");
 
-        // ⚠ Shape 4a's KEY is an owned kafka_common_AclBindingFilter_t that only the core can
+        // ⚠ Shape 4a's KEY is an owned kafka_common_acl_AclBindingFilter_t that only the core can
         // mint, so the inline fan-out is driven through the REAL ABI rather than a hand-fired
         // callback: the mock's submit fails, so every key completes on this thread before the
         // call returns — which is the inline path this test is about.
@@ -1155,7 +1155,7 @@ public sealed class AdminP6SubmitArgumentTests
 
     /// <summary>
     /// ⚠ <b>Submitted from inside the stand-in.</b> Since M15/P9 CP6 this RPC's key is an
-    /// owned <c>kafka_common_ClientQuotaEntity_t</c> only the core can mint, so the callback
+    /// owned <c>kafka_common_quota_ClientQuotaEntity_t</c> only the core can mint, so the callback
     /// cannot be hand-fired and a whole-call failure is fanned out <b>once per entity</b>.
     /// Issuing the real submit from inside the stand-in must not deadlock, must fault
     /// <b>every</b> per-entity awaitable, and must free the <c>GCHandle</c> once.
@@ -1248,7 +1248,7 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.UserData = userData;
 
                 // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
-                // kafka_common_AclBinding_t that only the core can mint, so a hand-fired
+                // kafka_common_acl_AclBinding_t that only the core can mint, so a hand-fired
                 // callback cannot supply one.
                 NativeMethods.AdminClientCreateAclsAsync(
                     handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
@@ -1530,7 +1530,7 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.UserData = userData;
 
                 // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
-                // kafka_common_ClientQuotaEntity_t that only the core can mint.
+                // kafka_common_quota_ClientQuotaEntity_t that only the core can mint.
                 NativeMethods.AdminClientAlterClientQuotasAsync(
                     handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
                     opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData);

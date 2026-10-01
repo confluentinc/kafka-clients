@@ -1396,14 +1396,14 @@ internal static partial class NativeMethods
     // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionList_count</c> — the number of topic-partitions in
+    /// <c>kafka_common_TopicPartitionList_count</c> — the number of topic-partitions in
     /// the owned list.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionList_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionListCount(IntPtr list);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionList_get</c> — the topic-partition at
+    /// <c>kafka_common_TopicPartitionList_get</c> — the topic-partition at
     /// <paramref name="index"/>, <b>borrowed</b> (Category 4) and valid until the list is
     /// destroyed, or <see cref="IntPtr.Zero"/> if out of range. Never freed by the binding
     /// (the list root's <see cref="TopicPartitionListDestroy"/> invalidates it).
@@ -1412,7 +1412,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr TopicPartitionListGet(IntPtr list, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionList_destroy</c> — frees the owned
+    /// <c>kafka_common_TopicPartitionList_destroy</c> — frees the owned
     /// topic-partition-list root (every borrowed element from it is invalidated).
     /// Null-safe (no-op).
     /// </summary>
@@ -1420,7 +1420,7 @@ internal static partial class NativeMethods
     internal static extern void TopicPartitionListDestroy(IntPtr list);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartition_topic</c> — the topic of a borrowed
+    /// <c>kafka_common_TopicPartition_topic</c> — the topic of a borrowed
     /// topic-partition element as a NUL-terminated <c>const char*</c> owned by the element
     /// (valid until the list is destroyed). Copy via
     /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy — this is the
@@ -1430,7 +1430,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr TopicPartitionTopic(IntPtr tp);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartition_partition</c> — the partition of a borrowed
+    /// <c>kafka_common_TopicPartition_partition</c> — the partition of a borrowed
     /// topic-partition element.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_TopicPartition_partition", CallingConvention = CallingConvention.Cdecl)]
@@ -1860,7 +1860,7 @@ internal static partial class NativeMethods
     // ---- PartitionInfoList_t — owned borrow-root + borrowed PartitionInfo elements (ffi §B2) ----
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfoList_count</c> — the number of partition-info
+    /// <c>kafka_common_PartitionInfoList_count</c> — the number of partition-info
     /// entries in the owned list. NOT null-safe (only <c>_destroy</c> is) — call only on a
     /// non-null root (the success branch of the trampoline).
     /// </summary>
@@ -1868,7 +1868,7 @@ internal static partial class NativeMethods
     internal static extern int PartitionInfoListCount(IntPtr list);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfoList_get</c> — the <c>PartitionInfo_t</c> at
+    /// <c>kafka_common_PartitionInfoList_get</c> — the <c>PartitionInfo_t</c> at
     /// <paramref name="index"/>, <b>borrowed</b> (Category 4; a <c>const *</c> return valid
     /// until the list is destroyed), or <see cref="IntPtr.Zero"/> if out of range. Never
     /// freed by the binding (there is a <c>PartitionInfo_destroy</c>, but it is only for a
@@ -1878,7 +1878,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr PartitionInfoListGet(IntPtr list, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfoList_destroy</c> — frees the owned partition-info-list
+    /// <c>kafka_common_PartitionInfoList_destroy</c> — frees the owned partition-info-list
     /// root (every borrowed <c>PartitionInfo</c> / <c>Node</c> / string from it is
     /// invalidated). Null-safe (no-op). Called by the trampoline <b>after</b> the copy-out
     /// completes.
@@ -1889,14 +1889,14 @@ internal static partial class NativeMethods
     // ---- TopicPartitionInfoMap_t — owned borrow-root + borrowed topic / list elements (ffi §B2) ----
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionInfoMap_count</c> — the number of topics in the owned
+    /// <c>kafka_common_TopicPartitionInfoMap_count</c> — the number of topics in the owned
     /// map. NOT null-safe (only <c>_destroy</c> is).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_TopicPartitionInfoMap_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TopicPartitionInfoMapCount(IntPtr map);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionInfoMap_get_topic</c> — the topic name at
+    /// <c>kafka_common_TopicPartitionInfoMap_get_topic</c> — the topic name at
     /// <paramref name="index"/> as a <b>NUL-terminated</b> <c>const char*</c> owned by the
     /// map (borrowed; valid until the map is destroyed), or <see cref="IntPtr.Zero"/> if out
     /// of range. Copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy —
@@ -1907,7 +1907,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr TopicPartitionInfoMapGetTopic(IntPtr map, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionInfoMap_get_partitions</c> — the
+    /// <c>kafka_common_TopicPartitionInfoMap_get_partitions</c> — the
     /// <c>PartitionInfoList_t</c> for the topic at <paramref name="index"/>, <b>borrowed</b>
     /// (Category 4; a nested <c>const *</c> container valid until the map is destroyed), or
     /// <see cref="IntPtr.Zero"/> if out of range. Copied out (via
@@ -1919,7 +1919,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr TopicPartitionInfoMapGetPartitions(IntPtr map, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_TopicPartitionInfoMap_destroy</c> — frees the owned map root (every
+    /// <c>kafka_common_TopicPartitionInfoMap_destroy</c> — frees the owned map root (every
     /// borrowed topic string, nested list, and its <c>PartitionInfo</c> / <c>Node</c>
     /// elements are invalidated). Null-safe (no-op). Called by the trampoline <b>after</b>
     /// the copy-out completes.
@@ -1936,7 +1936,7 @@ internal static partial class NativeMethods
     // before the owning root is destroyed.
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_topic</c> — the topic name as a <b>NUL-terminated</b>
+    /// <c>kafka_common_PartitionInfo_topic</c> — the topic name as a <b>NUL-terminated</b>
     /// <c>const char*</c> owned by the handle (§B3 NUL-scan form). Copy via
     /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before the owning root is destroyed.
     /// </summary>
@@ -1944,13 +1944,13 @@ internal static partial class NativeMethods
     internal static extern IntPtr PartitionInfoTopic(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_partition</c> — the partition id (by value).
+    /// <c>kafka_common_PartitionInfo_partition</c> — the partition id (by value).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoPartition(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_leader</c> — the leader <c>Node_t</c>, <b>borrowed</b>
+    /// <c>kafka_common_PartitionInfo_leader</c> — the leader <c>Node_t</c>, <b>borrowed</b>
     /// (Category 4), or <see cref="IntPtr.Zero"/> if the partition has no leader. Never
     /// freed (there is no <c>Node_destroy</c>). A null pointer maps to a null
     /// <see cref="Node"/>.
@@ -1959,13 +1959,13 @@ internal static partial class NativeMethods
     internal static extern IntPtr PartitionInfoLeader(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_replica_count</c> — the number of replica nodes.
+    /// <c>kafka_common_PartitionInfo_replica_count</c> — the number of replica nodes.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoReplicaCount(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_replica</c> — the replica <c>Node_t</c> at
+    /// <c>kafka_common_PartitionInfo_replica</c> — the replica <c>Node_t</c> at
     /// <paramref name="index"/>, <b>borrowed</b> (Category 4), or <see cref="IntPtr.Zero"/>
     /// if out of range. Never freed.
     /// </summary>
@@ -1973,14 +1973,14 @@ internal static partial class NativeMethods
     internal static extern IntPtr PartitionInfoReplica(IntPtr info, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_in_sync_replica_count</c> — the number of in-sync
+    /// <c>kafka_common_PartitionInfo_in_sync_replica_count</c> — the number of in-sync
     /// replica nodes.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_in_sync_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoInSyncReplicaCount(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_in_sync_replica</c> — the in-sync replica
+    /// <c>kafka_common_PartitionInfo_in_sync_replica</c> — the in-sync replica
     /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
     /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
     /// </summary>
@@ -1988,14 +1988,14 @@ internal static partial class NativeMethods
     internal static extern IntPtr PartitionInfoInSyncReplica(IntPtr info, int index);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_offline_replica_count</c> — the number of offline
+    /// <c>kafka_common_PartitionInfo_offline_replica_count</c> — the number of offline
     /// replica nodes.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_PartitionInfo_offline_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int PartitionInfoOfflineReplicaCount(IntPtr info);
 
     /// <summary>
-    /// <c>kafka_consumer_PartitionInfo_offline_replica</c> — the offline replica
+    /// <c>kafka_common_PartitionInfo_offline_replica</c> — the offline replica
     /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
     /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
     /// </summary>
@@ -2080,7 +2080,7 @@ internal static partial class NativeMethods
     // M11/P1 declared the construct + lifecycle subset (below). M11/P2 adds the async
     // PERIPHERALS — flush / close / partitions-for (over the push completion bridge) plus
     // the sync flush/close counterparts for the graceful Dispose upgrade. The SEND
-    // DllImports (Producer_send, FutureRecordMetadata_*, RecordMetadata_*, the
+    // DllImports (Producer_send, KafkaFuture_RecordMetadata_*, RecordMetadata_*, the
     // MockProducer send-control helpers) remain deliberately NOT declared here — they land
     // additively in the later send phase (and the ffi §A7 pull-vs-push decision with them).
 
@@ -2293,10 +2293,10 @@ internal static partial class NativeMethods
     //     runs"), not a violation of it.
     //   * COMPLETION side (BOTH flavors) — UNCHANGED. On the ASYNC flavor that is ffi §A7's
     //     pull pump: a single SendCompletionPump thread per NativeProducer drains a batched
-    //     FutureRecordMetadata_get_all and frees the futures with
-    //     FutureRecordMetadata_destroy_all. The SYNC flavor has NO pump at all (verified
+    //     KafkaFuture_RecordMetadata_get_all and frees the futures with
+    //     KafkaFuture_RecordMetadata_destroy_all. The SYNC flavor has NO pump at all (verified
     //     NativeProducer.cs:504) — it completes on the caller's own thread via the blocking
-    //     FutureRecordMetadata_get (:603). Neither is touched: this phase does NOT reopen
+    //     KafkaFuture_RecordMetadata_get (:603). Neither is touched: this phase does NOT reopen
     //     pull-vs-push, and it moves only the SEND submission side of the async flavor.
     //
     // Why the reversal is on the record rather than silent: Option A was analysed and NOT
@@ -2326,14 +2326,14 @@ internal static partial class NativeMethods
     // are declared, and the ASYNC send path goes through them. The second clause
     // STANDS on both paths: Producer_send_async and any per-send Cdecl callback remain
     // undeclared, because that is Option B, which this phase does NOT adopt (M11/P3.1 §1.5).
-    // Likewise unchanged: the optional fast-path FutureRecordMetadata_is_done and the
+    // Likewise unchanged: the optional fast-path KafkaFuture_RecordMetadata_is_done and the
     // RecordMetadata_copy callback are deliberately NOT declared — the pump enqueues every
     // send and reads the per-field metadata accessors (no dead/unused DllImport, M11/P3
     // PLAN §6.1).
 
     /// <summary>
     /// <c>kafka_producer_Producer_send</c> — sends a single record (sync enqueue), returning a
-    /// non-null <c>FutureRecordMetadata_t</c> handle on success or null with a non-null
+    /// non-null <c>KafkaFuture_RecordMetadata_t</c> handle on success or null with a non-null
     /// <paramref name="outError"/> on a synchronous validation failure. The core copies
     /// <paramref name="key"/> / <paramref name="value"/> into the batch buffer
     /// <b>synchronously during the call</b> (verified <c>rust/src/ffi/producer.rs</c>), so the
@@ -2371,7 +2371,7 @@ internal static partial class NativeMethods
     /// <summary>
     /// <c>kafka_producer_Producer_send_batch</c> — sends <paramref name="count"/> records in one
     /// call, writing one result pair per index: <paramref name="outFutures"/><c>[i]</c> is a non-null
-    /// <c>FutureRecordMetadata_t</c> and <paramref name="outErrors"/><c>[i]</c> null on success, or
+    /// <c>KafkaFuture_RecordMetadata_t</c> and <paramref name="outErrors"/><c>[i]</c> null on success, or
     /// the reverse on a <b>per-record</b> failure. Returns the number of records that succeeded. The
     /// callee writes <b>both</b> slots for every index (verified <c>send_batch_inner</c> — every
     /// early-continue branch assigns both), so the caller reads all <paramref name="count"/> pairs
@@ -2404,7 +2404,7 @@ internal static partial class NativeMethods
         IntPtr* outErrors);
 
     /// <summary>
-    /// <c>kafka_producer_FutureRecordMetadata_get_all</c> — blocks until every future in
+    /// <c>kafka_common_KafkaFuture_RecordMetadata_get_all</c> — blocks until every future in
     /// <paramref name="futures"/> (<paramref name="count"/> entries) resolves, writing the
     /// parallel results into <paramref name="outMetadata"/> / <paramref name="outErrors"/>:
     /// per index exactly one is non-null (metadata on success, error on failure). The future
@@ -2424,7 +2424,7 @@ internal static partial class NativeMethods
         [Out] IntPtr[] outErrors);
 
     /// <summary>
-    /// <c>kafka_producer_FutureRecordMetadata_destroy_all</c> — frees the
+    /// <c>kafka_common_KafkaFuture_RecordMetadata_destroy_all</c> — frees the
     /// <paramref name="count"/> future handles in <paramref name="futures"/> (null entries
     /// skipped). Called by the pump after <see cref="FutureRecordMetadataGetAll"/> reads each
     /// result (<c>get_all</c> does not consume the futures, ffi §A2).
@@ -2435,16 +2435,16 @@ internal static partial class NativeMethods
     // ---- kafka_producer_Producer_t — the SYNC SEND path (M11/P4, ffi §A1/§A5, PLAN §3 decision #2) ----
     //
     // The sync producer's Send blocks on the caller's OWN thread — Producer_send (inline, shared with
-    // the async path) then the BLOCKING FutureRecordMetadata_get, with no pump / TCS / callback. The
+    // the async path) then the BLOCKING KafkaFuture_RecordMetadata_get, with no pump / TCS / callback. The
     // block happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — this is
     // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
-    // header (Mode A). The singular FutureRecordMetadata_destroy (below) is used instead of the
+    // header (Mode A). The singular KafkaFuture_RecordMetadata_destroy (below) is used instead of the
     // pump's _destroy_all wherever one future is freed or the free path must not allocate (no
     // 1-element array); it is a genuinely-used DllImport (not dead — see its own remarks for the
     // three call sites).
 
     /// <summary>
-    /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
+    /// <c>kafka_common_KafkaFuture_RecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
     /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
     /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
     /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
@@ -2461,7 +2461,7 @@ internal static partial class NativeMethods
     internal static extern IntPtr FutureRecordMetadataGet(IntPtr future, out IntPtr outError);
 
     /// <summary>
-    /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
+    /// <c>kafka_common_KafkaFuture_RecordMetadata_destroy</c> — frees a single future handle. Null-safe
     /// (no-op). Used wherever exactly one future is freed, or wherever the free path must not
     /// allocate, because the singular form avoids the 1-element array
     /// <see cref="FutureRecordMetadataDestroyAll"/> would need: the sync

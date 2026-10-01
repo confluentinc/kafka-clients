@@ -36,7 +36,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </para>
 /// <para>
 /// A <see cref="IntPtr.Zero"/> future stands in for a real one: the fault-in-place branch frees the
-/// future through <c>FutureRecordMetadata_destroy_all</c>, which skips null entries (null-safe by
+/// future through <c>KafkaFuture_RecordMetadata_destroy_all</c>, which skips null entries (null-safe by
 /// contract), so no native handle is needed to exercise the branch.
 /// </para>
 /// </remarks>

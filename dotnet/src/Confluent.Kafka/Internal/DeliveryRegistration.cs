@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Internal;
 /// <c>RecordMetadata_copy</c> convenience (ffi §A6) and the <c>*_async</c> push completions
 /// (ffi §A7 / §B6). This one does not: the delivery callback rides on the <b>existing</b> pull
 /// completion path (ffi §A7 Option C — the singular <c>Producer_send</c> plus the batched
-/// <c>FutureRecordMetadata_get_all</c> pump, or the sync blocking <c>FutureRecordMetadata_get</c>),
+/// <c>KafkaFuture_RecordMetadata_get_all</c> pump, or the sync blocking <c>KafkaFuture_RecordMetadata_get</c>),
 /// so there is <b>no</b> <c>[UnmanagedFunctionPointer]</c> delegate, no <c>GCHandle</c>, no
 /// <c>user_data</c>, no <c>user_data_destroy</c> hook and <b>no new <c>[DllImport]</c></b> — the
 /// whole family is Mode A. Consequently none of §A6's keep-alive / no-unwind-into-native

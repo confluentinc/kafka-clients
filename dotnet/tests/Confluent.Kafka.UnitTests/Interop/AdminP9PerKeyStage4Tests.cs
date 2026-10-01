@@ -27,7 +27,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// M15/P9 CP5 — <c>deleteAcls</c>, the first and only RPC whose per-key <b>key</b> is an
 /// owned handle (shape 4a): the callback receives a
-/// <c>kafka_common_AclBindingFilter_t*</c> it must destroy, alongside the owned value and
+/// <c>kafka_common_acl_AclBindingFilter_t*</c> it must destroy, alongside the owned value and
 /// owned error every other per-key RPC already had.
 /// </summary>
 /// <remarks>

@@ -29,7 +29,7 @@ internal static class ProducerSendMarshal
 {
     /// <summary>
     /// Sends one record synchronously through <c>kafka_producer_Producer_send</c> and returns the
-    /// resulting <c>FutureRecordMetadata_t</c> handle. The topic and the key / value buffers are
+    /// resulting <c>KafkaFuture_RecordMetadata_t</c> handle. The topic and the key / value buffers are
     /// pinned only for the duration of the P/Invoke — the core copies them into the batch buffer
     /// during the call, so the pins are released the moment this returns (ffi §A4). Sentinels
     /// (§A4): an <b>absent</b> (<see langword="null"/>) key/value passes
@@ -50,7 +50,7 @@ internal static class ProducerSendMarshal
     /// <param name="timestamp">The timestamp in ms, or <c>-1</c> to let the producer stamp it.</param>
     /// <param name="key">The record key, or <see langword="null"/> for no key.</param>
     /// <param name="value">The record value, or <see langword="null"/> for a tombstone.</param>
-    /// <returns>A non-null <c>FutureRecordMetadata_t</c> handle on success.</returns>
+    /// <returns>A non-null <c>KafkaFuture_RecordMetadata_t</c> handle on success.</returns>
     /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
     internal static unsafe IntPtr Send(
         SafeProducerHandle producer,

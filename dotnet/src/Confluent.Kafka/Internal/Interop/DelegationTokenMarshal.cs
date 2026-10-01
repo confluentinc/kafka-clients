@@ -19,7 +19,7 @@ using System.Runtime.InteropServices;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a borrowed <c>kafka_common_DelegationToken_t</c> — and the
+/// Copies a borrowed <c>kafka_common_security_token_delegation_DelegationToken_t</c> — and the
 /// <c>TokenInformation_t</c> / <c>KafkaPrincipal_t</c> tree under it — out into the owned
 /// managed shape.
 /// </summary>
@@ -31,7 +31,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </para>
 /// <para>
 /// ⚠⚠ <b>The MAC is length-delimited, not NUL-terminated</b>
-/// (header, <c>kafka_common_DelegationToken_hmac</c>) — the only such slice on the admin surface.
+/// (header, <c>kafka_common_security_token_delegation_DelegationToken_hmac</c>) — the only such slice on the admin surface.
 /// It is read through <c>out_len</c>; a NUL-scan would truncate at the first interior zero byte,
 /// which a uniformly random 32-byte MAC contains roughly one time in eight, and the truncated MAC
 /// then round-trips into a broker-side rejection rather than a local failure (ffi §B3).
@@ -71,7 +71,7 @@ internal static class DelegationTokenMarshal
     /// <returns>The borrowed MAC pointer.</returns>
     internal delegate IntPtr HmacAccessor(IntPtr token, out int length);
 
-    /// <summary>The production <c>kafka_common_DelegationToken_hmac</c>.</summary>
+    /// <summary>The production <c>kafka_common_security_token_delegation_DelegationToken_hmac</c>.</summary>
     internal static readonly HmacAccessor NativeHmac = NativeMethods.DelegationTokenHmac;
 
     /// <summary>

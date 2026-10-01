@@ -158,7 +158,7 @@ internal static class ProducerSendBatchMarshal
     /// <summary>
     /// Sends exactly one record through <c>kafka_producer_Producer_send_batch</c>
     /// (<c>count == 1</c>) from already-pinned buffers, and returns its
-    /// <c>FutureRecordMetadata_t</c> handle. Allocation-free: the record and the one result pair
+    /// <c>KafkaFuture_RecordMetadata_t</c> handle. Allocation-free: the record and the one result pair
     /// live on the stack, so the send path's DoD §10 budget is unchanged.
     /// </summary>
     /// <param name="producer">
@@ -171,7 +171,7 @@ internal static class ProducerSendBatchMarshal
     /// <param name="topic">A pinned NUL-terminated UTF-8 topic pointer, valid for this call.</param>
     /// <param name="keyPin">The key pin, valid for this call (the caller releases it afterwards).</param>
     /// <param name="valuePin">The value pin, valid for this call (the caller releases it afterwards).</param>
-    /// <returns>A non-null <c>FutureRecordMetadata_t</c> handle on success.</returns>
+    /// <returns>A non-null <c>KafkaFuture_RecordMetadata_t</c> handle on success.</returns>
     /// <exception cref="KafkaException">The core reported a per-record send failure.</exception>
     internal static unsafe IntPtr SendOne(
         SafeProducerHandle producer,

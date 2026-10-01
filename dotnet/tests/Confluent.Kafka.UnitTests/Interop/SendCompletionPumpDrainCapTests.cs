@@ -232,7 +232,7 @@ public sealed class SendCompletionPumpDrainCapTests
         // It needs REAL futures: with the null-future stand-in the other tests use there is nothing
         // to double-free, so the bug would pass unnoticed. A large group at exactly the array
         // capacity fills every slot, then a 2-record group must touch only its own two. A double
-        // free of a FutureRecordMetadata_t corrupts the allocator, so — as with the other
+        // free of a KafkaFuture_RecordMetadata_t corrupts the allocator, so — as with the other
         // use-after-free guards in this project — the assertion is that this completes at all, plus
         // that both groups settled.
         const int Large = SendCompletionPump.DrainCap;

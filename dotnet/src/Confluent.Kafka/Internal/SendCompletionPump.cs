@@ -27,9 +27,9 @@ namespace Confluent.Kafka.Internal;
 /// background thread per <see cref="NativeProducer"/> that takes one <c>send_batch</c> group at a
 /// time off an unbounded MPSC queue (M11/P3.2 §3B — the anchor's unit, one <c>BatchNode</c> per
 /// <c>get_all</c>), blocks on a batched
-/// <c>FutureRecordMetadata_get_all</c>, completes each <see cref="TaskCompletionSource{TResult}"/>
+/// <c>KafkaFuture_RecordMetadata_get_all</c>, completes each <see cref="TaskCompletionSource{TResult}"/>
 /// (built with <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>), and frees the
-/// future handles with <c>FutureRecordMetadata_destroy_all</c>. There is no <b>native</b> per-send
+/// future handles with <c>KafkaFuture_RecordMetadata_destroy_all</c>. There is no <b>native</b> per-send
 /// callback and no producer handle here — the pump owns only the flat transient future / metadata /
 /// error handles (ffi §A2 Category 2); the producer-outlives-pump invariant is enforced by
 /// <see cref="NativeProducer"/>'s teardown ordering (stop + join the pump before

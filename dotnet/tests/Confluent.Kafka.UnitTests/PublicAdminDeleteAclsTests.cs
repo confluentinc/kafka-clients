@@ -33,7 +33,7 @@ namespace Confluent.Kafka.UnitTests;
 /// (<c>MockAdminClient.java:816-818</c>) and the Rust mock mirrors it as one exceptional
 /// future <em>per filter</em> (<c>admin-client.md</c> §9). The ABI still materialises a real
 /// result table, so the <b>key</b> reader runs over real borrowed
-/// <c>kafka_common_AclBindingFilter_t</c> handles and each filter-level error is read through
+/// <c>kafka_common_acl_AclBindingFilter_t</c> handles and each filter-level error is read through
 /// <see cref="KafkaException.FromBorrowedHandle"/> — real native memory, not a stand-in. What
 /// the mock cannot reach is a filter-level <em>success</em>, and with it the whole inner
 /// axis; <c>AdminP6ResultMarshalTests</c> covers that by injection.

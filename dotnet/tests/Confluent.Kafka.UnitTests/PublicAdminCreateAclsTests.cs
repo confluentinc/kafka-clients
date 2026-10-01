@@ -33,7 +33,7 @@ namespace Confluent.Kafka.UnitTests;
 /// (<c>MockAdminClient.java:806-808</c>) and the Rust mock mirrors it as one exceptional
 /// future <em>per binding</em> (<c>admin-client.md</c> §9). That still exercises the whole
 /// receive path: the walk reads a real <c>kafka_admin_CreateAclsResult_t</c>, reassembles
-/// each key from a real borrowed <c>kafka_common_AclBinding_t</c>, and reads each per-key
+/// each key from a real borrowed <c>kafka_common_acl_AclBinding_t</c>, and reads each per-key
 /// error through <see cref="KafkaException.FromBorrowedHandle"/> — so the key reader and
 /// the borrowed-error rule are covered by real native memory, not by a stand-in.
 /// </para>

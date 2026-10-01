@@ -476,7 +476,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_create_acls_callback_t</c>:
-    /// <c>void (*)(kafka_common_AclBinding_t* binding, kafka_common_KafkaError_t* error,
+    /// <c>void (*)(kafka_common_acl_AclBinding_t* binding, kafka_common_KafkaError_t* error,
     /// void* user_data)</c> — result shape <b>4b</b>, fired <b>exactly <c>count</c>
     /// times</b>; a null <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
@@ -520,7 +520,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_alter_client_quotas_callback_t</c>:
-    /// <c>void (*)(kafka_common_ClientQuotaEntity_t* entity,
+    /// <c>void (*)(kafka_common_quota_ClientQuotaEntity_t* entity,
     /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4b</b>,
     /// fired <b>once per entity</b>; a null <paramref name="error"/> <em>is</em> the
     /// success value.
@@ -1028,7 +1028,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// <c>deleteAcls</c>' per-key <b>key</b> reader: the OWNED
-    /// <c>kafka_common_AclBindingFilter_t</c> the callback is handed, copied out before
+    /// <c>kafka_common_acl_AclBindingFilter_t</c> the callback is handed, copied out before
     /// <see cref="CompletePerKeyOwnedKey{TKey, TValue}"/>'s <c>finally</c> destroys it.
     /// </summary>
     internal static readonly Func<IntPtr, AclBindingFilter> DeleteAclsPerKeyKey =
@@ -1036,7 +1036,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// <c>createAcls</c>' per-key <b>key</b> reader: the OWNED
-    /// <c>kafka_common_AclBinding_t</c> the callback is handed, copied out before
+    /// <c>kafka_common_acl_AclBinding_t</c> the callback is handed, copied out before
     /// <see cref="CompletePerKeyVoidOwnedKey{TKey}"/>'s <c>finally</c> destroys it.
     /// </summary>
     internal static readonly Func<IntPtr, AclBinding> CreateAclsPerKeyKey =
@@ -1044,7 +1044,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// <c>alterClientQuotas</c>' per-key <b>key</b> reader: the OWNED
-    /// <c>kafka_common_ClientQuotaEntity_t</c> the callback is handed, copied out before
+    /// <c>kafka_common_quota_ClientQuotaEntity_t</c> the callback is handed, copied out before
     /// <see cref="CompletePerKeyVoidOwnedKey{TKey}"/>'s <c>finally</c> destroys it.
     /// </summary>
     internal static readonly Func<IntPtr, ClientQuotaEntity> AlterClientQuotasPerKeyKey =
@@ -1052,7 +1052,7 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// <c>deleteAcls</c>' per-key value reader, over the owned
-    /// <c>kafka_admin_DeleteAclsFilterResults_t</c> rather than the retired root's
+    /// <c>kafka_admin_FilterResults_t</c> rather than the retired root's
     /// <c>(i, j)</c> pair.
     /// </summary>
     internal static readonly Func<IntPtr, DeleteAclsResult.FilterResults>

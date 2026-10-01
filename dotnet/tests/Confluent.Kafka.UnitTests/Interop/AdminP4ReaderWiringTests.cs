@@ -357,7 +357,7 @@ public sealed class AdminP4ReaderWiringTests
 
     /// <summary>
     /// <c>deleteAcls</c>' <b>per-key</b> value reader captures the three accessors of the
-    /// OWNED <c>DeleteAclsFilterResults_t</c> it is handed — not the retired root's
+    /// OWNED <c>FilterResults_t</c> it is handed — not the retired root's
     /// two-index twins above, which take a filter index it no longer has (M15/P9 CP5).
     /// </summary>
     [Fact]
@@ -556,7 +556,7 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
-    /// ⚠⚠ Every member of the shared <c>kafka_common_AclBindingFilter_*</c> bundle is bound
+    /// ⚠⚠ Every member of the shared <c>kafka_common_acl_AclBindingFilter_*</c> bundle is bound
     /// to <b>its own</b> ABI symbol — the positional guard the closure scan cannot give
     /// (M15/P6, finding 76.1).
     /// </summary>
@@ -566,8 +566,8 @@ public sealed class AdminP4ReaderWiringTests
     /// <c>ResourceType</c>/<c>PatternType</c>, or any two of
     /// <c>ResourceName</c>/<c>Principal</c>/<c>Host</c> — moves a symbol to the wrong row
     /// and fails here. The expected symbols are the header's own accessor order
-    /// (header, <c>kafka_common_AclBindingFilter_resource_type</c> through
-    /// <c>kafka_common_AclBindingFilter_permission_type</c>).
+    /// (header, <c>kafka_common_acl_AclBindingFilter_resource_type</c> through
+    /// <c>kafka_common_acl_AclBindingFilter_permission_type</c>).
     /// </remarks>
     [Fact]
     public void NativeFilterAccessors_BindEveryMemberToItsOwnAbiSymbol()
@@ -598,7 +598,7 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
-    /// Every member of the shared <c>kafka_common_ClientQuotaEntity_*</c> bundle is bound to
+    /// Every member of the shared <c>kafka_common_quota_ClientQuotaEntity_*</c> bundle is bound to
     /// <b>its own</b> ABI symbol (M15/P6).
     /// </summary>
     /// <remarks>

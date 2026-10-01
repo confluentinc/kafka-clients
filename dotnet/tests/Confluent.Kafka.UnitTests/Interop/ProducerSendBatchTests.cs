@@ -300,7 +300,7 @@ public sealed class ProducerSendBatchTests
 
     /// <summary>
     /// Frees every non-null handle the ABI wrote: the futures via the singular
-    /// <c>FutureRecordMetadata_destroy</c>, any remaining errors via
+    /// <c>KafkaFuture_RecordMetadata_destroy</c>, any remaining errors via
     /// <c>KafkaError_destroy</c> (both null-safe).
     /// </summary>
     private static void FreeResults(IntPtr[] futures, IntPtr[] errors)

@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// The seven-array row projector shared by the ACL RPCs, plus the reader that restores
-/// Java's nesting from the ABI's flat <c>kafka_common_AclBinding_t</c>.
+/// Java's nesting from the ABI's flat <c>kafka_common_acl_AclBinding_t</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -32,7 +32,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// only place that rule is implemented.</b> On a <em>filter</em> row a null name means
 /// "match any resource name" and travels as <see cref="IntPtr.Zero"/>, while <c>""</c> is
 /// a filter on the literal empty name and must travel as a <b>non-null</b> pointer to a
-/// NUL byte (header, <c>kafka_common_AclBindingFilter_resource_name</c>). Collapsing the two turns
+/// NUL byte (header, <c>kafka_common_acl_AclBindingFilter_resource_name</c>). Collapsing the two turns
 /// a filter on <c>""</c> into match-everything, which on <c>delete_acls</c> deletes ACLs the caller
 /// never asked to delete. Concrete rows never carry a null (the value types reject one at
 /// construction), so both paths go through <see cref="PinName"/> and cannot diverge.
@@ -56,7 +56,7 @@ internal static class AclRowMarshal
         "The admin result produced no ACL binding for an index within its own count.";
 
     /// <summary>
-    /// The production <c>kafka_common_AclBindingFilter_*</c> set. Shared by every ACL result,
+    /// The production <c>kafka_common_acl_AclBindingFilter_*</c> set. Shared by every ACL result,
     /// so — unlike a result's own <c>get_filter</c> — it is not cross-wirable.
     /// </summary>
     internal static readonly FilterAccessors NativeFilterAccessors = new FilterAccessors(
@@ -168,7 +168,7 @@ internal static class AclRowMarshal
         (result, index) => ReadBinding(getBinding(result, index));
 
     /// <summary>
-    /// Copies one borrowed <c>kafka_common_AclBinding_t</c> out into the nested managed
+    /// Copies one borrowed <c>kafka_common_acl_AclBinding_t</c> out into the nested managed
     /// shape, reassembling <see cref="ResourcePattern"/> from accessors 1-3 and
     /// <see cref="AccessControlEntry"/> from accessors 4-7 (PLAN D36).
     /// </summary>
@@ -207,7 +207,7 @@ internal static class AclRowMarshal
         (result, index) => ReadFilter(getFilter(result, index));
 
     /// <summary>
-    /// Copies one borrowed <c>kafka_common_AclBindingFilter_t</c> out into the nested managed
+    /// Copies one borrowed <c>kafka_common_acl_AclBindingFilter_t</c> out into the nested managed
     /// shape, reassembling <see cref="ResourcePatternFilter"/> from accessors 1-3 and
     /// <see cref="AccessControlEntryFilter"/> from accessors 4-7 (PLAN D36).
     /// </summary>
@@ -219,7 +219,7 @@ internal static class AclRowMarshal
     /// ⚠ The three strings are read <b>without</b> a null guard, unlike
     /// <see cref="ReadBinding"/>'s: on a filter a null pointer means "match any" and must
     /// come back as <see langword="null"/>, distinct from a pointer to the empty string
-    /// (header, <c>kafka_common_AclBindingFilter_resource_name</c>).
+    /// (header, <c>kafka_common_acl_AclBindingFilter_resource_name</c>).
     /// </remarks>
     internal static AclBindingFilter ReadFilter(IntPtr filter) =>
         ReadFilter(filter, NativeFilterAccessors);
@@ -265,7 +265,7 @@ internal static class AclRowMarshal
         ?? throw new KafkaException($"The admin result produced no {field} for an ACL binding.");
 
     /// <summary>
-    /// The seven flat <c>kafka_common_AclBindingFilter_*</c> accessors, as one set.
+    /// The seven flat <c>kafka_common_acl_AclBindingFilter_*</c> accessors, as one set.
     /// </summary>
     internal sealed class FilterAccessors
     {

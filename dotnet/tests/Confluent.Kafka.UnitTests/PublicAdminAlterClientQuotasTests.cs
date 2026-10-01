@@ -34,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 /// (<c>MockAdminClient.java:1249-1251</c>) — and the Rust mock surfaces it as one exceptional
 /// future <em>per entity</em> (<c>admin-client.md</c> §9). That still exercises the whole
 /// receive path: the walk reads a real <c>kafka_admin_AlterClientQuotasResult_t</c>, rebuilds
-/// each key from a real borrowed <c>kafka_common_ClientQuotaEntity_t</c>, and reads each
+/// each key from a real borrowed <c>kafka_common_quota_ClientQuotaEntity_t</c>, and reads each
 /// per-entity error through <see cref="KafkaException.FromBorrowedHandle"/>.
 /// </para>
 /// <para>

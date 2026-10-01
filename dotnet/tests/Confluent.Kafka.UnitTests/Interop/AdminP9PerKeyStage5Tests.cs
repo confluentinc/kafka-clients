@@ -64,7 +64,7 @@ public sealed class AdminP9PerKeyStage5Tests
     // ------------------------------------------------------------------------------------
 
     /// <summary>
-    /// ⚠ <b>The owned <c>kafka_common_AclBinding_t</c> key.</b> Three bindings differing only
+    /// ⚠ <b>The owned <c>kafka_common_acl_AclBinding_t</c> key.</b> Three bindings differing only
     /// in resource name each fault under their own key, which is only possible if the
     /// trampoline copied the handle out into an equal <see cref="AclBinding"/> before
     /// destroying it.
@@ -89,7 +89,7 @@ public sealed class AdminP9PerKeyStage5Tests
     }
 
     /// <summary>
-    /// ⚠ <b>The owned <c>kafka_common_ClientQuotaEntity_t</c> key</b>, whose reader has to
+    /// ⚠ <b>The owned <c>kafka_common_quota_ClientQuotaEntity_t</c> key</b>, whose reader has to
     /// rebuild a whole entity map — and whose expected message carries the core's typo.
     /// </summary>
     [Fact]

@@ -65,7 +65,7 @@ public sealed class AdminP6ResultMarshalTests
     private static readonly IntPtr s_root = new IntPtr(0x6060);
 
     /// <summary>
-    /// A stand-in for the owned <c>DeleteAclsFilterResults_t *</c> a per-key callback is
+    /// A stand-in for the owned <c>FilterResults_t *</c> a per-key callback is
     /// handed; never dereferenced.
     /// </summary>
     private static readonly IntPtr s_value = new IntPtr(0x6161);
@@ -421,7 +421,7 @@ public sealed class AdminP6ResultMarshalTests
 
     /// <summary>
     /// The sub-shape-3b walk builds an ordered collection out of real borrowed
-    /// <c>kafka_common_AclBinding_t</c> handles and copies every element out <b>before</b> the
+    /// <c>kafka_common_acl_AclBinding_t</c> handles and copies every element out <b>before</b> the
     /// root dies.
     /// </summary>
     /// <remarks>

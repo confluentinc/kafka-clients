@@ -392,7 +392,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_partitions_for_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
+    /// <c>void (*)(kafka_common_PartitionInfoList_t* list,
     /// kafka_common_Error_t* error, void* user_data)</c> — the owned-handle completion
     /// shape (§B6/§B7), the <c>PartitionInfoList_t</c> analog of <see cref="PollCallback"/>.
     /// </summary>
@@ -451,7 +451,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_list_topics_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_TopicPartitionInfoMap_t* map,
+    /// <c>void (*)(kafka_common_TopicPartitionInfoMap_t* map,
     /// kafka_common_Error_t* error, void* user_data)</c> — the owned-handle completion
     /// shape (§B6/§B7), the <c>TopicPartitionInfoMap_t</c> analog of
     /// <see cref="PollCallback"/>.
@@ -527,7 +527,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature shared by all three listener callbacks
     /// (<c>kafka_consumer_ConsumerRebalanceListener_on_partitions_{revoked,assigned,lost}_callback_t</c>):
-    /// <c>kafka_common_Error_t* (*)(kafka_consumer_TopicPartitionList_t* partitions,
+    /// <c>kafka_common_Error_t* (*)(kafka_common_TopicPartitionList_t* partitions,
     /// void* user_data)</c>. The three ABI typedefs are distinct C types with an identical
     /// layout, so one delegate type binds all three parameters of
     /// <see cref="NativeMethods.ConsumerRebalanceListenerNew"/>.

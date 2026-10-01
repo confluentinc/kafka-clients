@@ -616,7 +616,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>producer.send(record).get()</c> — M11/P4 decision #1/#2). Runs entirely on the caller's
     /// thread with <b>no pump / TCS / callback</b>: preconditions → <c>Producer_send</c>
     /// (call-scoped pinning, the core copies key/value synchronously, ffi §A4) → the <b>blocking</b>
-    /// <c>FutureRecordMetadata_get</c> → copy-out → free every handle.
+    /// <c>KafkaFuture_RecordMetadata_get</c> → copy-out → free every handle.
     /// </summary>
     /// <remarks>
     /// <b>Direct sync ABI, not sync-over-async (ffi §A1).</b> The blocking <c>get</c>'s
@@ -669,7 +669,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// (<c>KafkaProducer.java:1073-1076</c>). The same holds, further up, for the
     /// <see cref="ObjectDisposedException"/> here and for the null-record / null-callback /
     /// serializer preconditions in the public <c>Send</c> skin.</item>
-    /// <item><c>FutureRecordMetadata_get</c> returning an error → <b>callback fires</b>, with Java's
+    /// <item><c>KafkaFuture_RecordMetadata_get</c> returning an error → <b>callback fires</b>, with Java's
     /// <c>-1</c> placeholder metadata, and <em>then</em> the throw. Java has already fired on the
     /// I/O thread by the time <c>produceFuture.done()</c> releases the caller's
     /// <c>future.get()</c>.</item>
@@ -678,7 +678,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// record <em>was</em> accepted. This surface's share of <b>recorded residual 3</b>
     /// (<see cref="IDeliveryCallback"/>), in both of its conditions: the
     /// <see cref="KafkaException.FromHandle(IntPtr)"/> read of a reported error can fail for
-    /// sub-case (a)'s reason (a completion was in hand), and <c>FutureRecordMetadata_get</c> is its
+    /// sub-case (a)'s reason (a completion was in hand), and <c>KafkaFuture_RecordMetadata_get</c> is its
     /// own separate native entry point, so the P/Invoke itself can fail for sub-case (b)'s reason
     /// (none was). It is <b>not</b> a separate residual site: there is no batch here to fault
     /// wholesale, so the throw simply propagates out of this method. The mirror-image window on the
@@ -1183,7 +1183,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <b>Flush BEFORE the join — the manual-mock no-hang fix (M11/P3).</b> The pump may be blocked
-    /// inside a <c>FutureRecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
+    /// inside a <c>KafkaFuture_RecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
     /// cannot be interrupted, so <c>_thread.Join()</c> would hang until that future resolves. The
     /// core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks the producer
     /// closed (verified <c>rust/src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only

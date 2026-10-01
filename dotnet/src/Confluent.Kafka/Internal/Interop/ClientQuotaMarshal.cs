@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>get_entry_name</c> returns null both out of range and when the entry names the
 /// built-in default entity; inside <c>0..entry_count-1</c> a null therefore means "default
 /// entity" — Java's null map value — never a skipped entry and never <c>""</c>
-/// (header, <c>kafka_common_ClientQuotaEntity_get_entry_name</c>).
+/// (header, <c>kafka_common_quota_ClientQuotaEntity_get_entry_name</c>).
 /// </para>
 /// <para>
 /// The string pins are <b>call-scoped</b> (ffi §A4): the ABI copies the filter out during
@@ -55,7 +55,7 @@ internal static class ClientQuotaMarshal
     internal delegate int QuotaCountAccessor(IntPtr result, int index);
 
     /// <summary>
-    /// The production <c>kafka_common_ClientQuotaEntity_*</c> set. Shared by every quota
+    /// The production <c>kafka_common_quota_ClientQuotaEntity_*</c> set. Shared by every quota
     /// result, so — unlike a result's own <c>get_entity</c> — it is not cross-wirable.
     /// </summary>
     internal static readonly EntityAccessors NativeEntityAccessors = new EntityAccessors(
@@ -142,7 +142,7 @@ internal static class ClientQuotaMarshal
         (result, index) => ReadEntity(getEntity(result, index));
 
     /// <summary>
-    /// Copies one borrowed <c>kafka_common_ClientQuotaEntity_t</c> out into the managed
+    /// Copies one borrowed <c>kafka_common_quota_ClientQuotaEntity_t</c> out into the managed
     /// value type.
     /// </summary>
     /// <param name="entity">The borrowed entity pointer; it dies with the result root.</param>
@@ -181,7 +181,7 @@ internal static class ClientQuotaMarshal
 
             // ⚠ Inside the count a null name is Java's null map value — the built-in default
             // entity for the type — never a skip and never "" (header,
-            // kafka_common_ClientQuotaEntity_get_entry_name).
+            // kafka_common_quota_ClientQuotaEntity_get_entry_name).
             entries.Add(type, Utf8Marshal.PtrToString(accessors.GetEntryName(entity, index)));
         }
 
@@ -231,7 +231,7 @@ internal static class ClientQuotaMarshal
         };
 
     /// <summary>
-    /// The three flat <c>kafka_common_ClientQuotaEntity_*</c> accessors, as one set.
+    /// The three flat <c>kafka_common_quota_ClientQuotaEntity_*</c> accessors, as one set.
     /// </summary>
     internal sealed class EntityAccessors
     {

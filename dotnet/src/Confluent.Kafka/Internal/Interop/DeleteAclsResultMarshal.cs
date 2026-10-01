@@ -93,7 +93,7 @@ internal static class DeleteAclsResultMarshal
 
     /// <summary>
     /// The per-key twin of <see cref="FilterResultsReader"/>, over the OWNED
-    /// <c>kafka_admin_DeleteAclsFilterResults_t</c> a per-key callback is handed: one index
+    /// <c>kafka_admin_FilterResults_t</c> a per-key callback is handed: one index
     /// axis instead of two, and the accessors take the value handle itself.
     /// </summary>
     /// <param name="getCount">That value's <c>count()</c>.</param>

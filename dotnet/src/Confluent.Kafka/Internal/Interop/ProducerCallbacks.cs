@@ -34,8 +34,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// the <b>owned-handle</b> shape (<c>kafka_producer_Producer_partitions_for_callback_t</c>:
 /// <c>(PartitionInfoList*, KafkaError*, void*)</c>) — signature-identical to the consumer's
 /// <c>partitions_for_callback_t</c> and reusing the consumer's shared
-/// <c>kafka_consumer_PartitionInfoList_t</c> (the header names it after the consumer sibling
-/// deliberately), so the shipped <see cref="PartitionInfoListMarshal"/> applies verbatim. A
+/// <c>kafka_common_PartitionInfoList_t</c> (a <c>kafka_common_</c> type since master #209,
+/// which named it after Java's <c>org.apache.kafka.common</c> package), so the shipped <see cref="PartitionInfoListMarshal"/> applies verbatim. A
 /// thin producer-local mirror (rather than reusing the consumer delegate types) keeps the
 /// producer module self-documenting (PLAN §3, "recommend the mirror").
 /// </para>
@@ -97,7 +97,7 @@ internal static class ProducerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_producer_Producer_partitions_for_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
+    /// <c>void (*)(kafka_common_PartitionInfoList_t* list,
     /// kafka_common_Error_t* error, void* user_data)</c> — the <b>owned-handle</b>
     /// completion shape (ffi §A6/§B6). On success <paramref name="list"/> is a non-null owned
     /// list and <paramref name="error"/> is null; on failure <paramref name="list"/> is null
