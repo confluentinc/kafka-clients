@@ -24,7 +24,8 @@ blocks in Java:
     `async fn subscribe_with_pattern(...)`,
     `async fn subscribe_with_pattern_listener(...)`
   - `async fn unsubscribe()`, `async fn close()`,
-    `async fn close_with_timeout(...)`, `async fn close_with_options(...)`
+    `async fn close_with_options(...)` (Java's `@Deprecated close(Duration)`
+    is not translated — pass `CloseOptions::new_timeout(..)` instead)
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
 
 Java methods that do not block remain synchronous:
@@ -45,7 +46,7 @@ Two notes on the names above, so neither is "corrected" back later:
   - **The `_with_` infixes are mandated by CLAUDE.md §2**, which requires
     `<base>_with_<param1>_<param2>` for every overload beyond the
     intersection-of-parameters one. `subscribe_with_topics`,
-    `close_with_timeout`, `close_with_options`, `commit_sync_with_offsets` etc.
+    `close_with_options`, `commit_sync_with_offsets` etc.
     are therefore not verbose spellings to be shortened — the plain name is
     reserved for the overload that exists in Java with the intersection
     parameter set.
@@ -148,27 +149,42 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         fn subscription(&self) -> HashSet<String>;
         fn paused(&self) -> HashSet<TopicPartition>;
         fn wakeup(&self);
-        fn group_metadata(&self) -> ConsumerGroupMetadata;
+        // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
+        // its constructors; it becomes an interface in Kafka 5.0).
+        fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
         fn client_id(&self) -> &str;
     }
 
-    pub fn new_consumer<K, V>(config: ConsumerConfig)
-        -> Result<Box<dyn Consumer<K, V>>, Error>
-    where K: Send + Sync + 'static, V: Send + Sync + 'static
-    {
-        match config.group_protocol() {
-            GroupProtocol::Consumer =>
-                Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(config)?)),
-            GroupProtocol::Classic => Err(Error::unsupported_version(
-                "Classic group protocol is not yet supported in this client; \
-                 set group.protocol=consumer (KIP-848).",
-            )),
+    impl KafkaConsumer {
+        // Java's constructor returns the delegate `ConsumerDelegateCreator`
+        // chose; Rust returns it boxed rather than wrapping it again.
+        pub fn new<K, V>(
+            config: ConsumerConfig,
+            key_deserializer: Box<dyn Deserializer<K>>,
+            value_deserializer: Box<dyn Deserializer<V>>,
+        ) -> Result<Box<dyn Consumer<K, V>>, Error>
+        where K: Send + Sync + 'static, V: Send + Sync + 'static
+        {
+            match GroupProtocol::of(config.group_protocol())? {
+                GroupProtocol::Consumer => Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(
+                    config, key_deserializer, value_deserializer)?)),
+                GroupProtocol::Classic => Err(Error::unsupported_version(
+                    "Classic group protocol is not yet supported in this client; \
+                     set group.protocol=consumer (KIP-848).",
+                )),
+            }
         }
     }
 
 Implementations in Milestone 8:
 
-  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer.
+  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
+    `consumer.internals`, so it is `pub(crate)`: users reach it only through
+    `KafkaConsumer::new` as a `Box<dyn Consumer<K, V>>`.
+    `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
+    with no Java class; it stays public through an entry in
+    `rust/xtask/public-audience-allowlist.txt`, because listeners need it for
+    in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
     (`add_record`, `set_pollable`, etc.) as inherent methods on the concrete
@@ -177,11 +193,11 @@ Implementations in Milestone 8:
     expected.
 
 A `ClassicKafkaConsumer<K, V>` impl may be added later without breaking
-changes; `new_consumer` just gains a new arm.
+changes; `KafkaConsumer::new` just gains a new arm.
 
-**Why `#[async_trait]` despite CLAUDE.md §11:**
+**Why `#[async_trait]` despite CLAUDE.md §13:**
 
-CLAUDE.md §11 cautions against `Pin<Box<dyn Future>>` per call on **hot
+CLAUDE.md §13 cautions against `Pin<Box<dyn Future>>` per call on **hot
 paths**. The `Consumer` dispatch surface is *not* a hot path:
 
   - `poll()` is called at batch granularity (≤ ~100/sec realistically); the
@@ -207,9 +223,9 @@ Benefits over an enum-dispatch alternative:
 **How to apply:**
 
   - Define `Consumer<K, V>` as one `#[async_trait]` trait in
-    `src/consumer/mod.rs`. Public method surface mirrors
+    `rust/src/consumer/mod.rs`. Public method surface mirrors
     `Consumer.java` (Apache Kafka 4.2).
-  - Expose `Box<dyn Consumer<K, V>>` from the `new_consumer` factory.
+  - Expose `Box<dyn Consumer<K, V>>` from the `KafkaConsumer::new` factory.
   - `AsyncKafkaConsumer` and `MockConsumer` both `impl Consumer<K, V> for ...`.
   - Tests construct `MockConsumer` directly and pass it as `&mut dyn
     Consumer<K, V>` to code-under-test. No enum match, no `as_mock_mut`
@@ -267,7 +283,7 @@ I/O-bound on the same `NetworkClient`).
     because the Rust `Selector::connect` awaits the TCP handshake instead of
     being non-blocking like Java NIO. A `select!` that drops the poll at that
     `await` strands the node in `Connecting` with no socket; it only recovers
-    after the ~10 s connection-setup-timeout (CLAUDE.md §9.6.1). This produced a
+    after the ~10 s connection-setup-timeout (CLAUDE.md §11.6.1). This produced a
     severe intermittent join stall — full analysis in
     `design/current/consumer-join-stall-rootcause.md`.
 
@@ -289,7 +305,7 @@ I/O-bound on the same `NetworkClient`).
     non-blocking like Java NIO, so the poll has no side-effect-before-`await`;
     that is not currently done.)
   - Do NOT `tokio::spawn` inside the bg task for per-request or per-event
-    work (CLAUDE.md §11).
+    work (CLAUDE.md §13).
 
 ## 11. `wakeup()` semantics: rotating `CancellationToken`
 
@@ -342,7 +358,7 @@ Java's `SubscriptionState` 1:1 — the Java source is the contract.
 
 **Why std `Mutex` and not `tokio::Mutex`:**
 
-Critical sections are short, CPU-bound, never awaiting (per CLAUDE.md §9.6).
+Critical sections are short, CPU-bound, never awaiting (per CLAUDE.md §11.6).
 `std::sync::Mutex` is faster (no async overhead) and `poisoned()` surfaces
 panics, which is correct here. Do NOT use `parking_lot::Mutex` —
 non-poisoning semantics silently leaves state inconsistent after a panic.
@@ -358,7 +374,7 @@ Java's `synchronized` blocks, simplifying behavior-parity review.
   - One `Arc<Mutex<SubscriptionState>>` per consumer instance, cloned into
     the bg task at spawn time.
   - Lock acquire → mutate / read → drop guard. NEVER hold the guard across
-    an `.await` (CLAUDE.md §9.6).
+    an `.await` (CLAUDE.md §11.6).
   - In particular: drop the guard before invoking a
     `ConsumerRebalanceListener` callback, before sending on any mpsc
     channel that could block, and before any `network_client` call.
@@ -406,7 +422,7 @@ compatibility but is NOT in scope now.
     `ConsumerConfig`, `ConsumerRecord`, `ConsumerRecords`,
     `ConsumerGroupMetadata`, `ConsumerRebalanceListener`,
     `OffsetCommitCallback`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
-    `OffsetResetStrategy`, `GroupProtocol`, `CloseOptions`,
+    `GroupProtocol`, `CloseOptions`,
     `SubscriptionPattern`, the consumer exception hierarchy.
 
 **Out of scope (do NOT translate):**
@@ -430,8 +446,8 @@ compatibility but is NOT in scope now.
     `ConsumerProtocol.deserializeAssignment(...)` to decode a classic member's
     raw assignment bytes into a `Set<TopicPartition>`. So `ConsumerProtocol`
     (translated in full per DoD #2 →
-    `src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
-    `Subscription` data holders (→ `src/consumer/consumer_partition_assignor.rs`)
+    `rust/src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
+    `Subscription` data holders (→ `rust/src/consumer/consumer_partition_assignor.rs`)
     ARE in scope; only the `ConsumerPartitionAssignor` **trait** and the
     client-side assignors remain out of scope. `ConsumerProtocolTest` remains
     listed below as out-of-scope, but the Admin-exercised (de)serialization
@@ -474,11 +490,11 @@ Match Java behavior. Specifically:
 
 When classic-protocol support is added later, all of the above out-of-scope
 files become a new module/phase. The current public API does not change;
-`new_consumer` gains a new arm in its match.
+`KafkaConsumer::new` gains a new arm in its match.
 
 ## 27. Receive-path zero-copy contract
 
-CLAUDE.md §12 forbids copying key/value/header bytes through the producer
+CLAUDE.md §14 forbids copying key/value/header bytes through the producer
 send path. The symmetric rule on the receive path:
 
   - `FetchResponse` bytes arriving from the network are owned by exactly
@@ -542,7 +558,7 @@ in a batch) only if profiling shows header allocation is hot.
     buffer + a parsing cursor instead, decode lazily.
   - `String::from_utf8(topic_bytes.clone())` per record — clone the
     `Arc<str>` from `SubscriptionState` instead.
-  - Per-record `tokio::spawn` on the fetch path (CLAUDE.md §11).
+  - Per-record `tokio::spawn` on the fetch path (CLAUDE.md §13).
 
 **Tests required:**
 

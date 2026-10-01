@@ -1,0 +1,185 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! An interface for asynchronous, multi-channel network I/O.
+//!
+//! Translated from `org.apache.kafka.common.network.Selectable`.
+
+use super::ChannelState;
+use super::NetworkReceive;
+use super::NetworkSend;
+
+use std::collections::HashMap;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
+
+/// See [`Selectable::connect`] — use the platform default buffer size.
+///
+/// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an interface
+/// field and therefore implicitly `public static final`.
+///
+/// Module-level rather than an associated const on [`Selectable`], per CLAUDE.md
+/// §2: a constant that Java associates with an interface is exported through the
+/// module containing the trait. An associated const would make the trait
+/// non-dyn-compatible (E0038) and would be unnameable without a `Self` type
+/// (E0790), which forced callers outside an `impl` to write
+/// `<Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE`. Same treatment as
+/// `AdminApiFuture::UNKNOWN_BROKER_ID`.
+///
+/// Note this does not by itself make [`Selectable`] dyn-compatible — [`Selectable::connect`]
+/// and the other I/O methods return `impl Future`, so `dyn Selectable` remains
+/// impossible. The rule is applied because §2 asks for it uniformly, not because the
+/// const was the binding constraint.
+pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
+
+/// An interface for asynchronous, multi-channel network I/O.
+///
+/// Translated from the Java `Selectable` interface.
+///
+/// All I/O methods are `async` per CLAUDE.md rule 10.
+#[doc(alias = "org.apache.kafka.common.network.Selectable")]
+pub trait Selectable: Send {
+    /// Begin establishing a socket connection to the given address identified by
+    /// the given id.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id for this connection
+    /// * `address` - The address to connect to
+    /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
+    /// * `send_buffer_size` - The send buffer for the socket
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    /// * `receive_buffer_size` - The receive buffer for the socket
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if we cannot begin connecting.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connect")]
+    fn connect(
+        &mut self,
+        id: &str,
+        address: SocketAddr,
+        peer_host: &str,
+        send_buffer_size: i32,
+        receive_buffer_size: i32,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// Wakeup this selector if it is blocked on I/O.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#wakeup")]
+    fn wakeup(&self);
+
+    /// Returns a lock-free handle to this selector's wakeup primitive.
+    ///
+    /// Not present in Java: there, `Selector.wakeup()` is called directly
+    /// across threads because `nioSelector.wakeup()` is itself thread-safe.
+    /// In Rust the selector lives behind the `NetworkClientDelegate`'s async
+    /// `Mutex`, which is held for the whole duration of a `poll()`. To wake an
+    /// in-progress poll from another task *without* taking that lock (and
+    /// without cancelling the poll — see the join-stall root cause in
+    /// `design/current/consumer-join-stall-rootcause.md`), callers grab this
+    /// `Arc<Notify>` once and fire `notify_one()` on it. It is the same
+    /// `Notify` the selector's own `poll()` awaits, so firing it makes the
+    /// blocking wait return at a safe boundary.
+    fn wakeup_handle(&self) -> Arc<Notify>;
+
+    /// Returns the [`Notify`] handle used by the selector's poll loop.
+    ///
+    /// Callers can use this to share the selector's wakeup mechanism,
+    /// ensuring that `notify_one()` on the returned handle causes the
+    /// selector's `poll()` to return promptly.
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        Arc::new(Notify::new())
+    }
+
+    /// Close this selector.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#close")]
+    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Close the connection identified by the given id.
+    fn close_channel(&mut self, id: &str) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Queue the given request for sending in the subsequent `poll()` calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the channel does not exist.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#send")]
+    fn send(&mut self, send: NetworkSend) -> Result<(), String>;
+
+    /// Do I/O. Reads, writes, connection establishment, etc.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout_ms` - The amount of time to block if there is nothing to do
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if I/O fails.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#poll")]
+    fn poll(&mut self, timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// The list of sends that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedSends")]
+    fn completed_sends(&self) -> &[NetworkSend];
+
+    /// The collection of receives that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedReceives")]
+    fn completed_receives(&self) -> Vec<&NetworkReceive>;
+
+    /// Drains the receives that completed on the last `poll()` call, returning
+    /// each receive's source id and payload buffer **by move** — the payload
+    /// `Vec<u8>` is taken out of the selector without copying (§27 receive-path
+    /// zero-copy, Phase 20 Fix #3).
+    ///
+    /// After this call the internal `completed_receives` list is empty, so the
+    /// next `poll()`'s clear is a no-op. Callers must therefore drain exactly
+    /// once per poll cycle (the network client does so in
+    /// `handle_completed_receives`). Unlike [`Self::completed_receives`], which
+    /// borrows and forces a `to_vec()` copy of each payload, this avoids the
+    /// per-fetch payload copy entirely.
+    fn drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)>;
+
+    /// The connections that finished disconnecting on the last `poll()` call.
+    /// Channel state indicates the local channel state at the time of disconnection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#disconnected")]
+    fn disconnected(&self) -> &HashMap<String, ChannelState>;
+
+    /// The list of connections that completed their connection on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connected")]
+    fn connected(&self) -> &[String];
+
+    /// Disable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#mute")]
+    fn mute(&mut self, id: &str);
+
+    /// Re-enable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmute")]
+    fn unmute(&mut self, id: &str);
+
+    /// Disable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#muteAll")]
+    fn mute_all(&mut self);
+
+    /// Re-enable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmuteAll")]
+    fn unmute_all(&mut self);
+
+    /// Returns `true` if a channel is ready.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#isChannelReady")]
+    fn is_channel_ready(&self, id: &str) -> bool;
+}
