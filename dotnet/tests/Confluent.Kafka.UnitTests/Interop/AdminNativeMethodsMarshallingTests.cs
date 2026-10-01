@@ -203,8 +203,8 @@ public sealed class AdminNativeMethodsMarshallingTests
     /// <remarks>
     /// ⚠ The second prefix keeps the sweep's reach unchanged across master #209, which
     /// renamed the C ABI to Java package names and so moved <c>TopicPartitionInfo</c>
-    /// (Java <c>org.apache.kafka.common.TopicPartitionInfo</c>) from
-    /// <c>kafka_admin_TopicPartitionInfo_*</c> to <c>kafka_common_TopicPartitionInfo_*</c>.
+    /// (Java <c>org.apache.kafka.common.TopicPartitionInfo</c>) from the <c>kafka_admin_</c>
+    /// prefix to <c>kafka_common_TopicPartitionInfo_*</c>.
     /// They are still admin-surface declarations (<c>describeTopics</c>' partition rows),
     /// and two of them — <c>has_elr</c> / <c>has_last_known_elr</c> — are <c>bool</c>
     /// returns, so a <c>kafka_admin_</c>-only filter would silently drop them from
