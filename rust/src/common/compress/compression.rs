@@ -251,27 +251,7 @@ impl Compression {
     ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
     ///   is implemented; the parameter is accepted for forward compatibility.
     #[doc(alias = "org.apache.kafka.common.compress.Compression#wrapForInput")]
-    pub fn wrap_for_input<R: Read>(&self, reader: R, message_version: i8) -> io::Result<DecompressingReader<R>> {
-        self.wrap_for_input_with_limit(reader, message_version, usize::MAX)
-    }
-
-    /// Like [`wrap_for_input`](Self::wrap_for_input), for a stream that may
-    /// decompress to at most `max_decompressed_bytes` (D4).
-    ///
-    /// A Rust-only addition: Java decompresses a batch record by record and
-    /// needs no bound. Only the xerial snappy reader consumes the limit, because
-    /// only its blocks declare a decompressed length that would otherwise size
-    /// an allocation: a block that would take the stream past the limit is
-    /// refused before its buffer exists. The other codecs' own buffers are
-    /// bounded by the codec — gzip's 32 KiB window, lz4's 4 MiB maximum block
-    /// size, zstd's default window limit — and the caller bounds their output as
-    /// it reads it.
-    pub(crate) fn wrap_for_input_with_limit<R: Read>(
-        &self,
-        reader: R,
-        _message_version: i8,
-        max_decompressed_bytes: usize,
-    ) -> io::Result<DecompressingReader<R>> {
+    pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
             Self::Gzip(_) => {
@@ -279,7 +259,7 @@ impl Compression {
                 Ok(DecompressingReader::Gzip(decoder))
             },
             Self::Snappy => {
-                let decoder = XerialSnappyReader::new(reader, max_decompressed_bytes);
+                let decoder = XerialSnappyReader::new(reader);
                 Ok(DecompressingReader::Snappy(decoder))
             },
             Self::Lz4(_) => {

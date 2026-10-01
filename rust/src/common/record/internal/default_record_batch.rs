@@ -38,10 +38,8 @@
 //! Corresponds to Java's `org.apache.kafka.common.record.internal.DefaultRecordBatch`.
 
 use std::io;
-use std::io::Read;
 
 use crate::common::InvalidRecordError;
-use crate::common::compress;
 use crate::common::compress::Compression;
 use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
@@ -64,31 +62,6 @@ pub struct DefaultRecordBatch {
 }
 
 impl DefaultRecordBatch {
-    /// The most bytes one record batch may decompress to (D4).
-    ///
-    /// Java has no such bound: it decompresses a batch record by record as the
-    /// consumer iterates (`DefaultRecordBatch.java:279-297`), so a zip bomb costs it
-    /// time, not memory. This client decompresses a batch once, into the buffer its
-    /// records borrow from (`consumer-threading.md` §27), so without a bound a small
-    /// compressed batch could demand gigabytes.
-    ///
-    /// A stored batch decompresses to its compressed size — at most the broker's
-    /// `message.max.bytes`, by default 1 MiB + 12 bytes
-    /// (`ServerLogConfigs.MAX_MESSAGE_BYTES_DEFAULT`, `ServerLogConfigs.java:177`) —
-    /// times its compression ratio, and the ratio has no bound in principle.
-    /// Reaching 1 GiB on a default broker takes a ratio of roughly 1000:1, which
-    /// realistic data does not produce. A broker with a raised `message.max.bytes`
-    /// serving highly compressible topics could reach it, and there a Java consumer
-    /// streams the batch while this client fails it. That is the case for promoting
-    /// this constant to a configuration key, which is to be done only if a user hits
-    /// it.
-    pub const MAX_DECOMPRESSED_BATCH_BYTES: usize = 1 << 30;
-
-    /// The most bytes one `read` asks a decompressor for while a batch is
-    /// decompressed, and so the furthest the output buffer can grow past
-    /// [`MAX_DECOMPRESSED_BATCH_BYTES`](Self::MAX_DECOMPRESSED_BATCH_BYTES) (or a lower limit) before the limit is seen.
-    pub(crate) const DECOMPRESSION_READ_CHUNK_BYTES: usize = 16 * 1024;
-
     // Attribute masks
     const COMPRESSION_CODEC_MASK: u8 = 0x07;
 
@@ -157,51 +130,6 @@ impl DefaultRecordBatch {
         } else {
             sequence - decrement
         }
-    }
-
-    /// Reads `reader` to its end into one buffer that never grows past `max_bytes`
-    /// by more than one read (D4).
-    ///
-    /// Replaces `read_to_end`, whose doubling has no ceiling. The capacity starts at
-    /// `size_hint` (the compressed size) and doubles, but is clamped to
-    /// `max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES`, and each `read` is offered at
-    /// most one chunk, so no capacity above that ceiling is ever requested; the
-    /// first byte past `max_bytes` is an error. Every reservation is
-    /// `try_reserve_exact`, so an allocation the process cannot satisfy is an error
-    /// rather than an abort, and each byte of spare capacity is zeroed once.
-    fn read_decompressed<R: Read>(reader: &mut R, size_hint: usize, max_bytes: usize) -> io::Result<Vec<u8>> {
-        let ceiling = max_bytes.saturating_add(Self::DECOMPRESSION_READ_CHUNK_BYTES);
-        let mut decompressed: Vec<u8> = Vec::new();
-        // `decompressed[..filled]` is output; `decompressed[filled..]` is zeroed
-        // space not yet read into.
-        let mut filled = 0;
-        loop {
-            if filled == decompressed.len() {
-                if decompressed.len() == decompressed.capacity() {
-                    // `filled <= max_bytes < ceiling`, so the target is always past
-                    // the current length.
-                    let target = decompressed.capacity().saturating_mul(2).max(size_hint).max(1).min(ceiling);
-                    decompressed
-                        .try_reserve_exact(target - decompressed.len())
-                        .map_err(io::Error::other)?;
-                }
-                let zeroed = decompressed.capacity().min(filled + Self::DECOMPRESSION_READ_CHUNK_BYTES);
-                decompressed.resize(zeroed, 0);
-            }
-            match reader.read(&mut decompressed[filled..]) {
-                Ok(0) => break,
-                Ok(read) => {
-                    filled += read;
-                    if filled > max_bytes {
-                        return Err(compress::decompressed_size_limit_error(max_bytes));
-                    }
-                },
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
-                Err(e) => return Err(e),
-            }
-        }
-        decompressed.truncate(filled);
-        Ok(decompressed)
     }
 
     /// A decompression failure, in the message the batch reader has always used.
@@ -549,26 +477,18 @@ impl DefaultRecordBatch {
     /// §27, this allocation happens once per compressed batch — never per
     /// record.
     ///
-    /// Returns an error if the batch is corrupt, decompression fails, or the
-    /// records decompress to more than `max_bytes`.
-    pub fn decompress_records(&self, max_bytes: usize) -> Result<Vec<u8>, InvalidRecordError> {
-        self.as_ref().decompress_records(max_bytes)
+    /// Returns an error if the batch is corrupt or decompression fails.
+    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
+        self.as_ref().decompress_records()
     }
 
     /// Iterate over the records in this batch.
     ///
     /// For uncompressed batches, reads records directly from the buffer.
-    /// For compressed batches, decompresses all records into memory first, at
-    /// most [`MAX_DECOMPRESSED_BATCH_BYTES`](DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES) of them (D4).
+    /// For compressed batches, decompresses all records into memory first.
     ///
     /// Returns an error if the batch is corrupt.
     pub fn iter_records(&self) -> Result<Vec<DefaultRecord>, InvalidRecordError> {
-        self.iter_records_with_limit(DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES)
-    }
-
-    /// [`iter_records`](Self::iter_records) with the decompression limit as a
-    /// parameter, so a test can drive it down to a few bytes.
-    fn iter_records_with_limit(&self, max_decompressed_bytes: usize) -> Result<Vec<DefaultRecord>, InvalidRecordError> {
         let num_records = self.count();
         if num_records == 0 {
             return Ok(Vec::new());
@@ -627,41 +547,20 @@ impl DefaultRecordBatch {
         } else {
             // Decompress and read records from the stream
             let compression = Compression::of(self.compression_type()).build();
-            // D4: the stream may yield `max_decompressed_bytes`; `take` stops it
-            // one byte later, so a batch that decompresses to more is visible as
-            // an exhausted limit rather than read to its end. `take` enforces the
-            // limit for every codec alike, so the limit is not also handed to
-            // the reader: a snappy reader that refused a block itself would
-            // surface here as a failed record read, indistinguishable from any
-            // other. Its blocks stay bounded by what their bytes can encode, and
-            // an owned batch is one this client built or already validated.
             let mut reader = compression
                 .wrap_for_input(records_data, self.magic())
-                .map_err(DefaultRecordBatch::decompression_error)?
-                .take((max_decompressed_bytes as u64).saturating_add(1));
-            let limit_exceeded = || {
-                DefaultRecordBatch::decompression_error(compress::decompressed_size_limit_error(max_decompressed_bytes))
-            };
+                .map_err(DefaultRecordBatch::decompression_error)?;
 
             let mut records = Vec::with_capacity(capacity_hint);
             for _ in 0..num_records {
-                let record = match DefaultRecord::read_from_stream(
+                let record = DefaultRecord::read_from_stream(
                     &mut reader,
                     base_offset,
                     base_timestamp,
                     base_sequence,
                     log_append_time,
-                ) {
-                    Ok(record) => record,
-                    // The stream was cut at the limit: report the limit, not the
-                    // record it cut short.
-                    Err(_) if reader.limit() == 0 => return Err(limit_exceeded()),
-                    Err(e) => return Err(e),
-                };
+                )?;
                 records.push(record);
-            }
-            if reader.limit() == 0 {
-                return Err(limit_exceeded());
             }
 
             // Check that no data remains
@@ -1168,22 +1067,16 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// §27, this allocation happens once per compressed batch — never per
     /// record.
     ///
-    /// At most `max_bytes` are decompressed (D4): the buffer's capacity never
-    /// exceeds `max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES`, and the first byte
-    /// past `max_bytes` fails the batch — see [`read_decompressed`](DefaultRecordBatch::read_decompressed). The consumer
-    /// passes `FetchConfig::max_decompressed_batch_bytes`, which is
-    /// [`MAX_DECOMPRESSED_BATCH_BYTES`](DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES) outside tests.
-    ///
-    /// Returns an error if the batch is corrupt, decompression fails, or the
-    /// records decompress to more than `max_bytes`.
-    pub fn decompress_records(&self, max_bytes: usize) -> Result<Vec<u8>, InvalidRecordError> {
+    /// Returns an error if the batch is corrupt or decompression fails.
+    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
         let records_data = self.records_section();
         let compression = Compression::of(self.compression_type()).build();
         let mut reader = compression
-            .wrap_for_input_with_limit(records_data, self.magic(), max_bytes)
+            .wrap_for_input(records_data, self.magic())
             .map_err(DefaultRecordBatch::decompression_error)?;
-        DefaultRecordBatch::read_decompressed(&mut reader, records_data.len(), max_bytes)
-            .map_err(DefaultRecordBatch::decompression_error)
+        let mut decompressed = Vec::new();
+        io::Read::read_to_end(&mut reader, &mut decompressed).map_err(DefaultRecordBatch::decompression_error)?;
+        Ok(decompressed)
     }
 }
 
@@ -1922,89 +1815,6 @@ mod tests {
             &records,
         );
         DefaultRecordBatch::with_slice(records.buffer())
-    }
-
-    /// A reader that never ends, as a decompression bomb does not.
-    struct Endless;
-    impl io::Read for Endless {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            buf.fill(0);
-            Ok(buf.len())
-        }
-    }
-
-    /// The growth policy on its own: an endless stream is cut at the limit,
-    /// and no allocation larger than the limit plus one read chunk is ever
-    /// requested — `read_to_end` would have doubled without a ceiling.
-    #[test]
-    fn test_read_decompressed_never_grows_past_the_limit_and_a_chunk() {
-        for (size_hint, max_bytes) in [(0, 1000), (10, 1000), (100_000, 1000), (64, 200_000)] {
-            let (err, max_allocation) = {
-                let _guard = crate::AllocTrackingGuard::new();
-                let err = DefaultRecordBatch::read_decompressed(&mut Endless, size_hint, max_bytes)
-                    .expect_err("an endless stream");
-                (err, crate::AllocTrackingGuard::max_allocation())
-            };
-            assert_eq!(
-                format!("decompressed size exceeds the limit of {max_bytes} bytes per record batch"),
-                err.to_string()
-            );
-            assert!(
-                max_allocation <= max_bytes + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES,
-                "hint {size_hint}, limit {max_bytes}: allocated {max_allocation} bytes"
-            );
-        }
-    }
-
-    /// Every codec: a batch decompresses at exactly its size and fails one byte
-    /// under it, with the message naming the limit, and the returned buffer's
-    /// capacity stays within the limit plus one read chunk.
-    #[test]
-    fn test_decompress_records_is_bounded_for_every_codec() {
-        for compression_type in COMPRESSED_TYPES {
-            let batch = compressed_batch(compression_type);
-            let size = batch.decompress_records(usize::MAX).expect("an intact batch").len();
-
-            let decompressed = batch.decompress_records(size).expect("exactly at the limit");
-            assert_eq!(size, decompressed.len(), "{compression_type:?}");
-            assert!(
-                decompressed.capacity() <= size + DefaultRecordBatch::DECOMPRESSION_READ_CHUNK_BYTES,
-                "{compression_type:?}: capacity {} for {size} bytes",
-                decompressed.capacity()
-            );
-
-            let err = batch.decompress_records(size - 1).expect_err("one byte over the limit");
-            assert_eq!(
-                format!(
-                    "Failed to decompress record stream: decompressed size exceeds the limit of {} bytes per record \
-                     batch",
-                    size - 1
-                ),
-                err.message(),
-                "{compression_type:?}"
-            );
-        }
-    }
-
-    /// The owned path (`iter_records`) applies the same limit through `take`.
-    #[test]
-    fn test_iter_records_decompression_is_bounded_for_every_codec() {
-        for compression_type in COMPRESSED_TYPES {
-            let batch = compressed_batch(compression_type);
-            let size = batch.decompress_records(usize::MAX).expect("an intact batch").len();
-
-            assert_eq!(20, batch.iter_records_with_limit(size).expect("exactly at the limit").len());
-            let err = batch.iter_records_with_limit(size - 1).expect_err("one byte over the limit");
-            assert_eq!(
-                format!(
-                    "Failed to decompress record stream: decompressed size exceeds the limit of {} bytes per record \
-                     batch",
-                    size - 1
-                ),
-                err.message(),
-                "{compression_type:?}"
-            );
-        }
     }
 
     /// A declared count of `i32::MAX` no longer sizes the record list

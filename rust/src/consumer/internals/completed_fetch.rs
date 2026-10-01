@@ -1234,10 +1234,8 @@ impl CompletedFetch {
                 let source = if batch.try_is_compressed()? {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
-                    // D4: bounded by `max_decompressed_batch_bytes`; the
-                    // limit fails the batch like any other decompression failure.
                     let decompressed = batch
-                        .decompress_records(config.max_decompressed_batch_bytes)
+                        .decompress_records()
                         .map_err(|e| invalid_batch_error(&self.partition, meta.base_offset, e.message()))?;
                     // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
                     // without copying; records then slice_ref from it (§27).
@@ -2979,59 +2977,6 @@ mod tests {
                 )
             };
             assert_eq!(expected, cause(&err).message(), "fragment of {fragment_len} bytes");
-        }
-    }
-
-    // ── D4: a compressed batch's decompression is bounded ───────────────────
-
-    /// D4 through the cursor for every codec: with `max_decompressed_batch_bytes`
-    /// lowered to the batch's decompressed size its records come back, and one
-    /// byte lower the batch fails like any other decompression failure, with a
-    /// message naming the limit. The default limit is
-    /// `MAX_DECOMPRESSED_BATCH_BYTES`, which every other compressed-batch test
-    /// here runs under.
-    #[test]
-    fn test_decompression_limit_through_fetch_records_for_every_codec() {
-        for compression in [
-            Compression::gzip().build(),
-            Compression::snappy().build(),
-            Compression::lz4().build(),
-            Compression::zstd().build(),
-        ] {
-            let buf = new_multi_batch_records(0, 1, 10, compression.clone());
-            let size = DefaultRecordBatchRef::new(&buf)
-                .unwrap()
-                .decompress_records(usize::MAX)
-                .expect("an intact batch")
-                .len();
-            assert!(
-                size < 1024,
-                "{compression:?}: the limit under test is a few hundred bytes, not {size}"
-            );
-
-            let mut config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
-            config.max_decompressed_batch_bytes = size;
-            let mut cf = new_completed_fetch(0, buf.clone());
-            let records = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 100)
-                .expect("exactly at the limit");
-            assert_eq!(10, records.len(), "{compression:?}");
-
-            config.max_decompressed_batch_bytes = size - 1;
-            let mut cf = new_completed_fetch(0, buf);
-            let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 100)
-                .expect_err("one byte over the limit");
-            assert_eq!(SEEK_PAST_MESSAGE, err.message());
-            assert_eq!(
-                format!(
-                    "Record batch for partition test-0 at offset 0 is invalid, cause: Failed to decompress record \
-                     stream: decompressed size exceeds the limit of {} bytes per record batch",
-                    size - 1
-                ),
-                cause(&err).message(),
-                "{compression:?}"
-            );
         }
     }
 }

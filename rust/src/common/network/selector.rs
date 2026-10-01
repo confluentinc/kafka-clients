@@ -358,23 +358,13 @@ impl Selector {
         }
     }
 
-    /// Convenience constructor matching the common Java pattern: no receive
-    /// limit ([`UNLIMITED`](NetworkReceive::UNLIMITED)), as Java's
-    /// `Selector(long, Metrics, Time, String, ChannelBuilder, LogContext)` has
-    /// (`Selector.java:228-230`).
-    ///
-    /// The production clients no longer use it: the producer, the consumer and
-    /// the admin client pass a real cap to [`with_log_context`](Self::with_log_context)
-    /// (D5). It remains for tests.
+    /// Convenience constructor matching the common Java pattern.
     #[doc(alias = "org.apache.kafka.common.network.Selector#Selector")]
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::new(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder)
     }
 
     /// Create a new selector with default max receive size and a `LogContext`.
-    ///
-    /// The default is no limit, as in Java. The production clients no longer
-    /// use it; see [`with_defaults`](Self::with_defaults).
     #[doc(alias = "org.apache.kafka.common.network.Selector#Selector")]
     pub fn with_defaults_and_log_context(
         connection_max_idle_ms: i64,
