@@ -3,7 +3,7 @@
   <!--
     Shared MSBuild properties for every project in the Confluent.Kafka
     .NET binding. Applied to the library and the unit-test project alike.
-    See bindings/dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
+    See dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
   -->
 
   <PropertyGroup>

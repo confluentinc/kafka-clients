@@ -43,7 +43,8 @@
     <None>) is deliberate so it flows TRANSITIVELY to the referencing test project's
     output, where the native-load probe finds it at runtime. Path/filename are
     COMPUTED (never hardcoded, ffi §0.2): the per-OS filename Cargo emits and the
-    cargo profile dir from $(Configuration); the repo root is 4 dir levels up.
+    cargo profile dir from $(Configuration); the Rust workspace's target dir is
+    rust/target/ under the repo root, which is 3 dir levels up.
   -->
   <PropertyGroup>
     <!-- Per-OS filename Cargo emits — the `lib` prefix / OS suffix must be
@@ -57,9 +58,10 @@
     <CargoProfileDir>debug</CargoProfileDir>
     <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
 
-    <!-- Repo root is 4 dir levels up from this project
-         (src/Confluent.Kafka -> src -> dotnet -> bindings -> repo). -->
-    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../../target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
+    <!-- Repo root is 3 dir levels up from this project
+         (src/Confluent.Kafka -> src -> dotnet -> repo); the Rust workspace, and so
+         Cargo's target dir, is rust/ under it. -->
+    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -71,7 +73,7 @@
        DllNotFoundException surfaces only at runtime. -->
   <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build">
     <Error Condition="!Exists('$(NativeLibraryPath)')"
-           Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` from the repo root first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
+           Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` in rust/ first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
   </Target>
 
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /

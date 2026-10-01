@@ -13,7 +13,7 @@
     run by `dotnet <dll>` on a Linux box, never on .NET Framework).
 
     Kept OUT of Confluent.Kafka.sln with the exe (PLAN D11); run by
-    bindings/dotnet/Makefile's `test-soak-dotnet`, by path.
+    dotnet/Makefile's `test-soak-dotnet`, by path.
   -->
 
   <PropertyGroup>

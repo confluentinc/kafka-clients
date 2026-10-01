@@ -24,12 +24,12 @@
 # The local-directory mode is not a convenience: the Rust repository is not
 # public yet, so on a host that cannot clone it, the sources arrive by scp.
 #
-# Ordering is mandatory (bindings/dotnet/CLAUDE.md §7.1, firm). `dotnet build`
-# consumes target/<profile>/libconfluent_kafka.* -- Confluent.Kafka.csproj copies
+# Ordering is mandatory (dotnet/CLAUDE.md §7.1, firm). `dotnet build`
+# consumes rust/target/<profile>/libconfluent_kafka.* -- Confluent.Kafka.csproj copies
 # it into the output, and its EnsureNativeLibraryExists target fails the build
 # loudly if cargo has not run. So cargo runs first, always.
 #
-# Ported from bindings/python/soak/build.sh: the source resolution, the cargo
+# Ported from python/soak/build.sh: the source resolution, the cargo
 # step, the post-build test gate and the build-manifest writer are the same; the
 # venv/pip section becomes a `dotnet build` by path, and there is no
 # CONFLUENT_KAFKA_LIB_DIR (the csproj computes the native path itself).
@@ -61,7 +61,7 @@ Options:
   --label <text>    Free-form build label recorded alongside the sha.
   -h, --help        This message.
 
-Writes <source>/bindings/dotnet/soak/build-manifest.json (git SHA, toolchain
+Writes <source>/dotnet/soak/build-manifest.json (git SHA, toolchain
 versions, build time), which the soak client logs at startup so a two-week run
 is traceable to an exact commit.
 EOF
@@ -106,7 +106,7 @@ if [[ "$PROFILE" != "release" && "$PROFILE" != "debug" ]]; then
 fi
 
 # The .NET build configuration MUST match the cargo profile: the csproj maps
-# Configuration -> target/<debug|release>/ to find the native.
+# Configuration -> rust/target/<debug|release>/ to find the native.
 if [[ "$PROFILE" == "release" ]]; then
     DOTNET_CONFIG="Release"
 else
@@ -141,18 +141,18 @@ if [[ -n "$GIT_REF" ]]; then
     # Submodules are deliberately NOT initialised: `kafka` is a multi-GB Java
     # source reference and `unity` only backs the C unit tests. Neither is a
     # prerequisite of the cargo ffi build (build.rs generates from the in-repo
-    # generator/messages/ specs).
+    # rust/generator/messages/ specs).
 else
     ROOT="$(cd "$SRC_DIR" && pwd)"
-    if [[ ! -f "$ROOT/Cargo.toml" ]]; then
+    if [[ ! -f "$ROOT/rust/Cargo.toml" ]]; then
         echo "ERROR: $ROOT does not look like the client source tree "\
-             "(no Cargo.toml)" >&2
+             "(no rust/Cargo.toml)" >&2
         exit 2
     fi
     echo ">>> Building the source tree at $ROOT in place"
 fi
 
-SOAK_DIR="$ROOT/bindings/dotnet/soak"
+SOAK_DIR="$ROOT/dotnet/soak"
 if [[ ! -d "$SOAK_DIR" ]]; then
     echo "ERROR: $SOAK_DIR not found -- is this source tree too old?" >&2
     exit 1
@@ -161,22 +161,24 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Build the Rust client with the FFI feature
 #
-# Produces target/<profile>/libconfluent_kafka.{so,dylib,a} and
-# target/include/confluent_kafka.h.
+# Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
+# rust/target/include/confluent_kafka.h. cargo runs from rust/, so
+# rust-toolchain.toml and .cargo/config.toml resolve (as python/soak/build.sh
+# and rust/Makefile do).
 # ---------------------------------------------------------------------------
 CARGO_ARGS=(build --features ffi)
 [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
 
 echo ">>> cargo ${CARGO_ARGS[*]}"
-( cd "$ROOT" && cargo "${CARGO_ARGS[@]}" )
+( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
 
-LIB_DIR="$ROOT/target/$PROFILE"
+LIB_DIR="$ROOT/rust/target/$PROFILE"
 if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
 fi
-if [[ ! -f "$ROOT/target/include/confluent_kafka.h" ]]; then
-    echo "ERROR: target/include/confluent_kafka.h missing after the cargo build" >&2
+if [[ ! -f "$ROOT/rust/target/include/confluent_kafka.h" ]]; then
+    echo "ERROR: rust/target/include/confluent_kafka.h missing after the cargo build" >&2
     exit 1
 fi
 
@@ -186,7 +188,7 @@ fi
 # By PATH, never through Confluent.Kafka.sln: the soak is deliberately outside
 # the solution (it carries the OpenTelemetry dependency tree). No venv and no
 # CONFLUENT_KAFKA_LIB_DIR -- Confluent.Kafka.csproj computes the native path
-# from target/<profile>/ itself and copies it into the output.
+# from rust/target/<profile>/ itself and copies it into the output.
 # ---------------------------------------------------------------------------
 echo ">>> $DOTNET build -c $DOTNET_CONFIG (soak client)"
 "$DOTNET" build -c "$DOTNET_CONFIG" "$SOAK_DIR/SoakClient/SoakClient.csproj"

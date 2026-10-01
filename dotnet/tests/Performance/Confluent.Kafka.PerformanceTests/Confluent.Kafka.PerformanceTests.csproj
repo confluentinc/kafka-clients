@@ -20,7 +20,7 @@
     the failure mode item E exists to remove.
 
     TFMs net8.0;net10.0 (D4 — perf never runs on net462). Testcontainers 4.14.0 ships net10.0 + net8.0
-    assets. Directory.Build.props (at bindings/dotnet/) auto-applies (#nullable enable, dotnet/runtime
+    assets. Directory.Build.props (at dotnet/) auto-applies (#nullable enable, dotnet/runtime
     code style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4).
   -->
 

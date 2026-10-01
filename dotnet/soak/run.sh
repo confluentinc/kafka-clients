@@ -19,7 +19,7 @@
 # Usage:
 #   TESTID=<id> [HI=true] ./run.sh <client.config>
 #
-# Ported from bindings/python/soak/run.sh. The supervisor logic is UNCHANGED —
+# Ported from python/soak/run.sh. The supervisor logic is UNCHANGED —
 # real child-PID tracking, the EXIT_FATAL never-restart rule, the rotation gate
 # that protects crash evidence, the backoff doubling, `wc -c` instead of GNU
 # `stat -c%s`, the HI-mode config append and the jemalloc discovery are all

@@ -3,7 +3,7 @@
   <!--
     The .NET soak-test client (M16/P1) — a long-running producer/consumer endurance
     harness driven through the binding's PUBLIC API, the analog of the Python soak
-    at bindings/python/soak/. It is an operational tool, not a test of the binding's
+    at python/soak/. It is an operational tool, not a test of the binding's
     internals: it constructs AsyncKafkaProducer / AsyncKafkaConsumer / KafkaAdminClient
     exactly as a user would.
 
@@ -12,7 +12,7 @@
     functional gate's critical path, and `dotnet build $(SOLUTION)` must not restore
     the OpenTelemetry tree. The CONSEQUENCE, stated so it is not lost: the solution's
     format-verify pass does not cover this project either, so
-    bindings/dotnet/Makefile's `test-soak-dotnet` formats it BY PATH.
+    dotnet/Makefile's `test-soak-dotnet` formats it BY PATH.
 
     ⚠ NEW EXTERNAL DEPENDENCY (PLAN D12, root CLAUDE.md §1.2): the three OpenTelemetry
     packages below. They are scoped to this project and never reach src/Confluent.Kafka.
@@ -23,7 +23,7 @@
     native cdylib FIRST; the ProjectReference to Confluent.Kafka carries it transitively
     into this exe's output, where default [DllImport] probing resolves it.
 
-    Directory.Build.props (at bindings/dotnet/) auto-applies: #nullable enable,
+    Directory.Build.props (at dotnet/) auto-applies: #nullable enable,
     dotnet/runtime code style, TreatWarningsAsErrors, strong-name signing.
   -->
 

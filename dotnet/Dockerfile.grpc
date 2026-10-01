@@ -10,11 +10,11 @@
 # Multi-stage build for the .NET gRPC backend image used by the
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
-# bindings/dotnet/design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md.
+# dotnet/design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md.
 #
-# Build context MUST be the repo root because we copy from target/,
-# bindings/dotnet/, and multilanguage-test-server/. Use the Makefile target:
-#   make -C bindings/dotnet grpc-image
+# Build context MUST be the repo root because we copy from rust/target/,
+# rust/multilanguage-test-server/ and dotnet/. Use the Makefile target:
+#   make -C dotnet grpc-image
 #
 # Tags the result as confluent-kafka-rust/dotnet-grpc-server:dev.
 #
@@ -23,7 +23,7 @@
 # synchronous KafkaProducer<byte[],byte[]> / KafkaConsumer<byte[],byte[]> and
 # KafkaAdminClient over the C ABI. Requires
 # `cargo build --features ffi --release` to have produced the LINUX
-# libconfluent_kafka.so under target/release/ first (build-grpc-images: build).
+# libconfluent_kafka.so under rust/target/release/ first (build-grpc-images: build).
 
 # ---------------------------------------------------------------------------
 # Stage 1: Restore + publish the grpc-server app against the prebuilt Rust
@@ -33,30 +33,33 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
 
 WORKDIR /src
 
-# Recreate the repo layout the csprojs expect: the Rust native at
-# target/release/ (Confluent.Kafka.csproj's EnsureNativeLibraryExists probes it
-# 4 dir levels up from src/Confluent.Kafka), the shared build config at the
-# binding root (Directory.Build.props / .editorconfig / the strong-name key), the
-# library the server ProjectReferences, the server itself, and the proto crate
-# (the server's ProtoRoot resolves it 3 dir levels up from grpc-server).
-COPY target/release/libconfluent_kafka.so /src/target/release/libconfluent_kafka.so
-COPY target/include/confluent_kafka.h /src/target/include/confluent_kafka.h
-COPY bindings/dotnet/Directory.Build.props /src/bindings/dotnet/Directory.Build.props
-COPY bindings/dotnet/.editorconfig /src/bindings/dotnet/.editorconfig
-COPY bindings/dotnet/Confluent.Kafka.snk /src/bindings/dotnet/Confluent.Kafka.snk
-COPY bindings/dotnet/src /src/bindings/dotnet/src
-COPY bindings/dotnet/grpc-server /src/bindings/dotnet/grpc-server
-COPY multilanguage-test-server/proto /src/multilanguage-test-server/proto
+# Recreate the repo layout the csprojs expect, mirrored under /src: the Rust
+# native at rust/target/release/ (Confluent.Kafka.csproj's
+# EnsureNativeLibraryExists probes ../../../rust/target/ from
+# dotnet/src/Confluent.Kafka), the shared build config at the binding root
+# (Directory.Build.props / .editorconfig / the strong-name key), the library the
+# server ProjectReferences, the server itself, and the proto crate (the server's
+# ProtoRoot resolves ../../rust/multilanguage-test-server/proto from
+# dotnet/grpc-server). Both csproj paths are relative, so the in-image layout
+# must match the repo's.
+COPY rust/target/release/libconfluent_kafka.so /src/rust/target/release/libconfluent_kafka.so
+COPY rust/target/include/confluent_kafka.h /src/rust/target/include/confluent_kafka.h
+COPY dotnet/Directory.Build.props /src/dotnet/Directory.Build.props
+COPY dotnet/.editorconfig /src/dotnet/.editorconfig
+COPY dotnet/Confluent.Kafka.snk /src/dotnet/Confluent.Kafka.snk
+COPY dotnet/src /src/dotnet/src
+COPY dotnet/grpc-server /src/dotnet/grpc-server
+COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/proto
 
 # Scrub any bin/obj that rode in from a dev-machine build context — a stale
 # cross-OS NuGet assets file would break the Linux restore. CI checkouts are
 # clean, so this is a no-op there.
-RUN find /src/bindings/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+RUN find /src/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
 
 # Publish the server's net8.0 leg (the project also targets net10.0 for the
 # native build, M17/P1). Grpc.Tools generates the proto stubs during this build;
 # the ProjectReference builds only the net8.0 leg of Confluent.Kafka.
-RUN dotnet publish /src/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
+RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
         -c Release -f net8.0 -o /app
 
 # ---------------------------------------------------------------------------
@@ -76,7 +79,7 @@ WORKDIR /app
 # native-copy Content item flows transitively), but copy it explicitly too so the
 # native is guaranteed beside the app regardless of that item's behavior.
 COPY --from=builder /app /app
-COPY --from=builder /src/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
+COPY --from=builder /src/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 
 # Default [DllImport("confluent_kafka")] probing resolves the bare name to
 # libconfluent_kafka.so on the loader path; LD_LIBRARY_PATH=/app guarantees /app

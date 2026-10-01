@@ -16,7 +16,7 @@
     the ProjectReference to Confluent.Kafka carries the native (its Content copy) transitively into this
     exe's output, where default [DllImport] probing resolves it.
 
-    Directory.Build.props (at bindings/dotnet/) auto-applies (#nullable enable, dotnet/runtime code
+    Directory.Build.props (at dotnet/) auto-applies (#nullable enable, dotnet/runtime code
     style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4).
   -->
 

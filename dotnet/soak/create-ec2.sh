@@ -249,7 +249,7 @@ cat <<EOF
           'mkdir -p ~/confluent-kafka-rust && tar -x -C ~/confluent-kafka-rust'
 
       # on the instance, before running bootstrap.sh, fill in the three
-      # FILL_IN_* values in bindings/dotnet/soak/otel-config.yaml, then:
-      cd ~/confluent-kafka-rust/bindings/dotnet/soak
+      # FILL_IN_* values in dotnet/soak/otel-config.yaml, then:
+      cd ~/confluent-kafka-rust/dotnet/soak
       ./bootstrap.sh \$SHA "$LABEL"
 EOF
