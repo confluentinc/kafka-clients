@@ -1,6 +1,20 @@
-RUST_PROJECT_ROOT ?= $(realpath ../..)
+# .NET binding targets. Invoked by the repository root's cross-language
+# Makefile (`make -C dotnet $(ROOTS) <target>`), or directly from this directory.
+# REPO_ROOT / RUST_PROJECT_ROOT follow python/Makefile and c/Makefile:
+# RUST_PROJECT_ROOT is the Rust workspace (rust/), NOT the repository root.
+#
+# Every cargo command runs from $(RUST_PROJECT_ROOT), through rust/Makefile
+# (`$(MAKE) -C $(RUST_PROJECT_ROOT) <target>`): rust-toolchain.toml and
+# .cargo/config.toml (the `xtask` alias) are looked up from the current
+# directory, so `cargo --manifest-path rust/Cargo.toml` from here would lose both.
+REPO_ROOT ?= $(realpath ..)
+RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:dev
+# Native (non-container) gRPC server build for the multilanguage harness,
+# written under the Rust target dir, where rust/tests/common/backend_pool.rs
+# looks for it in MULTILANG_BACKEND_MODE=native (rust/target/grpc-native/dotnet).
+GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
 
 # .NET tooling knobs. `dotnet` is resolved from PATH (the CI job provisions it
 # via .semaphore/install-dotnet.sh; local dev uses its own install). Operations
@@ -11,21 +25,21 @@ GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:dev
 # building/formatting/testing the .sln never drags it in.
 DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
-SOLUTION := $(RUST_PROJECT_ROOT)/bindings/dotnet/Confluent.Kafka.sln
+SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
-.PHONY: grpc-image grpc-image-async grpc-native build-dotnet test-dotnet test-soak-dotnet
+.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
-# root so the Dockerfile can copy from target/release/, bindings/dotnet/, and
-# the multilanguage-test-server/ proto crate. Requires
-# `cargo build --features ffi --release` to have produced the Linux
-# libconfluent_kafka.so in target/release/ first.
+# root (as for python/ and c/) so the Dockerfile can copy from
+# rust/target/release/, dotnet/, and the rust/multilanguage-test-server/ proto
+# crate. Requires `cargo build --features ffi --release` to have produced the
+# Linux libconfluent_kafka.so in rust/target/release/ first.
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
-		-f $(RUST_PROJECT_ROOT)/bindings/dotnet/Dockerfile.grpc \
-		$(RUST_PROJECT_ROOT)
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc \
+		$(REPO_ROOT)
 
 # Build the *async* .NET gRPC backend image (dotnet_async backend, M8/P2).
 # Same build context and prerequisites as grpc-image; the image bakes
@@ -35,23 +49,66 @@ grpc-image:
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
-		-f $(RUST_PROJECT_ROOT)/bindings/dotnet/Dockerfile.grpc.async \
-		$(RUST_PROJECT_ROOT)
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async \
+		$(REPO_ROOT)
 
 # Build the .NET gRPC server for the native (host-process) multilanguage arm
-# (M17/P1): the net10.0 leg of grpc-server into target/grpc-native/dotnet, where
-# tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
+# (M17/P1): the net10.0 leg of grpc-server into rust/target/grpc-native/dotnet,
+# where rust/tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
 # brings the ASP.NET Core 10 runtime but no ASP.NET Core 8 one; the Docker images
 # publish the net8.0 leg instead. Invoked by the root `build-grpc-native-dotnet`,
 # which builds the Rust release artifacts first.
 #
 # `-c Release` is PINNED rather than $(DOTNET_CONFIG): Confluent.Kafka.csproj's
-# native-copy <Content> item copies target/$(CargoProfileDir)/libconfluent_kafka.*
+# native-copy <Content> item copies rust/target/$(CargoProfileDir)/libconfluent_kafka.*
 # into the output, CargoProfileDir follows the configuration, and only the release
 # native is built by build-rust-all-features. A Debug build would copy a stale or
 # missing debug native instead.
 grpc-native:
-	$(DOTNET) build -c Release -f net10.0 $(RUST_PROJECT_ROOT)/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(RUST_PROJECT_ROOT)/target/grpc-native/dotnet
+	$(DOTNET) build -c Release -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
+
+# The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
+# server images, then run the `__grpc_dotnet` tests of the Rust harness against
+# them (rust/Makefile's test-integration-grpc-dotnet; the filter also matches
+# `__grpc_dotnet_async`, and it carries the .NET-only DOTNET_GRPC_SKIPS). Reached
+# from the root's test-integration-dotnet and its -ssl / -sasl-ssl variants, which
+# select the broker listener through INTEGRATION_TEST_PROTOCOL in the environment.
+#
+# Cross-arch guard: both Dockerfiles COPY the *host-built*
+# rust/target/release/libconfluent_kafka.so straight into a Linux container. On a
+# non-Linux host that artifact is Mach-O / absent (no ELF .so), so the image
+# cannot build. Cross-compiling host->Linux is out of scope for a dev-box run, so
+# off Linux this SELF-SKIPS with a loud notice and exits 0. It is NOT skipped in
+# CI, whose amd64 Linux verify-dotnet jobs run it. The skip is honest -- it never
+# claims the container arms passed, only that this host cannot build the Linux
+# images. The non-Linux fallback is the native arm, the root
+# test-integration-dotnet-native, which the macOS CI verify-dotnet job runs.
+#
+# The images are built for linux/amd64 because Grpc.Tools' linux_arm64 protoc
+# SIGSEGVs during C# codegen inside an arm64 Linux container; local Apple-Silicon
+# dev sets DOCKER_DEFAULT_PLATFORM=linux/amd64 in its environment, never a
+# Makefile-baked --platform. A macOS arm64 host is unaffected for the native arm:
+# Grpc.Tools has no macOS arm64 protoc, and its macosx_x64 one runs under Rosetta 2.
+#
+# The image builds are invoked *inside* the recipe (rather than as prerequisites)
+# so the skip also short-circuits the Docker builds.
+test-integration:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\n========================================================================\n'; \
+		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf '\n'; \
+		printf 'The .NET gRPC-server images COPY the host-built\n'; \
+		printf '  rust/target/release/libconfluent_kafka.so\n'; \
+		printf 'into a Linux container. On this host that artifact is\n'; \
+		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
+		printf 'This container arm runs only in CI'"'"'s amd64 Linux verify-dotnet jobs.\n'; \
+		printf 'Run it natively on this host with: %smake test-integration-dotnet-native\n' \
+			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
+		printf '========================================================================\n\n'; \
+	else \
+		$(MAKE) grpc-image grpc-image-async && \
+		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet; \
+	fi
 
 # Two-stage build (CLAUDE.md §7.1, firm order): the Rust core produces the
 # native cdylib + generated header FIRST, then `dotnet build` compiles the
@@ -59,10 +116,12 @@ grpc-native:
 # the native would not exist and the csproj's EnsureNativeLibraryExists target
 # fails fast.
 #
-# `--features ffi` is the minimal build the binding needs (the ffi cdylib +
-# header); it is deliberately narrower than the root's `build-rust-all-features`
-# used by the integration arm. `--manifest-path` keeps the invocation
-# location-independent (works whether invoked here or via the root Makefile).
+# rust/Makefile's `build` (`cargo build --features ffi --release`) is the minimal
+# build the binding needs (the ffi cdylib + header, in the release profile
+# $(DOTNET_CONFIG)=Release maps to); it is deliberately narrower than the root's
+# `build-rust-all-features` used by the integration arm. It runs in
+# $(RUST_PROJECT_ROOT) (see the header), so it works whether this Makefile is
+# invoked here or via the root Makefile.
 #
 # The `dotnet build` compiles the full TFM matrix: the library
 # (netstandard2.0;net8.0;net10.0) and the test project (net462;net8.0;net10.0).
@@ -71,7 +130,7 @@ grpc-native:
 # cannot execute on Linux; test execution is net8.0 + net10.0 only (see
 # test-dotnet).
 build-dotnet:
-	cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release
+	$(MAKE) -C $(RUST_PROJECT_ROOT) build
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOLUTION)
 
 # build + format-check + unit tests, no broker (Mock* tests only). Mirrors the
@@ -110,7 +169,7 @@ test-dotnet: build-dotnet
 # is deliberately absent — the client is run by `dotnet <dll>` on a Linux box,
 # never on .NET Framework).
 # ---------------------------------------------------------------------------
-SOAK_DIR := $(RUST_PROJECT_ROOT)/bindings/dotnet/soak
+SOAK_DIR := $(REPO_ROOT)/dotnet/soak
 SOAK_CLIENT := $(SOAK_DIR)/SoakClient/SoakClient.csproj
 SOAK_TESTS := $(SOAK_DIR)/SoakClient.Tests/SoakClient.Tests.csproj
 
@@ -133,7 +192,7 @@ test-soak-dotnet: build-dotnet
 # PerfV3 are never in one sln (PLAN §1.1.1 — the same-assembly collision); each is
 # built/run by path.
 # ---------------------------------------------------------------------------
-PERF_DIR := $(RUST_PROJECT_ROOT)/bindings/dotnet/tests/Performance
+PERF_DIR := $(REPO_ROOT)/dotnet/tests/Performance
 PERF_TESTS := $(PERF_DIR)/Confluent.Kafka.PerformanceTests/Confluent.Kafka.PerformanceTests.csproj
 PERF_V3 := $(PERF_DIR)/PerfV3
 PERF_V2 := $(PERF_DIR)/PerfV2
@@ -172,18 +231,23 @@ perf-unit-test-dotnet:
 # the two-stage native build first (CLAUDE.md §7.1); the v2/ckd exe needs no native
 # (ckd carries its own librdkafka). Configure the run via the shared env-var
 # contract (TOPIC_NAME, VALUE_SIZE, LIMIT_RPS, ASYNC, P99_LIMIT_MS, ...).
+#
+# The native build is its own recipe line, ahead of the `case`, rather than a
+# `3)` branch of it: GNU make executes every line that contains `$(MAKE)` even
+# under `make -n`, so folding it into the `case` would make a dry run actually
+# `dotnet run` the benchmark.
 producer-perf-test-dotnet:
+	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build; fi
 	@case "$(CLIENT_VERSION)" in \
-	  3) cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release && \
-	     MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
+	  3) MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
 	  2) MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V2) ;; \
 	  *) echo "producer-perf-test-dotnet: CLIENT_VERSION=$(CLIENT_VERSION) unsupported (2=PerfV2/ckd, 3=PerfV3/our binding)" >&2; exit 1 ;; \
 	esac
 
 consumer-perf-test-dotnet:
+	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build; fi
 	@case "$(CLIENT_VERSION)" in \
-	  3) cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release && \
-	     MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
+	  3) MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
 	  2) MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V2) ;; \
 	  *) echo "consumer-perf-test-dotnet: CLIENT_VERSION=$(CLIENT_VERSION) unsupported (2=PerfV2/ckd, 3=PerfV3/our binding)" >&2; exit 1 ;; \
 	esac
@@ -205,6 +269,6 @@ consumer-perf-test-dotnet:
 # be the case-sensitive "True" — the suite-wide Python-compatible convention; =1
 # would silently not enable it.
 test-integration-perf-dotnet:
-	cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release
+	$(MAKE) -C $(RUST_PROJECT_ROOT) build
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
 	PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS)

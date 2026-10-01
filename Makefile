@@ -84,8 +84,7 @@ devel-build-python: init-venv devel-build-rust
 build-grpc-images: build
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 	$(MAKE) -C c $(ROOTS) grpc-image
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
+	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
 
 # Just the two Python gRPC images (sync + asyncio). The Python image installs
 # the built binding, hence `build-python`.
@@ -99,17 +98,16 @@ build-grpc-images-c: build-rust-all-features
 
 # The two .NET gRPC images (sync + async), for the .NET-only multilanguage run
 # below. Mirrors build-grpc-images-python (also two images). Needs only the Rust
-# release artifacts: Dockerfile.grpc / Dockerfile.grpc.async copy
-# target/release/libconfluent_kafka.so + target/include/confluent_kafka.h and
-# build the .NET gRPC server inside the container (which brings its own SDK), so
-# unlike build-grpc-images-python this does NOT depend on a host-side
+# release artifacts: dotnet/Dockerfile.grpc / Dockerfile.grpc.async copy
+# rust/target/release/libconfluent_kafka.so + rust/target/include/confluent_kafka.h
+# and build the .NET gRPC server inside the container (which brings its own SDK),
+# so unlike build-grpc-images-python this does NOT depend on a host-side
 # binding build. Images are platform-agnostic: CI is amd64-native; local
 # Apple-Silicon dev sets DOCKER_DEFAULT_PLATFORM=linux/amd64 in its environment
 # (Grpc.Tools' linux_arm64 protoc segfaults in an arm64 Linux container), never a
 # Makefile-baked --platform.
 build-grpc-images-dotnet: build-rust-all-features
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
+	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests) and the
@@ -159,70 +157,13 @@ test-integration-python: build-rust-all-features build-python
 test-integration-c: build-rust-all-features
 	$(MAKE) -C c $(ROOTS) test-integration
 
-# .NET multilanguage integration arm. The `__grpc_dotnet` filter matches both
-# the sync (`__grpc_dotnet`) and async (`__grpc_dotnet_async`) backends — exactly
-# as `__grpc_python` matches both python arms — so one target covers both dotnet
-# gRPC images. To run only the sync backend, add `--skip __grpc_dotnet_async`.
-#
-# Non-Linux hosts skip, for the same reason and by the same mechanism as
-# `test-integration-python` / `test-integration-c` — see the shared rationale
-# above `test-integration-python`, including why `build-grpc-images-dotnet` is
-# invoked INSIDE the recipe instead of as a prerequisite (a prerequisite runs
-# before the recipe, so it would fire the failing image build before the guard
-# could stop it).
-#
-# As for python and c, the non-Linux fallback is the native arm,
-# test-integration-dotnet-native below, which the macOS CI verify-dotnet job
-# runs. The container arm runs in CI's amd64 Linux verify-dotnet jobs (see
-# .semaphore/semaphore.yml): the images are built for linux/amd64 because
-# Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen inside an arm64 Linux
-# container. A macOS arm64 host is unaffected by that: Grpc.Tools has no macOS
-# arm64 protoc, and its macosx_x64 one runs under Rosetta 2.
-#
-# THREE TESTS ARE SKIPPED FOR .NET ONLY -- the producer transaction arms.
-# `multilanguage_test!` emits one arm per backend for every test it wraps, so the
-# three transaction tests in tests/integration/producer_transactions_test.rs
-# generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
-# .NET gRPC server cannot serve them: ProducerServiceImpl /
-# AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
-# transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
-# AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
-# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
-# at all yet -- IAsyncProducer's own docs record it as deferred.
-#
-# The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the dotnet
-# targets (this one, the -ssl / -sasl-ssl variants that delegate to it, and
-# test-integration-dotnet-native), which only ever run __grpc_dotnet*, so no
-# other backend loses coverage: python / c / rust still run all three.
-#
-# REMOVE DOTNET_GRPC_SKIPS (the definition below and its uses in this target and
-# in test-integration-dotnet-native) when the .NET producer reaches transaction
-# parity with Python (the 10 transaction P/Invokes, the public surface on
-# IProducer/IAsyncProducer and the four producer types, the three MockProducer
-# transaction controls, and the five RPCs in both producer servicers). Deleting
-# it is the last step of that phase, not a follow-up to it.
-DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
-	--skip test_aborted_transaction_records_are_discarded \
-	--skip test_consume_transform_produce_with_offsets
-
-test-integration-dotnet:
-	@if [ "$$(uname -s)" != "Linux" ]; then \
-		printf '\n========================================================================\n'; \
-		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
-		printf '\n'; \
-		printf 'The .NET gRPC-server images COPY the host-built\n'; \
-		printf '  target/release/libconfluent_kafka.so\n'; \
-		printf 'into a Linux container. On this host that artifact is\n'; \
-		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
-		printf 'This container arm runs only in CI'"'"'s amd64 Linux verify-dotnet jobs.\n'; \
-		printf 'Run it natively on this host with: %smake test-integration-dotnet-native\n' \
-			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
-		printf '========================================================================\n\n'; \
-	else \
-		$(MAKE) build-grpc-images-dotnet && \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-			$(DOTNET_GRPC_SKIPS); \
-	fi
+# .NET's container arm, like python's and c's: dotnet/'s `test-integration` builds
+# the sync and async .NET gRPC images and runs the `__grpc_dotnet` tests (through
+# rust/Makefile's test-integration-grpc-dotnet, which also carries the .NET-only
+# DOTNET_GRPC_SKIPS). It self-skips off Linux, with test-integration-dotnet-native
+# below as the fallback the macOS CI verify-dotnet job runs; see dotnet/Makefile.
+test-integration-dotnet: build-rust-all-features
+	$(MAKE) -C dotnet $(ROOTS) test-integration
 
 # The gRPC Python/C/.NET arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
@@ -269,11 +210,11 @@ build-grpc-native-c: build-rust-all-features
 	$(MAKE) -C c $(ROOTS) grpc-native
 
 # Builds the .NET gRPC server's net10.0 leg against the host's release
-# libconfluent_kafka (bindings/dotnet's grpc-native target). Requires the .NET 10
+# libconfluent_kafka (dotnet/'s grpc-native target). Requires the .NET 10
 # SDK on PATH, which brings the ASP.NET Core 10 runtime the server runs on. On an
 # Apple-Silicon host Grpc.Tools runs its macosx_x64 protoc under Rosetta 2.
 build-grpc-native-dotnet: build-rust-all-features
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-native
+	$(MAKE) -C dotnet $(ROOTS) grpc-native
 
 test-integration-python-native: build-grpc-native-python
 	$(MAKE) -C rust test-integration-grpc-python-native
@@ -282,11 +223,9 @@ test-integration-c-native: build-grpc-native-c
 	$(MAKE) -C rust test-integration-grpc-c-native
 
 # Skips the same three transaction tests as test-integration-dotnet
-# (DOTNET_GRPC_SKIPS, see there).
+# (DOTNET_GRPC_SKIPS, see rust/Makefile).
 test-integration-dotnet-native: build-grpc-native-dotnet
-	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-		$(DOTNET_GRPC_SKIPS)
+	$(MAKE) -C rust test-integration-grpc-dotnet-native
 
 # ── Performance integration tests ────────────────────────────────────────
 #
@@ -323,26 +262,26 @@ producer-perf-test-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) producer-perf-test)
 
 # Env-driven .NET producer/consumer performance benchmarks (manual; need a
-# reachable broker via BOOTSTRAP_SERVERS). Delegate into bindings/dotnet — its
+# reachable broker via BOOTSTRAP_SERVERS). Delegate into dotnet/ — its
 # own producer-perf-test-dotnet / consumer-perf-test-dotnet do the two-stage
 # native build (cargo --features ffi) then `dotnet run` the exe selected by
 # CLIENT_VERSION (3 = PerfV3/our binding, default; 2 = PerfV2/ckd baseline), so
 # there is no build-rust prerequisite here (mirrors how test-dotnet delegates
-# below). Pass RUST_PROJECT_ROOT so the delegated cargo/dotnet resolve the same
-# repo root; CLIENT_VERSION passes through the environment.
+# below). Pass $(ROOTS) so the delegated cargo/dotnet resolve the same
+# repo and Rust roots; CLIENT_VERSION passes through the environment.
 producer-perf-test-dotnet:
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) producer-perf-test-dotnet
+	$(MAKE) -C dotnet $(ROOTS) producer-perf-test-dotnet
 
 consumer-perf-test-dotnet:
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) consumer-perf-test-dotnet
+	$(MAKE) -C dotnet $(ROOTS) consumer-perf-test-dotnet
 
 # .NET in-suite performance smoke (xUnit + Testcontainers). Delegate into
-# bindings/dotnet, which builds the native + PerfV3 exe then runs the Docker-gated
+# dotnet/, which builds the native + PerfV3 exe then runs the Docker-gated
 # net10.0-only smoke (skips cleanly without Docker). Alongside
 # test-integration-perf-python above; now part of verify-dotnet (mirroring
 # verify-python's perf stage).
 test-integration-perf-dotnet:
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-integration-perf-dotnet
+	$(MAKE) -C dotnet $(ROOTS) test-integration-perf-dotnet
 
 # c/'s `test` runs ctest and then the C-backend multilanguage arm.
 test-c: build-c
@@ -356,19 +295,19 @@ test-c-macos-docker: build-c
 test-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test)
 
-# Delegates to bindings/dotnet's own `test-dotnet` (native cargo build -> dotnet
+# Delegates to dotnet/'s own `test-dotnet` (native cargo build -> dotnet
 # build matrix -> dotnet format -> unit tests on net8.0 + net10.0), mirroring how
 # test-python / test-c delegate to their bindings. The delegated build does the
 # Rust native step itself (CLAUDE.md §7.1 two-stage order), so no build-rust
-# prerequisite here. Passes RUST_PROJECT_ROOT so the delegated cargo/dotnet
-# invocations resolve the same repo root.
+# prerequisite here. Passes $(ROOTS) so the delegated cargo/dotnet
+# invocations resolve the same repo and Rust roots.
 test-dotnet:
-	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-dotnet
+	$(MAKE) -C dotnet $(ROOTS) test-dotnet
 
 # macOS variant of test-dotnet: same target verbatim (native build -> dotnet
 # build matrix -> dotnet format -> unit tests on net8.0 + net10.0). Unlike
 # test-c-macos-docker / test-python-macos-docker, .NET has no OS-specific
-# recipe to swap in -- the delegated bindings/dotnet Makefile step is already
+# recipe to swap in -- the delegated dotnet/Makefile step is already
 # platform-agnostic -- so this is a thin alias, kept for naming symmetry with
 # the other macOS-block targets. On macOS the gRPC multilanguage arm runs
 # natively instead (see verify-dotnet-macos-docker); this build never touches
