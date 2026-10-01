@@ -65,10 +65,10 @@ namespace Confluent.Kafka.GrpcServer;
 /// what both reference servers do.
 /// </para>
 /// <para>
-/// <b>Close ignores <c>timeout_ms</c> (PLAN §2.1).</b> <see cref="AsyncKafkaConsumer{TKey, TValue}"/>
-/// has no timed async close (only <c>Close(CancellationToken)</c>), so the async <see cref="Close"/>
-/// RPC awaits <c>Close()</c> and ignores the proto's optional <c>timeout_ms</c>. Documented
-/// divergence, behaviorally invisible to the harness scenarios (none assert close-timeout).
+/// <b>Close is untimed.</b> The close request carries only the consumer id (its former
+/// <c>timeout_ms</c> carried Java's deprecated <c>close(Duration)</c>, which is not translated,
+/// and the proto reserves the field), so the async <see cref="Close"/> RPC awaits
+/// <c>Close()</c>, as the sync servicer and the Python server do.
 /// </para>
 /// <para>
 /// <b>No sync-over-async.</b> Handlers <c>await</c> the binding's <see cref="Task"/> directly —
@@ -652,11 +652,10 @@ internal sealed class AsyncConsumerServiceImpl
     /// async mirror of <c>ConsumerServiceImpl.Close</c>.
     /// </summary>
     /// <remarks>
-    /// This servicer cannot hit the negative-timeout throw that motivated the fix — it ignores
-    /// <c>timeout_ms</c> entirely (see below) — but the eviction-before-close shape and the
-    /// orphaning <c>catch</c> were identical, and the registry-drain sweep needs both servicers
-    /// consistent. So the reorder is applied symmetrically: evict only after the close ran, and
-    /// on failure dispose then evict so the native handle is never orphaned.
+    /// The eviction-before-close shape and the orphaning <c>catch</c> were identical to the sync
+    /// servicer's, and the registry-drain sweep needs both servicers consistent. So the reorder
+    /// is applied symmetrically: evict only after the close ran, and on failure dispose then
+    /// evict so the native handle is never orphaned.
     /// </remarks>
     /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> Close(Proto.ConsumerCloseRequest request, ServerCallContext context)
@@ -673,8 +672,6 @@ internal sealed class AsyncConsumerServiceImpl
         {
             // The binding's Close() gracefully closes AND releases the native handle
             // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed here.
-            // AsyncKafkaConsumer.Close has no TimeSpan overload (only Close(CancellationToken)),
-            // so timeout_ms is IGNORED here (PLAN §2.1) — behaviorally invisible to the harness.
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {

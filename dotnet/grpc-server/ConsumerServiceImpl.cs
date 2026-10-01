@@ -556,24 +556,19 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
     /// <remarks>
     /// <para>
     /// <b>Why the order matters.</b> This used to <c>TryRemove</c> <em>first</em> and only then
-    /// try to close, with two throw sites sitting between the eviction and any native call:
-    /// <c>TimeSpan.FromMilliseconds</c> itself (for a <c>timeout_ms</c> above ~9.22e15), and the
-    /// binding's own precondition — <c>Close(TimeSpan)</c> throws
-    /// <see cref="ArgumentOutOfRangeException"/> ("Timeout must not be negative.") before any
-    /// native call. The proto field is <c>optional int64 timeout_ms</c>, so a negative value
-    /// both survives the wire and sets <c>HasTimeoutMs</c>. Either throw left the entry already
-    /// gone, the <c>catch</c> restoring nothing and disposing nothing, so the consumer became
+    /// try to close, so any throw between the eviction and the native call left the entry
+    /// already gone, the <c>catch</c> restoring nothing and disposing nothing, and the consumer
     /// <b>unreachable</b>: <c>Consumer_close</c> and <c>Consumer_destroy</c> never ran, a whole
     /// native consumer (tokio runtime + <c>ConsumerNetworkThread</c> + dispatcher thread) leaked,
     /// a retried <c>Close</c> hit the <c>TryRemove</c> miss and reported <b>silent success</b>,
-    /// and <c>Wakeup</c> became a silent no-op for that id.
+    /// and <c>Wakeup</c> became a silent no-op for that id. Evicting only after the close ran
+    /// keeps the registry-drain sweep on the same discipline.
     /// </para>
     /// <para>
-    /// <b>It was latent, not active</b> — the shipped Rust harness client hardcodes
-    /// <c>timeout_ms: None</c> in both close variants, so <c>HasTimeoutMs</c> is always false and
-    /// the throwing path is unreachable from the suite. Fixed anyway: it is a genuine
-    /// precondition-ordering defect, the harness client could plumb a timeout at any time, and
-    /// the registry-drain sweep depends on the same discipline.
+    /// <b>No timed close.</b> The request carries only the consumer id: its former
+    /// <c>timeout_ms</c> carried Java's deprecated <c>close(Duration)</c>, which is not
+    /// translated, and the proto reserves the field. So this always calls the untimed
+    /// <c>Close()</c>, as the Python server does.
     /// </para>
     /// <para>
     /// A <em>failing</em> <c>Consumer_close</c> is NOT a leak — the binding releases the handle
@@ -599,14 +594,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed here.
             lock (entry.Gate)
             {
-                if (request.HasTimeoutMs)
-                {
-                    entry.Consumer.Close(TimeSpan.FromMilliseconds(request.TimeoutMs));
-                }
-                else
-                {
-                    entry.Consumer.Close();
-                }
+                entry.Consumer.Close();
             }
 
             // Evict only after the close actually ran. Close/Dispose are documented idempotent,

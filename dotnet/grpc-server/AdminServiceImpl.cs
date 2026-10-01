@@ -569,44 +569,6 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListClientMetricsResourcesResponse> ListClientMetricsResources(Proto.ListClientMetricsResourcesRequest request, ServerCallContext context)
-    {
-        IAdmin? admin = Get(request.AdminId);
-        if (admin is null)
-        {
-            return new Proto.ListClientMetricsResourcesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
-        }
-
-        // Deprecated in Java since 4.1, but every binding still exposes it, so the harness
-        // exercises it — hence the local suppression rather than dropping the RPC. The
-        // listing type carries the attribute too, so the scope spans the whole body.
-#pragma warning disable CS0618 // Type or member is obsolete
-        try
-        {
-            ListClientMetricsResourcesResult result = admin.ListClientMetricsResources(
-                new ListClientMetricsResourcesOptions
-                {
-                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                });
-
-            IReadOnlyCollection<ClientMetricsResourceListing> resources =
-                await result.All().ConfigureAwait(false);
-            Proto.ListClientMetricsResourcesResponse response = new Proto.ListClientMetricsResourcesResponse();
-            foreach (ClientMetricsResourceListing listing in resources)
-            {
-                response.Resources.Add(new Proto.ClientMetricsResourceListing { Name = listing.Name });
-            }
-
-            return response;
-        }
-        catch (Exception ex)
-        {
-            return new Proto.ListClientMetricsResourcesResponse { Error = Translate.ToProto(ex) };
-        }
-#pragma warning restore CS0618
-    }
-
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeLogDirsResponse> DescribeLogDirs(Proto.DescribeLogDirsRequest request, ServerCallContext context)
     {
         IAdmin? admin = Get(request.AdminId);
@@ -1277,52 +1239,6 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             return new Proto.ListGroupsResponse { Error = Translate.ToProto(ex) };
         }
     }
-
-    // Java deprecates this RPC and its three types; mirrored, not avoided.
-#pragma warning disable CS0618
-    /// <inheritdoc/>
-    public override async Task<Proto.ListConsumerGroupsResponse> ListConsumerGroups(Proto.ListConsumerGroupsRequest request, ServerCallContext context)
-    {
-        IAdmin? admin = Get(request.AdminId);
-        if (admin is null)
-        {
-            return new Proto.ListConsumerGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
-        }
-
-        try
-        {
-            // Only GroupStates is set: this options type's deprecated `States` is the SAME
-            // filter on the older enum (assigning one replaces the other), and the wire has
-            // one field for both, so setting both would just overwrite.
-            ListConsumerGroupsResult result = admin.ListConsumerGroups(new ListConsumerGroupsOptions
-            {
-                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                GroupStates = TranslateAdmin.GroupStates(request.GroupStates),
-                Types = TranslateAdmin.GroupTypes(request.Types_),
-            });
-
-            IReadOnlyCollection<ConsumerGroupListing> valid = await result.Valid().ConfigureAwait(false);
-            IReadOnlyCollection<KafkaException> errors = await result.Errors().ConfigureAwait(false);
-
-            Proto.ListConsumerGroupsResponse response = new Proto.ListConsumerGroupsResponse();
-            foreach (ConsumerGroupListing listing in valid)
-            {
-                response.Valid.Add(TranslateAdmin.ConsumerGroupListingToProto(listing));
-            }
-
-            foreach (KafkaException error in errors)
-            {
-                response.ListingErrors.Add(Translate.ToProto(error));
-            }
-
-            return response;
-        }
-        catch (Exception ex)
-        {
-            return new Proto.ListConsumerGroupsResponse { Error = Translate.ToProto(ex) };
-        }
-    }
-#pragma warning restore CS0618
 
     /// <inheritdoc/>
     public override async Task<Proto.DescribeConsumerGroupsResponse> DescribeConsumerGroups(Proto.DescribeConsumerGroupsRequest request, ServerCallContext context)

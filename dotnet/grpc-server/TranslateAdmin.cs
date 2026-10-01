@@ -939,39 +939,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    // Java deprecates the listing type and its state enum; mirrored, not avoided.
-#pragma warning disable CS0618
-    /// <summary>
-    /// Binding <see cref="ConsumerGroupListing"/> -&gt; proto. Both <c>group_state</c> and the
-    /// deprecated <c>state</c> cross although Java derives the second from the first: both
-    /// bindings expose both, so a dropped one is a finding.
-    /// </summary>
-    internal static Proto.ConsumerGroupListing ConsumerGroupListingToProto(ConsumerGroupListing listing)
-    {
-        Proto.ConsumerGroupListing proto = new Proto.ConsumerGroupListing
-        {
-            GroupId = listing.GroupId,
-            IsSimpleConsumerGroup = listing.IsSimpleConsumerGroup,
-        };
-        if (listing.GroupState.HasValue)
-        {
-            proto.GroupState = listing.GroupState.Value.ToString();
-        }
-
-        if (listing.State.HasValue)
-        {
-            proto.State = listing.State.Value.ToString();
-        }
-
-        if (listing.Type.HasValue)
-        {
-            proto.GroupType = listing.Type.Value.ToString();
-        }
-
-        return proto;
-    }
-#pragma warning restore CS0618
-
     /// <summary>Binding <see cref="MemberAssignment"/> -&gt; proto.</summary>
     internal static Proto.MemberAssignment MemberAssignmentToProto(MemberAssignment assignment)
     {
@@ -1032,8 +999,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    // Java deprecates state(); mirrored, not avoided.
-#pragma warning disable CS0618
     /// <summary>
     /// Binding <see cref="ConsumerGroupDescription"/> -&gt; proto. The coordinator must carry
     /// the broker's real host and port, not a placeholder — the field this milestone exists
@@ -1048,7 +1013,6 @@ internal static class TranslateAdmin
             IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
             PartitionAssignor = description.PartitionAssignor,
             GroupType = description.Type.ToString(),
-            State = description.State.ToString(),
             GroupState = description.GroupState.ToString(),
         };
         foreach (MemberDescription member in description.Members)
@@ -1080,7 +1044,6 @@ internal static class TranslateAdmin
 
         return proto;
     }
-#pragma warning restore CS0618
 
     /// <summary>
     /// Binding <see cref="ClassicGroupDescription"/> -&gt; proto. <c>protocol</c> (the
