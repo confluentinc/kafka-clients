@@ -1,9 +1,6 @@
 version: v1.0
 name: verify-crates-io-release
-# Auto-promoted from publish-crates-io.yml when "Publish to crates.io" passes.
-# (TEST MODE: publish-crates-io.yml has no publish block for now, so this runs
-# against the version already on crates.io; see its header.)
-# It checks the crate as users get it: the bytes crates.io serves are the bytes
+# Auto-promoted from publish-crates-io.yml when "Publish to crates.io" passes.# It checks the crate as users get it: the bytes crates.io serves are the bytes
 # that were uploaded, and a fresh project that depends on the version from
 # crates.io builds and passes the smoke test (xtask/smoke/main.rs) on Linux and
 # macOS, on the MSRV and on the latest stable toolchain.
@@ -33,16 +30,8 @@ blocks:
           commands:
             # Same commit as the release, so the manifest has the released version.
             - version=$(/usr/bin/python3 -c 'import tomllib; print(tomllib.load(open("rust/Cargo.toml", "rb"))["package"]["version"])')
-            # TEST MODE: publish-crates-io.yml currently uploads nothing, so
-            # there may be no upload record. Without one, the index checksum
-            # stands in for it: the download must still match the index.
-            - |
-              if artifact pull workflow "crates-io/${CRATE}-${version}.sha256" --destination /tmp/uploaded.sha256 --force; then
-                uploaded=$(cut -d' ' -f1 /tmp/uploaded.sha256)
-              else
-                echo "No upload record in this workflow (nothing was published); comparing crates.io's index with its download only"
-                uploaded=""
-              fi
+            - artifact pull workflow "crates-io/${CRATE}-${version}.sha256" --destination /tmp/uploaded.sha256
+            - uploaded=$(cut -d' ' -f1 /tmp/uploaded.sha256)
             # The sparse index entry for the version: retried, because a
             # just-published version takes a little while to appear.
             - |
@@ -64,7 +53,6 @@ blocks:
                 exit 1
               fi
               read -r index_sha index_state <<< "${indexed}"
-              [ -n "${uploaded}" ] || uploaded="${index_sha}"
               curl -fsSL -o /tmp/downloaded.crate "https://static.crates.io/crates/${CRATE}/${CRATE}-${version}.crate" \
                 || { echo "could not download ${CRATE}-${version}.crate from static.crates.io" >&2; exit 1; }
               downloaded=$(sha256sum /tmp/downloaded.crate | cut -d' ' -f1)
