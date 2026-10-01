@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Smoke test for `confluent-kafka` as a user gets it: `cargo xtask
-//! package-check` and `cargo xtask package-smoke-test` build this file as the
-//! `main.rs` of a fresh project that depends on the packaged `.crate`, or on
-//! the version published to crates.io. It is not part of any workspace, so it
-//! sees only the crate's public API.
+//! Smoke test for `confluent-kafka` as distributed to users. `cargo xtask
+//! package-check` and `cargo xtask package-smoke-test` compile this file as the
+//! `main.rs` of a new project that depends on either the packaged `.crate` or
+//! the version published to crates.io. The project is not part of any
+//! workspace, so the test can use only the crate's public API.
 //!
-//! Without `KAFKA_BOOTSTRAP_SERVERS` it runs the offline checks only: client
-//! configuration parsing and a `MockProducer` round trip. With it, it also
-//! creates a topic, produces records, consumes them back through the KIP-848
-//! consumer and deletes the topic, so a broken network, protocol or
-//! group-membership path fails here and not in a user's application.
+//! When `KAFKA_BOOTSTRAP_SERVERS` is unset, only the offline checks run: client
+//! configuration parsing and a `MockProducer` round trip. When it is set, the
+//! test also creates a topic, produces records, consumes them through the
+//! KIP-848 consumer and deletes the topic, so that a defect in the network,
+//! protocol or group-membership path is detected here rather than in a user's
+//! application.
 
 use std::collections::{BTreeSet, HashMap};
 use std::process::ExitCode;
@@ -36,8 +37,14 @@ use confluent_kafka::producer::{KafkaProducer, MockProducer, Producer, ProducerC
 
 const NUM_PARTITIONS: i32 = 3;
 const NUM_RECORDS: usize = 100;
-/// How long the consumer may take to join the group and read every record back.
+/// Maximum time for the consumer to join the group and read back every record.
 const CONSUME_DEADLINE: Duration = Duration::from_secs(90);
+/// Maximum time for the whole round trip, from creating the topic to closing the
+/// consumer. Every client call is awaited within this limit, so a call that never
+/// completes fails the smoke test instead of stalling the CI job.
+const ROUND_TRIP_DEADLINE: Duration = Duration::from_secs(240);
+/// Maximum time for deleting the topic and closing the admin client.
+const CLEANUP_DEADLINE: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -63,8 +70,9 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Checks that need no broker: every client's configuration parses, and a
-/// record goes through the `Producer` trait to `MockProducer`'s history.
+/// Checks that require no broker: the configuration of every client parses, and
+/// a record sent through the `Producer` trait is recorded in `MockProducer`'s
+/// history.
 async fn offline() -> Result<(), Error> {
     let bootstrap = "localhost:9092".to_string();
     ProducerConfig::new(&HashMap::from([(
@@ -90,16 +98,16 @@ async fn offline() -> Result<(), Error> {
     let history = producer.history();
     if history.len() != 1 || history[0].value() != Some(&"value".to_string()) {
         return Err(failure(format!(
-            "MockProducer history holds {} records, expected the one sent",
+            "MockProducer history contains {} records; expected exactly the one sent",
             history.len()
         )));
     }
     Ok(())
 }
 
-/// Creates a topic, produces [`NUM_RECORDS`] records to it, consumes them back
-/// and deletes it. The topic and group are named per run, so concurrent or
-/// repeated runs against one broker do not see each other's records.
+/// Creates a topic, produces [`NUM_RECORDS`] records to it, consumes them and
+/// deletes the topic. The topic and group names are unique to each run, so
+/// concurrent or repeated runs against the same broker do not interfere.
 async fn round_trip(bootstrap_servers: &str) -> Result<(), Error> {
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -112,15 +120,29 @@ async fn round_trip(bootstrap_servers: &str) -> Result<(), Error> {
         AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
         bootstrap_servers.to_string(),
     )]))?)?;
-    let result = produce_and_consume(admin.as_ref(), bootstrap_servers, &topic, &group).await;
-    // Delete the topic whatever happened, but report the first failure.
-    let delete = admin
-        .delete_topics(TopicCollection::of_topic_names(vec![topic.clone()]))
-        .all()
-        .get()
-        .await;
-    admin.close().await;
-    result.and(delete)
+    let result = tokio::time::timeout(
+        ROUND_TRIP_DEADLINE,
+        produce_and_consume(admin.as_ref(), bootstrap_servers, &topic, &group),
+    )
+    .await
+    .unwrap_or_else(|_| Err(failure(format!("the round trip did not finish within {ROUND_TRIP_DEADLINE:?}"))));
+    // Always delete the topic, but report the first failure that occurred.
+    let cleanup = tokio::time::timeout(CLEANUP_DEADLINE, async {
+        let delete = admin
+            .delete_topics(TopicCollection::of_topic_names(vec![topic.clone()]))
+            .all()
+            .get()
+            .await;
+        admin.close().await;
+        delete
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(failure(format!(
+            "deleting topic {topic} and closing the admin client did not finish within {CLEANUP_DEADLINE:?}"
+        )))
+    });
+    result.and(cleanup)
 }
 
 async fn produce_and_consume(
@@ -190,10 +212,10 @@ async fn produce_and_consume(
         let missing = expected.difference(&consumed).count();
         let unexpected = consumed.difference(&expected).count();
         return Err(failure(format!(
-            "consumed records differ from those produced: {missing} missing, {unexpected} unexpected"
+            "consumed records do not match those produced: {missing} missing, {unexpected} unexpected"
         )));
     }
-    println!("consumed all {NUM_RECORDS} records back through group {group}");
+    println!("consumed all {NUM_RECORDS} records through group {group}");
     Ok(())
 }
 
@@ -213,16 +235,23 @@ async fn consume_all(
             )));
         }
         for record in consumer.poll(Duration::from_secs(1)).await? {
-            if let (Some(key), Some(value)) = (record.key(), record.value()) {
-                consumed.insert((key.clone(), value.clone()));
-            }
+            // Every record is produced with a key and a value, so a record
+            // missing either indicates data loss in the round trip.
+            let (Some(key), Some(value)) = (record.key(), record.value()) else {
+                return Err(failure(format!(
+                    "consumed a record without a key or value at offset {} of partition {}",
+                    record.offset(),
+                    record.partition()
+                )));
+            };
+            consumed.insert((key.clone(), value.clone()));
         }
     }
     consumer.commit_sync().await?;
     Ok(consumed)
 }
 
-/// A smoke-test failure, reported through the crate's own error type.
+/// Builds a smoke-test failure, reported through the crate's own error type.
 fn failure(message: String) -> Error {
     Error::LocalIllegalState(LocalIllegalStateError::new(message))
 }

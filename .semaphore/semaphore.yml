@@ -57,14 +57,14 @@ name: build-test-release
 # It runs in a detached git worktree and pushes new commits when promotions
 # run either manually or automatically.
 #
-# "Publish to crates.io" is a manual promotion (publish-crates-io.yml) run on a
-# green build of the current master tip to publish the confluent-kafka version
-# in rust/Cargo.toml. It asks for that version (CRATE_VERSION) as a
-# confirmation. Every job that passes leaves a `ci-passed/<job name>` marker
-# in the workflow's artifacts (the global epilogue below), and the publish
-# pipeline refuses unless every job it lists
-# in REQUIRED_CI_JOBS left one. Adding or renaming a job here means updating
-# that list.
+# "Publish to crates.io" is a manual promotion (publish-crates-io.yml) that
+# publishes the confluent-kafka version in rust/Cargo.toml from a green build of
+# the current master tip. It asks for that version (CRATE_VERSION) as a
+# confirmation. Every job records its result and the commit it tested as
+# `ci-result/<job name>` in the workflow's artifacts (the global epilogue
+# below). The publish pipeline refuses unless every job in its REQUIRED_CI_JOBS
+# list passed on this commit and no other job reported a result, so adding,
+# renaming or removing a job here also means updating that list.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -90,21 +90,34 @@ global_job_config:
           git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
         fi
       - sem-version python 3.10
+  # Records the CI results that publish-crates-io.yml checks before
+  # publishing. Each job writes `<result> <commit tested> <job id>` to
+  # ci-result/<job name> in the workflow's artifacts. The commit is the working
+  # tree's HEAD rather than SEMAPHORE_GIT_SHA, so a job that switched branches
+  # (see the prologue) cannot attest to the commit being published. Results are
+  # recorded on every build; the publish pipeline decides which builds may
+  # publish. The job name is reduced to characters that are safe in an
+  # artifact path, and LC_ALL=C ensures that Linux and macOS (BSD tr) map
+  # multibyte characters such as the em dash identically; publish-crates-io.yml
+  # applies the same mapping. A failed upload produces only a warning, and the
+  # publish pipeline then reports the job as having no result.
   epilogue:
     on_pass:
       commands:
-        # The green-build evidence publish-crates-io.yml checks before it
-        # publishes: one marker per passed job, in this workflow's artifacts.
-        # Written on every build, not only master, so the gate can be
-        # exercised from a branch; which builds may publish is decided by the
-        # publish pipeline's own guards. The name is reduced to bytes safe in
-        # an artifact path, with LC_ALL=C so Linux and macOS (BSD tr) map
-        # multibyte characters such as the em dash identically;
-        # publish-crates-io.yml applies the same mapping.
         - |
           marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
-          echo "${SEMAPHORE_JOB_ID}" > /tmp/ci-passed
-          artifact push workflow /tmp/ci-passed --destination "ci-passed/${marker}" --force
+          result_file=$(mktemp) \
+            && printf 'passed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
+            && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
+            || echo "Warning: could not record this job's result; publish-crates-io.yml will treat it as missing"
+    on_fail:
+      commands:
+        - |
+          marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+          result_file=$(mktemp) \
+            && printf 'failed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
+            && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
+            || echo "Warning: could not record this job's result; publish-crates-io.yml will treat it as missing"
 
 blocks:
   - name: "Verify Rust (Linux amd64)"
@@ -283,8 +296,9 @@ blocks:
             - make doc-check
 
   - name: "Check crate package (Linux amd64)"
-    # Packages `confluent-kafka` as it would be published, fails if the
-    # compressed `.crate` is above 3 MiB, and builds a fresh project that
+    # Packages `confluent-kafka` as it would be published and fails if the
+    # `.crate` is missing LICENSE or README.md, contains a key or certificate
+    # file, or exceeds 3 MiB compressed. It then builds a new project that
     # depends on it (`cargo xtask package-check`).
     dependencies: []
     task:
@@ -305,9 +319,9 @@ promotions:
     pipeline_file: publish-crates-io.yml
     parameters:
       env_vars:
-        # A typed confirmation, not the source of the version: the pipeline
-        # refuses unless it equals [package] version in rust/Cargo.toml, so a
-        # stray click cannot publish.
+        # A typed confirmation, not the source of the version. The pipeline
+        # refuses unless it equals [package] version in rust/Cargo.toml, so an
+        # accidental click cannot publish.
         - name: CRATE_VERSION
           required: true
           description: "The confluent-kafka version being released. Must equal
