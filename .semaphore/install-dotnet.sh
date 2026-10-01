@@ -2,7 +2,7 @@
 set -euo pipefail
 #
 # Job-scoped .NET SDK provisioning, shared by the "verify-dotnet (Linux amd64)
-# — plaintext" job in the "Verify .NET binding (Linux amd64)" CI block
+# — plaintext" job in the "Verify language bindings (Linux amd64)" CI block
 # (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" job in "Verify
 # language bindings (macOS arm64)". The Linux "verify-dotnet (Linux amd64) —
 # ssl" and "— sasl_ssl (plain)" jobs (M17/P1) do NOT run this script: they run
