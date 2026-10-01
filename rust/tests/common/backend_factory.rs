@@ -661,7 +661,6 @@ mod grpc_backends {
 }
 
 #[cfg(feature = "multilanguage-tests")]
-#[allow(unused_imports)] // Used only by the `integration` test binary
 pub use grpc_backends::{
     CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
 };

@@ -114,7 +114,7 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_dotnet>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -128,7 +128,7 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_dotnet_async>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
