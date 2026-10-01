@@ -23,7 +23,7 @@ import java.util.Map;
  * Per-second metrics aggregator and metrics.jsonl writer.
  *
  * Matches the schema produced by
- * {@code bindings/python/test/performance/performance_common.py} so that the
+ * {@code python/test/performance/performance_common.py} so that the
  * same plotting / analysis tooling
  * ({@code tools/performance_metrics_plot/plot_metrics.py}) works on the Java
  * test's output. Each rolled-over bucket is rendered as four string fields:
