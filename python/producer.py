@@ -45,6 +45,10 @@ class KafkaError(Exception):
         ret._message = message
         ret._is_retriable = bool(is_retriable)
         ret._is_fatal = bool(is_fatal)
+        # The copied fields carry no abort flag, and every caller builds an
+        # admin per-key or synthesised error, which never belongs to a
+        # producer transaction; `_from_c` reads the flag from the handle.
+        ret._txn_requires_abort = False
         return ret
 
     @property
