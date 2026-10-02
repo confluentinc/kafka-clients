@@ -95,6 +95,20 @@ public sealed class AdminP3SubmitArgumentTests
         Assert.Equal(timeoutMs, Capture(rpc, timeoutMs, useOptions: true).TimeoutMs);
 
     /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's
+    /// <c>calcDeadlineMs</c> clamp (<c>KafkaAdminClient.java:496-499</c>), not a throw, and not
+    /// the negative "unset" sentinel a <see langword="null"/> maps to. See
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
+    [Theory]
+    [InlineData(Rpc.DescribeCluster, -1)]
+    [InlineData(Rpc.DescribeCluster, int.MinValue)]
+    [InlineData(Rpc.ListConfigResources, -1)]
+    [InlineData(Rpc.ListConfigResources, int.MinValue)]
+    public void X2_NegativeTimeout_IsSentAsZero(Rpc rpc, int timeoutMs) =>
+        Assert.Equal(0, Capture(rpc, timeoutMs, useOptions: true).TimeoutMs);
+
+    /// <summary>
     /// <c>DescribeCluster</c>'s two booleans reach the submit <b>independently</b>, in
     /// their own argument slots — all four combinations, so a swap cannot hide behind a
     /// case where both happen to agree.

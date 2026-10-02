@@ -81,6 +81,25 @@ public sealed class AdminConfigsSubmitArgumentTests
     }
 
     /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's
+    /// <c>calcDeadlineMs</c> clamp (<c>KafkaAdminClient.java:496-499</c>), not a throw, and not
+    /// the negative "unset" sentinel a <see langword="null"/> maps to. See
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_DescribeConfigs_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(0, CaptureDescribe(new DescribeConfigsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+
+    /// <inheritdoc cref="X2_DescribeConfigs_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_IncrementalAlterConfigs_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(0, CaptureAlter(new AlterConfigsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+
+    /// <summary>
     /// <c>describeConfigs</c>' two booleans reach the submit <b>independently</b>, in their
     /// own argument slots — all four combinations, so a transposition cannot hide behind a
     /// case where both agree.

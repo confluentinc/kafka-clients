@@ -78,6 +78,23 @@ public sealed class AdminP8SubmitArgumentTests
                 new AbortTransactionOptions { TimeoutMs = 0 })
                 .TimeoutMs);
 
+    /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's
+    /// <c>calcDeadlineMs</c> clamp (<c>KafkaAdminClient.java:496-499</c>), not a throw, and not
+    /// the <c>-1</c> default sentinel, from which an unclamped <c>-1</c> would be
+    /// indistinguishable. See <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_AbortTransaction_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(
+            0,
+            CaptureAbort(
+                new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1),
+                new AbortTransactionOptions { TimeoutMs = timeoutMs })
+                .TimeoutMs);
+
     /// <summary>A non-ASCII topic survives the UTF-8 round trip (ffi §A3).</summary>
     [Fact]
     public void AbortTransaction_NonAsciiTopic_RoundTrips() =>
@@ -115,6 +132,14 @@ public sealed class AdminP8SubmitArgumentTests
     [Fact]
     public void ForceTerminateTransaction_NoOptions_SendsTheDefaultTimeoutSentinel() =>
         Assert.Equal(-1, CaptureForceTerminate("txn-a", null).TimeoutMs);
+
+    /// <inheritdoc cref="X2_AbortTransaction_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_ForceTerminateTransaction_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(
+            0, CaptureForceTerminate("txn-a", new TerminateTransactionOptions { TimeoutMs = timeoutMs }).TimeoutMs);
 
     /// <summary>
     /// The empty string is a legal id at the boundary and is <b>not</b> normalized to the
@@ -157,6 +182,14 @@ public sealed class AdminP8SubmitArgumentTests
     public void FenceProducers_NoOptions_SendsTheDefaultTimeoutSentinel() =>
         Assert.Equal(-1, CaptureFence(new[] { "txn-a" }, null).TimeoutMs);
 
+    /// <inheritdoc cref="X2_AbortTransaction_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_FenceProducers_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(
+            0, CaptureFence(new[] { "txn-a" }, new FenceProducersOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+
     /// <summary>An empty request sends a zero count, not a stale one.</summary>
     [Fact]
     public void FenceProducers_EmptyRequest_SendsAZeroCount() =>
@@ -179,6 +212,16 @@ public sealed class AdminP8SubmitArgumentTests
     [Fact]
     public void DescribeTransactions_NoOptions_SendsTheDefaultTimeoutSentinel() =>
         Assert.Equal(-1, CaptureDescribeTransactions(new[] { "txn-a" }, null).TimeoutMs);
+
+    /// <inheritdoc cref="X2_AbortTransaction_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_DescribeTransactions_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(
+            0,
+            CaptureDescribeTransactions(new[] { "txn-a" }, new DescribeTransactionsOptions { TimeoutMs = timeoutMs })
+                .TimeoutMs);
 
     [Fact]
     public void DescribeTransactions_DeduplicatesBeforeTheSubmit()
@@ -256,6 +299,17 @@ public sealed class AdminP8SubmitArgumentTests
         Assert.False(captured.HasBrokerId);
         Assert.Equal(-1, captured.TimeoutMs);
     }
+
+    /// <inheritdoc cref="X2_AbortTransaction_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_DescribeProducers_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(
+            0,
+            CaptureDescribeProducers(
+                new[] { new TopicPartition("t", 0) }, new DescribeProducersOptions { TimeoutMs = timeoutMs })
+                .TimeoutMs);
 
     /// <summary>A repeated partition collapses before the submit, as Java's map-keyed result does.</summary>
     [Fact]
@@ -360,6 +414,13 @@ public sealed class AdminP8SubmitArgumentTests
         Assert.True(captured.PatternWasNull);
         Assert.Equal(-1, captured.TimeoutMs);
     }
+
+    /// <inheritdoc cref="X2_AbortTransaction_NegativeTimeout_IsSentAsZero"/>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void X2_ListTransactions_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
+        Assert.Equal(0, CaptureListTransactions(new ListTransactionsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
 
     /// <summary>
     /// ⚠ <c>0</c> is a <b>real</b> duration filter, and only a negative value is neutral — so

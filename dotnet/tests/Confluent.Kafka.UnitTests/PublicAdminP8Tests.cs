@@ -78,7 +78,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_AbortTransaction_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void AbortTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
@@ -132,7 +133,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_ForceTerminateTransaction_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void ForceTerminateTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
@@ -261,7 +263,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_FenceProducers_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void FenceProducers_ANegativeTimeout_IsNotRejectedSynchronously()
@@ -358,7 +361,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_DescribeTransactions_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void DescribeTransactions_ANegativeTimeout_IsNotRejectedSynchronously()
@@ -480,7 +484,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_DescribeProducers_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void DescribeProducers_ANegativeTimeout_IsNotRejectedSynchronously()
@@ -565,7 +570,8 @@ public sealed class PublicAdminP8Tests
 
     /// <summary>
     /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit seam by
+    /// <c>AdminP8SubmitArgumentTests.X2_ListTransactions_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void ListTransactions_ANegativeTimeout_IsNotRejectedSynchronously()

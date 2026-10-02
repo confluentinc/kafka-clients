@@ -368,8 +368,9 @@ public sealed class PublicAdminConfigsTests
 
     /// <summary>
     /// A negative <c>TimeoutMs</c> is not rejected on either RPC (M15/P13.5 X2): it is sent as
-    /// 0, Java's <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the
-    /// submit-seam tests.
+    /// 0, Java's <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit
+    /// seam by <c>AdminConfigsSubmitArgumentTests.X2_DescribeConfigs_NegativeTimeout_IsSentAsZero</c>
+    /// and <c>X2_IncrementalAlterConfigs_NegativeTimeout_IsSentAsZero</c>.
     /// </summary>
     [Fact]
     public void NegativeTimeout_IsNotRejectedSynchronously()

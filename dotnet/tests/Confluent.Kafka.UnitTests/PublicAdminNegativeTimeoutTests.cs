@@ -26,9 +26,13 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// M15/P13.5 X2: a negative <c>TimeoutMs</c> is sent as 0, Java's <c>calcDeadlineMs</c> clamp
-/// (<c>KafkaAdminClient.java:496-499</c>), instead of being rejected synchronously. The
-/// per-RPC submit-seam tests pin the value each RPC sends; this class pins the shared helper
-/// and what a real client then does with the clamped value.
+/// (<c>KafkaAdminClient.java:496-499</c>), instead of being rejected synchronously. This class
+/// pins the clamp itself — the shared <c>NativeAdminClient.ToNativeTimeoutMs</c> helper, as a
+/// table — and, through <c>ListTopics</c>, what a real client then does with the clamped value.
+/// The value a given RPC sends is pinned only where that RPC's submit-seam test has a
+/// negative-timeout row asserting a captured <c>0</c>. For an RPC without such a row, this class
+/// does not pin the value it sends: that relies on its call site routing the timeout through
+/// the helper.
 /// </summary>
 public sealed class PublicAdminNegativeTimeoutTests
 {
