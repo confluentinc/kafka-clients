@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -24,8 +25,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Pins the small Java-parity fixes from the <c>f2f397e5</c> AdminClient audit: the three
-/// <c>*Result</c> constructors Java declares public (G4-10), and the result collections Java
-/// returns as unmodifiable views (G3-11).
+/// <c>*Result</c> constructors Java declares public (G4-10), the result collections Java
+/// returns as unmodifiable views (G3-11), and the closed SCRAM alteration hierarchy (G4-13).
 /// </summary>
 public sealed class PublicAdminParityLowsTests
 {
@@ -172,5 +173,22 @@ public sealed class PublicAdminParityLowsTests
 
         replicas[second] = new ReplicaInfo(3, 4, true);
         Assert.Equal(2, description.ReplicaInfos.Count);
+    }
+
+    /// <summary>
+    /// G4-13: the base constructor is <c>private protected</c>, so only this library's
+    /// upsertion and deletion can derive from it. A caller's own subclass could never be
+    /// sent, and Java likewise sends only those two cases.
+    /// </summary>
+    [Fact]
+    public void G4_13_UserScramCredentialAlteration_IsClosedToOtherAssemblies()
+    {
+        ConstructorInfo constructor = Assert.Single(
+            typeof(UserScramCredentialAlteration).GetConstructors(
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
+
+        Assert.True(constructor.IsFamilyAndAssembly, "expected a private protected constructor");
+        Assert.True(typeof(UserScramCredentialUpsertion).IsSealed);
+        Assert.True(typeof(UserScramCredentialDeletion).IsSealed);
     }
 }

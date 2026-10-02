@@ -27,7 +27,10 @@ public sealed class TransactionListing
     /// <param name="transactionalId">The transactional id.</param>
     /// <param name="producerId">The producer id.</param>
     /// <param name="state">The transaction state.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="transactionalId"/> is null — stricter than Java, whose constructor
+    /// stores it unchecked (<c>:26-34</c>).
+    /// </exception>
     public TransactionListing(string transactionalId, long producerId, TransactionState state)
     {
         TransactionalId = transactionalId ?? throw new ArgumentNullException(nameof(transactionalId));

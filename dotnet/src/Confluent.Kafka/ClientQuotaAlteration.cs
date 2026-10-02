@@ -99,7 +99,11 @@ public sealed class ClientQuotaAlteration
         /// </summary>
         /// <param name="key">The quota type to alter.</param>
         /// <param name="value">The new value, or null to clear the quota.</param>
-        /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
+        /// <exception cref="ArgumentNullException">
+        /// <paramref name="key"/> is null — stricter than Java, whose constructor accepts it and
+        /// whose <c>alterClientQuotas</c> call then fails; the binding's rule for null keys (see
+        /// the <see cref="Admin.IAdmin"/> remarks).
+        /// </exception>
         public Op(string key, double? value)
         {
             Key = key ?? throw new ArgumentNullException(nameof(key));

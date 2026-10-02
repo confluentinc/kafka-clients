@@ -182,6 +182,8 @@ internal static class AlterUserScramCredentialsMarshal
                     _hasSalts[index] = 0;
                     break;
 
+                // Unreachable: the base constructor is private protected, so these two
+                // sealed classes are the only cases. Kept as a guard should a case be added.
                 default:
                     throw new ArgumentException(
                         "The SCRAM credential alterations must be upsertions or deletions.",

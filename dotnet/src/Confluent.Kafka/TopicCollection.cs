@@ -87,9 +87,8 @@ public abstract class TopicCollection
     /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails
     /// only that key's future with <c>InvalidTopicException</c>
     /// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>, used at
-    /// <c>:1924</c> and <c>:2334</c>). Whether the binding should reproduce that per-key
-    /// failure is open: it is one instance of the binding-wide up-front-rejection pattern
-    /// (audit X10).
+    /// <c>:1924</c> and <c>:2334</c>). That is the binding's settled rule for null keys — see
+    /// the <see cref="Admin.IAdmin"/> remarks.
     /// </remarks>
     public static TopicNameCollection OfTopicNames(IEnumerable<string> topics) =>
         new TopicNameCollection(topics);

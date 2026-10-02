@@ -69,6 +69,22 @@ namespace Confluent.Kafka.Admin;
 /// one, leaving the call unable to complete. Java has no such limit, because it
 /// length-prefixes every string on the wire.
 /// </para>
+/// <para>
+/// ⚠ <b>A null key, element or argument is rejected up front, for the whole call.</b>
+/// Where a method's <see cref="ArgumentNullException"/> or <see cref="ArgumentException"/>
+/// entry names a null — a null topic, group id, transactional id or other key, a null
+/// element of a key collection, or a null operation, spec, update or HMAC — the method
+/// throws before anything is sent, so the valid keys in the same call are not sent either.
+/// This is <b>stricter than Java</b>. Java's per-key RPCs treat a null name as
+/// unrepresentable and fail only that key's future, with <c>InvalidTopicException</c>
+/// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>) or
+/// <c>InvalidGroupIdException</c> (<c>CoordinatorStrategy.java:70-99</c>), and still send
+/// the other keys; elsewhere Java hits a <c>NullPointerException</c> on its admin thread,
+/// which fails that call's futures. It is this binding's settled rule, not an open gap
+/// (audit X10): the C ABI cannot carry a null key — it would skip such a row or refuse
+/// it — and the binding checks its preconditions before any native call. To get Java's
+/// outcome for the other keys, leave the null ones out of the call.
+/// </para>
 /// </remarks>
 public interface IAdmin : IDisposable, IAsyncDisposable
 {
@@ -97,8 +113,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="NewTopic.Configs"/>). A topic with a null <em>name</em> never reaches this
     /// call: the <see cref="NewTopic"/> constructor rejects one, stricter than Java, whose
     /// <c>createTopics</c> fails only that topic's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). Whether to fail per key
-    /// instead is open (audit X10; see the <see cref="NewTopic"/> remarks).
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>) — the binding's rule for
+    /// null keys (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null);
@@ -137,8 +153,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks). The null element is rejected stricter than Java, whose
     /// <c>deleteTopics</c> fails only that key's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1924</c>). Whether to fail per key
-    /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1924</c>) — the binding's rule for
+    /// null keys (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
@@ -214,8 +230,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks). The null element is rejected stricter than Java, whose
     /// <c>describeTopics</c> fails only that key's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:2334</c>). Whether to fail per key
-    /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
+    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:2334</c>) — the binding's rule for
+    /// null keys (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.PartitionSizeLimitPerResponse</c> is negative — the ABI reads a negative

@@ -45,7 +45,12 @@ public sealed class MemberToRemove : IEquatable<MemberToRemove>
     /// <c>MemberToRemove(String groupInstanceId)</c> (<c>:30-32</c>).
     /// </summary>
     /// <param name="groupInstanceId">The static member's <c>group.instance.id</c>.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="groupInstanceId"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupInstanceId"/> is null — stricter than Java, whose constructor
+    /// accepts it (<c>MemberToRemove.java:30-33</c>) and sends the member with a null
+    /// <c>group.instance.id</c>; the binding's rule for null keys (see the
+    /// <see cref="IAdmin"/> remarks).
+    /// </exception>
     public MemberToRemove(string groupInstanceId)
     {
         if (groupInstanceId is null)

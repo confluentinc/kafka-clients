@@ -78,7 +78,10 @@ public sealed class DescribeUserScramCredentialsResult
     /// <remarks>
     /// Both guards throw <b>synchronously</b> — this method is deliberately not <c>async</c>,
     /// so a precondition failure is not deferred into the returned <see cref="Task"/>
-    /// (ffi §A5).
+    /// (ffi §A5). A null <paramref name="userName"/> is rejected stricter than Java, whose
+    /// <c>description(null)</c> returns a future failed with <c>"No such user: null"</c>
+    /// (<c>DescribeUserScramCredentialsResult.java:122-125</c>) — the binding's rule for null
+    /// keys (see the <see cref="IAdmin"/> remarks).
     /// </remarks>
     public Task<UserScramCredentialsDescription> Description(string userName)
     {

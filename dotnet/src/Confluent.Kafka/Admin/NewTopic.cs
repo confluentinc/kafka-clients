@@ -60,9 +60,8 @@ namespace Confluent.Kafka.Admin;
 /// the name without checking (<c>NewTopic.java:57</c>, <c>:72</c>), and
 /// <c>createTopics</c> then fails only that topic's future with
 /// <c>InvalidTopicException</c> (<c>topicNameIsUnrepresentable</c>,
-/// <c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). Whether the binding should
-/// reproduce that per-key failure instead of rejecting up front is open: it is one
-/// instance of the binding-wide up-front-rejection pattern (audit X10).
+/// <c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). That is the binding's settled
+/// rule for null keys — see the <see cref="IAdmin"/> remarks.
 /// </para>
 /// </remarks>
 public sealed class NewTopic

@@ -40,6 +40,13 @@ public sealed class TransactionDescription
     /// When the transaction started, in milliseconds, or <see langword="null"/> when absent.
     /// </param>
     /// <param name="topicPartitions">The partitions enlisted in the transaction; null means none.</param>
+    /// <remarks>
+    /// ⚠ <b>Normalises where Java stores as given</b> (<c>:34-50</c>, no checks):
+    /// a null <paramref name="topicPartitions"/> becomes an empty
+    /// <see cref="TopicPartitions"/>, where Java's <c>topicPartitions()</c> would return
+    /// null, and repeated partitions are kept once, as Java's <c>Set</c> field keeps them.
+    /// This only affects descriptions a caller builds; the client never passes null.
+    /// </remarks>
     public TransactionDescription(
         int coordinatorId,
         TransactionState state,
