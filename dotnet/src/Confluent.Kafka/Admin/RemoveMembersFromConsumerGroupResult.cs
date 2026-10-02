@@ -38,13 +38,15 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠ <b><see cref="All"/> rethrows the core's own <c>all()</c> outcome</b>, read off the
 /// native result together with the map, rather than re-deriving it here. Outside
-/// <see cref="RemoveAll"/> mode that is the outcome <see cref="MemberResult"/> reports for the
-/// first failing requested member; which member is first is the core's choice
-/// (group-instance-id order — Java iterates its set in unspecified order).
+/// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> mode that is the outcome
+/// <see cref="MemberResult"/> reports for the first failing requested member; which member
+/// is first is the core's choice (group-instance-id order — Java iterates its set in
+/// unspecified order).
 /// </para>
 /// <para>
-/// ⚠⚠ <b>In <see cref="RemoveAll"/> mode a member failure is a wrapper whose cause is the
-/// member's own error, as in Java.</b> Java's <c>all()</c> (<c>:56-64</c>) throws
+/// ⚠⚠ <b>In <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> mode a member
+/// failure is a wrapper whose cause is the member's own error, as in Java.</b> Java's
+/// <c>all()</c> (<c>:56-64</c>) throws
 /// <c>new KafkaException("Encounter exception when trying to remove: " + identity,
 /// memberException)</c>. The core builds the same error, with "exception" spelled "error":
 /// a bare <see cref="KafkaException"/> with <see cref="KafkaException.Code"/> -1
@@ -88,7 +90,12 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// empty rather than stored as its own field, mirroring
     /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/>.
     /// </summary>
-    public bool RemoveAll => _memberInfos.Count == 0;
+    /// <remarks>
+    /// <see langword="internal"/>, as Java's is <c>private</c>: a caller already knows which
+    /// mode it asked for, from the options it passed
+    /// (<see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/>).
+    /// </remarks>
+    internal bool RemoveAll => _memberInfos.Count == 0;
 
     /// <summary>
     /// Returns a task which indicates whether the request was 100% success, i.e. no either
@@ -99,10 +106,10 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// <remarks>
     /// The fault is the core's <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>,
     /// rethrown unchanged — see the type remarks for what it carries in
-    /// <see cref="RemoveAll"/> mode. A whole-request failure faults the awaitable instead and
-    /// propagates unchanged through the <see langword="await"/> (<c>:52-53</c>). A fresh task
-    /// per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per <c>all()</c> call
-    /// (<c>:50</c>).
+    /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> mode. A whole-request
+    /// failure faults the awaitable instead and propagates unchanged through the
+    /// <see langword="await"/> (<c>:52-53</c>). A fresh task per call, as Java allocates a
+    /// fresh <c>KafkaFutureImpl</c> per <c>all()</c> call (<c>:50</c>).
     /// </remarks>
     public async Task All()
     {

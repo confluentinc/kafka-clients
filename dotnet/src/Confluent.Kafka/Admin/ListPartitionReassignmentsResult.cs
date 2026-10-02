@@ -18,7 +18,9 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListPartitionReassignments"/> — the .NET realization of
+/// The result of
+/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+/// — the .NET realization of
 /// Java's <c>ListPartitionReassignmentsResult</c>: <b>one</b> awaitable over the whole
 /// listing (<c>ListPartitionReassignmentsResult.java:31, :40</c>).
 /// </summary>

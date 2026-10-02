@@ -55,7 +55,11 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     [Fact]
     public void IAdmin_TheTwoNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo listReassignments = typeof(IAdmin).GetMethod(nameof(IAdmin.ListPartitionReassignments))!;
+        // The partitions-taking form; the options-only one (M15/P13.5 G3-7) is pinned by
+        // PublicAdminReassignmentsOffsetsTests.
+        MethodInfo listReassignments = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.ListPartitionReassignments),
+            new[] { typeof(IReadOnlyCollection<TopicPartition>), typeof(ListPartitionReassignmentsOptions) })!;
         MethodInfo listOffsets = typeof(IAdmin).GetMethod(nameof(IAdmin.ListOffsets))!;
 
         Assert.Equal(typeof(ListPartitionReassignmentsResult), listReassignments.ReturnType);
@@ -68,10 +72,11 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>), typeof(ListOffsetsOptions) },
             listOffsets.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // ⚠ The selection is NULLABLE and REQUIRED: null is Java's Optional.empty() —
-        // "every ongoing reassignment" — and Java has no overload that omits the argument.
+        // ⚠ The selection is NULLABLE: null is Java's Optional.empty() — "every ongoing
+        // reassignment". It is OPTIONAL too since M15/P13.5 G3-7: Java's zero-argument
+        // listPartitionReassignments() (Admin.java:1193) is `()` here.
         ParameterInfo selection = listReassignments.GetParameters()[0];
-        Assert.False(selection.IsOptional, "the selection mirrors Java's required parameter");
+        Assert.True(selection.IsOptional, "the selection defaults, as Java's zero-arg overload");
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(selection));
 
         // …whereas listOffsets' map is required AND non-nullable, matching Java.

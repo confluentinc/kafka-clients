@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -283,7 +285,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         await using MockAdminClient admin = new MockAdminClient(1);
 
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(null).Reassignments(), s_deadline));
+            () => admin.ListPartitionReassignments(partitions: null).Reassignments(), s_deadline));
         Assert.Empty(await TestTimeout.Run(
             () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>()).Reassignments(), s_deadline));
     }
@@ -296,7 +298,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     public async Task ListPartitionReassignmentsResult_ReturnsTheSameTaskInstance()
     {
         await using MockAdminClient admin = new MockAdminClient(1);
-        ListPartitionReassignmentsResult result = admin.ListPartitionReassignments(null);
+        ListPartitionReassignmentsResult result = admin.ListPartitionReassignments();
 
         Assert.Same(result.Reassignments(), result.Reassignments());
         await TestTimeout.Run(result.Reassignments, s_deadline);
@@ -312,7 +314,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         await using (MockAdminClient live = new MockAdminClient(1))
         {
             IAdmin admin = live;
-            await TestTimeout.Run(() => admin.ListPartitionReassignments(null).Reassignments(), s_deadline);
+            await TestTimeout.Run(() => admin.ListPartitionReassignments().Reassignments(), s_deadline);
             await TestTimeout.Run(
                 () => admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()).All(), s_deadline);
         }
@@ -320,11 +322,137 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         MockAdminClient closed = new MockAdminClient(1);
         closed.Dispose();
 
-        Assert.Throws<ObjectDisposedException>(() => closed.ListPartitionReassignments(null));
+        Assert.Throws<ObjectDisposedException>(() => closed.ListPartitionReassignments());
+        Assert.Throws<ObjectDisposedException>(
+            () => closed.ListPartitionReassignments(new ListPartitionReassignmentsOptions()));
         Assert.Throws<ObjectDisposedException>(
             () => closed.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()));
 
-        Assert.NotNull(typeof(KafkaAdminClient).GetMethod(nameof(IAdmin.ListPartitionReassignments)));
+        Assert.Contains(
+            typeof(KafkaAdminClient).GetMethods(),
+            method => method.Name == nameof(IAdmin.ListPartitionReassignments));
         Assert.NotNull(typeof(KafkaAdminClient).GetMethod(nameof(IAdmin.ListOffsets)));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-7: Java's zero-argument <c>listPartitionReassignments()</c>
+    /// (<c>Admin.java:1193</c>) and options-only
+    /// <c>listPartitionReassignments(ListPartitionReassignmentsOptions)</c> (<c>:1248</c>) are
+    /// writable — the selection defaults to <see langword="null"/>, and the options-only form
+    /// is its own member — on <see cref="IAdmin"/> and on both clients.
+    /// </summary>
+    /// <param name="type">The type the overloads must be declared on.</param>
+    [Theory]
+    [InlineData(typeof(IAdmin))]
+    [InlineData(typeof(KafkaAdminClient))]
+    [InlineData(typeof(MockAdminClient))]
+    public void G3_7_TheZeroArgAndOptionsOnlyForms_AreDeclared(Type type)
+    {
+        MethodInfo? selection = type.GetMethod(
+            nameof(IAdmin.ListPartitionReassignments),
+            new[] { typeof(IReadOnlyCollection<TopicPartition>), typeof(ListPartitionReassignmentsOptions) });
+        MethodInfo? optionsOnly = type.GetMethod(
+            nameof(IAdmin.ListPartitionReassignments), new[] { typeof(ListPartitionReassignmentsOptions) });
+
+        Assert.NotNull(selection);
+        ParameterInfo partitions = selection!.GetParameters()[0];
+        Assert.Equal("partitions", partitions.Name);
+        Assert.True(partitions.HasDefaultValue);
+        Assert.Null(partitions.DefaultValue);
+        Assert.True(selection.GetParameters()[1].HasDefaultValue);
+        Assert.Null(selection.GetParameters()[1].DefaultValue);
+
+        Assert.NotNull(optionsOnly);
+        Assert.Equal(typeof(ListPartitionReassignmentsResult), optionsOnly!.ReturnType);
+        Assert.False(optionsOnly.GetParameters()[0].IsOptional);
+
+        Assert.Equal(
+            2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.ListPartitionReassignments)));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-7: <c>()</c> and <c>(options)</c> list <b>every</b> ongoing reassignment,
+    /// exactly as <c>(null, options)</c> does — a null selection, not an empty one, which
+    /// would list nothing.
+    /// </summary>
+    [Fact]
+    public async Task G3_7_TheZeroArgAndOptionsOnlyForms_ListEveryReassignment()
+    {
+        await using MockAdminClient mock = new MockAdminClient(3);
+        IAdmin admin = mock;
+        await TestTimeout.Run(
+            () => admin.CreateTopics(new[] { new NewTopic("p135-g37", 1, 2) }).All(), s_deadline);
+
+        TopicPartition partition = new TopicPartition("p135-g37", 0);
+        await TestTimeout.Run(
+            () => admin.AlterPartitionReassignments(
+                new Dictionary<TopicPartition, NewPartitionReassignment?>
+                {
+                    [partition] = new NewPartitionReassignment(new[] { 0, 2 }),
+                }).All(),
+            s_deadline);
+
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions();
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> explicitNull = await TestTimeout.Run(
+            () => admin.ListPartitionReassignments(null, options).Reassignments(), s_deadline);
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> zeroArg = await TestTimeout.Run(
+            () => admin.ListPartitionReassignments().Reassignments(), s_deadline);
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> optionsOnly = await TestTimeout.Run(
+            () => admin.ListPartitionReassignments(options).Reassignments(), s_deadline);
+
+        Assert.Equal(new[] { partition }, explicitNull.Keys);
+        Assert.Equal(new[] { partition }, zeroArg.Keys);
+        Assert.Equal(new[] { partition }, optionsOnly.Keys);
+        Assert.Equal(explicitNull[partition].Replicas, optionsOnly[partition].Replicas);
+
+        // The control: an EMPTY selection is a different request, and lists nothing.
+        Assert.Empty(await TestTimeout.Run(
+            () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>(), options).Reassignments(),
+            s_deadline));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-7: the options-only form hands its options through, on both clients. It
+    /// is compared with <c>(null, options)</c> given the same options, so the assertion is
+    /// about forwarding, not about what the option does.
+    /// </summary>
+    [Fact]
+    public void G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
+    {
+        IAdmin mock = new MockAdminClient(1);
+        IAdmin real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        try
+        {
+            ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
+            foreach (IAdmin admin in new[] { mock, real })
+            {
+                Assert.Equal(
+                    Rejection(() => admin.ListPartitionReassignments(null, options)),
+                    Rejection(() => admin.ListPartitionReassignments(options)));
+            }
+        }
+        finally
+        {
+            mock.Dispose();
+            real.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// What a call threw, as one comparable string, or <see langword="null"/> if it did not
+    /// throw.
+    /// </summary>
+    private static string? Rejection(Action call)
+    {
+        try
+        {
+            call();
+            return null;
+        }
+        catch (Exception thrown)
+        {
+            return $"{thrown.GetType().FullName}|{(thrown as ArgumentException)?.ParamName}|{thrown.Message}";
+        }
     }
 }

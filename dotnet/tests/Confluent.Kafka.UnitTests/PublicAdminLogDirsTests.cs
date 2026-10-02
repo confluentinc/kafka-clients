@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -327,5 +329,95 @@ public sealed class PublicAdminLogDirsTests
             () => admin.AlterReplicaLogDirs(
                 new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir }));
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeReplicaLogDirs(new[] { replica }));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-8: <see cref="LogDirDescription"/> has Java's three <b>public</b>
+    /// constructors, with Java's arities — 2, 4 and 5 (<c>LogDirDescription.java:38</c>,
+    /// <c>:42</c>, <c>:46</c>) — and no other.
+    /// </summary>
+    [Fact]
+    public void G3_8_LogDirDescription_HasJavasThreePublicConstructors()
+    {
+        Type[][] shapes = typeof(LogDirDescription).GetConstructors()
+            .Select(ctor => ctor.GetParameters().Select(parameter => parameter.ParameterType).ToArray())
+            .OrderBy(types => types.Length)
+            .ToArray();
+
+        Type replicaInfos = typeof(IReadOnlyDictionary<TopicPartition, ReplicaInfo>);
+        Assert.Equal(3, shapes.Length);
+        Assert.Equal(new[] { typeof(KafkaException), replicaInfos }, shapes[0]);
+        Assert.Equal(new[] { typeof(KafkaException), replicaInfos, typeof(long?), typeof(long?) }, shapes[1]);
+        Assert.Equal(
+            new[] { typeof(KafkaException), replicaInfos, typeof(long?), typeof(long?), typeof(bool) },
+            shapes[2]);
+        Assert.Empty(typeof(LogDirDescription).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-8: each constructor stores what it is given, the shorter ones default as
+    /// Java's do (unreported sizes, uncordoned), and Java's <c>-1</c>
+    /// (<c>UNKNOWN_VOLUME_BYTES</c>) is stored as <see langword="null"/>, as Java's
+    /// constructor turns it into <c>OptionalLong.empty()</c> (<c>:49-50</c>). Every other
+    /// value — <c>0</c> and other negatives included — is kept.
+    /// </summary>
+    [Fact]
+    public void G3_8_LogDirDescription_ConstructorsStoreTheirArguments_AndMapJavasMinusOneToNull()
+    {
+        KafkaException error = new KafkaException("the log directory is offline");
+        Dictionary<TopicPartition, ReplicaInfo> replicas = new Dictionary<TopicPartition, ReplicaInfo>
+        {
+            [new TopicPartition("t", 0)] = new ReplicaInfo(1, 2, false),
+        };
+
+        LogDirDescription two = new LogDirDescription(error, replicas);
+        Assert.Same(error, two.Error);
+        Assert.Same(replicas, two.ReplicaInfos);
+        Assert.Null(two.TotalBytes);
+        Assert.Null(two.UsableBytes);
+        Assert.False(two.IsCordoned);
+
+        LogDirDescription four = new LogDirDescription(null, replicas, 100, 0);
+        Assert.Null(four.Error);
+        Assert.Equal(100, four.TotalBytes);
+        Assert.Equal(0, four.UsableBytes);
+        Assert.False(four.IsCordoned);
+
+        LogDirDescription javaUnknown = new LogDirDescription(null, replicas, -1, -1, true);
+        Assert.Null(javaUnknown.TotalBytes);
+        Assert.Null(javaUnknown.UsableBytes);
+        Assert.True(javaUnknown.IsCordoned);
+
+        LogDirDescription fourUnknown = new LogDirDescription(null, replicas, -1, 5);
+        Assert.Null(fourUnknown.TotalBytes);
+        Assert.Equal(5, fourUnknown.UsableBytes);
+
+        LogDirDescription otherNegative = new LogDirDescription(null, replicas, -2, 7, false);
+        Assert.Equal(-2, otherNegative.TotalBytes);
+        Assert.Equal(7, otherNegative.UsableBytes);
+    }
+
+    /// <summary>
+    /// M15/P13.5 G3-8: a null <c>replicaInfos</c> is rejected by every arity, with the
+    /// parameter's name — stricter than Java, which stores it and fails later in
+    /// <c>replicaInfos()</c> (<c>:70</c>).
+    /// </summary>
+    /// <param name="arity">Which constructor to call.</param>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void G3_8_LogDirDescription_RejectsANullReplicaInfos(int arity)
+    {
+        Action construct = arity switch
+        {
+            2 => () => _ = new LogDirDescription(null, null!),
+            4 => () => _ = new LogDirDescription(null, null!, 1, 1),
+            _ => () => _ = new LogDirDescription(null, null!, 1, 1, false),
+        };
+
+        ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(construct);
+        Assert.Equal("replicaInfos", thrown.ParamName);
+        Assert.StartsWith("Value cannot be null.", thrown.Message, StringComparison.Ordinal);
     }
 }

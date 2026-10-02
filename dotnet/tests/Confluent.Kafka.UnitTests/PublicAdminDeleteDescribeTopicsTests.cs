@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -278,8 +280,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     {
         using MockAdminClient admin = new MockAdminClient(1);
 
-        Assert.Throws<ArgumentNullException>(() => admin.DeleteTopics(null!));
-        Assert.Throws<ArgumentNullException>(() => admin.DescribeTopics(null!));
+        // The cast picks the TopicCollection overload: a lone literal null matches the
+        // name-collection one too (CS0121) since M15/P13.5 G1-10.
+        Assert.Throws<ArgumentNullException>(() => admin.DeleteTopics((TopicCollection)null!));
+        Assert.Throws<ArgumentNullException>(() => admin.DescribeTopics((TopicCollection)null!));
 
         ArgumentException nullName = Assert.Throws<ArgumentException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha", null! })));
@@ -386,6 +390,183 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         finally
         {
             real.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// M15/P13.5 G1-10: Java's name-collection overloads — <c>deleteTopics(Collection&lt;String&gt;)</c>
+    /// / <c>(…, DeleteTopicsOptions)</c> and <c>describeTopics(Collection&lt;String&gt;)</c> /
+    /// <c>(…, DescribeTopicsOptions)</c> (<c>Admin.java:212</c>, <c>:226</c>, <c>:295</c>,
+    /// <c>:306</c>) — exist on <see cref="IAdmin"/> and on both clients, each as one member
+    /// whose options default to <see langword="null"/>.
+    /// </summary>
+    /// <param name="type">The type the overloads must be declared on.</param>
+    [Theory]
+    [InlineData(typeof(IAdmin))]
+    [InlineData(typeof(KafkaAdminClient))]
+    [InlineData(typeof(MockAdminClient))]
+    public void G1_10_TheNameCollectionOverloads_AreDeclared(Type type)
+    {
+        MethodInfo? delete = type.GetMethod(
+            nameof(IAdmin.DeleteTopics),
+            new[] { typeof(IReadOnlyCollection<string>), typeof(DeleteTopicsOptions) });
+        MethodInfo? describe = type.GetMethod(
+            nameof(IAdmin.DescribeTopics),
+            new[] { typeof(IReadOnlyCollection<string>), typeof(DescribeTopicsOptions) });
+
+        Assert.NotNull(delete);
+        Assert.NotNull(describe);
+        Assert.Equal(typeof(DeleteTopicsResult), delete!.ReturnType);
+        Assert.Equal(typeof(DescribeTopicsResult), describe!.ReturnType);
+
+        foreach (MethodInfo method in new[] { delete, describe })
+        {
+            ParameterInfo[] parameters = method.GetParameters();
+            Assert.Equal("topicNames", parameters[0].Name);
+            Assert.False(parameters[0].IsOptional);
+            Assert.True(parameters[1].IsOptional);
+            Assert.Null(parameters[1].DefaultValue);
+        }
+
+        // Each RPC now has exactly the two forms: TopicCollection and the name collection.
+        Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DeleteTopics)));
+        Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DescribeTopics)));
+    }
+
+    /// <summary>
+    /// M15/P13.5 G1-10: the name-collection forms do exactly what the
+    /// <see cref="TopicCollection"/> form does with <see cref="TopicCollection.OfTopicNames"/>
+    /// — the same per-name keys, the same success values, the same failures — through the
+    /// <see cref="IAdmin"/> interface.
+    /// </summary>
+    [Fact]
+    public async Task G1_10_TheNameCollectionForms_BehaveAsTheTopicCollectionForm()
+    {
+        using MockAdminClient mock = new MockAdminClient(1);
+        IAdmin admin = mock;
+        const string Present = "p135-g110-present";
+        const string Absent = "p135-g110-absent";
+
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Present, 2, 1) }).All(), s_deadline);
+
+        DescribeTopicsResult byName = admin.DescribeTopics(new[] { Present, Absent });
+        DescribeTopicsResult byCollection =
+            admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Present, Absent }));
+        Assert.Null(byName.TopicIdValues);
+        Assert.Equal(
+            byCollection.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal),
+            byName.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal));
+
+        TopicDescription named = await TestTimeout.Run(() => byName.TopicNameValues![Present], s_deadline);
+        TopicDescription collected = await TestTimeout.Run(() => byCollection.TopicNameValues![Present], s_deadline);
+        Assert.Equal(Present, named.Name);
+        Assert.Equal(collected.Partitions.Count, named.Partitions.Count);
+        Assert.Equal(collected.TopicId, named.TopicId);
+
+        KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => byName.TopicNameValues![Absent], s_deadline));
+        Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
+
+        DeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
+        Assert.Null(deleted.TopicIdValues);
+        await TestTimeout.Run(() => deleted.TopicNameValues![Present], s_deadline);
+        KafkaException deleteFailure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent], s_deadline));
+        Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
+
+        // The delete took effect: describing the topic by name now fails.
+        DescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
+        KafkaException gone = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present], s_deadline));
+        Assert.Equal($"Topic {Present} not found.", gone.Message);
+    }
+
+    /// <summary>
+    /// M15/P13.5 G1-10: the name-collection forms hand their options through, on both
+    /// clients. Each call is compared with the <see cref="TopicCollection"/> form given the
+    /// same options, so the assertion is about forwarding, not about what any one option does.
+    /// </summary>
+    [Fact]
+    public void G1_10_TheNameCollectionForms_ForwardTheirOptions()
+    {
+        IAdmin mock = new MockAdminClient(1);
+        IAdmin real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        try
+        {
+            string[] names = { "alpha" };
+            foreach (IAdmin admin in new[] { mock, real })
+            {
+                DescribeTopicsOptions badLimit = new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 };
+                string? described = Rejection(() => admin.DescribeTopics(names, badLimit));
+                Assert.Equal(
+                    Rejection(() => admin.DescribeTopics(TopicCollection.OfTopicNames(names), badLimit)), described);
+                Assert.NotNull(described);
+
+                DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
+                Assert.Equal(
+                    Rejection(() => admin.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout)),
+                    Rejection(() => admin.DeleteTopics(names, deleteTimeout)));
+
+                DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
+                Assert.Equal(
+                    Rejection(() => admin.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout)),
+                    Rejection(() => admin.DescribeTopics(names, describeTimeout)));
+            }
+        }
+        finally
+        {
+            mock.Dispose();
+            real.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// M15/P13.5 G1-10: a null name collection is rejected before anything is forwarded, with
+    /// the overload's own parameter name — on both clients, through <see cref="IAdmin"/>.
+    /// </summary>
+    [Fact]
+    public void G1_10_ANullNameCollection_IsRejectedWithItsParameterName()
+    {
+        IAdmin mock = new MockAdminClient(1);
+        IAdmin real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        try
+        {
+            foreach (IAdmin admin in new[] { mock, real })
+            {
+                ArgumentNullException delete = Assert.Throws<ArgumentNullException>(
+                    () => admin.DeleteTopics((IReadOnlyCollection<string>)null!));
+                Assert.Equal("topicNames", delete.ParamName);
+                Assert.StartsWith("Value cannot be null.", delete.Message, StringComparison.Ordinal);
+
+                ArgumentNullException describe = Assert.Throws<ArgumentNullException>(
+                    () => admin.DescribeTopics((IReadOnlyCollection<string>)null!, new DescribeTopicsOptions()));
+                Assert.Equal("topicNames", describe.ParamName);
+                Assert.StartsWith("Value cannot be null.", describe.Message, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            mock.Dispose();
+            real.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// What a call threw, as one comparable string, or <see langword="null"/> if it did not
+    /// throw.
+    /// </summary>
+    private static string? Rejection(Action call)
+    {
+        try
+        {
+            call();
+            return null;
+        }
+        catch (Exception thrown)
+        {
+            return $"{thrown.GetType().FullName}|{(thrown as ArgumentException)?.ParamName}|{thrown.Message}";
         }
     }
 }

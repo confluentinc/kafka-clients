@@ -342,10 +342,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
     /// are asserted to be found by the <em>same</em> walk.
     /// </para>
     /// <para>
-    /// ⚠ <b>The constructor stays <see langword="internal"/> although Java's three are
-    /// public.</b> Only the result marshaller builds one, consistent with the sibling admin
-    /// result types; publishing it is a separate decision, not a consequence of this member
-    /// landing.
+    /// The constructors are public with Java's three arities since M15/P13.5 G3-8; that is
+    /// pinned by <see cref="PublicAdminLogDirsTests"/>, not here.
     /// </para>
     /// </remarks>
     [Fact]
@@ -372,9 +370,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
         // above is about this member rather than about a walk that returns everything.
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.TotalBytes), StringComparison.Ordinal));
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.Error), StringComparison.Ordinal));
-
-        // The constructor's accessibility is unchanged — see the remarks.
-        Assert.Empty(typeof(LogDirDescription).GetConstructors());
     }
 
     /// <summary>
@@ -434,12 +429,12 @@ public sealed class PublicAdminLogDirsShapeParityTests
     }
 
     /// <summary>
-    /// ⚠ <b><see cref="ReplicaInfo"/>'s constructor is PUBLIC and
-    /// <see cref="LogDirDescription"/>'s is not</b>, and the split follows Java plus D15
-    /// rather than a house style.
+    /// <see cref="ReplicaInfo"/>'s and <see cref="TopicPartitionReplica"/>'s constructors are
+    /// public, as Java's are. <see cref="LogDirDescription"/>'s three are public too since
+    /// M15/P13.5 G3-8, pinned by <see cref="PublicAdminLogDirsTests"/>.
     /// </summary>
     [Fact]
-    public void TheConstructorVisibility_FollowsJavaExceptWhereD15Intervenes()
+    public void TheConstructorVisibility_FollowsJava()
     {
         // Java's ReplicaInfo(long, long, boolean) is public (ReplicaInfo.java:28), and this
         // type can carry every field it takes.
@@ -453,9 +448,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(
             new[] { typeof(string), typeof(int), typeof(int) },
             replica.GetParameters().Select(parameter => parameter.ParameterType));
-
-        // …and LogDirDescription's is internal — see the D15 test's remarks.
-        Assert.Empty(typeof(LogDirDescription).GetConstructors());
     }
 
     /// <summary>

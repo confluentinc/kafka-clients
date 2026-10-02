@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -482,6 +483,31 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         KafkaException fromAll = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
         Assert.Same(callLevel, fromAll);
+    }
+
+    /// <summary>
+    /// M15/P13.5 G5-6: the result's <c>RemoveAll</c> is not public, as Java's
+    /// <c>removeAll()</c> is <c>private</c> (<c>RemoveMembersFromConsumerGroupResult.java:113</c>).
+    /// The options type's public <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/>
+    /// — Java's public <c>removeAll()</c> there — is unchanged, and still answers which mode
+    /// a request is in.
+    /// </summary>
+    [Fact]
+    public void G5_6_TheResultsRemoveAll_IsNotPublic_TheOptionsOneIs()
+    {
+        Assert.Null(typeof(RemoveMembersFromConsumerGroupResult).GetProperty(
+            "RemoveAll", BindingFlags.Public | BindingFlags.Instance));
+        PropertyInfo? onResult = typeof(RemoveMembersFromConsumerGroupResult).GetProperty(
+            "RemoveAll", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(onResult);
+        Assert.True(onResult!.GetMethod!.IsAssembly);
+
+        PropertyInfo? onOptions = typeof(RemoveMembersFromConsumerGroupOptions).GetProperty(
+            nameof(RemoveMembersFromConsumerGroupOptions.RemoveAll), BindingFlags.Public | BindingFlags.Instance);
+        Assert.NotNull(onOptions);
+        Assert.Equal(typeof(bool), onOptions!.PropertyType);
+        Assert.True(new RemoveMembersFromConsumerGroupOptions().RemoveAll);
+        Assert.False(new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove("instance-1") }).RemoveAll);
     }
 
     /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>

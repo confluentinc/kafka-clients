@@ -1551,7 +1551,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             RemoveMembersFromConsumerGroupResult result =
                 admin.RemoveMembersFromConsumerGroup(request.GroupId, options);
 
-            if (result.RemoveAll)
+            if (options.RemoveAll)
             {
                 // In removeAll mode Java's memberResult refuses, so all() is the only
                 // observable: its failure is the top-level error and its success reports no
@@ -2075,9 +2075,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 deleted.Binding = TranslateAdmin.AclBindingToProto(result.Binding);
             }
 
-            if (result.Error is not null)
+            if (result.Exception is not null)
             {
-                deleted.Exception = Translate.ToProto(result.Error);
+                deleted.Exception = Translate.ToProto(result.Exception);
             }
 
             proto.Values.Add(deleted);

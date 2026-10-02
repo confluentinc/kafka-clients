@@ -130,13 +130,11 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// awaitable; a partially failed batch is not a failed call.
     /// </returns>
     /// <remarks>
-    /// Java also declares <c>deleteTopics(Collection&lt;String&gt;)</c> convenience
-    /// overloads, but they are <c>default</c> interface methods that simply call
-    /// <c>TopicCollection.ofTopicNames(...)</c>. C# default interface methods need
-    /// .NET Standard 2.1 and this binding's floor is netstandard2.0 — the same constraint
-    /// that put <c>onPartitionsLost</c>'s default on
-    /// <see cref="ConsumerRebalanceListenerBase"/> — so the one-line call is left to the
-    /// caller rather than duplicated into both client classes.
+    /// Java's name-collection convenience overloads
+    /// (<c>deleteTopics(Collection&lt;String&gt;)</c> and
+    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>,
+    /// <c>Admin.java:212</c> and <c>:226</c>) are
+    /// <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -156,6 +154,47 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
 
     /// <summary>
+    /// Deletes topics by name — Java's <c>deleteTopics(Collection&lt;String&gt;)</c> and
+    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>
+    /// (<c>Admin.java:212</c>, <c>:226</c>). Like Java's, it wraps the names in
+    /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
+    /// </summary>
+    /// <param name="topicNames">The names of the topics to delete.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Java's overloads are <c>default</c> interface methods. C# default interface methods
+    /// need .NET Standard 2.1 and this binding's floor is netstandard2.0 — the constraint that
+    /// put <c>onPartitionsLost</c>'s default on <see cref="ConsumerRebalanceListenerBase"/> —
+    /// so this is an ordinary interface member that each client class forwards.
+    /// </para>
+    /// <para>
+    /// ⚠ A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
+    /// overloads and does not compile (CS0121); cast it to the parameter type meant.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
+    /// character or an unpaired surrogate — as
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>, which records how
+    /// that is stricter than Java.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — as
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DeleteTopicsResult DeleteTopics(
+        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null);
+
+    /// <summary>
     /// Describes topics — Java's
     /// <c>describeTopics(TopicCollection, DescribeTopicsOptions)</c>. Returns
     /// <b>immediately</b>, without waiting for the broker; the result carries one
@@ -163,7 +202,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="topics">
     /// The topics to describe, identified <b>either</b> by name <b>or</b> by id — see
-    /// <see cref="DeleteTopics"/>. The choice also selects which of
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>. The choice also
+    /// selects which of
     /// <see cref="DescribeTopicsResult.AllTopicNames"/> /
     /// <see cref="DescribeTopicsResult.AllTopicIds"/> returns a task rather than
     /// <see langword="null"/>.
@@ -175,6 +215,13 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// One awaitable per topic, each carrying that topic's own
     /// <see cref="TopicDescription"/> or its own failure.
     /// </returns>
+    /// <remarks>
+    /// Java's name-collection convenience overloads
+    /// (<c>describeTopics(Collection&lt;String&gt;)</c> and
+    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>,
+    /// <c>Admin.java:295</c> and <c>:306</c>) are
+    /// <see cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions?)"/>.
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
@@ -191,6 +238,40 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null);
+
+    /// <summary>
+    /// Describes topics by name — Java's <c>describeTopics(Collection&lt;String&gt;)</c> and
+    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>
+    /// (<c>Admin.java:295</c>, <c>:306</c>). Like Java's, it wraps the names in
+    /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
+    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
+    /// </summary>
+    /// <param name="topicNames">The names of the topics to describe.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
+    /// </returns>
+    /// <remarks>
+    /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
+    /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>;
+    /// a lone literal <see langword="null"/> argument likewise does not compile (CS0121).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
+    /// character or an unpaired surrogate — as
+    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>, which records
+    /// how that is stricter than Java.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is negative —
+    /// as <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeTopicsResult DescribeTopics(
+        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null);
 
     /// <summary>
     /// Lists the cluster's topics — Java's <c>listTopics(ListTopicsOptions)</c>. Returns
@@ -668,13 +749,52 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// topic containing a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
+    /// <remarks>
+    /// <paramref name="partitions"/> defaults to <see langword="null"/>, so
+    /// <c>ListPartitionReassignments()</c> is Java's zero-argument
+    /// <c>listPartitionReassignments()</c> (<c>Admin.java:1193</c>), and Java's
+    /// options-only form is
+    /// <see cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>.
+    /// ⚠ Because of that overload a lone literal <see langword="null"/> argument binds to
+    /// the options-only form, not to <paramref name="partitions"/>: C# prefers the candidate
+    /// that needs no default argument. A <see langword="null"/> options means defaults, so it
+    /// still lists every reassignment, but it is a nullable-annotation warning (CS8625).
+    /// Write <c>ListPartitionReassignments()</c> for "every reassignment".
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListPartitionReassignmentsResult ListPartitionReassignments(
-        IReadOnlyCollection<TopicPartition>? partitions,
+        IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null);
+
+    /// <summary>
+    /// Lists <b>every</b> ongoing partition reassignment in the cluster with the given
+    /// options — Java's <c>listPartitionReassignments(ListPartitionReassignmentsOptions)</c>
+    /// (<c>Admin.java:1248</c>), which passes <c>Optional.empty()</c> for the partitions.
+    /// Exactly
+    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+    /// with a <see langword="null"/> partition set.
+    /// </summary>
+    /// <param name="options">
+    /// Request options. A <see langword="null"/> one is forwarded unchanged and means
+    /// Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable over the whole listing — see
+    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
+    /// </returns>
+    /// <remarks>
+    /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
+    /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListPartitionReassignmentsResult ListPartitionReassignments(
+        ListPartitionReassignmentsOptions options);
 
     /// <summary>
     /// Lists offsets for the given partitions — Java's

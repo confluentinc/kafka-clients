@@ -164,8 +164,12 @@ public sealed class PublicAdminP2aShapeParityTests
     [Fact]
     public void IAdmin_RpcsAreSynchronousAndTakeATopicCollection()
     {
-        MethodInfo delete = typeof(IAdmin).GetMethod(nameof(IAdmin.DeleteTopics))!;
-        MethodInfo describe = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeTopics))!;
+        // The TopicCollection forms; the name-collection ones (M15/P13.5 G1-10) are pinned by
+        // PublicAdminDeleteDescribeTopicsTests.
+        MethodInfo delete = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DeleteTopics), new[] { typeof(TopicCollection), typeof(DeleteTopicsOptions) })!;
+        MethodInfo describe = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DescribeTopics), new[] { typeof(TopicCollection), typeof(DescribeTopicsOptions) })!;
 
         Assert.Equal(typeof(DeleteTopicsResult), delete.ReturnType);
         Assert.Equal(typeof(DescribeTopicsResult), describe.ReturnType);

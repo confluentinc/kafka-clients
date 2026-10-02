@@ -282,7 +282,7 @@ public sealed class AdminP6ResultMarshalTests
         // Channel 1: the filter's own Task completed, carrying the error as a VALUE.
         DeleteAclsResult.FilterResults results =
             await TestTimeout.Run(() => result.Values[key], s_deadline);
-        Assert.Equal("ACL deletion failed", Assert.Single(results.Values).Error!.Message);
+        Assert.Equal("ACL deletion failed", Assert.Single(results.Values).Exception!.Message);
 
         // Channel 2: All() throws the first inner error it meets.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
@@ -860,21 +860,21 @@ public sealed class AdminP6ResultMarshalTests
         Assert.Equal(4, results.Values.Count);
 
         Assert.Equal(Binding("deleted-a"), results.Values[0].Binding);
-        Assert.Null(results.Values[0].Error);
+        Assert.Null(results.Values[0].Exception);
 
         // ⚠ THE G4-1 row: the failed delete still names the ACL it failed on.
         Assert.Equal(Binding("failed"), results.Values[1].Binding);
-        Assert.Equal("could not delete", results.Values[1].Error!.Message);
-        Assert.Equal(42, results.Values[1].Error!.Code);
+        Assert.Equal("could not delete", results.Values[1].Exception!.Message);
+        Assert.Equal(42, results.Values[1].Exception!.Code);
 
         // No binding, an error: Binding stays null and the copy-out is never handed the null.
         Assert.Null(results.Values[2].Binding);
-        Assert.Equal("undecodable", results.Values[2].Error!.Message);
-        Assert.Equal(58, results.Values[2].Error!.Code);
+        Assert.Equal("undecodable", results.Values[2].Exception!.Message);
+        Assert.Equal(58, results.Values[2].Exception!.Code);
 
         // Order is the ABI's own, so an implementation collecting errors separately fails here.
         Assert.Equal(Binding("deleted-b"), results.Values[3].Binding);
-        Assert.Null(results.Values[3].Error);
+        Assert.Null(results.Values[3].Exception);
     }
 
     /// <summary>

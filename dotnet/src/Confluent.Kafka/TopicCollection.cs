@@ -21,8 +21,8 @@ namespace Confluent.Kafka;
 /// <summary>
 /// A collection of topics identified <b>either</b> by name <b>or</b> by id — the .NET
 /// realization of Java's <c>org.apache.kafka.common.TopicCollection</c>. It is the
-/// argument type of <see cref="Admin.IAdmin.DeleteTopics"/> and
-/// <see cref="Admin.IAdmin.DescribeTopics"/>.
+/// argument type of <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
+/// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -82,7 +82,8 @@ public abstract class TopicCollection
     /// <remarks>
     /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicNames</c>
     /// accepts one. ⚠ The RPC it is handed to is <b>stricter than Java</b>:
-    /// <see cref="Admin.IAdmin.DeleteTopics"/> and <see cref="Admin.IAdmin.DescribeTopics"/>
+    /// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
+    /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>
     /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails
     /// only that key's future with <c>InvalidTopicException</c>
     /// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>, used at

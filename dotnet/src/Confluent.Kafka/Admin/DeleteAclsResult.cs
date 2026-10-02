@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Admin;
 /// ⚠⚠ <b>There are two independent error channels, and only one of them is a fault.</b> A
 /// <em>filter</em> that failed — nothing was deleted for it — faults that filter's
 /// <see cref="Task"/>. An individual matched ACL that could not be deleted is reported as a
-/// <b>value</b>, in <see cref="FilterResult.Error"/>, inside a <see cref="FilterResults"/>
+/// <b>value</b>, in <see cref="FilterResult.Exception"/>, inside a <see cref="FilterResults"/>
 /// whose <see cref="Task"/> completed <em>successfully</em>. So
 /// <c>Values[filter]</c> succeeding and <see cref="All"/> faulting is the correct, intended
 /// outcome of an inner failure — the two are supposed to disagree.
@@ -53,7 +53,7 @@ public sealed class DeleteAclsResult
     /// </summary>
     /// <returns>
     /// The deleted bindings. Faults if any <em>filter</em> failed, or with the first
-    /// <see cref="FilterResult.Error"/> encountered in filter order. Filters that matched
+    /// <see cref="FilterResult.Exception"/> encountered in filter order. Filters that matched
     /// nothing are not an error (<c>DeleteAclsResult.java:97-98</c>) — the result is then a
     /// successful empty collection.
     /// </returns>
@@ -69,10 +69,10 @@ public sealed class DeleteAclsResult
         {
             foreach (FilterResult result in results.Values)
             {
-                if (result.Error is not null)
+                if (result.Exception is not null)
                 {
                     // Java: `if (result.exception() != null) throw result.exception();`
-                    throw result.Error;
+                    throw result.Exception;
                 }
 
                 bindings.Add(result.Binding!);
@@ -91,7 +91,7 @@ public sealed class DeleteAclsResult
     /// <em>and</em> its error: Java builds every entry as
     /// <c>new FilterResult(aclBinding, aclError.exception(matchingAcl.errorMessage()))</c>
     /// (<c>KafkaAdminClient.java:2705-2708</c>), storing the decoded binding unconditionally
-    /// and an error that is null only on success. So <see cref="Error"/>, not a null
+    /// and an error that is null only on success. So <see cref="Exception"/>, not a null
     /// <see cref="Binding"/>, is what says the delete failed. The binding is read independently
     /// of the error for the same reason (M15/P13.2 G4-1). Java's own <c>binding()</c> Javadoc
     /// ("or null if there was an error", <c>:49</c>) does not match the entries its client
@@ -103,17 +103,17 @@ public sealed class DeleteAclsResult
         /// Java's package-private <c>FilterResult(AclBinding, ApiException)</c> (<c>:43</c>):
         /// both are stored as given. The error is a stored value, never a fault.
         /// </summary>
-        internal FilterResult(AclBinding? binding, KafkaException? error)
+        internal FilterResult(AclBinding? binding, KafkaException? exception)
         {
             Binding = binding;
-            Error = error;
+            Exception = exception;
         }
 
         /// <summary>
-        /// The ACL the filter matched — deleted when <see cref="Error"/> is
+        /// The ACL the filter matched — deleted when <see cref="Exception"/> is
         /// <see langword="null"/>, and still reported when deleting it failed — Java's
         /// <c>binding()</c> (<c>:51</c>). <see langword="null"/> only when the matched ACL could
-        /// not be decoded, which then always comes with an <see cref="Error"/>: an entry
+        /// not be decoded, which then always comes with an <see cref="Exception"/>: an entry
         /// carrying neither faults its filter's <see cref="Task"/> as a malformed result.
         /// </summary>
         public AclBinding? Binding { get; }
@@ -122,7 +122,11 @@ public sealed class DeleteAclsResult
         /// Why deleting this ACL failed, or <see langword="null"/> if it was deleted —
         /// Java's <c>exception()</c> (<c>:58</c>).
         /// </summary>
-        public KafkaException? Error { get; }
+        /// <remarks>
+        /// Named after Java's accessor <c>exception()</c> (M15/P13.5 G4-5); the type is the
+        /// binding's flat <see cref="KafkaException"/>.
+        /// </remarks>
+        public KafkaException? Exception { get; }
     }
 
     /// <summary>

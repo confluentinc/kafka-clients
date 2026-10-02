@@ -15,7 +15,8 @@
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DeleteTopics"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/> —
+/// the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DeleteTopicsOptions</c>.
 /// </summary>
 /// <remarks>
@@ -34,7 +35,7 @@ public sealed class DeleteTopicsOptions
     /// <remarks>
     /// Must not be negative. The ABI reads a negative <c>timeout_ms</c> as <em>unset</em>,
     /// so passing one would silently mean "use the client default" rather than the
-    /// timeout asked for; <see cref="IAdmin.DeleteTopics"/> rejects it with
+    /// timeout asked for; <see cref="IAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/> rejects it with
     /// <see cref="System.ArgumentOutOfRangeException"/> before any native call
     /// (ffi §B5). <see langword="null"/> is how you ask for the default.
     /// </remarks>

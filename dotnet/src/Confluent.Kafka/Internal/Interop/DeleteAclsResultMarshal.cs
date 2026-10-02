@@ -34,7 +34,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// ⚠⚠ <b>The two error accessors are independent, and only <c>get_error</c> is a fault.</b>
 /// The outer <c>get_error(i)</c> is the filter's future failing and faults that filter's
 /// <c>Task</c> — it is read by <see cref="KeyedResultMarshal"/>, not here. The inner
-/// <c>get_result_error(i, j)</c> is Java's <c>FilterResult.error()</c> and is a stored
+/// <c>get_result_error(i, j)</c> is Java's <c>FilterResult.exception()</c> and is a stored
 /// <b>value</b> inside a successfully completed <c>FilterResults</c>
 /// (header, <c>kafka_admin_DeleteAclsResult_get_error</c>,
 /// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). Both are <c>const</c>, so both are read

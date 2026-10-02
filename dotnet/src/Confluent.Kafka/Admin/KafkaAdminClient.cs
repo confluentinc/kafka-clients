@@ -57,8 +57,22 @@ public sealed class KafkaAdminClient : IAdmin
         _native.DeleteTopics(topics, options);
 
     /// <inheritdoc/>
+    public DeleteTopicsResult DeleteTopics(
+        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
+        _native.DeleteTopics(
+            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
+            options);
+
+    /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
         _native.DescribeTopics(topics, options);
+
+    /// <inheritdoc/>
+    public DescribeTopicsResult DescribeTopics(
+        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null) =>
+        _native.DescribeTopics(
+            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
+            options);
 
     /// <inheritdoc/>
     public ListTopicsResult ListTopics(ListTopicsOptions? options = null) =>
@@ -143,9 +157,14 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
-        IReadOnlyCollection<TopicPartition>? partitions,
+        IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null) =>
         _native.ListPartitionReassignments(partitions, options);
+
+    /// <inheritdoc/>
+    public ListPartitionReassignmentsResult ListPartitionReassignments(
+        ListPartitionReassignmentsOptions options) =>
+        _native.ListPartitionReassignments(null, options);
 
     /// <inheritdoc/>
     public ListOffsetsResult ListOffsets(

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -41,34 +42,108 @@ namespace Confluent.Kafka.Admin;
 public sealed class LogDirDescription
 {
     /// <summary>
-    /// Initializes a description — the shape of Java's 5-arg constructor (<c>:46</c>).
+    /// Java's <c>UNKNOWN_VOLUME_BYTES</c> (<c>DescribeLogDirsResponse.java</c>, imported at
+    /// <c>LogDirDescription.java:26</c>), the "did not report" volume size.
+    /// </summary>
+    private const long UnknownVolumeBytes = -1L;
+
+    /// <summary>
+    /// Initializes a description with unreported volume sizes and an uncordoned directory —
+    /// Java's 2-arg constructor (<c>:38</c>), which passes <c>UNKNOWN_VOLUME_BYTES</c> for both
+    /// sizes and <c>false</c> for <c>isCordoned</c>.
+    /// </summary>
+    /// <param name="error">
+    /// The directory-level error, or <see langword="null"/> if the directory is healthy.
+    /// </param>
+    /// <param name="replicaInfos">The replicas hosted in this directory.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
+    public LogDirDescription(
+        KafkaException? error, IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos)
+        : this(error, replicaInfos, null, null, false)
+    {
+    }
+
+    /// <summary>
+    /// Initializes an uncordoned description — Java's 4-arg constructor (<c>:42</c>), which
+    /// passes <c>false</c> for <c>isCordoned</c>.
     /// </summary>
     /// <param name="error">
     /// The directory-level error, or <see langword="null"/> if the directory is healthy.
     /// </param>
     /// <param name="replicaInfos">The replicas hosted in this directory.</param>
     /// <param name="totalBytes">
-    /// The volume's total size, or <see langword="null"/> if the broker did not report it.
+    /// The volume's total size, or <see langword="null"/> — or Java's <c>-1</c> — if the
+    /// broker did not report it.
     /// </param>
     /// <param name="usableBytes">
-    /// The volume's usable size, or <see langword="null"/> if the broker did not report it.
+    /// The volume's usable size, or <see langword="null"/> — or Java's <c>-1</c> — if the
+    /// broker did not report it.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
+    public LogDirDescription(
+        KafkaException? error,
+        IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
+        long? totalBytes,
+        long? usableBytes)
+        : this(error, replicaInfos, totalBytes, usableBytes, false)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a description — Java's 5-arg constructor (<c>:46</c>).
+    /// </summary>
+    /// <param name="error">
+    /// The directory-level error, or <see langword="null"/> if the directory is healthy.
+    /// </param>
+    /// <param name="replicaInfos">The replicas hosted in this directory.</param>
+    /// <param name="totalBytes">
+    /// The volume's total size, or <see langword="null"/> — or Java's <c>-1</c> — if the
+    /// broker did not report it.
+    /// </param>
+    /// <param name="usableBytes">
+    /// The volume's usable size, or <see langword="null"/> — or Java's <c>-1</c> — if the
+    /// broker did not report it.
     /// </param>
     /// <param name="isCordoned">Whether this log directory is cordoned.</param>
     /// <remarks>
-    /// <see langword="internal"/> because the only producer is the result marshaller,
-    /// consistent with the sibling admin result types.
+    /// <para>
+    /// <b>Public, with Java's three arities</b> (2, 4 and 5 — <c>:38</c>, <c>:42</c>,
+    /// <c>:46</c>), so a caller can build one for a fake or a test, as Java's public
+    /// constructors allow; its siblings <see cref="ReplicaInfo"/> and
+    /// <see cref="PartitionReassignment"/> are likewise publicly constructible.
+    /// </para>
+    /// <para>
+    /// The sizes are <c>long?</c> because <see cref="TotalBytes"/> / <see cref="UsableBytes"/>
+    /// are (see <see cref="TotalBytes"/>). Java's sentinel <c>-1</c>
+    /// (<c>UNKNOWN_VOLUME_BYTES</c>) is accepted too and stored as <see langword="null"/>, as
+    /// Java's constructor turns it into <c>OptionalLong.empty()</c> (<c>:49-50</c>), so a
+    /// Java-ported <c>(…, -1, -1)</c> means the same here. Every other value, <c>0</c> and
+    /// other negatives included, is kept as given, as Java keeps it.
+    /// </para>
+    /// <para>
+    /// ⚠ A null <paramref name="replicaInfos"/> is rejected with
+    /// <see cref="ArgumentNullException"/>, stricter than Java, which stores it and fails
+    /// later, in <c>replicaInfos()</c>'s <c>unmodifiableMap(null)</c> (<c>:70</c>) — the
+    /// <see cref="PartitionReassignment"/> precedent for a null collection argument.
+    /// </para>
     /// </remarks>
-    internal LogDirDescription(
+    /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
+    public LogDirDescription(
         KafkaException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
         long? usableBytes,
         bool isCordoned)
     {
+        if (replicaInfos is null)
+        {
+            throw new ArgumentNullException(nameof(replicaInfos));
+        }
+
         Error = error;
         ReplicaInfos = replicaInfos;
-        TotalBytes = totalBytes;
-        UsableBytes = usableBytes;
+        TotalBytes = totalBytes == UnknownVolumeBytes ? null : totalBytes;
+        UsableBytes = usableBytes == UnknownVolumeBytes ? null : usableBytes;
         IsCordoned = isCordoned;
     }
 

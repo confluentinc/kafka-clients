@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -240,6 +241,23 @@ public sealed class PublicAdminDeleteAclsTests
     /// <summary>The options default to Java's defaults — an unset timeout.</summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs);
+
+    /// <summary>
+    /// M15/P13.5 G4-5: <see cref="DeleteAclsResult.FilterResult"/>'s failure accessor is named
+    /// after Java's <c>exception()</c> (<c>DeleteAclsResult.java:58</c>) — a public, nullable
+    /// <see cref="KafkaException"/> <c>Exception</c> — and the old <c>Error</c> name is gone.
+    /// </summary>
+    [Fact]
+    public void G4_5_FilterResult_ExposesException_NotError()
+    {
+        const BindingFlags Public = BindingFlags.Public | BindingFlags.Instance;
+        PropertyInfo? exception = typeof(DeleteAclsResult.FilterResult).GetProperty("Exception", Public);
+        Assert.NotNull(exception);
+        Assert.Equal(typeof(KafkaException), exception!.PropertyType);
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(exception));
+
+        Assert.Null(typeof(DeleteAclsResult.FilterResult).GetProperty("Error", Public | BindingFlags.NonPublic));
+    }
 
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(

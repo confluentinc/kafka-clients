@@ -19,7 +19,8 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DeleteTopics"/> — the .NET realization of Java's
+/// The result of <see cref="IAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/> —
+/// the .NET realization of Java's
 /// <c>DeleteTopicsResult</c>: one awaitable <b>per topic</b>, handed back the moment the
 /// request is submitted, keyed by whichever identifier the request used.
 /// </summary>

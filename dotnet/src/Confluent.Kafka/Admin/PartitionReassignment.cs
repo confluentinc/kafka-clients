@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 /// A partition's ongoing reassignment — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.PartitionReassignment</c>
 /// (<c>PartitionReassignment.java:32, :41, :49, :57</c>), returned by
-/// <see cref="IAdmin.ListPartitionReassignments"/>.
+/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
