@@ -55,6 +55,9 @@ not reintroduce a password-key predicate for it (the Phase 1 fixup deleted
 exhaustively, bind secrets to `_`, and render the secret the way the Java type the
 options build renders it (`"Redacted"` for a sensitive ConfigEntry value, `"REDACTED"`
 + empty hmac for CreateDelegationTokenResponse) — never its length.
+Phase 2's item list missed the sibling `DescribeDelegationTokenResponseOptions`. The
+pull-request review caught it, and round 4 fixed it (2026-10-02). After fixing one instance,
+sweep every struct holding the secret-bearing type; see [[m15-merge-review-followup]].
 
 **Verify without the kafka/ submodule:** `make verify` = build (its `build-c` runs
 `git submodule update`) + format-check + lint + `test-rust-all-features`

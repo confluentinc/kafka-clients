@@ -1,6 +1,6 @@
 ---
 name: workflow-teeth-check-mtime
-description: Teeth-check traps — touch a mv-restored source or cargo runs the stale binary; under deny(warnings) an unused-import mutation fails to compile with no error[E] code
+description: Teeth-check traps — touch a mv-restored source or cargo runs the stale binary; under deny(warnings) an unused-import mutation fails to compile with no error[E] code; an exact-string assertion masks the assertions after it
 metadata:
   type: feedback
 ---
@@ -41,3 +41,12 @@ which reads as a toothless test. **How to apply:** detect `could not compile`,
 keep every import used inside the mutation (`let _: BTreeSet<&str> = BTreeSet::new();`),
 and print the panic line of each red run to prove it hit the intended assertion.
 See [[m15-password-redaction]].
+
+## An exact-rendering assertion masks the assertions after it (M15 review follow-up)
+
+A test that first pins the exact `{:?}` string, then checks "secret absent" and "field
+present", goes red at the exact-string assertion for EVERY mutation. That run proves nothing
+about the specific assertions behind it. To show each one has teeth, re-run the mutations with
+the exact assertion (and any other catch-all) temporarily removed. Confirm that each mutation
+now fails at its own message ("token id leaked", "owner missing"), and report both runs. See
+[[m15-merge-review-followup]].
