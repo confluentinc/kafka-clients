@@ -49,7 +49,7 @@
 //! do not release `user_data` yourself: the callback, or the
 //! `user_data_destroy` hook where there is one, releases it when it runs. The
 //! error's code is `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message
-//! begins "Rust panic caught at the FFI boundary in <function>".
+//! begins `Rust panic caught at the FFI boundary in <function>`.
 //!
 //! A panic is a bug in this library and may leave the handle it happened on in
 //! an inconsistent state: destroy that handle and create a new one. Later calls
