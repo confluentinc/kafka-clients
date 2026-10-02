@@ -1,6 +1,6 @@
 ---
 name: m15-merge-review-followup
-description: Merging master's rust/ restructure into a long-lived branch (stranded new dirs, local exclude for the stale root target/, rename list, auto-merged files still break); cargo xtask lint without kafka/ decomposed; fmt::from_fn for nested redacted Debug; sweep a defect class by type containment
+description: Merging master's rust/ restructure into a long-lived branch (stranded new dirs, local exclude for the stale root target/, rename list, auto-merged files still break); cargo xtask lint without kafka/ (decomposed, then run in full via a stand-in); a Public-list class in an unsupported package must stay crate-private; fmt::from_fn for nested redacted Debug; sweep a defect class by type containment
 metadata:
   type: project
 ---
@@ -65,7 +65,35 @@ Round 4 of Milestone 15 (2026-10-02, Actor 85): `origin/master` `4eb87db1` merge
   - the three clippy passes exactly as `lint()` runs them: workspace, workspace
     `--all-features`, and `-p xtask`, all with `--all-targets -- -D warnings`.
 - CI's Verify Rust job runs `cargo xtask fetch-java-refs`, then `make verify-rust`, whose `lint`
-  covers all six rules. So report the three as left to CI.
+  covers all six rules. Do NOT report the three as "left to CI": round 4 showed one of them
+  failing CI on this branch. Run them as the next section says.
+
+**Round 4 fix (fixup `3d11391f`): `pub` in an unsupported package fails CI.**
+- `check-public-audience` needs ALL three CLAUDE.md §2 conditions. Being on
+  `design/current/interface-audience-public-4.4.txt` is only the third; a package whose
+  `package-info.java` says "not a supported Kafka API" (`common.config.types`, so `Password`)
+  still forbids `pub`. Before declaring a `pub mod` for a translated package, read its
+  `package-info.java`. Fix shape (master's `common::security`): `pub(crate) mod x;` with the
+  items inside left `pub` plus a `pub use`; the crate path is unchanged, so no importer moves.
+- Privatising a module breaks every public intra-doc link to its items:
+  `rustdoc::private_intra_doc_links` is an error under `#![deny(warnings)]`, and only
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` (CI's doc-check
+  job) shows it. Grep ``[`Type`` and turn the links in PUBLIC docs into code spans; links in
+  crate-private docs may stay. rustdoc names an impl's doc `<unknown>` in the error.
+- Running the three Java rules without `kafka/`: kafka-critic memory
+  [[review-lint-java-rules-repro]] has the recipe (tagged throwaway repo, symlinked as `kafka`
+  into `git archive` copies outside the repo). About 5 minutes here. xtask reads `../kafka` and
+  `../design/...` relative to its cwd, so run the scratch-built binary from each copy's `rust/`.
+  The full `xtask lint` in the fixed copy also covers module-path hygiene, with no temporary
+  edit to the real xtask.
+- Always run a master control in a copy: the count deltas then explain themselves.
+  `check-no-public-field` counts public structs and `check-no-deprecated-translation` markers on
+  public items, so both dropped to master's after the fix. `check-java-name` counts markers,
+  class-named files and `pub use` paths of ALL items, crate-private ones included, so the
+  branch's additions keep it above master.
+- Prove the real-tree arms ran on the fixed code with a count that the fix changes (here
+  `check-no-public-field` 232 → 231 in the real-tree `lint` log), and `diff -rq` the scratch copy
+  against `git archive <fixup>` before citing its results for the commit.
 
 **`std::fmt::from_fn` is stable on the pinned 1.95 toolchain.**
 - Use it to build a nested redacted `Debug` (a list of structs of structs) with no helper type
