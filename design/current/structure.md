@@ -143,10 +143,10 @@ In practice:
   `ApiVersions`, `KafkaClient`, ...) and `CommonClientConfigs` are
   `pub(crate)`.
 - `common::{compress, feature, memory, network, protocol, requests, utils}`,
-  `common::security::{authenticator, ssl}` and the generated wire modules are
-  `pub(crate)`. Tests that need them live inside the crate: the message and
-  protocol tests sit under `rust/src/common/`, and the raw-socket integration
-  suites under `rust/src/integration_tests/`.
+  `common::config::types`, `common::security::{authenticator, ssl}` and the
+  generated wire modules are `pub(crate)`. Tests that need them live inside the
+  crate: the message and protocol tests sit under `rust/src/common/`, and the
+  raw-socket integration suites under `rust/src/integration_tests/`.
 - `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
   constructs it and returns it as `Box<dyn Consumer<K, V>>`.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public

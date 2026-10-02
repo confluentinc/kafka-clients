@@ -5,7 +5,8 @@ Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` afte
 (§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). **Phase 2 (§11) COMPLETE 2026-09-30**
 (commit `35d399fa`, Actor/Critic 85, same branch). **`master` merged and the pull-request review
 answered (§12) 2026-10-02** (merge `091f6f9d`, fixup `21be3984`, Actor 85; the branch is pushed and
-its pull request is open).
+its pull request is open). **Critic 85's round-4 blocker fixed (§12.4) 2026-10-02:** `Password` is
+crate-private (fixup `3d11391f`).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -245,7 +246,7 @@ printing `user` and `info`, then `.field("salt", &Password::HIDDEN).field("passw
 
 ```
 src/common/config/
-  mod.rs                 # + pub mod types;
+  mod.rs                 # + pub(crate) mod types;   (pub until §12.4)
   types/
     mod.rs               # mod password; pub use password::Password;
     password.rs          # Password (Java: common.config.types.Password)
@@ -255,6 +256,11 @@ src/common/config/
 
 Import path per CLAUDE.md §2: `use crate::common::config::types::Password;` (parent-module
 re-export, never `types::password::Password`).
+
+> **Amended in round 4 (§12.4, fixup `3d11391f`).** Phase 1 declared `pub mod types;`. Java marks
+> `org.apache.kafka.common.config.types` "not a supported Kafka API" (`package-info.java:19`), so
+> CLAUDE.md §2 forbids a public `Password`, and the module is now `pub(crate)`. The import path above is
+> unchanged.
 
 ## 6. Phase 1 — single phase, two commits (Actor/Critic 85)
 
@@ -500,7 +506,8 @@ Two commits on the same branch, made after it was pushed and its pull request op
 `origin/master` at `4eb87db1` was merged into the branch at `79db2f0f`. Master's changes are kept, and so
 is every Milestone 15 redaction. The merge commit's body lists each conflicted file and its resolution.
 
-- **§1–§11 predate the merge and are left as written.** Master moved the crate under `rust/`, renamed
+- **§1–§11 predate the merge and are left as written**, except §5's `types` line, which §12.4 amends.
+  Master moved the crate under `rust/`, renamed
   `SslConfig` / `SaslConfig` to `SslConfigs` / `SaslConfigs`, `ConcreteRequest` to `AbstractRequest` and
   `ConfigResourceType` to `config_resource::Type`, nested each request builder as `Builder` in its request
   module, made config fields `pub(crate)`, and added `#[non_exhaustive]` and
@@ -509,8 +516,10 @@ is every Milestone 15 redaction. The merge commit's body lists each conflicted f
   `XxxRequestBuilder` as `xxx_request::Builder`. The `RequestBuilder` trait keeps its name.
 - **`Password`** lives at `rust/src/common/config/types/password.rs`. The merge left the branch's `types/`
   directory under the old top-level `src/`, which master no longer has, so it moved beside the rest of
-  `common::config`. The public path `common::config::types::Password` is unchanged. It carries master's
-  `doc(alias)` markers on the struct, `new` and `value`, and none on `HIDDEN`, as master marks no constant.
+  `common::config`. Its crate path `crate::common::config::types::Password` is unchanged. The merge kept
+  the module `pub`, which master's new `check-public-audience` rule rejects; §12.4 makes it crate-private.
+  It carries master's `doc(alias)` markers on the struct, `new` and `value`, and none on `HIDDEN`, as
+  master marks no constant.
 - **`ProducerConfig` derives nothing.** Master dropped `Clone`, because its new `partitioner` field holds a
   `Box<dyn Any + Send + Sync>`, and §4.3 had already dropped `Debug`. The hand-written `Debug` still
   destructures every field. It adds master's `client_dns_lookup`, `partitioner_type` and `partitioner` in
@@ -582,3 +591,55 @@ were run one by one instead, and all are clean:
 
 CI's Verify Rust job runs `cargo xtask fetch-java-refs` before `make verify-rust`, whose `lint` step runs
 all six rules.
+
+### 12.4 Round-4 review: `Password` is crate-private (fixup `3d11391f`)
+
+Critic 85's round-4 review found that the branch fails CI's lint, although every step §12.3 could run is
+clean. CLAUDE.md §2 lets an item be public only if the Java class it translates is outside `internal*`
+packages, outside packages whose `package-info.java` says "not a supported Kafka API", and annotated
+`@InterfaceAudience.Public` in Kafka 4.4. Master's `check-public-audience` rule enforces this. `Password`
+is on the 4.4 Public list (`design/current/interface-audience-public-4.4.txt`) and is not in an internal
+package, but its package carries the disclaimer (`common/config/types/package-info.java:19`, at 4.3.1 and
+at 4.4.0-rc3). Phase 1 declared `pub mod types;` (§5), and the merge kept it (§12.1). The rule reads the
+Java sources, so it is one of the three that §12.3 could not run.
+
+- **Fix.** `common::config` declares `pub(crate) mod types;`, as master declares
+  `common::security::{authenticator, ssl}`. Inside the module, `Password` and its `HIDDEN`, `new` and
+  `value` stay `pub` and keep their `doc(alias)` markers, as master's items in those modules do. No
+  allowlist entry was added: CLAUDE.md §2 says the type MUST NOT be public, and nothing needs it to be.
+  - The crate path `crate::common::config::types::Password` is unchanged, so no importer changed.
+  - No public signature names `Password`. The fields that hold one are `pub(crate)`, and rustc's
+    `unnameable_types`, which `src/lib.rs` enables, would reject a public signature that did. A user meets
+    a `Password` only as the `[hidden]` that a config's `Debug` renders in its place.
+  - rustdoc rejects public documentation that links to a private item (`private_intra_doc_links`, an
+    error under `-D warnings`). So the five such links became code spans: one each in the docs of
+    `SslConfigs`, `UserScramCredentialUpsertion` and `ProducerConfig`, and two in the doc of
+    `ProducerConfig`'s `Debug` impl. Links in the docs of crate-private items stay. The `types` module doc
+    now says why the module is crate-private.
+- **Verified on the real tree:** workspace 4469 / ffi 4533 / all-features (with `--skip __grpc`) 4756
+  passed, 0 failed, the same counts as §12.2. `format-check`, `check-generated` and `cargo doc` with
+  `-D warnings` are clean, and so are the three `lint-custom` rules, `doc-hygiene` and the three clippy
+  passes that §12.3 lists.
+- **Verified with the Java sources.** A throwaway git repository held `clients/src/{main,test}/java` from
+  Apache Kafka 4.3.1 (the pinned commit) and 4.4.0-rc3, each tagged as `lint-custom` expects. It stood in
+  for `kafka/` in copies of the tree made outside the repository, so the submodule stayed uninitialised.
+  Items checked by each `lint-custom` rule:
+
+  | Rule | master `4eb87db1` | before the fix (`3e869523`) | after the fix (`3d11391f`) |
+  |---|---|---|---|
+  | `check-no-data-carrying-enum-variants` | 817 | 817 | 817 |
+  | `check-no-public-field` | 231 | 232 | 231 |
+  | `check-java-name` | 8373 | 8378 | 8378 |
+  | `check-no-deprecated-translation` | 1324 | 1327 | 1324 |
+  | `check-public-audience` | 2331 | 1 finding, `Password` | 2331 |
+  | `check-dyn-compatible` | 22 | 22 | 22 |
+
+  - Every cell but the finding is a pass. Before the fix, `Password` was one more public struct for
+    `check-no-public-field` and three more public markers for `check-no-deprecated-translation`.
+    `check-java-name` also checks crate-private items; its five over master are `Password`'s three
+    markers, its file and the `pub use` in `types/mod.rs`.
+  - After the fix, the whole `cargo xtask lint` passes: all six rules, doc hygiene, module-path hygiene
+    and the three clippy passes. `cargo doc` with `-D warnings` passes there too.
+  - With the module change alone, and none of the five link changes, `cargo doc` fails with exactly those
+    five errors.
+- `COMMENTS.DONE.85.md` in this directory records the item and its resolution.
