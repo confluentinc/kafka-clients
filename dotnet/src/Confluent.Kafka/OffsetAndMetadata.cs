@@ -46,8 +46,17 @@ namespace Confluent.Kafka;
 /// passes a non-null (normalized) metadata and a non-negative offset, for which the ctor's
 /// validate/coerce is a no-op. Recorded in <c>COMMENTS.DONE.15.md</c>.
 /// </para>
+/// <para>
+/// <b>Value equality</b> over <see cref="Offset"/>, <see cref="Metadata"/> and
+/// <see cref="LeaderEpoch"/> — Java's <c>equals</c> / <c>hashCode</c>
+/// (<c>OffsetAndMetadata.java:105-116</c>), which compare the <em>normalised</em>
+/// <c>leaderEpoch()</c>, so an epoch given as <c>-1</c> equals an absent one. No
+/// <c>==</c> / <c>!=</c> operators are declared: Java has none, and the
+/// <see cref="Admin.MemberToRemove"/> / <see cref="Admin.RecordsToDelete"/> precedent
+/// keeps <c>==</c> as reference identity.
+/// </para>
 /// </remarks>
-public sealed class OffsetAndMetadata
+public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
 {
     /// <summary>
     /// Initializes a new instance for committing <paramref name="offset"/> (Java's
@@ -63,8 +72,13 @@ public sealed class OffsetAndMetadata
     /// precedent on <c>Seek</c>); a <see langword="null"/> <paramref name="metadata"/> is
     /// coerced to the empty string (Java's <c>Objects.requireNonNullElse(metadata,
     /// NO_METADATA)</c> where <c>NO_METADATA == ""</c>), keeping <see cref="Metadata"/>
-    /// never-null. <paramref name="leaderEpoch"/> is passed through unvalidated (Java's
-    /// <c>Optional&lt;Integer&gt;</c>; <see langword="null"/> = absent). The parameter order
+    /// never-null. <paramref name="leaderEpoch"/> is not validated, but a <b>negative</b> one
+    /// is stored as <see langword="null"/> (absent): Java keeps the raw value and its
+    /// <c>leaderEpoch()</c> getter reports a null or negative epoch as
+    /// <c>Optional.empty()</c> (<c>OffsetAndMetadata.java:98-101</c>), and .NET has no
+    /// accessor of the raw value, so normalising here is the same observable contract. The
+    /// wire is unchanged: a commit sends an absent epoch as <c>-1</c>, as Java does. The
+    /// parameter order
     /// <c>(offset, metadata, leaderEpoch)</c> matches Java's most-used 2-arg
     /// <c>(offset, metadata)</c> overload and the Python sibling's
     /// <c>OffsetAndMetadata(offset, metadata="", leader_epoch=None)</c> exactly.
@@ -73,7 +87,10 @@ public sealed class OffsetAndMetadata
     /// <param name="metadata">
     /// The commit metadata, or <see langword="null"/> (coerced to the empty string).
     /// </param>
-    /// <param name="leaderEpoch">The leader epoch, or <see langword="null"/> when absent.</param>
+    /// <param name="leaderEpoch">
+    /// The leader epoch, or <see langword="null"/> when absent. A negative value is stored as
+    /// <see langword="null"/>.
+    /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="offset"/> is negative (Java: <c>"Invalid negative offset"</c>).
     /// </exception>
@@ -90,7 +107,11 @@ public sealed class OffsetAndMetadata
         // (normalized) metadata + a non-negative offset, so this validate/coerce is a no-op
         // for that path — see the type remarks (M5/P6 deviation on the ctor merge).
         Metadata = metadata ?? string.Empty;
-        LeaderEpoch = leaderEpoch;
+        // Java's leaderEpoch(): "if (leaderEpoch == null || leaderEpoch < 0) return
+        // Optional.empty()" (OffsetAndMetadata.java:98-101). Nothing in .NET reads the raw
+        // value, so the getter's normalisation is applied once, here; Equals, GetHashCode and
+        // ToString then all see the normalised epoch, as Java's do.
+        LeaderEpoch = leaderEpoch < 0 ? null : leaderEpoch;
     }
 
     /// <summary>The committed offset.</summary>
@@ -105,9 +126,40 @@ public sealed class OffsetAndMetadata
 
     /// <summary>
     /// The leader epoch of the record at <see cref="Offset"/>, or <see langword="null"/>
-    /// when absent (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
+    /// when absent (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>). Never negative: a
+    /// negative epoch is absent, as Java's getter reports it (<c>:98-101</c>).
     /// </summary>
     public int? LeaderEpoch { get; }
+
+    /// <summary>
+    /// Value equality over <see cref="Offset"/>, <see cref="Metadata"/> (ordinal) and the
+    /// normalised <see cref="LeaderEpoch"/> — Java's <c>equals</c> (<c>:105-112</c>).
+    /// </summary>
+    /// <param name="other">The instance to compare with.</param>
+    /// <returns>Whether the two describe the same committed offset.</returns>
+    public bool Equals(OffsetAndMetadata? other) =>
+        other is not null
+        && Offset == other.Offset
+        && string.Equals(Metadata, other.Metadata, StringComparison.Ordinal)
+        && LeaderEpoch == other.LeaderEpoch;
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => Equals(obj as OffsetAndMetadata);
+
+    /// <summary>
+    /// The hash of the same three fields <see cref="Equals(OffsetAndMetadata?)"/> compares —
+    /// Java's <c>hashCode</c> (<c>:115-116</c>).
+    /// </summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = Offset.GetHashCode();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Metadata);
+            return (hash * 31) + (LeaderEpoch?.GetHashCode() ?? 0);
+        }
+    }
 
     /// <summary>
     /// Returns a debug string of the form

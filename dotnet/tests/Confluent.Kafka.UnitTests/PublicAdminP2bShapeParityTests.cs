@@ -396,6 +396,35 @@ public sealed class PublicAdminP2bShapeParityTests
         }
     }
 
+    /// <summary>
+    /// G1-13: <see cref="ListTopicsOptions"/> has Java's value equality, which compares
+    /// <c>listInternal</c> only and ignores the timeout (<c>ListTopicsOptions.java:67-77</c>).
+    /// </summary>
+    [Fact]
+    public void G1_13_ListTopicsOptions_EqualityIgnoresTheTimeout()
+    {
+        ListTopicsOptions shortTimeout = new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 };
+        ListTopicsOptions longTimeout = new ListTopicsOptions { ListInternal = true, TimeoutMs = 99_000 };
+        ListTopicsOptions noTimeout = new ListTopicsOptions { ListInternal = true };
+
+        // Differing only in TimeoutMs: equal, with equal hashes.
+        Assert.True(shortTimeout.Equals(longTimeout));
+        Assert.True(shortTimeout.Equals(noTimeout));
+        Assert.Equal(shortTimeout.GetHashCode(), longTimeout.GetHashCode());
+        Assert.Equal(shortTimeout.GetHashCode(), noTimeout.GetHashCode());
+        Assert.True(new ListTopicsOptions().Equals(new ListTopicsOptions { TimeoutMs = 5 }));
+
+        // Differing in ListInternal: unequal.
+        Assert.False(shortTimeout.Equals(new ListTopicsOptions { ListInternal = false, TimeoutMs = 10 }));
+        Assert.False(shortTimeout.Equals(null));
+        Assert.False(shortTimeout.Equals(new DeleteRecordsOptions()));
+
+        // Both overrides are declared on the type itself.
+        Type type = typeof(ListTopicsOptions);
+        Assert.Same(type, type.GetMethod(nameof(Equals), new[] { typeof(object) })!.DeclaringType);
+        Assert.Same(type, type.GetMethod(nameof(GetHashCode), Type.EmptyTypes)!.DeclaringType);
+    }
+
     private static void AssertOptionNames(Type optionsType, params string[] expected) =>
         Assert.Equal(
             expected.OrderBy(name => name, StringComparer.Ordinal),

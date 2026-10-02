@@ -41,4 +41,23 @@ public sealed class ListTopicsOptions
     /// <see langword="false"/>, as Java's does.
     /// </summary>
     public bool ListInternal { get; set; }
+
+    /// <summary>
+    /// Value equality over <see cref="ListInternal"/> only, deliberately <em>excluding</em>
+    /// <see cref="TimeoutMs"/> — Java's <c>equals</c> (<c>ListTopicsOptions.java:67-72</c>)
+    /// compares <c>listInternal</c> alone, as <see cref="ListTransactionsOptions.Equals(object?)"/>
+    /// leaves out its timeout (unlike <see cref="DescribeProducersOptions.Equals(object?)"/>).
+    /// Two options that differ only in their timeout are therefore equal.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two options ask for the same listing.</returns>
+    public override bool Equals(object? obj) =>
+        obj is ListTopicsOptions other && ListInternal == other.ListInternal;
+
+    /// <summary>
+    /// The hash of <see cref="ListInternal"/> alone, excluding <see cref="TimeoutMs"/> as
+    /// <see cref="Equals(object?)"/> does — Java's <c>hashCode</c> (<c>:75-77</c>).
+    /// </summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode() => ListInternal.GetHashCode();
 }

@@ -107,14 +107,33 @@ public sealed class FeatureUpdate
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:108</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>FeatureUpdate.java:108-110</c>),
+    /// with the upgrade type printed as <b>Java's constant name</b>, as Java's <c>%s</c> of the
+    /// enum does — <c>FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}</c>. The
+    /// constructor stores an undefined <see cref="UpgradeType"/> as given, and that one renders
+    /// as its numeric value.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "FeatureUpdate{{maxVersionLevel:{0}, upgradeType:{1}}}",
             MaxVersionLevel,
-            Type);
+            JavaName(Type));
+
+    /// <summary>
+    /// Java's <c>UpgradeType</c> constant name for each member (<c>FeatureUpdate.java:28-32</c>),
+    /// falling back to the numeric value for an undefined one.
+    /// </summary>
+    private static string JavaName(UpgradeType upgradeType) => upgradeType switch
+    {
+        UpgradeType.Unknown => "UNKNOWN",
+        UpgradeType.Upgrade => "UPGRADE",
+        UpgradeType.SafeDowngrade => "SAFE_DOWNGRADE",
+        UpgradeType.UnsafeDowngrade => "UNSAFE_DOWNGRADE",
+        _ => ((int)upgradeType).ToString(CultureInfo.InvariantCulture),
+    };
 }
 
 /// <summary>

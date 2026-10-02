@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 
 namespace Confluent.Kafka.Admin;
 
@@ -36,8 +37,10 @@ namespace Confluent.Kafka.Admin;
 /// Java rejects."
 /// </para>
 /// <para>
-/// <b>The replica list is copied on construction</b>, as Java's <c>List.copyOf</c> does,
-/// so a caller mutating the list afterwards cannot change a submitted request.
+/// <b>The replica list is copied on construction and handed out read-only</b>, as Java's
+/// <c>List.copyOf</c> does (<c>:35</c>): a caller mutating its own list afterwards cannot
+/// change a submitted request, and <see cref="TargetReplicas"/> cannot be cast back to a
+/// mutable list and emptied behind the constructor's non-empty check.
 /// </para>
 /// <para>
 /// <b>Recorded sub-divergence (<c>definition-of-done.md</c> §7): the null and the empty
@@ -60,7 +63,7 @@ public sealed class NewPartitionReassignment
     /// <summary>Java's own message, carried unchanged (<c>:34</c>).</summary>
     private const string NoReplicasMessage = "Cannot create a new partition reassignment without any replicas";
 
-    private readonly List<int> _targetReplicas;
+    private readonly ReadOnlyCollection<int> _targetReplicas;
 
     /// <summary>
     /// Creates a reassignment onto <paramref name="targetReplicas"/> — Java's
@@ -85,12 +88,15 @@ public sealed class NewPartitionReassignment
             throw new ArgumentException(NoReplicasMessage, nameof(targetReplicas));
         }
 
-        _targetReplicas = new List<int>(targetReplicas);
+        // Java's List.copyOf: a copy (the caller's list stays the caller's) that is also
+        // unmodifiable, so the getter's view cannot be cast back to a List<int> and cleared.
+        _targetReplicas = new List<int>(targetReplicas).AsReadOnly();
     }
 
     /// <summary>
     /// The broker ids the partition's replicas are to move to — Java's
-    /// <c>targetReplicas()</c> (<c>:38</c>). Never empty.
+    /// <c>targetReplicas()</c> (<c>:38</c>). Never empty, and read-only: Java's list is the
+    /// unmodifiable <c>List.copyOf</c> result (<c>:35</c>).
     /// </summary>
     /// <remarks>
     /// A property rather than a method (decision D18): it is a pure managed field read

@@ -297,6 +297,33 @@ public sealed class PublicAdminP4ShapeParityTests
     }
 
     /// <summary>
+    /// G3-6: <see cref="NewPartitionReassignment.TargetReplicas"/> is Java's
+    /// <c>List.copyOf</c> — a copy that is also unmodifiable
+    /// (<c>NewPartitionReassignment.java:35</c>). Before the fix the getter handed out the
+    /// backing <see cref="List{T}"/>, so a cast back to it could empty a built request behind
+    /// the constructor's non-empty check.
+    /// </summary>
+    [Fact]
+    public void G3_6_TargetReplicas_IsAReadOnlyCopy()
+    {
+        List<int> source = new List<int> { 4, 5 };
+        NewPartitionReassignment reassignment = new NewPartitionReassignment(source);
+        IReadOnlyList<int> replicas = reassignment.TargetReplicas;
+
+        // Not the backing List<int>, and read-only through the mutable interface.
+        Assert.False(replicas is List<int>);
+        ICollection<int> asCollection = Assert.IsAssignableFrom<ICollection<int>>(replicas);
+        Assert.True(asCollection.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => asCollection.Clear());
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+
+        // Mutating the caller's source after construction changes nothing.
+        source.Clear();
+        source.Add(9);
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+    }
+
+    /// <summary>
     /// The two new options types match Java's fields and defaults exactly, so
     /// <c>options: null</c> at a call site behaves like a freshly constructed instance.
     /// </summary>

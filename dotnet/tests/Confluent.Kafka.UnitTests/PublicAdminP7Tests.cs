@@ -591,6 +591,23 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade).MaxVersionLevel);
 
     /// <summary>
+    /// G6-4: <see cref="FeatureUpdate.ToString"/> prints Java's constant name, as Java's
+    /// <c>String.format("…upgradeType:%s}", upgradeType)</c> does
+    /// (<c>FeatureUpdate.java:108-110</c>, constants at <c>:28-32</c>), not the C# member name.
+    /// An undefined value — the constructor stores what it is given — falls back to its number.
+    /// </summary>
+    /// <param name="type">The upgrade type.</param>
+    /// <param name="expected">Java's rendering.</param>
+    [Theory]
+    [InlineData(FeatureUpdate.UpgradeType.Unknown, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
+    [InlineData(FeatureUpdate.UpgradeType.Upgrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
+    [InlineData(FeatureUpdate.UpgradeType.SafeDowngrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
+    [InlineData(FeatureUpdate.UpgradeType.UnsafeDowngrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
+    [InlineData((FeatureUpdate.UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
+    public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(FeatureUpdate.UpgradeType type, string expected) =>
+        Assert.Equal(expected, new FeatureUpdate(1, type).ToString());
+
+    /// <summary>
     /// <see cref="KafkaPrincipal"/> mirrors Java's two null guards
     /// (<c>KafkaPrincipal.java:52-57</c>).
     /// </summary>
