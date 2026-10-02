@@ -105,11 +105,19 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
     {
         Box::pin(async move {
             let broker_futures = self.source.get().await?;
-            let mut result = HashMap::with_capacity(broker_futures.len());
-            for (broker_id, future) in broker_futures {
-                result.insert(broker_id, future.get().await?);
-            }
-            Ok(result)
+            // Java's `allByBrokerId` registers a `whenComplete` on every broker
+            // future and fails `allFuture` as soon as ANY of them fails, without
+            // waiting for the rest; `try_join_all` polls them all concurrently
+            // and returns the first error to occur in time, which is the same
+            // fail-fast rule. (An empty broker map completes with an empty map
+            // here; Java's `remainingResponses` loop never completes it.)
+            let listings = futures_util::future::try_join_all(
+                broker_futures
+                    .iter()
+                    .map(|(broker_id, future)| async move { Ok::<_, Error>((*broker_id, future.get().await?)) }),
+            )
+            .await?;
+            Ok(listings.into_iter().collect())
         })
     }
 
@@ -135,7 +143,14 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
         }
         // The source is done, so its `get()` resolves in a single poll.
         match poll_once(self.source.get()) {
-            Some(Ok(broker_futures)) => broker_futures.values().all(KafkaFuture::is_done),
+            // Done once every broker has resolved, or — fail-fast, as Java's
+            // `allFuture.completeExceptionally` — as soon as any has failed.
+            Some(Ok(broker_futures)) => {
+                broker_futures.values().all(KafkaFuture::is_done)
+                    || broker_futures
+                        .values()
+                        .any(|future| future.is_done() && matches!(poll_once(future.get()), Some(Err(_))))
+            },
             Some(Err(_)) => true,
             None => false,
         }
@@ -199,6 +214,33 @@ mod tests {
             result.all().get().await.unwrap().into_iter().collect::<HashSet<_>>(),
             all_expected
         );
+    }
+
+    /// Java's `allByBrokerId` (and so `all`) fails as soon as any broker
+    /// fails, without waiting for a broker that is still pending.
+    #[tokio::test]
+    async fn all_fails_fast_on_the_first_broker_error() {
+        let top: KafkaFutureImpl<BrokerFutures> = KafkaFutureImpl::new();
+        let result = ListTransactionsResult::new(top.future());
+        let slow: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let failed: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        top.complete(HashMap::from([(1, slow.future()), (2, failed.future())]));
+        failed.complete_with_error(Error::new(crate::common::protocol::Errors::NotCoordinator));
+
+        let all_by_broker = result.all_by_broker_id();
+        assert!(all_by_broker.is_done(), "done as soon as one broker failed");
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), all_by_broker.get())
+            .await
+            .expect("must not wait for the pending broker")
+            .unwrap_err();
+        assert_eq!(error.error(), crate::common::protocol::Errors::NotCoordinator);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), result.all().get())
+            .await
+            .expect("must not wait for the pending broker")
+            .unwrap_err();
+        assert_eq!(error.error(), crate::common::protocol::Errors::NotCoordinator);
+        // The pending broker is still pending; `byBrokerId` exposes it as such.
+        assert!(!result.by_broker_id().get().await.unwrap()[&1].is_done());
     }
 
     // Mirrors `ListTransactionsResultTest.testPartialFailure`.
