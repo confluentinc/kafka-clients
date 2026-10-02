@@ -1576,7 +1576,7 @@ const SEND_CANCELLED_MESSAGE: &str = "Send was cancelled while waiting for metad
 /// states: the `block_on` completes within this C call and the C caller keeps the
 /// handle alive for its duration, so the `&'static` reference never outlives the
 /// producer and no task registration is needed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn send_with_callback_impl(
     producer: *mut kafka_producer_Producer_t,
     topic: *const c_char,
