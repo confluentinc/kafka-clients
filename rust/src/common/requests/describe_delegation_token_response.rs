@@ -53,7 +53,10 @@ pub struct DescribeDelegationTokenResponse {
 /// Build it from [`DescribeDelegationTokenResponseOptionsBuilder::new`], whose `tokens` starts empty
 /// exactly as Java's `DescribeDelegationTokenResponse(int, int, Errors)` (`:69`)
 /// passes `new ArrayList<>()` on the caller's behalf.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Debug` renders no token's id and no token's hmac, as the response built
+/// from these options renders neither.
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct DescribeDelegationTokenResponseOptions<'a> {
     /// Java's `version`.
@@ -64,6 +67,62 @@ pub struct DescribeDelegationTokenResponseOptions<'a> {
     pub(crate) error: Errors,
     /// Java's `tokens`. Starts empty, as in `:69`.
     pub(crate) tokens: &'a [DelegationToken],
+}
+
+/// Renders `version`, `throttle_time_ms` and `error` as the derive it replaces
+/// did, and each token field by field, with its id and hmac rendered as Java's
+/// `DescribeDelegationTokenResponse.toString()` renders them
+/// (`DescribeDelegationTokenResponse.java:131-140`): the token id as
+/// `"REDACTED"` and the hmac as empty.
+///
+/// This struct has no Java counterpart, so it has no Java rendering of its
+/// own. It carries the tokens of the response it prepares, which never renders
+/// their ids or hmacs. The derive rendered each token through
+/// [`DelegationToken`]'s own `Debug`, which follows Java's
+/// `DelegationToken.toString()` (`DelegationToken.java:71-76`): that hides the
+/// hmac but prints the token id, so the derive printed what the response
+/// itself hides.
+impl std::fmt::Debug for DescribeDelegationTokenResponseOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here.
+        let Self { version, throttle_time_ms, error, tokens } = self;
+        // Each token renders field by field. The fields of `DelegationToken`
+        // and `TokenInformation` are private to their module, so they are read
+        // through accessors: a field added there is not rendered until it is
+        // listed here. The two secrets are not read at all: nothing of them is
+        // rendered, not even the length.
+        let tokens = std::fmt::from_fn(|f| {
+            f.debug_list()
+                .entries(tokens.iter().map(|token| {
+                    std::fmt::from_fn(move |f| {
+                        let info = token.token_info();
+                        let token_information = std::fmt::from_fn(|f| {
+                            f.debug_struct("TokenInformation")
+                                .field("owner", info.owner())
+                                .field("token_requester", info.token_requester())
+                                .field("renewers", &info.renewers())
+                                .field("issue_timestamp", &info.issue_timestamp())
+                                .field("max_timestamp", &info.max_timestamp())
+                                .field("expiry_timestamp", &info.expiry_timestamp())
+                                .field("token_id", &"REDACTED")
+                                .finish()
+                        });
+                        f.debug_struct("DelegationToken")
+                            .field("token_information", &token_information)
+                            .field("hmac", &[0u8; 0])
+                            .finish()
+                    })
+                }))
+                .finish()
+        });
+        f.debug_struct("DescribeDelegationTokenResponseOptions")
+            .field("version", version)
+            .field("throttle_time_ms", throttle_time_ms)
+            .field("error", error)
+            .field("tokens", &tokens)
+            .finish()
+    }
 }
 
 /// Fluent builder for [`DescribeDelegationTokenResponseOptions`].
@@ -441,6 +500,62 @@ mod tests {
             assert!(rendered.contains("REDACTED"), "{rendered}");
             assert!(!rendered.contains("secret-id"), "{rendered}");
             assert!(!rendered.contains(&format!("{:?}", &b"hmac-secret-id"[..])), "{rendered}");
+        }
+    }
+
+    /// New test, no Java original (Java has no such struct): `Debug` renders
+    /// each token's id and hmac as Java's `toString()` renders the response's
+    /// (`DescribeDelegationTokenResponse.java:131-140`), the other token fields
+    /// as they are, and every other field as the derive did.
+    #[test]
+    fn options_debug_redacts_token_id_and_hmac() {
+        const TOKEN_ID: &str = "token-id-5b19e4";
+        let tokens = [token(TOKEN_ID)];
+        let options = DescribeDelegationTokenResponseOptionsBuilder::new()
+            .set_version(3)
+            .set_throttle_time_ms(0)
+            .set_error(Errors::None)
+            .set_tokens(&tokens)
+            .build()
+            .unwrap();
+        let token = &options.tokens[0];
+        let info = token.token_info();
+        let hmac = token.hmac();
+        assert_eq!(info.token_id(), TOKEN_ID);
+        assert_eq!(hmac, format!("hmac-{TOKEN_ID}").as_bytes());
+        // `DelegationToken`'s own `Debug`, which the derive used for each
+        // token, prints the token id: the secret this test guards is really
+        // there to leak.
+        assert!(format!("{token:?}").contains(TOKEN_ID));
+
+        let rendered = format!("{options:?}");
+        assert_eq!(
+            rendered,
+            format!(
+                "DescribeDelegationTokenResponseOptions {{ version: 3, throttle_time_ms: 0, error: None, \
+                 tokens: [DelegationToken {{ token_information: TokenInformation {{ owner: {:?}, \
+                 token_requester: {:?}, renewers: {:?}, issue_timestamp: 1, max_timestamp: 100, \
+                 expiry_timestamp: 50, token_id: \"REDACTED\" }}, hmac: [] }}] }}",
+                info.owner(),
+                info.token_requester(),
+                info.renewers(),
+            )
+        );
+        let pretty = format!("{options:#?}");
+        assert!(pretty.contains("token_id: \"REDACTED\","), "{pretty}");
+        // The pretty form of a derived byte list spreads over indented lines,
+        // so check that the field is the empty list itself.
+        assert!(pretty.contains("hmac: [],"), "{pretty}");
+        for rendered in [rendered, pretty] {
+            // The hmac's text holds the token id, so this also covers the hmac
+            // rendered as text.
+            assert!(!rendered.contains(TOKEN_ID), "token id leaked: {rendered}");
+            assert!(!rendered.contains(&format!("{hmac:?}")), "hmac leaked: {rendered}");
+            assert!(!rendered.contains(&token.hmac_as_base64_string()), "hmac leaked: {rendered}");
+            // The other direction: the fields that are not secret still render.
+            assert!(rendered.contains("\"alice\""), "owner missing: {rendered}");
+            assert!(rendered.contains("\"requester\""), "token requester missing: {rendered}");
+            assert!(rendered.contains("\"bob\""), "renewer missing: {rendered}");
         }
     }
 
