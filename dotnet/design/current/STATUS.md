@@ -7,6 +7,54 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 15 / Phase 13.5 — ".NET Admin: parity lows (no core or ABI change)": DONE (2026-10-02). N=90. Mode A.** Branch `prashah_dev_dotnet_binding`, base `21458241` (the #225 v0.1.1 master merge). The commits are not squashed and not pushed:
+  - S1: `f308d137` (S1a value types), `a69408ac` (S1b admin surface), `d5fdcc66` (S1c preconditions), `ec2ddd7a` (S1d X2).
+  - S2: `0b0327ae` (S2a X6), `d2f6f656` (S2b docs) and `b6f71c2c` (S2b X8, the one rule-file edit the user authorized, D2).
+  - The `fixup!` commits `070985b8` and `ab3537f9` fix Critic 90.1 and 90.2.
+  - Then this close.
+
+  Plan and review record: `design/history/M15/P13.5-admin-dotnet-parity-lows/` (`PLAN.md`, `COMMENTS.DONE.90.md`, both first tracked by this close). Proof of Mode A: `git diff --stat 21458241..ab3537f9 -- . ':!dotnet'` is empty, and the header SHA-1 stayed `af0f1644…`.
+  - **Why.** The clean-slate admin parity audit at `de51d14b` left 21 low findings after P13.4. All 21 reproduced at `21458241`, and none needed core or ABI work.
+  - **User-visible changes (pre-publish; Java-faithful unless marked):**
+    - **G3-6** — `NewPartitionReassignment.TargetReplicas` is a read-only copy (Java `List.copyOf`). The declared type is unchanged.
+    - **G5-2 / G5-3** — `OffsetAndMetadata` has value equality (`IEquatable<>`, no operators), and a negative leader epoch is stored as `null` (Java's getter reports empty). The consumer still sends `-1` for an absent epoch.
+    - **G1-13** — `ListTopicsOptions` equality covers `ListInternal` only; `TimeoutMs` is excluded, as in Java.
+    - **G6-4** — `FeatureUpdate.ToString` prints Java's constant names.
+    - **G3-7** — `ListPartitionReassignments()` and `ListPartitionReassignments(options)` are writable, as Java's zero-arg and options-only overloads. A lone literal `null` binds to the options-only overload (CS8625, not CS0121) and means defaults.
+    - **G1-10** — `DeleteTopics` / `DescribeTopics(IReadOnlyCollection<string> topicNames, options = null)` forward `TopicCollection.OfTopicNames`. A literal `null` is now ambiguous (CS0121) between the two overloads; cast it.
+    - **G3-8** — `LogDirDescription` has Java's three public constructors (2/4/5 arguments; `long?` sizes; Java's `-1` stored as `null`).
+    - **G5-6** — `RemoveMembersFromConsumerGroupResult.RemoveAll` is internal, as Java's is private. The gRPC server reads `options.RemoveAll`.
+    - **G4-5** — `DeleteAclsResult.FilterResult.Error` is renamed `Exception` (Java `exception()`).
+    - **G4-3** — `DescribeUserScramCredentials` skips a null user instead of throwing (Java `:4357-4360`).
+    - **G6-9** — a null feature name gets Java's "Provided feature can not be empty."
+    - **G6-1** — the mock accepts an empty `UpdateFeatures` map (Java's mock validates nothing); the real client still rejects it.
+    - **X9** — `ObjectDisposedException.ObjectName` is `KafkaAdminClient` or `MockAdminClient`, not the internal `NativeAdminClient`.
+    - **X2** — a negative `TimeoutMs` on any admin options type is sent as `0` (Java `calcDeadlineMs`, `Math.max(0, timeoutMs)`): the call is already expired and fails through its result with the core's timeout error. It no longer throws. The wording lives once, on `CreateTopicsOptions.TimeoutMs`. `Close(TimeSpan)` and the other negative-value rules are unchanged.
+    - **Internal / docs:** X6 deleted the 75 unreferenced `kafka_admin_*` P/Invokes (653 → **578**; the 8 tests-only ones stay, D6). G4-1, G5-8, G7-7 and G3-10 fix stale doc sentences and cites. X8 updates the two `dotnet/CLAUDE.md` passages that still said Admin was not exposed / Mode B.
+  - **Gates, verified by the Manager at each sub-stage and at `ab3537f9`.**
+    - Header SHA-1 `af0f16448fd7ec653174907890f0e245a6b24738` throughout; Mode-A diff empty.
+    - P/Invokes: 653 through S1, then 578 = `ExpectedImportCount` after S2a. The dead-P/Invoke script reports 0 unreferenced `kafka_admin_*`.
+    - Unit tests on both net10.0 and net8.0: 2846/2846 on base, 2886/2886 after S1, 2886/2886 after S2, **2906/2906** at close (+60).
+    - 0 warnings and 0 errors (sln and grpc-server); `dotnet format --verify-no-changes` clean on both.
+    - Known flake, not this phase: `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` (a `GetTotalMemory` heap budget) went red once in an Actor run and green on rerun.
+  - **Critic 90.** One review of `21458241..b6f71c2c` (D1). Every item matched its Java anchor. It found two low issues: 90.1, nine X2 test comments claimed a submit-seam pin that ten RPCs lacked (fixed by adding the negative seam rows, mutation-proven: 20/20 new rows turn red); 90.2, the test-side twin of the G3-10 remark kept stale cites (fixed; the production copy's Java cites were also off by one and were corrected to `KafkaAdminClient.java:3104-3107` / `:3154-3157`). The re-check of `b6f71c2c..ab3537f9` was clean: **no open findings.**
+  - **Local Docker gate, run on `ab3537f9` (2026-10-02).** The grpc-server changed (F1, F2) and every RPC's timeout path changed (X2), so all admin `__grpc_dotnet` arms were run in plaintext container mode.
+    - The staged linux/amd64 `.so` was M17/P2's (`b8bbc17a…`). `rust/src` is unchanged since then, but the #225 merge bumped `rust/Cargo.toml` (`0.1.0` → `0.1.1`, which the core sends as its ApiVersions client software version), so a fresh `.so` was cross-built at HEAD (`e7dd3ee2…`). All 578 of the binding's EntryPoints resolve in its exports.
+    - The sync .NET gRPC image was rebuilt with `DOCKER_DEFAULT_PLATFORM=linux/amd64`; its `/app/libconfluent_kafka.so` has the staged sha256 `e7dd3ee2…`. The run used `MULTILANG_BACKEND_MODE=container` (docker events show the `dotnet-grpc-server:dev` backends starting).
+    - `--list` gives 151 `__grpc_dotnet*` arms, 79 of them admin (78 across the 13 admin families plus the one `multilanguage_admin_test` arm; cluster configs has 6 since M17/P2 removed `ListClientMetricsResources`). **79 passed; 0 failed.**
+    - Not run: the async image and the non-admin arms (this phase touches neither).
+  - **⚠ Supersedes the P13.4 entry's X10 carry-over (F3).** That entry lists "X10's other members, which throw synchronously for a null where Java fails per key (D1)" and the recorded member list included G4-3 and G6-9. Neither is an X10 member: Java **skips** a null SCRAM user (`KafkaAdminClient.java:4357-4360`), and a null feature name is Java's own **synchronous** `IllegalArgumentException` (`:4597-4599`). Fixing both here does **not** reverse P13.4 D1; the per-key null family (X10) stays out of scope.
+  - **Observed, not acted on (for the user):**
+    1. G3-6's 13 sibling getters that hand out a mutable backing collection (D5, PLAN §7).
+    2. About 21 other admin Rust line cites (`mock_admin_client.rs:NNN`, `ffi/admin.rs:NNN`, …) in older test and src comments, outside G3-10's site list.
+    3. The seam-suite summaries "an explicit timeout is forwarded verbatim" do not say the value must be non-negative (pre-existing wording).
+    4. Two declarations are reachable only through orphaned internal readers (`ListConsumerGroupOffsetsResultGetValue` via `AdminCallbacks.ListConsumerGroupOffsetsValue`; `CreateTopicsResultDestroy` via `s_destroyCreateTopicsResult`), so the dead-P/Invoke script counts them as live.
+    5. A null *element* in G1-10's name collection reports `ParamName "topics"` (from `OfTopicNames`), not `topicNames` — left with the X10 family.
+    6. P13.4 PM-1's six stale "borrowed error" docs remain as recorded there.
+  - **Out of scope, carried:** G1-2, G1-4, G2-2, G2-3, G3-9, G5-5, G7-6, G4-7, G6-5 (core or ABI work); PR #219; the X10 null-input per-key family; X1, X4, X7, G5-4, G7-5, G6-8, G4-8; every Python half.
+  - **Next unused dotnet N = 91.**
+  - **Not pushed.** `origin` is at `274523ec`; push the whole range from `274523ec` together (M17/P2 D11).
+
 - **Milestone 17 / Phase 2 — ".NET: adopt master #210 / #209 / #223 through rebased PR #201 — layout move, C ABI rename, Java-deprecated removals": DONE locally (2026-10-02); not pushed. N=89. Mode A.** Branch `prashah_dev_dotnet_binding`, on top of `274523ec` (the M17/P1 close, which `origin` carries). The commits after it are not squashed and not pushed:
   - S1a: `777dfa83` (`git mv bindings/dotnet dotnet`, 743 × R100) and `27b61304` (`bindings/CLAUDE.md` → `dotnet/.claude/rules/bindings.md`, R100; D14).
   - S1: `b4f019d4` merges `c0220aab` (PR #201 rebased on master `c7dd21bf`, which carries #223, #209, #210 and #216–#218; merge-base `d6bf7c76`). `8964a732` switches the .NET harness arms to `#[expect]`.
@@ -114,6 +162,7 @@ Newest first.
     - G1-2, a Rust-core dependency;
     - the NUL gap in the admin, producer and consumer construction config, as one cross-client follow-up (D3);
     - X10's other members, which throw synchronously for a null where Java fails per key (D1);
+      ⚠ **Superseded in part by M15/P13.5 (F3):** G4-3 and G6-9 were listed as X10 members but are not — Java skips a null SCRAM user and throws synchronously for a null feature name — so P13.5 fixed both without reversing D1. See the P13.5 entry above.
     - the Java-parity `ToString` claims on about 60 other types.
 
     `grpc-server/TranslateAdmin.cs` casts proto op types unchecked, so an undefined op type now throws there (G2-4). The plan anticipated this, and no harness scenario sends one.
