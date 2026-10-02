@@ -1,0 +1,386 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! IncrementalAlterConfigs request handling.
+//!
+//! Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest`.
+
+use std::io;
+
+use crate::IncrementalAlterConfigsRequestData;
+use crate::IncrementalAlterConfigsResponseData;
+use crate::common::protocol::{ApiKeys, Errors, Readable};
+use crate::incremental_alter_configs_response_data::AlterConfigsResourceResponse;
+
+use super::{AbstractRequest, ConcreteResponse, IncrementalAlterConfigsResponse, RequestBuilder};
+
+/// An IncrementalAlterConfigs request.
+///
+/// Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest`.
+#[derive(Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest")]
+pub struct IncrementalAlterConfigsRequest {
+    data: IncrementalAlterConfigsRequestData,
+    version: i16,
+}
+
+impl IncrementalAlterConfigsRequest {
+    /// Creates a new `IncrementalAlterConfigsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#IncrementalAlterConfigsRequest")]
+    pub fn new(data: IncrementalAlterConfigsRequestData, version: i16) -> Self {
+        Self { data, version }
+    }
+
+    /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#data")]
+    pub fn data(&self) -> &IncrementalAlterConfigsRequestData {
+        &self.data
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut IncrementalAlterConfigsRequestData {
+        &mut self.data
+    }
+
+    /// Returns the API version of this request.
+    pub fn version(&self) -> i16 {
+        self.version
+    }
+
+    /// Returns the API key for this request.
+    pub fn api_key(&self) -> &'static ApiKeys {
+        &ApiKeys::INCREMENTAL_ALTER_CONFIGS
+    }
+
+    /// Creates an error response for this request, failing every resource with
+    /// the given error.
+    ///
+    /// Mirrors `IncrementalAlterConfigsRequest.getErrorResponse` (Java uses
+    /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
+    /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#getErrorResponse")]
+    pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
+        let mut data = IncrementalAlterConfigsResponseData::new();
+        data.set_throttle_time_ms(throttle_time_ms);
+        let responses = self
+            .data
+            .resources
+            .iter()
+            .map(|resource| {
+                let mut response = AlterConfigsResourceResponse::new();
+                response.set_resource_name(resource.resource_name.clone());
+                response.set_resource_type(resource.resource_type);
+                response.set_error_code(error.code());
+                response.set_error_message(Some(error.message().to_string()));
+                response
+            })
+            .collect();
+        data.set_responses(responses);
+        ConcreteResponse::IncrementalAlterConfigs(IncrementalAlterConfigsResponse::new(data))
+    }
+
+    /// Parses an `IncrementalAlterConfigsRequest` from a readable buffer at the
+    /// given version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#parse")]
+    pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
+        let data = IncrementalAlterConfigsRequestData::read(readable, version)?;
+        Ok(Self::new(data, version))
+    }
+
+    /// Returns a copy of `data` with every config value replaced by
+    /// `"REDACTED"`, for rendering: it is not safe to print all config values.
+    ///
+    /// Mirrors Java's private `maskData`
+    /// (`IncrementalAlterConfigsRequest.java:111-118`), which
+    /// `Builder.toString()` (`:74-75`) renders. Like Java's `setValue("REDACTED")`
+    /// it replaces a null value too. Java returns the copy's `toString()`, and
+    /// the caller here renders the copy.
+    fn mask_data(data: &IncrementalAlterConfigsRequestData) -> IncrementalAlterConfigsRequestData {
+        let mut temp_data = data.clone();
+        for resource in &mut temp_data.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        temp_data
+    }
+}
+
+impl std::fmt::Display for IncrementalAlterConfigsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Config values are not printed (they may be sensitive), mirroring
+        // Java's `maskData`.
+        write!(
+            f,
+            "IncrementalAlterConfigsRequest(version={}, resources={})",
+            self.version,
+            self.data.resources.len()
+        )
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()` (`IncrementalAlterConfigsRequest.java:122-123`);
+/// a derived `Debug` would be a second, unredacted rendering that prints every
+/// config value being altered.
+impl std::fmt::Debug for IncrementalAlterConfigsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+/// Builder for [`IncrementalAlterConfigsRequest`].
+///
+/// Corresponds to `IncrementalAlterConfigsRequest.Builder` in Java. The Java
+/// `Builder(resources, configs, validateOnly)` constructor folds the admin
+/// `AlterConfigOp`/`ConfigResource` types into `IncrementalAlterConfigsRequestData`;
+/// in Rust that assembly happens in the admin client (which owns those types)
+/// and this builder only wraps the pre-built data (`common::requests` must not
+/// depend on the `admin` module).
+#[derive(Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder")]
+pub struct Builder {
+    data: IncrementalAlterConfigsRequestData,
+    oldest_allowed_version: i16,
+    latest_allowed_version: i16,
+}
+
+impl Builder {
+    /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder#Builder")]
+    pub fn with_data(data: IncrementalAlterConfigsRequestData) -> Self {
+        Self {
+            data,
+            oldest_allowed_version: ApiKeys::INCREMENTAL_ALTER_CONFIGS.oldest_version(),
+            latest_allowed_version: ApiKeys::INCREMENTAL_ALTER_CONFIGS.latest_version(),
+        }
+    }
+}
+
+impl RequestBuilder for Builder {
+    fn api_key(&self) -> &'static ApiKeys {
+        &ApiKeys::INCREMENTAL_ALTER_CONFIGS
+    }
+
+    fn oldest_allowed_version(&self) -> i16 {
+        self.oldest_allowed_version
+    }
+
+    fn latest_allowed_version(&self) -> i16 {
+        self.latest_allowed_version
+    }
+
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
+            self.data.clone(),
+            version,
+        )))
+    }
+}
+
+/// Mirrors Java's `Builder.toString()` (`IncrementalAlterConfigsRequest.java:74-75`),
+/// which returns `maskData(data)`: the data with every config value replaced by
+/// `"REDACTED"`.
+impl std::fmt::Display for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", IncrementalAlterConfigsRequest::mask_data(&self.data))
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints every config value being altered.
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::incremental_alter_configs_request_data::{AlterConfigsResource, AlterableConfig};
+
+    fn resource(name: &str, resource_type: i8, configs: &[(&str, Option<&str>, i8)]) -> AlterConfigsResource {
+        let mut r = AlterConfigsResource::new();
+        r.set_resource_name(name.to_string());
+        r.set_resource_type(resource_type);
+        r.set_configs(
+            configs
+                .iter()
+                .map(|(name, value, op)| {
+                    let mut c = AlterableConfig::new();
+                    c.set_name((*name).to_string());
+                    c.set_value(value.map(str::to_string));
+                    c.set_config_operation(*op);
+                    c
+                })
+                .collect(),
+        );
+        r
+    }
+
+    /// A distinctive secret value for the rendering tests.
+    const SECRET_VALUE: &str = "sasl-jaas-S3cr3t-7a41";
+
+    /// Two resources: a broker config set to [`SECRET_VALUE`] and a topic config
+    /// deleted with a null value.
+    fn data_with_secret() -> IncrementalAlterConfigsRequestData {
+        let mut data = IncrementalAlterConfigsRequestData::new();
+        data.set_resources(vec![
+            resource("0", 4, &[("listener.name.sasl.plain.sasl.jaas.config", Some(SECRET_VALUE), 0)]),
+            resource("orders", 2, &[("retention.ms", None, 1)]),
+        ]);
+        data
+    }
+
+    /// New test, no Java original: the redacting `Display` counts the resources
+    /// and prints no config value.
+    #[test]
+    fn display_redacts_config_values() {
+        let request = IncrementalAlterConfigsRequest::new(data_with_secret(), 1);
+        let rendered = request.to_string();
+        assert_eq!(rendered, "IncrementalAlterConfigsRequest(version=1, resources=2)");
+        assert!(!rendered.contains(SECRET_VALUE), "{rendered}");
+    }
+
+    /// New test, no Java original: `Debug` renders exactly what `Display` does
+    /// (Java has a single `toString()`), never a config value.
+    #[test]
+    fn debug_redacts_config_values() {
+        let request = IncrementalAlterConfigsRequest::new(data_with_secret(), 1);
+        assert_eq!(request.data().resources[0].configs[0].value.as_deref(), Some(SECRET_VALUE));
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("resources=2"), "{rendered}");
+            assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+        }
+    }
+
+    /// New test, no Java original: the builder renders as Java's
+    /// `Builder.toString()` does, the data with every config value replaced by
+    /// `"REDACTED"` (`maskData`) — the null value of the deleted config
+    /// included — while the resource and config names still show.
+    #[test]
+    fn builder_display_masks_config_values() {
+        let builder = Builder::with_data(data_with_secret());
+        let rendered = builder.to_string();
+        let mut masked = data_with_secret();
+        for resource in &mut masked.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        assert_eq!(rendered, masked.to_string());
+        assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+        assert!(
+            rendered.contains("name: \"listener.name.sasl.plain.sasl.jaas.config\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+        assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does, never a config value.
+    #[test]
+    fn builder_debug_masks_config_values() {
+        let builder = Builder::with_data(data_with_secret());
+        assert_eq!(builder.data.resources[0].configs[0].value.as_deref(), Some(SECRET_VALUE));
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            assert_eq!(rendered, builder.to_string());
+            assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+            assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+        }
+    }
+
+    #[test]
+    fn get_error_response_fails_every_resource() {
+        let mut data = IncrementalAlterConfigsRequestData::new();
+        data.set_resources(vec![
+            resource("t", 2, &[("retention.ms", Some("1"), 0)]),
+            resource("0", 4, &[("log.segment.bytes", Some("2"), 0)]),
+        ]);
+        let request = IncrementalAlterConfigsRequest::new(data, 1);
+        let response = request.get_error_response(100, &Errors::ClusterAuthorizationFailed);
+        if let ConcreteResponse::IncrementalAlterConfigs(r) = response {
+            assert_eq!(r.data().throttle_time_ms, 100);
+            assert_eq!(r.data().responses.len(), 2);
+            for resp in &r.data().responses {
+                assert_eq!(resp.error_code, Errors::ClusterAuthorizationFailed.code());
+            }
+        } else {
+            panic!("expected IncrementalAlterConfigs response");
+        }
+    }
+
+    #[test]
+    fn serialize_parse_round_trip() {
+        let mut data = IncrementalAlterConfigsRequestData::new();
+        data.set_resources(vec![resource("t", 2, &[("retention.ms", Some("1000"), 0)])]);
+        data.set_validate_only(true);
+        let mut request = AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
+        let bytes = request.serialize().unwrap();
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
+        let parsed = IncrementalAlterConfigsRequest::parse(&mut readable, 1).unwrap();
+        assert_eq!(parsed.data().resources.len(), 1);
+        assert_eq!(parsed.data().resources[0].resource_name, "t");
+        assert_eq!(parsed.data().resources[0].configs.len(), 1);
+        assert_eq!(parsed.data().resources[0].configs[0].name, "retention.ms");
+        assert_eq!(parsed.data().resources[0].configs[0].value.as_deref(), Some("1000"));
+        assert_eq!(parsed.data().resources[0].configs[0].config_operation, 0);
+        assert!(parsed.data().validate_only);
+    }
+
+    /// Byte-level encoding test against a known vector. IncrementalAlterConfigs
+    /// v1 is flexible, so the body is:
+    ///   resources: compact array (len+1 = 0x02)
+    ///     resource_type: int8 = 2 (0x02)
+    ///     resource_name: compact string "t" (0x02, 0x74)
+    ///     configs: compact array (len+1 = 0x02)
+    ///       name: compact string "k" (0x02, 0x6b)
+    ///       config_operation: int8 = 0 (0x00)
+    ///       value: compact nullable string "v" (0x02, 0x76)
+    ///       _tagged_fields: 0x00
+    ///     _tagged_fields: 0x00
+    ///   validate_only: bool false (0x00)
+    ///   _tagged_fields: 0x00
+    #[test]
+    fn serialize_known_byte_vector_v1() {
+        let mut data = IncrementalAlterConfigsRequestData::new();
+        data.set_resources(vec![resource("t", 2, &[("k", Some("v"), 0)])]);
+        let mut request = AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
+        let bytes = request.serialize().unwrap();
+        let expected: &[u8] = &[
+            0x02, // resources array length + 1
+            0x02, // resource_type = 2
+            0x02, 0x74, // resource_name "t"
+            0x02, // configs array length + 1
+            0x02, 0x6b, // name "k"
+            0x00, // config_operation = 0
+            0x02, 0x76, // value "v"
+            0x00, // config tagged fields
+            0x00, // resource tagged fields
+            0x00, // validate_only = false
+            0x00, // request tagged fields
+        ];
+        assert_eq!(bytes.into_buffer().as_slice(), expected);
+    }
+}

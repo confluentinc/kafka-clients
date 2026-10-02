@@ -1,6 +1,6 @@
 # Component & ownership structure of the client.
 #
-# Source of truth for design/current/component-ownership.svg.
+# Source of truth for design/current/img/component-ownership.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: each of the three clients owns its own
@@ -12,9 +12,9 @@ direction: down
 app: "Application task(s)" {
   style.fill: "#eef6ff"
 
-  producer: "KafkaProducer<K, V>\nsrc/producer/kafka_producer.rs"
-  consumer: "AsyncKafkaConsumer<K, V>\nsrc/consumer/async_kafka_consumer.rs"
-  admin: "KafkaAdminClient\nsrc/admin/kafka_admin_client.rs"
+  producer: "KafkaProducer<K, V>\nproducer/kafka_producer.rs"
+  consumer: "AsyncKafkaConsumer<K, V> (pub(crate))\nbuilt by KafkaConsumer::new -> Box<dyn Consumer>"
+  admin: "KafkaAdminClient\nadmin/kafka_admin_client.rs"
 }
 
 bg: "Background tasks (one tokio::spawn per client instance)" {
@@ -25,10 +25,10 @@ bg: "Background tasks (one tokio::spawn per client instance)" {
   runnable: "AdminClientRunnable<C>\nadmin/internals/admin_client_runnable.rs"
 }
 
-net: "Shared client layer (one instance per client, not shared across clients)" {
+net: "Client layer (one instance per client, never shared across clients)" {
   style.fill: "#f3f0ff"
 
-  client: "KafkaClient (trait)\nNetworkClient<S, H>\nsrc/kafka_client.rs, src/network_client.rs"
+  client: "KafkaClient (trait)\nNetworkClient<S, H>\nkafka_client.rs, network_client.rs"
   sel: "Selector (Selectable)\ncommon/network/selector.rs"
   chan: "KafkaChannel per connection\n+ Box<dyn TransportLayer>"
 

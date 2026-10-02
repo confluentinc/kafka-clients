@@ -1,0 +1,88 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Metrics internal helpers
+//! (`org.apache.kafka.common.metrics.internals.MetricsUtils`).
+
+use std::collections::BTreeMap;
+
+use crate::common::Error;
+use crate::common::metrics::TimeUnit;
+
+/// Translates the Java static-utility class `org.apache.kafka.common.metrics.internals.MetricsUtils`,
+/// which has no instance state, so it becomes a unit struct hosting its
+/// statics as associated items.
+#[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils")]
+pub(crate) struct MetricsUtils;
+
+impl MetricsUtils {
+    /// Convert the provided time from milliseconds to the requested time unit.
+    ///
+    /// Faithful translation of `MetricsUtils.convert(long timeMs, TimeUnit unit)`.
+    #[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils#convert")]
+    pub fn convert(time_ms: i64, unit: TimeUnit) -> f64 {
+        let time_ms = time_ms as f64;
+        match unit {
+            TimeUnit::Nanoseconds => time_ms * 1000.0 * 1000.0,
+            TimeUnit::Microseconds => time_ms * 1000.0,
+            TimeUnit::Milliseconds => time_ms,
+            TimeUnit::Seconds => time_ms / 1000.0,
+            TimeUnit::Minutes => time_ms / (60.0 * 1000.0),
+            TimeUnit::Hours => time_ms / (60.0 * 60.0 * 1000.0),
+            TimeUnit::Days => time_ms / (24.0 * 60.0 * 60.0 * 1000.0),
+        }
+    }
+
+    /// Convert a sequence of `key, value` pairs to a tags map.
+    ///
+    /// Returns an error (Java throws `IllegalArgumentException`) if the number of
+    /// elements is odd.
+    #[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils#getTags")]
+    pub fn get_tags(key_value: &[&str]) -> Result<BTreeMap<String, String>, Error> {
+        if !key_value.len().is_multiple_of(2) {
+            return Err(Error::local_illegal_argument("keyValue needs to be specified in pairs"));
+        }
+        let mut tags = BTreeMap::new();
+        let mut i = 0;
+        while i < key_value.len() {
+            tags.insert(key_value[i].to_string(), key_value[i + 1].to_string());
+            i += 2;
+        }
+        Ok(tags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairs_to_map() {
+        let tags = MetricsUtils::get_tags(&["k1", "v1", "k2", "v2"]).unwrap();
+        assert_eq!(tags.get("k1").map(String::as_str), Some("v1"));
+        assert_eq!(tags.get("k2").map(String::as_str), Some("v2"));
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn odd_count_is_error() {
+        let err = MetricsUtils::get_tags(&["k1"]).unwrap_err();
+        assert!(err.to_string().contains("keyValue needs to be specified in pairs"));
+    }
+
+    #[test]
+    fn empty_is_empty_map() {
+        assert!(MetricsUtils::get_tags(&[]).unwrap().is_empty());
+    }
+}
