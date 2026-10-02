@@ -28,12 +28,14 @@ pub struct ListConsumerGroupOffsetsOptions {
 
 impl ListConsumerGroupOffsetsOptions {
     /// Creates default options.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#ListConsumerGroupOffsetsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Sets an optional `requireStable` flag. Mirrors `requireStable(boolean)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable")]
     pub fn set_require_stable(mut self, require_stable: bool) -> Self {
         self.require_stable = require_stable;
         self
@@ -41,17 +43,20 @@ impl ListConsumerGroupOffsetsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// Whether stable offsets are required. Mirrors `requireStable()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable")]
     pub fn require_stable(&self) -> bool {
         self.require_stable
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

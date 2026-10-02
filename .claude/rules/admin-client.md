@@ -267,9 +267,9 @@ Wire wrappers go in `rust/src/common/requests/`.
 
 Java ships it in the clients *test* jar, without `@InterfaceAudience.Public`,
 so by the audience rules it would be crate-private. It stays public, together
-with its C and Python bindings, through an entry in
-`rust/xtask/public-audience-allowlist.txt`: the crate has no separate test artifact,
-so the allow-list stands in for Java's test jar.
+with its C and Python bindings, through a `#[doc(alias = "public-in-rust")]` tag
+on the Rust type and on its C binding (`cargo xtask lint-custom`): the crate has no
+separate test artifact, so the tag stands in for Java's test jar.
 
 **The governing principle: mirror Java's `MockAdminClient` method-for-method.**
 Whether a Rust mock method gets a real in-memory implementation or an

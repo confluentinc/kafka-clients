@@ -144,13 +144,13 @@ impl BufferPool {
         let wait_time_sensor = metrics
             .sensor(BufferPool::WAIT_TIME_SENSOR_NAME)
             .expect("registering bufferpool-wait-time sensor");
-        let rate_metric_name = metrics.metric_name_description_tags(
+        let rate_metric_name = metrics.metric_name_with_description_tags(
             "bufferpool-wait-ratio",
             metric_grp_name,
             "The fraction of time an appender waits for space allocation.",
             std::collections::BTreeMap::new(),
         );
-        let total_ns_metric_name = metrics.metric_name_description_tags(
+        let total_ns_metric_name = metrics.metric_name_with_description_tags(
             "bufferpool-wait-time-ns-total",
             metric_grp_name,
             "The total time in nanoseconds an appender waits for space allocation.",
@@ -169,13 +169,13 @@ impl BufferPool {
         let buffer_exhausted_sensor = metrics
             .sensor("buffer-exhausted-records")
             .expect("registering buffer-exhausted-records sensor");
-        let buffer_exhausted_rate_metric_name = metrics.metric_name_description_tags(
+        let buffer_exhausted_rate_metric_name = metrics.metric_name_with_description_tags(
             "buffer-exhausted-rate",
             metric_grp_name,
             "The average per-second number of record sends that are dropped due to buffer exhaustion",
             std::collections::BTreeMap::new(),
         );
-        let buffer_exhausted_total_metric_name = metrics.metric_name_description_tags(
+        let buffer_exhausted_total_metric_name = metrics.metric_name_with_description_tags(
             "buffer-exhausted-total",
             metric_grp_name,
             "The total number of record sends that are dropped due to buffer exhaustion",
@@ -437,7 +437,8 @@ impl BufferPool {
                     // elapsed, before throwing `BufferExhaustedException`
                     // (`BufferPool.java:160`). Recorded outside the pool lock
                     // (value/timestamp are independent of pool state).
-                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, self.time.milliseconds());
+                    self.buffer_exhausted_sensor
+                        .record_with_value_time_ms(1.0, self.time.milliseconds());
                     return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
@@ -473,7 +474,7 @@ impl BufferPool {
             ));
         }
         self.wait_time_sensor
-            .record_value_time_ms(time_ns as f64, self.time.milliseconds());
+            .record_with_value_time_ms(time_ns as f64, self.time.milliseconds());
         Ok(())
     }
 
@@ -920,8 +921,12 @@ mod tests {
             "buffer-exhausted-rate",
             "buffer-exhausted-total",
         ] {
-            let mn =
-                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn = metrics.metric_name_with_description_tags(
+                name,
+                "producer-metrics",
+                "",
+                std::collections::BTreeMap::new(),
+            );
             assert!(metrics.metric(&mn).is_some(), "metric {name} should be registered");
         }
 
@@ -931,7 +936,7 @@ mod tests {
         let result = pool.allocate(2, 10).await;
         assert!(matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)));
 
-        let total_ns = metrics.metric_name_description_tags(
+        let total_ns = metrics.metric_name_with_description_tags(
             "bufferpool-wait-time-ns-total",
             "producer-metrics",
             "",
@@ -941,7 +946,7 @@ mod tests {
             metrics.metric(&total_ns).unwrap().measurable_value(0) > 0.0,
             "wait-time-ns-total should have recorded"
         );
-        let exhausted_total = metrics.metric_name_description_tags(
+        let exhausted_total = metrics.metric_name_with_description_tags(
             "buffer-exhausted-total",
             "producer-metrics",
             "",

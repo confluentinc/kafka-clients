@@ -214,6 +214,8 @@ pub struct ConfigEntry {
 /// and set them: [`ConfigEntryOptionsBuilder::build`] returns an error if any of `name`, `value` was not set.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
+// the options of ConfigEntry's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
     pub(crate) name: String,
@@ -246,6 +248,8 @@ pub struct ConfigEntryOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+// builds ConfigEntryOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConfigEntryOptionsBuilder {
     name: Option<String>,
     value: Option<Option<String>>,
@@ -459,7 +463,8 @@ impl ConfigEntry {
     }
 
     /// Return the config data type.
-    pub fn config_type(&self) -> ConfigType {
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#type")]
+    pub fn r#type(&self) -> ConfigType {
         self.config_type
     }
 
@@ -507,7 +512,7 @@ mod tests {
         assert!(!entry.is_sensitive());
         assert!(!entry.is_read_only());
         assert!(entry.synonyms().is_empty());
-        assert_eq!(entry.config_type(), ConfigType::Unknown);
+        assert_eq!(entry.r#type(), ConfigType::Unknown);
         assert_eq!(entry.documentation(), None);
     }
 

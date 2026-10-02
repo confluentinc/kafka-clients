@@ -281,6 +281,8 @@ pub struct kafka_admin_AdminClient_t {
 
 /// Opaque admin-configuration properties handle (a `HashMap<String, String>`).
 #[repr(C)]
+// the `Properties` passed to the admin client constructor
+#[doc(alias = "rust-only")]
 pub struct kafka_admin_AdminClientProperties_t {
     _private: [u8; 0],
 }
@@ -507,6 +509,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// so there is one source of truth for the bound rather than a check here that
 /// could drift from the core's.
 #[unsafe(no_mangle)]
+// the C binding of the test-jar MockAdminClient, public as the Rust type is
+#[doc(alias = "public-in-rust")]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
     let mock = match MockAdminClient::create(num_brokers) {
@@ -1218,7 +1222,7 @@ impl NewPartitionsBuilder {
     /// succeeds.
     fn build(&self) -> NewPartitions {
         if self.has_assignments {
-            NewPartitions::increase_to_new_assignments(self.total_count, self.new_assignments.clone())
+            NewPartitions::increase_to_with_new_assignments(self.total_count, self.new_assignments.clone())
         } else {
             NewPartitions::increase_to(self.total_count)
         }
@@ -1387,10 +1391,7 @@ unsafe fn read_records_to_delete(
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
         let partition = unsafe { *partitions.add(i) };
         let offset = unsafe { *before_offsets.add(i) };
-        out.insert(
-            TopicPartition::new(name, partition),
-            RecordsToDelete::before_offset_with_offset(offset),
-        );
+        out.insert(TopicPartition::new(name, partition), RecordsToDelete::with_offset(offset));
     }
     out
 }
@@ -1486,7 +1487,7 @@ impl ConfigEntryC {
             is_sensitive: entry.is_sensitive(),
             is_read_only: entry.is_read_only(),
             source_c: to_cstring(config_source_name(entry.source())),
-            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            config_type_c: to_cstring(config_type_name(entry.r#type())),
             documentation_c: entry.documentation().map(to_cstring),
             synonyms: entry
                 .synonyms()
@@ -4268,9 +4269,9 @@ unsafe fn read_alter_config_ops(
 fn sorted_config_resource_entries<V>(map: HashMap<ConfigResource, V>) -> Vec<(ConfigResource, V)> {
     let mut entries: Vec<(ConfigResource, V)> = map.into_iter().collect();
     entries.sort_by(|a, b| {
-        a.0.resource_type()
+        a.0.r#type()
             .id()
-            .cmp(&b.0.resource_type().id())
+            .cmp(&b.0.r#type().id())
             .then_with(|| a.0.name().cmp(b.0.name()))
     });
     entries
@@ -4508,6 +4509,8 @@ fn replica_info_at(description: &LogDirDescriptionInner, index: i32) -> Option<&
 
 /// Opaque handle to one broker's `Map<String, LogDirDescription>`.
 #[repr(C)]
+// a Java `Map<String, LogDirDescription>`
+#[doc(alias = "rust-only")]
 pub struct kafka_admin_LogDirDescriptionMap_t {
     _private: [u8; 0],
 }
@@ -5020,7 +5023,7 @@ fn box_describe_configs_result(outcomes: DescribeConfigsOutcomes) -> *mut kafka_
     let mut values = Vec::with_capacity(entries.len());
     let mut errors = Vec::with_capacity(entries.len());
     for (resource, outcome) in entries {
-        key_types.push(i32::from(resource.resource_type().id()));
+        key_types.push(i32::from(resource.r#type().id()));
         key_names.push(to_cstring(resource.name()));
         match outcome {
             Ok(config) => {
@@ -5306,7 +5309,7 @@ fn box_alter_configs_result(outcomes: AlterConfigsOutcomes) -> *mut kafka_admin_
     let mut key_names = Vec::with_capacity(entries.len());
     let mut errors = Vec::with_capacity(entries.len());
     for (resource, outcome) in entries {
-        key_types.push(i32::from(resource.resource_type().id()));
+        key_types.push(i32::from(resource.r#type().id()));
         key_names.push(to_cstring(resource.name()));
         errors.push(outcome.err().map(error_inner));
     }
@@ -5565,16 +5568,11 @@ struct ListConfigResourcesResultInner {
 /// `(type id, name)` — Java returns an unordered collection, but C indexes it.
 fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafka_admin_ListConfigResourcesResult_t {
     let mut sorted = resources;
-    sorted.sort_by(|a, b| {
-        a.resource_type()
-            .id()
-            .cmp(&b.resource_type().id())
-            .then_with(|| a.name().cmp(b.name()))
-    });
+    sorted.sort_by(|a, b| a.r#type().id().cmp(&b.r#type().id()).then_with(|| a.name().cmp(b.name())));
     let mut types = Vec::with_capacity(sorted.len());
     let mut names = Vec::with_capacity(sorted.len());
     for resource in &sorted {
-        types.push(i32::from(resource.resource_type().id()));
+        types.push(i32::from(resource.r#type().id()));
         names.push(to_cstring(resource.name()));
     }
     Box::into_raw(Box::new(ListConfigResourcesResultInner { types, names }))
@@ -8305,7 +8303,7 @@ impl GroupListingInner {
     fn new(listing: &GroupListing) -> Self {
         Self {
             group_id_c: to_cstring(listing.group_id()),
-            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
+            group_type_c: listing.r#type().map(|t| to_cstring(t.name())),
             protocol_c: to_cstring(listing.protocol()),
             group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
             is_simple_consumer_group: listing.is_simple_consumer_group(),
@@ -8723,7 +8721,7 @@ impl ConsumerGroupDescriptionInner {
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
             partition_assignor_c: to_cstring(description.partition_assignor()),
-            group_type_c: to_cstring(description.group_type().name()),
+            group_type_c: to_cstring(description.r#type().name()),
             group_state_c: to_cstring(description.group_state().name()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
@@ -9162,6 +9160,8 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 /// Borrowed from the owning `list_consumer_group_offsets_with_group_specs` result handle; valid
 /// until that handle is destroyed. Do not free it.
 #[repr(C)]
+// a Java `Map<TopicPartition, OffsetAndMetadata>`
+#[doc(alias = "rust-only")]
 pub struct kafka_admin_OffsetAndMetadataMap_t {
     _private: [u8; 0],
 }
@@ -9789,7 +9789,10 @@ fn submit_list_consumer_group_offsets(
     let result = admin.list_consumer_group_offsets_with_group_specs_options(group_specs, options);
     let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
     for group_id in group_specs.keys() {
-        entries.push((group_id.clone(), result.partitions_to_offset_and_metadata_for_group(group_id)?));
+        entries.push((
+            group_id.clone(),
+            result.partitions_to_offset_and_metadata_with_group_id(group_id)?,
+        ));
     }
     Ok(KafkaFuture::join_map_results(entries))
 }
@@ -21608,15 +21611,15 @@ mod tests {
         let components = filter.components();
         assert_eq!(components.len(), 3);
         assert_eq!(components[0].entity_type(), "user");
-        assert_eq!(components[0].match_spec(), &ClientQuotaMatch::Exact("alice".to_string()));
+        assert_eq!(components[0].r#match(), &ClientQuotaMatch::Exact("alice".to_string()));
         assert_eq!(components[1].entity_type(), "client-id");
         // DEFAULT and SPECIFIED both carry no name; the discriminant is the
         // only thing separating them, and conflating them would change both
         // equality and the wire match-type byte.
-        assert_eq!(components[1].match_spec(), &ClientQuotaMatch::Default);
+        assert_eq!(components[1].r#match(), &ClientQuotaMatch::Default);
         assert_eq!(components[2].entity_type(), "ip");
-        assert_eq!(components[2].match_spec(), &ClientQuotaMatch::Any);
-        assert_ne!(components[1].match_spec(), components[2].match_spec());
+        assert_eq!(components[2].r#match(), &ClientQuotaMatch::Any);
+        assert_ne!(components[1].r#match(), components[2].r#match());
     }
 
     #[test]

@@ -18,14 +18,14 @@
 //! - `testRecordsAreImmutable` — Java asserts `UnsupportedOperationException`
 //!   on calls like `records.records(tp).add(...)`, which exercises the
 //!   contract that `Collections.unmodifiableList` returns are read-only.
-//!   In Rust, `records_partition` returns `&[ConsumerRecord<K, V>]` and
+//!   In Rust, `records_with_partition` returns `&[ConsumerRecord<K, V>]` and
 //!   `partitions()` returns an iterator over borrowed `&TopicPartition` —
 //!   neither can be mutated by construction (the borrow checker enforces
 //!   immutability statically), so the test is not behaviorally relevant.
 //!   We do preserve the `records.count()` and `next_offsets.size()`
 //!   assertions in a focused replacement test.
 //! - `testRecordsByNullTopic` — Java throws `IllegalArgumentException` when
-//!   `records(null)` is called. In Rust, `records_topic` accepts
+//!   `records(null)` is called. In Rust, `records_with_topic` accepts
 //!   `&str`, which cannot be null by the type system. There is nothing to
 //!   test.
 
@@ -79,7 +79,7 @@ fn test_records_by_partition() {
     for topic in &topics {
         for partition in 0..partition_size {
             let tp = TopicPartition::new(topic.to_string(), partition);
-            let records = consumer_records.records_partition(&tp);
+            let records = consumer_records.records_with_partition(&tp);
 
             if partition == empty_partition_index {
                 assert!(records.is_empty());
@@ -120,7 +120,7 @@ fn test_records_by_topic() {
         let mut partition_count: i32 = 0;
         let mut current_partition: i32 = -1;
 
-        for record in consumer_records.records_topic(topic) {
+        for record in consumer_records.records_with_topic(topic) {
             validate_empty_partition(record, empty_partition_index);
 
             if current_partition != record.partition() {

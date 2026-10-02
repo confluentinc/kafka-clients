@@ -1067,7 +1067,7 @@ fn config_view(config: &Config) -> ConfigView {
                 is_sensitive: entry.is_sensitive(),
                 is_read_only: entry.is_read_only(),
                 source: Some(config_source_name(entry.source()).to_string()),
-                config_type: Some(config_type_name(entry.config_type()).to_string()),
+                config_type: Some(config_type_name(entry.r#type()).to_string()),
                 documentation: entry.documentation().map(str::to_string),
                 synonyms: entry
                     .synonyms()
@@ -1423,7 +1423,7 @@ impl AdminBackend for RustNativeAdmin {
         // the same key set.
         let mut outcomes = HashMap::with_capacity(group_specs.len());
         for group_id in group_specs.keys() {
-            let future = result.partitions_to_offset_and_metadata_for_group(group_id)?;
+            let future = result.partitions_to_offset_and_metadata_with_group_id(group_id)?;
             outcomes.insert(group_id.clone(), future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await);
         }
         Ok(outcomes)

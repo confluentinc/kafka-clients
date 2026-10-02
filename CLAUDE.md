@@ -52,6 +52,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      **in case if the final names would collide**, use the Rust parameter type name instead of the parameter name to discriminate, only for the parameters with same name while continue using the parameter name for rest of parameters.
      In case the difference is **only** Optional use Rust's `Option` and a single method name
      - constructor translation from Java always uses `new`, not `from`. If there are parameters use `.with_<a>_<b>_<c>(a,b,c)`, not `.new_with_<a>_<b>_<c>(a,b,c)`
+     - a static factory method sharing its name with an instance method keeps the name on the instance one and becomes `new_with_<parameters>` if the corresponding `with_<parameters>` is also taken by an instance method: `CloseOptions.timeout(Duration)` beside the getter `timeout()` and `withTimeout()` -> `CloseOptions::new_with_timeout`
+     - a static NON-factory method sharing its name with an instance method becomes `do_<method_name>(_with_<parameters>)?`
      - if there a static method `from_<something>` that is translated from Java and a corresponding constructor `with_<something>` with same final signature, keep only the method `with_<something>`
      - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct that is the only parameter to the method name with `_with_options` suffix. Also in case Java API makes some parameters of the intersection set optional in a later version, add this method with only the `options` parameter
      The `Options` struct must have a `OptionsBuilder` with a `new` parameterless constructor. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct, there the different sets of mandatory parameters are validated and a `IllegalArgumentError` error is returned in case they weren't passed. Semantic validation is left to the method where the `Options` is passed.
@@ -72,6 +74,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - methods that are translated from Java methods must not be public if they're not public in Java implementation
     - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package
     - deprecated API MUST NOT be translated since the first major version of the client. Ensure this is not affecting the ability to implement later some large features that are not implemented at the moment such as the classic consumer group, because of changes to public traits
+    - NEVER EVER accept or return a fixed size array from a public interface
 4. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
@@ -81,7 +84,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
     - Classes that aren't public in Rust crate MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
-      `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every
+      `is_retriable_error` -> `kafka_common_Error_is_retriable_error`, and likewise every
       hierarchy predicate from §12.4, e.g. `is_kafka_error` ->
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the

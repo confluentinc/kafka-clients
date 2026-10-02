@@ -32,6 +32,7 @@ pub struct ByteArraySerializer;
 
 impl ByteArraySerializer {
     /// Create a new `ByteArraySerializer`.
+    #[doc(alias = "org.apache.kafka.common.serialization.ByteArraySerializer#ByteArraySerializer")]
     pub fn new() -> Self {
         Self
     }
@@ -48,7 +49,7 @@ impl Serializer<Vec<u8>> for ByteArraySerializer {
         Ok(data.cloned())
     }
 
-    fn serialize_owned_headers(
+    fn serialize_owned_with_headers(
         &self,
         _topic: &str,
         _headers: &RecordHeaders,

@@ -350,11 +350,13 @@ impl<K, V> MockProducerInner<K, V> {
             return Ok(partition);
         }
         let key_bytes = match self.key_serializer.as_ref() {
-            Some(key_serializer) => key_serializer.serialize_headers(topic, record.headers(), record.key())?,
+            Some(key_serializer) => key_serializer.serialize_with_headers(topic, record.headers(), record.key())?,
             None => None,
         };
         let value_bytes = match self.value_serializer.as_ref() {
-            Some(value_serializer) => value_serializer.serialize_headers(topic, record.headers(), record.value())?,
+            Some(value_serializer) => {
+                value_serializer.serialize_with_headers(topic, record.headers(), record.value())?
+            },
             None => None,
         };
         match self.partitioner.as_ref() {
@@ -439,6 +441,8 @@ impl Completion {
 /// [`MockProducerOptionsBuilder::build`] returns an error if `auto_complete` was
 /// not set.
 #[non_exhaustive]
+// the options of MockProducer's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct MockProducerOptions<K, V> {
     /// The cluster holding metadata for this producer. Java's `cluster`; starts
     /// as [`Cluster::empty`], the value `:137` passes on the caller's behalf.
@@ -464,6 +468,8 @@ pub struct MockProducerOptions<K, V> {
 /// [`Error::LocalIllegalArgument`] if they were not set. Like
 /// [`MockProducerOptions`] it has no Java counterpart and exists solely to
 /// satisfy that naming rule (DoD #7).
+// builds MockProducerOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct MockProducerOptionsBuilder<K, V> {
     cluster: Option<Cluster>,
     auto_complete: Option<bool>,
@@ -707,6 +713,8 @@ impl<K, V> MockProducer<K, V> {
     /// C FFI probe that does it on every call. Here the scan happens under the
     /// lock and only the matching entry is cloned. No Java counterpart; Java
     /// callers index the returned map directly.
+    // reads back one committed offset; exposed to C as kafka_producer_MockProducer_committed_offset
+    #[doc(alias = "rust-only")]
     pub fn committed_offset(&self, group: &str, topic_partition: &TopicPartition) -> Option<OffsetAndMetadata> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -884,6 +892,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.sendException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sendException")]
     pub fn set_send_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_error = error;
@@ -896,6 +905,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.flushException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#flushException")]
     pub fn set_flush_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.flush_error = error;
@@ -908,6 +918,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.partitionsForException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#partitionsForException")]
     pub fn set_partitions_for_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.partitions_for_error = error;
@@ -920,6 +931,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.closeException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#closeException")]
     pub fn set_close_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
@@ -940,6 +952,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.initTransactionException` field
     /// (`MockProducer.java:79`), which likewise persists until set back to `null`.
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#initTransactionException")]
     pub fn set_init_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.init_transaction_error = error;
@@ -950,6 +963,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.beginTransactionException` field
     /// (`MockProducer.java:80`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#beginTransactionException")]
     pub fn set_begin_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.begin_transaction_error = error;
@@ -961,6 +975,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.sendOffsetsToTransactionException`
     /// field (`MockProducer.java:81`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException")]
     pub fn set_send_offsets_to_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_offsets_to_transaction_error = error;
@@ -971,6 +986,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.commitTransactionException` field
     /// (`MockProducer.java:82`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#commitTransactionException")]
     pub fn set_commit_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.commit_transaction_error = error;
@@ -981,6 +997,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.abortTransactionException` field
     /// (`MockProducer.java:83`).
+    #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#abortTransactionException")]
     pub fn set_abort_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.abort_transaction_error = error;
@@ -1233,10 +1250,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             // empty-cluster mock keeps working
             // (`c/tests/test_mock_producer.c:133,600,640,735,1637`).
             if let Some(key_serializer) = inner.key_serializer.as_ref() {
-                key_serializer.serialize_headers(record.topic(), &RecordHeaders::new(), record.key())?;
+                key_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.key())?;
             }
             if let Some(value_serializer) = inner.value_serializer.as_ref() {
-                value_serializer.serialize_headers(record.topic(), &RecordHeaders::new(), record.value())?;
+                value_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.value())?;
             }
             record.partition().unwrap_or(0)
         };
@@ -2762,7 +2779,9 @@ mod tests {
         let registry = Metrics::new();
         let sensor = registry.sensor("mock-sensor").unwrap();
         let name = registry.metric_name("mock-metric", "mock-group");
-        sensor.add_metric_name(name.clone(), Box::new(CumulativeSum::new())).unwrap();
+        sensor
+            .add_with_metric_name(name.clone(), Box::new(CumulativeSum::new()))
+            .unwrap();
         let metric = registry.metric(&name).unwrap();
 
         producer.set_mock_metrics(name.clone(), Arc::clone(&metric));

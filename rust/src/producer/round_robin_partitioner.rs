@@ -46,6 +46,7 @@ pub struct RoundRobinPartitioner {
 
 impl RoundRobinPartitioner {
     /// Creates a new `RoundRobinPartitioner`.
+    #[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitioner#RoundRobinPartitioner")]
     pub fn new() -> Self {
         Self::default()
     }

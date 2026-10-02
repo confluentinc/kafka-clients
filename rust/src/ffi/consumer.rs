@@ -251,6 +251,8 @@ pub struct kafka_consumer_Consumer_t {
 
 /// Opaque consumer-configuration properties handle (a `HashMap<String,String>`).
 #[repr(C)]
+// the `Properties` passed to the consumer constructor
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_ConsumerProperties_t {
     _private: [u8; 0],
 }
@@ -2003,6 +2005,8 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_destroy(info: *mut kafka_com
 /// Opaque handle to a `Map<TopicPartition, OffsetAndMetadata>` result
 /// (`committed`).
 #[repr(C)]
+// a Java `Map<TopicPartition, OffsetAndMetadata>`
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_OffsetMap_t {
     _private: [u8; 0],
 }
@@ -2091,6 +2095,8 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_destroy(map: *mut kafka_consum
 /// Opaque handle to a `Map<TopicPartition, OffsetAndTimestamp>` result
 /// (`offsets_for_times`).
 #[repr(C)]
+// a Java `Map<TopicPartition, OffsetAndTimestamp>`
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_OffsetAndTimestampMap_t {
     _private: [u8; 0],
 }
@@ -2185,6 +2191,8 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_destroy(
 /// Opaque handle to a `Map<TopicPartition, Long>` result
 /// (`beginning_offsets` / `end_offsets`).
 #[repr(C)]
+// a Java `Map<TopicPartition, Long>`
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_LongOffsetMap_t {
     _private: [u8; 0],
 }
@@ -2268,6 +2276,8 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_destroy(map: *mut kafka_co
 
 /// Opaque handle to a `List<PartitionInfo>` result (`partitions_for`).
 #[repr(C)]
+// a Java `List<PartitionInfo>`
+#[doc(alias = "rust-only")]
 pub struct kafka_common_PartitionInfoList_t {
     _private: [u8; 0],
 }
@@ -2346,6 +2356,8 @@ pub unsafe extern "C" fn kafka_common_PartitionInfoList_destroy(list: *mut kafka
 /// point-in-time snapshot ... not a live view"), and it is the only thing that
 /// can cross an FFI boundary without an upcall per read.
 #[repr(C)]
+// a Java `Map<MetricName, Metric>`
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_MetricMap_t {
     _private: [u8; 0],
 }
@@ -2538,6 +2550,8 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_destroy(map: *mut kafka_consum
 /// Opaque handle to a `Map<String, List<PartitionInfo>>` result
 /// (`list_topics`).
 #[repr(C)]
+// a Java `Map<String, List<PartitionInfo>>`
+#[doc(alias = "rust-only")]
 pub struct kafka_common_TopicPartitionInfoMap_t {
     _private: [u8; 0],
 }
@@ -2636,6 +2650,8 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_destroy(map: *mut ka
 
 /// Opaque handle to a `Set<TopicPartition>` result (`assignment` / `paused`).
 #[repr(C)]
+// a Java `Collection<TopicPartition>`
+#[doc(alias = "rust-only")]
 pub struct kafka_common_TopicPartitionList_t {
     _private: [u8; 0],
 }
@@ -2700,6 +2716,8 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionList_destroy(list: *mut kafk
 
 /// Opaque handle to a `Set<String>` result (`subscription`).
 #[repr(C)]
+// a Java `Collection<String>`
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_StringList_t {
     _private: [u8; 0],
 }
@@ -2765,6 +2783,8 @@ pub unsafe extern "C" fn kafka_consumer_StringList_destroy(list: *mut kafka_cons
 ///
 /// `s` must be null or a string returned by such a getter.
 #[unsafe(no_mangle)]
+// frees a Java `String` returned to C
+#[doc(alias = "rust-only")]
 pub unsafe extern "C" fn kafka_consumer_string_destroy(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(std::ffi::CString::from_raw(s)) };

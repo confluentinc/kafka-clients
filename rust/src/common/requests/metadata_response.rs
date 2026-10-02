@@ -67,7 +67,7 @@ impl MetadataResponse {
     /// Creates a new `MetadataResponse` from data and version.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#MetadataResponse")]
     pub fn with_version(data: MetadataResponseData, version: i16) -> Self {
-        Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version))
+        Self::with_has_reliable_leader_epochs(data, do_has_reliable_leader_epochs(version))
     }
 
     /// Creates a new `MetadataResponse` from data with explicit epoch reliability flag.
@@ -296,7 +296,10 @@ impl MetadataResponse {
     #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = MetadataResponseData::read(readable, version)?;
-        Ok(Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version)))
+        Ok(Self::with_has_reliable_leader_epochs(
+            data,
+            do_has_reliable_leader_epochs(version),
+        ))
     }
 
     /// Returns whether the client should throttle upon receiving this response.
@@ -316,7 +319,7 @@ impl MetadataResponse {
         cluster_authorized_operations: i32,
     ) -> Self {
         Self::prepare_response_has_reliable_epoch(
-            has_reliable_leader_epochs(version),
+            do_has_reliable_leader_epochs(version),
             throttle_time_ms,
             brokers,
             cluster_id,
@@ -372,7 +375,7 @@ impl std::fmt::Display for MetadataResponse {
 /// progress. Relying on a stale epoch can lead to FENCED_LEADER_EPOCH errors which
 /// can prevent consumption throughout the course of a reassignment.
 #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#hasReliableLeaderEpochs")]
-fn has_reliable_leader_epochs(version: i16) -> bool {
+fn do_has_reliable_leader_epochs(version: i16) -> bool {
     version >= 9
 }
 

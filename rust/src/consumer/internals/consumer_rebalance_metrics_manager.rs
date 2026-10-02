@@ -106,49 +106,49 @@ impl ConsumerRebalanceMetricsManager {
             ConsumerUtils::COORDINATOR_METRICS_SUFFIX
         );
 
-        let rebalance_latency_avg = metrics.metric_name_description_tags(
+        let rebalance_latency_avg = metrics.metric_name_with_description_tags(
             "rebalance-latency-avg",
             &metric_group_name,
             "The average time in ms taken for a group to complete a rebalance",
             BTreeMap::new(),
         );
-        let rebalance_latency_max = metrics.metric_name_description_tags(
+        let rebalance_latency_max = metrics.metric_name_with_description_tags(
             "rebalance-latency-max",
             &metric_group_name,
             "The max time in ms taken for a group to complete a rebalance",
             BTreeMap::new(),
         );
-        let rebalance_latency_total = metrics.metric_name_description_tags(
+        let rebalance_latency_total = metrics.metric_name_with_description_tags(
             "rebalance-latency-total",
             &metric_group_name,
             "The total number of milliseconds spent in rebalances",
             BTreeMap::new(),
         );
-        let rebalance_total = metrics.metric_name_description_tags(
+        let rebalance_total = metrics.metric_name_with_description_tags(
             "rebalance-total",
             &metric_group_name,
             "The total number of rebalance events",
             BTreeMap::new(),
         );
-        let rebalance_rate_per_hour = metrics.metric_name_description_tags(
+        let rebalance_rate_per_hour = metrics.metric_name_with_description_tags(
             "rebalance-rate-per-hour",
             &metric_group_name,
             "The number of rebalance events per hour",
             BTreeMap::new(),
         );
-        let failed_rebalance_total = metrics.metric_name_description_tags(
+        let failed_rebalance_total = metrics.metric_name_with_description_tags(
             "failed-rebalance-total",
             &metric_group_name,
             "The total number of failed rebalance events",
             BTreeMap::new(),
         );
-        let failed_rebalance_rate = metrics.metric_name_description_tags(
+        let failed_rebalance_rate = metrics.metric_name_with_description_tags(
             "failed-rebalance-rate-per-hour",
             &metric_group_name,
             "The number of failed rebalance events per hour",
             BTreeMap::new(),
         );
-        let assigned_partitions_count = metrics.metric_name_description_tags(
+        let assigned_partitions_count = metrics.metric_name_with_description_tags(
             "assigned-partitions",
             &metric_group_name,
             "The number of partitions currently assigned to this consumer",
@@ -168,26 +168,26 @@ impl ConsumerRebalanceMetricsManager {
             guard.num_assigned_partitions() as f64
         });
         metrics
-            .add_metric_measurable(assigned_partitions_count.clone(), Box::new(num_parts))
+            .add_metric_with_measurable(assigned_partitions_count.clone(), Box::new(num_parts))
             .expect("registering assigned-partitions metric");
 
         let successful_rebalance_sensor =
             metrics.sensor("rebalance-latency").expect("creating rebalance-latency sensor");
         successful_rebalance_sensor
-            .add_metric_name(rebalance_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(rebalance_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding rebalance-latency-avg");
         successful_rebalance_sensor
-            .add_metric_name(rebalance_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(rebalance_latency_max.clone(), Box::new(Max::new()))
             .expect("adding rebalance-latency-max");
         successful_rebalance_sensor
-            .add_metric_name(rebalance_latency_total.clone(), Box::new(CumulativeSum::new()))
+            .add_with_metric_name(rebalance_latency_total.clone(), Box::new(CumulativeSum::new()))
             .expect("adding rebalance-latency-total");
         successful_rebalance_sensor
-            .add_metric_name(rebalance_total.clone(), Box::new(CumulativeCount::new()))
+            .add_with_metric_name(rebalance_total.clone(), Box::new(CumulativeCount::new()))
             .expect("adding rebalance-total");
         // Java: `new Rate(TimeUnit.HOURS, new WindowedCount(), 1)`.
         successful_rebalance_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 rebalance_rate_per_hour.clone(),
                 Box::new(Rate::with_unit_stat_window(
                     TimeUnit::Hours,
@@ -199,10 +199,10 @@ impl ConsumerRebalanceMetricsManager {
 
         let failed_rebalance_sensor = metrics.sensor("failed-rebalance").expect("creating failed-rebalance sensor");
         failed_rebalance_sensor
-            .add_metric_name(failed_rebalance_total.clone(), Box::new(CumulativeSum::new()))
+            .add_with_metric_name(failed_rebalance_total.clone(), Box::new(CumulativeSum::new()))
             .expect("adding failed-rebalance-total");
         failed_rebalance_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 failed_rebalance_rate.clone(),
                 Box::new(Rate::with_unit_stat_window(
                     TimeUnit::Hours,
@@ -224,14 +224,14 @@ impl ConsumerRebalanceMetricsManager {
                 ((now - last_end) / 1000) as f64
             }
         });
-        let last_rebalance_seconds_ago = metrics.metric_name_description_tags(
+        let last_rebalance_seconds_ago = metrics.metric_name_with_description_tags(
             "last-rebalance-seconds-ago",
             &metric_group_name,
             "The number of seconds since the last rebalance event",
             BTreeMap::new(),
         );
         metrics
-            .add_metric_measurable(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
+            .add_metric_with_measurable(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
             .expect("registering last-rebalance-seconds-ago metric");
 
         Self {
@@ -269,7 +269,7 @@ impl ConsumerRebalanceMetricsManager {
     pub(crate) fn record_rebalance_ended(&self, now_ms: i64) {
         self.last_rebalance_end_ms.store(now_ms, Ordering::SeqCst);
         let latency = now_ms - self.last_rebalance_start_ms.load(Ordering::SeqCst);
-        self.successful_rebalance_sensor.record_value(latency as f64);
+        self.successful_rebalance_sensor.record_with_value(latency as f64);
     }
 
     /// Java: `maybeRecordRebalanceFailed()`. A rebalance failed only if a start

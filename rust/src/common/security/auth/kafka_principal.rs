@@ -62,6 +62,7 @@ impl KafkaPrincipal {
     ///
     /// Mirrors `KafkaPrincipal.ANONYMOUS`. Modeled as a function rather than a
     /// constant because the name is an owned `String`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#ANONYMOUS")]
     pub fn anonymous() -> Self {
         Self::new(Self::USER_TYPE, "ANONYMOUS")
     }
@@ -85,6 +86,7 @@ impl KafkaPrincipal {
     /// Sets whether the principal was authenticated with a delegation token.
     ///
     /// Mirrors `KafkaPrincipal.tokenAuthenticated(boolean)`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated")]
     pub fn set_token_authenticated(&mut self, token_authenticated: bool) {
         self.token_authenticated = token_authenticated;
     }

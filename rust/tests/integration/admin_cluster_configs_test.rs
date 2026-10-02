@@ -548,13 +548,13 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         .unwrap_or_else(|e| panic!("{backend} backend: list config resources: {e}"));
 
     assert!(
-        resources.iter().any(|r| r.resource_type() == config_resource::Type::Broker),
+        resources.iter().any(|r| r.r#type() == config_resource::Type::Broker),
         "{backend} backend: expected at least one BROKER config resource"
     );
     assert!(
         resources
             .iter()
-            .any(|r| r.resource_type() == config_resource::Type::Topic && r.name() == topic),
+            .any(|r| r.r#type() == config_resource::Type::Topic && r.name() == topic),
         "{backend} backend: expected the created topic among the TOPIC config resources"
     );
 
@@ -573,9 +573,9 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         "{backend} backend: the created topic should be in the TOPIC-only listing"
     );
     assert!(
-        topics_only.iter().all(|r| r.resource_type() == config_resource::Type::Topic),
+        topics_only.iter().all(|r| r.r#type() == config_resource::Type::Topic),
         "{backend} backend: a TOPIC-only listing must contain only TOPIC resources, got {:?}",
-        topics_only.iter().map(|r| r.resource_type()).collect::<HashSet<_>>()
+        topics_only.iter().map(|r| r.r#type()).collect::<HashSet<_>>()
     );
 
     delete_and_close(&admin, &[topic]).await;

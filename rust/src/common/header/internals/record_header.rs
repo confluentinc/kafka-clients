@@ -27,6 +27,8 @@ use crate::common::header::Header;
 /// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeader`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader")]
+// the only `Header` implementation; users build one to attach headers to a ProducerRecord, as Java users do despite the internals package
+#[doc(alias = "public-in-rust")]
 pub struct RecordHeader {
     key: String,
     value: Option<Vec<u8>>,

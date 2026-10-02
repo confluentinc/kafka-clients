@@ -37,6 +37,8 @@ pub trait Measurable: Send + Sync {
 /// usage of `Measurable` (e.g. `(config, now) -> TimeUnit.SECONDS.convert(...)`
 /// in `KafkaConsumerMetrics` / `HeartbeatMetricsManager`). The symmetric
 /// counterpart of [`crate::common::metrics::ClosureGauge`].
+// a Measurable from a closure, standing in for a Java lambda
+#[doc(alias = "rust-only")]
 pub struct ClosureMeasurable<F>(F)
 where
     F: Fn(&MetricConfig, i64) -> f64 + Send + Sync;

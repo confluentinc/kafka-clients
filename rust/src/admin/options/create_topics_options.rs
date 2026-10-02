@@ -36,6 +36,7 @@ impl Default for CreateTopicsOptions {
 impl CreateTopicsOptions {
     /// Creates default options (`validate_only=false`,
     /// `retry_on_quota_violation=true`, default API timeout).
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#CreateTopicsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -43,6 +44,7 @@ impl CreateTopicsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -50,6 +52,7 @@ impl CreateTopicsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -57,6 +60,7 @@ impl CreateTopicsOptions {
     /// Set to true if the request should be validated without creating the
     /// topic.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
@@ -64,18 +68,21 @@ impl CreateTopicsOptions {
 
     /// Return true if the request should be validated without creating the
     /// topic.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#shouldValidateOnly")]
     pub fn should_validate_only(&self) -> bool {
         self.validate_only
     }
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#retryOnQuotaViolation")]
     pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
 
     /// Returns true if quota violation should be automatically retried.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#shouldRetryOnQuotaViolation")]
     pub fn should_retry_on_quota_violation(&self) -> bool {
         self.retry_on_quota_violation
     }

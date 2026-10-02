@@ -74,6 +74,7 @@ impl ConsumerLogTruncationError {
     }
 
     /// The out-of-range offset per partition.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#offsetOutOfRangePartitions")]
     pub fn offset_out_of_range_partitions(&self) -> &HashMap<TopicPartition, i64> {
         &self.offset_out_of_range_partitions
     }
@@ -100,11 +101,14 @@ impl ConsumerLogTruncationError {
     /// Returns an iterator rather than a `HashSet` for the same reason as
     /// [`ConsumerOffsetOutOfRangeError::partitions`](super::ConsumerOffsetOutOfRangeError::partitions):
     /// Java's `keySet()` is a view, not a copy.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.offset_out_of_range_partitions.keys()
     }
 
     /// The error message.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -146,6 +150,8 @@ impl ConsumerLogTruncationError {
     /// cause is null in Java too. Present as an inherent method so it shadows
     /// both `ErrorSource::source` and `std::error::Error::source`, keeping
     /// `x.source()` unambiguous and typed.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         None
     }

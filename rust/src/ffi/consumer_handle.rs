@@ -110,6 +110,8 @@ use super::consumer::{
 
 /// Opaque consumer reentrancy-handle (see the module documentation).
 #[repr(C)]
+// the C side of the Rust-only ConsumerHandle
+#[doc(alias = "rust-only")]
 pub struct kafka_consumer_ConsumerHandle_t {
     _private: [u8; 0],
 }

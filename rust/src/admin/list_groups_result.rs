@@ -86,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_and_errors_split() {
-        let source = KafkaFuture::completed(Ok(vec![
+        let source = KafkaFuture::completed_future(Ok(vec![
             Ok(listing("g1")),
             Err(Error::local_illegal_state("boom")),
             Ok(listing("g2")),
@@ -100,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_succeeds_when_no_errors() {
-        let source = KafkaFuture::completed(Ok(vec![Ok(listing("g1"))]));
+        let source = KafkaFuture::completed_future(Ok(vec![Ok(listing("g1"))]));
         let result = ListGroupsResult::new(source);
         assert_eq!(result.all().get().await.unwrap(), vec![listing("g1")]);
     }

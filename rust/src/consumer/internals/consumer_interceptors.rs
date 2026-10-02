@@ -349,7 +349,7 @@ mod tests {
             for tp in records.partitions().cloned().collect::<Vec<_>>() {
                 if tp.partition() != self.state.filter_partition {
                     let recs: Vec<ConsumerRecord<i32, i32>> = records
-                        .records_partition(&tp)
+                        .records_with_partition(&tp)
                         .iter()
                         .map(|r| {
                             ConsumerRecord::with_options(

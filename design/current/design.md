@@ -715,8 +715,8 @@ method for method:
   `unsupported_version("Not implemented yet")` on the returned future, not
   with a panic, since a public API must not panic (CLAUDE.md §12.1).
 
-Java ships the mock in its test jar. Here it stays public through
-`xtask/public-audience-allowlist.txt`.
+Java ships the mock in its test jar. Here it stays public through its
+`#[doc(alias = "public-in-rust")]` tag.
 
 The admin client builds its channel builder from `security.protocol` like the
 other two clients (`kafka_admin_client.rs:325`), so SSL and SASL/PLAIN work.

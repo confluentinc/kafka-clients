@@ -102,6 +102,8 @@ impl TopicAuthorizationError {
     }
 
     /// Access the base error.
+    // the embedded KafkaError base (CLAUDE.md §12.3)
+    #[doc(alias = "rust-only")]
     pub fn kafka_error(&self) -> &KafkaError {
         &self.kafka_error
     }
@@ -142,6 +144,8 @@ impl TopicAuthorizationError {
     /// The underlying source, held by the embedded [`KafkaError`] base — Java's
     /// subclass passes its `cause` up to `super(message, cause)`. Mirrors
     /// `Throwable.getCause()`.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.kafka_error.source()
     }

@@ -84,11 +84,15 @@ impl DuplicateResourceError {
     }
 
     /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
     }
 
     /// The error message.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }

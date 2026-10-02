@@ -74,6 +74,8 @@ pub(crate) struct ErrorInner {
 ///
 /// A null `kafka_common_Error_t` pointer means success (no error).
 #[repr(C)]
+// the handle over `common::Error` (CLAUDE.md §4)
+#[doc(alias = "rust-only")]
 pub struct kafka_common_Error_t {
     _private: [u8; 0],
 }
@@ -244,6 +246,8 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // exhaustiveness warning.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// the C enum of error codes a `kafka_common_Error_t` classifies by
+#[doc(alias = "rust-only")]
 pub enum kafka_common_ErrorCode_t {
     // Java's `Errors`, at Java's own values. Names come from
     // `Errors::enum_name()`, so each equals Java's constant.

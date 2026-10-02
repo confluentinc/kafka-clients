@@ -103,7 +103,7 @@ rust/xtask/             # format, format-check, check-generated,
                         # generate-error-codes, java-deprecated, lint,
                         # lint-custom, doc-hygiene, lint-fix,
                         # coverage{,-lcov,-all}, test-multilanguage,
-                        # producer-perf-test; public-audience-allowlist.txt
+                        # producer-perf-test
 rust/tests/             # integration + multilanguage tests (see below)
 rust/examples/          # transactional examples (txn_*)
 rust/consumer-perf/     # consumer benchmark harness (workspace member)
@@ -152,9 +152,12 @@ In practice:
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
   callers use `kafka_common_ErrorCode_t`.
-- Exceptions (Rust-only types, test helpers such as `MockAdminClient`, JDK
-  translations such as `TimeUnit`, C helper handles) are listed, each with its
-  reason, in `rust/xtask/public-audience-allowlist.txt`.
+- Exceptions are tagged in the code, each under a `//` comment giving the
+  reason: `#[doc(alias = "rust-only")]` for an item translating no Java API
+  (Rust-only types, JDK translations such as `TimeUnit`, C helper handles,
+  Rust-only public methods), `#[doc(alias = "public-in-rust")]` for Java API the
+  audience rules keep non-public (test helpers such as `MockAdminClient`). A
+  tag that lets nothing through is a lint finding.
 
 ![Layered network stack](img/network-stack.svg)
 

@@ -35,6 +35,7 @@ impl Default for DeleteTopicsOptions {
 impl DeleteTopicsOptions {
     /// Creates default options (`retry_on_quota_violation=true`, default API
     /// timeout).
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#DeleteTopicsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -42,6 +43,7 @@ impl DeleteTopicsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -49,18 +51,21 @@ impl DeleteTopicsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#retryOnQuotaViolation")]
     pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
 
     /// Returns true if quota violation should be automatically retried.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#shouldRetryOnQuotaViolation")]
     pub fn should_retry_on_quota_violation(&self) -> bool {
         self.retry_on_quota_violation
     }

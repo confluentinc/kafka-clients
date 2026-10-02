@@ -37,6 +37,7 @@ impl Default for ExpireDelegationTokenOptions {
 impl ExpireDelegationTokenOptions {
     /// Creates default options (default API timeout, expire-immediately
     /// sentinel `-1`).
+    #[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenOptions#ExpireDelegationTokenOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,6 +50,7 @@ impl ExpireDelegationTokenOptions {
     ///
     /// Mirrors `ExpireDelegationTokenOptions.expiryTimePeriodMs`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenOptions#expiryTimePeriodMs")]
     pub fn set_expiry_time_period_ms(mut self, expiry_time_period_ms: i64) -> Self {
         self.expiry_time_period_ms = expiry_time_period_ms;
         self
@@ -57,6 +59,7 @@ impl ExpireDelegationTokenOptions {
     /// The time period until the token should expire.
     ///
     /// Mirrors `ExpireDelegationTokenOptions.expiryTimePeriodMs`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenOptions#expiryTimePeriodMs")]
     pub fn expiry_time_period_ms(&self) -> i64 {
         self.expiry_time_period_ms
     }
@@ -64,6 +67,7 @@ impl ExpireDelegationTokenOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -71,6 +75,7 @@ impl ExpireDelegationTokenOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

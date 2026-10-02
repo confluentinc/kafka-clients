@@ -66,6 +66,7 @@ pub trait Partitioner<K, V>: Send + Sync {
     /// Called once, before the instance is shared with the producer, with the
     /// producer's original configuration plus the (possibly generated)
     /// `client.id`. The default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.common.Configurable#configure")]
     fn configure(&mut self, _configs: &HashMap<String, String>) {}
 
     /// Compute the partition for the given record.

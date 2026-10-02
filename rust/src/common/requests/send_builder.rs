@@ -170,8 +170,8 @@ impl Writable for SendBuilderWritable {
     }
 
     fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
-        self.write_long(uuid.most_sig_bits() as i64)?;
-        self.write_long(uuid.least_sig_bits() as i64)?;
+        self.write_long(uuid.most_significant_bits() as i64)?;
+        self.write_long(uuid.least_significant_bits() as i64)?;
         Ok(())
     }
 

@@ -158,6 +158,8 @@ where
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
+    // Java's KafkaConsumer.clientId() is package-private; consumer-threading.md §1 lists it
+    #[doc(alias = "rust-only")]
     fn client_id(&self) -> &str;
 
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
@@ -501,7 +503,7 @@ where
     /// Translates Java's `void close(CloseOptions option)`.
     ///
     /// Java's `@Deprecated void close(Duration timeout)` is not translated
-    /// (CLAUDE.md §3); pass `CloseOptions::new_timeout(timeout)` here instead,
+    /// (CLAUDE.md §3); pass `CloseOptions::new_with_timeout(timeout)` here instead,
     /// which is what the Java overload's body does.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close(CloseOptions)")]
     async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
@@ -527,6 +529,8 @@ where
     /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
     /// bare reference; capture a [`ConsumerHandle`] instead. See
     /// [`ConsumerHandle`].
+    // listener reentrancy handle (consumer-threading.md §31, §41)
+    #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;
 }
 

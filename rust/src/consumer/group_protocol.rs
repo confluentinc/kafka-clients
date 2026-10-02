@@ -38,6 +38,7 @@ impl GroupProtocol {
     /// The upper-case Java enum name (e.g. `"CLASSIC"`).
     ///
     /// Corresponds to Java `GroupProtocol.name`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol#name")]
     pub fn name(self) -> &'static str {
         match self {
             Self::Classic => "CLASSIC",

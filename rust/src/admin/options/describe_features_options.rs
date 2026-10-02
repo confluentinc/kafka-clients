@@ -28,6 +28,7 @@ pub struct DescribeFeaturesOptions {
 
 impl DescribeFeaturesOptions {
     /// Creates default options (default API timeout, arbitrary node).
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions#DescribeFeaturesOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -35,6 +36,7 @@ impl DescribeFeaturesOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -42,6 +44,7 @@ impl DescribeFeaturesOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -50,6 +53,7 @@ impl DescribeFeaturesOptions {
     ///
     /// Mirrors `DescribeFeaturesOptions.nodeId(int)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId")]
     pub fn set_node_id(mut self, node_id: i32) -> Self {
         self.node_id = Some(node_id);
         self
@@ -59,6 +63,7 @@ impl DescribeFeaturesOptions {
     /// will be sent to an arbitrary controller/broker.
     ///
     /// Mirrors `DescribeFeaturesOptions.nodeId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId")]
     pub fn node_id(&self) -> Option<i32> {
         self.node_id
     }

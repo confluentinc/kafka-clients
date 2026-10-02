@@ -1503,7 +1503,7 @@ mod tests {
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
-        let recs = fetch.records_partition(&partition);
+        let recs = fetch.records_with_partition(&partition);
         assert_eq!(COUNT as usize, recs.len());
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(i as i64, rec.offset(), "offset ordering preserved");

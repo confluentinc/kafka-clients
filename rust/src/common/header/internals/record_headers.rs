@@ -31,6 +31,8 @@ use crate::common::header::{Header, Headers};
 /// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders")]
+// the only `Headers` implementation, returned by ConsumerRecord / ProducerRecord `headers()`
+#[doc(alias = "public-in-rust")]
 pub struct RecordHeaders {
     headers: Vec<RecordHeader>,
     is_read_only: bool,
@@ -124,14 +126,14 @@ impl Default for RecordHeaders {
 }
 
 impl Headers for RecordHeaders {
-    fn add_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError> {
+    fn add_with_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError> {
         self.can_write()?;
         self.headers.push(header);
         Ok(())
     }
 
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError> {
-        self.add_header(RecordHeader::new(key.to_owned(), value.map(|v| v.to_vec())))
+    fn add_with_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError> {
+        self.add_with_header(RecordHeader::new(key.to_owned(), value.map(|v| v.to_vec())))
     }
 
     fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError> {
@@ -221,14 +223,14 @@ mod tests {
     fn test_add() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
 
         let header = headers.iter().next().unwrap();
         assert_header("key", "value", header);
 
         headers
-            .add_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
             .unwrap();
 
         assert_header("key2", "value2", headers.last_header("key2").unwrap());
@@ -241,13 +243,13 @@ mod tests {
     fn test_add_headers_preserve_order() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
+            .add_with_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
             .unwrap();
 
         let headers_arr = headers.to_array();
@@ -264,7 +266,7 @@ mod tests {
     fn test_remove() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
 
         assert!(headers.iter().next().is_some());
@@ -280,13 +282,13 @@ mod tests {
     fn test_preserve_order_after_remove() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
+            .add_with_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
             .unwrap();
 
         headers.remove("key").unwrap();
@@ -296,7 +298,7 @@ mod tests {
         assert_eq!(2, get_count(&headers));
 
         headers
-            .add_header(RecordHeader::new("key4".to_string(), Some(b"value4".to_vec())))
+            .add_with_header(RecordHeader::new("key4".to_string(), Some(b"value4".to_vec())))
             .unwrap();
         headers.remove("key3").unwrap();
         let headers_arr = headers.to_array();
@@ -311,10 +313,10 @@ mod tests {
     fn test_add_remove_interleaved() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
             .unwrap();
 
         assert!(headers.iter().next().is_some());
@@ -324,7 +326,7 @@ mod tests {
         assert_eq!(1, get_count(&headers));
 
         headers
-            .add_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
+            .add_with_header(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
             .unwrap();
 
         assert!(headers.last_header("key").is_none());
@@ -346,7 +348,7 @@ mod tests {
         assert_eq!(1, get_count(&headers));
 
         headers
-            .add_header(RecordHeader::new("key3".to_string(), Some(b"value4".to_vec())))
+            .add_with_header(RecordHeader::new("key3".to_string(), Some(b"value4".to_vec())))
             .unwrap();
 
         assert_header("key3", "value4", headers.last_header("key3").unwrap());
@@ -354,7 +356,7 @@ mod tests {
         assert_eq!(2, get_count(&headers));
 
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"valueNew".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"valueNew".to_vec())))
             .unwrap();
 
         assert_eq!(3, get_count(&headers));
@@ -378,13 +380,13 @@ mod tests {
     fn test_last_header() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value3".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value3".to_vec())))
             .unwrap();
 
         assert_header("key", "value3", headers.last_header("key").unwrap());
@@ -397,12 +399,12 @@ mod tests {
     fn test_read_only() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers.set_read_only();
 
         // Adding should fail
-        let result = headers.add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())));
+        let result = headers.add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())));
         assert!(result.is_err(), "Should fail as headers are closed.");
 
         // Removing should fail
@@ -416,16 +418,16 @@ mod tests {
     fn test_headers() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key1".to_string(), Some(b"key1value".to_vec())))
+            .add_with_header(RecordHeader::new("key1".to_string(), Some(b"key1value".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
             .unwrap();
         headers
-            .add_header(RecordHeader::new("key2".to_string(), Some(b"key2value".to_vec())))
+            .add_with_header(RecordHeader::new("key2".to_string(), Some(b"key2value".to_vec())))
             .unwrap();
 
         let key_headers = headers.headers("key");
@@ -447,13 +449,13 @@ mod tests {
     fn test_new_from_existing() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
         headers.set_read_only();
 
         let mut new_headers = RecordHeaders::with_record_headers(&headers);
         new_headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
             .unwrap();
 
         // Ensure existing headers are not modified
@@ -472,7 +474,7 @@ mod tests {
     fn test_headers_iterator_is_read_only() {
         let mut headers = RecordHeaders::new();
         headers
-            .add_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
+            .add_with_header(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
             .unwrap();
 
         // headers returns Vec<&RecordHeader> which is inherently read-only

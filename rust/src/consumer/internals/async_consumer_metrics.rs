@@ -77,8 +77,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::TIME_BETWEEN_NETWORK_THREAD_POLL_SENSOR_NAME)
             .expect("creating time-between-network-thread-poll sensor");
         time_between_network_thread_poll_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "time-between-network-thread-poll-avg",
                     group_name,
                     "The average time taken, in milliseconds, between each poll in the network thread.",
@@ -88,8 +88,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding time-between-network-thread-poll-avg");
         time_between_network_thread_poll_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "time-between-network-thread-poll-max",
                     group_name,
                     "The maximum time taken, in milliseconds, between each poll in the network thread.",
@@ -103,8 +103,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::APPLICATION_EVENT_QUEUE_SIZE_SENSOR_NAME)
             .expect("creating application-event-queue-size sensor");
         application_event_queue_size_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     AsyncConsumerMetrics::APPLICATION_EVENT_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of events in the queue to send from the application thread to the background thread.",
@@ -118,8 +118,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::APPLICATION_EVENT_QUEUE_TIME_SENSOR_NAME)
             .expect("creating application-event-queue-time sensor");
         application_event_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "application-event-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that application events are taking to be dequeued.",
@@ -129,8 +129,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding application-event-queue-time-avg");
         application_event_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "application-event-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that an application event took to be dequeued.",
@@ -144,8 +144,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::APPLICATION_EVENT_QUEUE_PROCESSING_TIME_SENSOR_NAME)
             .expect("creating application-event-queue-processing-time sensor");
         application_event_queue_processing_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "application-event-queue-processing-time-avg",
                     group_name,
                     "The average time, in milliseconds, that the background thread takes to process all available application events.",
@@ -155,8 +155,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding application-event-queue-processing-time-avg");
         application_event_queue_processing_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "application-event-queue-processing-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that the background thread took to process all available application events.",
@@ -170,8 +170,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::APPLICATION_EVENT_EXPIRED_SIZE_SENSOR_NAME)
             .expect("creating application-events-expired-count sensor");
         application_event_expired_size_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     AsyncConsumerMetrics::APPLICATION_EVENT_EXPIRED_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of expired application events.",
@@ -185,8 +185,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME)
             .expect("creating unsent-requests-queue-size sensor");
         unsent_requests_queue_size_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     AsyncConsumerMetrics::UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of unsent requests in the background thread.",
@@ -200,8 +200,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::UNSENT_REQUESTS_QUEUE_TIME_SENSOR_NAME)
             .expect("creating unsent-requests-queue-time sensor");
         unsent_requests_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "unsent-requests-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that requests are taking to be sent in the background thread.",
@@ -211,8 +211,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding unsent-requests-queue-time-avg");
         unsent_requests_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "unsent-requests-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that a request remained unsent in the background thread.",
@@ -226,8 +226,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::BACKGROUND_EVENT_QUEUE_SIZE_SENSOR_NAME)
             .expect("creating background-event-queue-size sensor");
         background_event_queue_size_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     AsyncConsumerMetrics::BACKGROUND_EVENT_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of events in the queue to send from the background thread to the application thread.",
@@ -241,8 +241,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::BACKGROUND_EVENT_QUEUE_TIME_SENSOR_NAME)
             .expect("creating background-event-queue-time sensor");
         background_event_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "background-event-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that background events are taking to be dequeued.",
@@ -252,8 +252,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding background-event-queue-time-avg");
         background_event_queue_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "background-event-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that background events are taking to be dequeued.",
@@ -267,8 +267,8 @@ impl AsyncConsumerMetrics {
             .sensor(AsyncConsumerMetrics::BACKGROUND_EVENT_QUEUE_PROCESSING_TIME_SENSOR_NAME)
             .expect("creating background-event-queue-processing-time sensor");
         background_event_queue_processing_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "background-event-queue-processing-time-avg",
                     group_name,
                     "The average time, in milliseconds, that the consumer took to process all available background events.",
@@ -278,8 +278,8 @@ impl AsyncConsumerMetrics {
             )
             .expect("adding background-event-queue-processing-time-avg");
         background_event_queue_processing_time_sensor
-            .add_metric_name(
-                metrics.metric_name_description_tags(
+            .add_with_metric_name(
+                metrics.metric_name_with_description_tags(
                     "background-event-queue-processing-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that the consumer took to process all available background events.",
@@ -307,55 +307,55 @@ impl AsyncConsumerMetrics {
     /// Java: `recordTimeBetweenNetworkThreadPoll(long)`.
     pub(crate) fn record_time_between_network_thread_poll(&self, time_between_network_thread_poll: i64) {
         self.time_between_network_thread_poll_sensor
-            .record_value(time_between_network_thread_poll as f64);
+            .record_with_value(time_between_network_thread_poll as f64);
     }
 
     /// Java: `recordApplicationEventQueueSize(int)`.
     pub(crate) fn record_application_event_queue_size(&self, size: i32) {
-        self.application_event_queue_size_sensor.record_value(size as f64);
+        self.application_event_queue_size_sensor.record_with_value(size as f64);
     }
 
     /// Java: `recordApplicationEventQueueTime(long)`.
     pub(crate) fn record_application_event_queue_time(&self, time: i64) {
-        self.application_event_queue_time_sensor.record_value(time as f64);
+        self.application_event_queue_time_sensor.record_with_value(time as f64);
     }
 
     /// Java: `recordApplicationEventQueueProcessingTime(long)`.
     pub(crate) fn record_application_event_queue_processing_time(&self, processing_time: i64) {
         self.application_event_queue_processing_time_sensor
-            .record_value(processing_time as f64);
+            .record_with_value(processing_time as f64);
     }
 
     /// Java: `recordApplicationEventExpiredSize(long)`.
     pub(crate) fn record_application_event_expired_size(&self, size: i64) {
-        self.application_event_expired_size_sensor.record_value(size as f64);
+        self.application_event_expired_size_sensor.record_with_value(size as f64);
     }
 
     /// Java: `recordUnsentRequestsQueueSize(int size, long timeMs)`.
     pub(crate) fn record_unsent_requests_queue_size(&self, size: i32, time_ms: i64) {
         self.unsent_requests_queue_size_sensor
-            .record_value_time_ms(size as f64, time_ms);
+            .record_with_value_time_ms(size as f64, time_ms);
     }
 
     /// Java: `recordUnsentRequestsQueueTime(long)`.
     pub(crate) fn record_unsent_requests_queue_time(&self, time: i64) {
-        self.unsent_requests_queue_time_sensor.record_value(time as f64);
+        self.unsent_requests_queue_time_sensor.record_with_value(time as f64);
     }
 
     /// Java: `recordBackgroundEventQueueSize(int)`.
     pub(crate) fn record_background_event_queue_size(&self, size: i32) {
-        self.background_event_queue_size_sensor.record_value(size as f64);
+        self.background_event_queue_size_sensor.record_with_value(size as f64);
     }
 
     /// Java: `recordBackgroundEventQueueTime(long)`.
     pub(crate) fn record_background_event_queue_time(&self, time: i64) {
-        self.background_event_queue_time_sensor.record_value(time as f64);
+        self.background_event_queue_time_sensor.record_with_value(time as f64);
     }
 
     /// Java: `recordBackgroundEventQueueProcessingTime(long)`.
     pub(crate) fn record_background_event_queue_processing_time(&self, processing_time: i64) {
         self.background_event_queue_processing_time_sensor
-            .record_value(processing_time as f64);
+            .record_with_value(processing_time as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes all ten sensors.

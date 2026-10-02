@@ -79,7 +79,7 @@ impl DelegationToken {
     ///
     /// Enables the mock's `renewDelegationToken`, which mutates the stored
     /// token's expiry timestamp (`token.tokenInfo().setExpiryTimestamp(...)`).
-    pub fn token_info_mut(&mut self) -> &mut TokenInformation {
+    pub(crate) fn token_info_mut(&mut self) -> &mut TokenInformation {
         &mut self.token_information
     }
 

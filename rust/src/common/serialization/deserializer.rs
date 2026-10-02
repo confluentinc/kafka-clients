@@ -97,7 +97,8 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// struct) to mirror Java's signature exactly — Java's parameter type
     /// is the `Headers` interface, which lets test doubles and alternative
     /// `Headers` implementations interoperate with custom deserializers.
-    fn deserialize_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, Error> {
+    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
+    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -113,6 +114,8 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// of an owned copy (consumer-threading.md §27).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
+    // zero-copy shared-buffer receive path (consumer-threading.md §27)
+    #[doc(alias = "rust-only")]
     fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
@@ -121,22 +124,24 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// [`deserialize_from_shared`](Deserializer::deserialize_from_shared).
     ///
     /// The default implementation delegates to
-    /// [`deserialize_headers`](Deserializer::deserialize_headers),
+    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers),
     /// ignoring `source`. This preserves the header-inspection behavior of any
-    /// deserializer that overrides `deserialize_headers` (e.g. schema
+    /// deserializer that overrides `deserialize_with_headers` (e.g. schema
     /// registry) even when called on the shared-buffer receive path — at the
     /// cost of the copy fallback. Byte-typed deserializers that want zero-copy
     /// override this method directly (see [`BytesDeserializer`]).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    fn deserialize_from_shared_headers(
+    // zero-copy shared-buffer receive path (consumer-threading.md §27)
+    #[doc(alias = "rust-only")]
+    fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
         headers: &dyn Headers,
         _source: &bytes::Bytes,
         data: &[u8],
     ) -> Result<T, Error> {
-        self.deserialize_headers(topic, headers, data)
+        self.deserialize_with_headers(topic, headers, data)
     }
 
     /// Configure this deserializer. The default implementation is a no-op.

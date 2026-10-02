@@ -72,6 +72,8 @@ pub struct ProducerRecord<K, V> {
 /// and set them: [`ProducerRecordOptionsBuilder::build`] returns an error if any of `topic`, `value` was not set.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
+// the options of ProducerRecord's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ProducerRecordOptions<K, V> {
     /// The topic the record will be appended to. Java's `topic`.
     pub(crate) topic: String,
@@ -98,6 +100,8 @@ pub struct ProducerRecordOptions<K, V> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ProducerRecordOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+// builds ProducerRecordOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ProducerRecordOptionsBuilder<K, V> {
     topic: Option<String>,
     partition: Option<i32>,
@@ -365,7 +369,8 @@ impl<K, V> ProducerRecord<K, V> {
     }
 
     /// Returns a mutable reference to the headers.
-    pub fn headers_mut(&mut self) -> &mut RecordHeaders {
+    #[cfg(test)]
+    pub(crate) fn headers_mut(&mut self) -> &mut RecordHeaders {
         &mut self.headers
     }
 
@@ -395,6 +400,8 @@ impl<K, V> ProducerRecord<K, V> {
     }
 
     /// Consume this record and return its parts.
+    // moves the fields out without copying them (CLAUDE.md §14)
+    #[doc(alias = "rust-only")]
     pub fn into_parts(self) -> (String, Option<i32>, Option<i64>, RecordHeaders, Option<K>, Option<V>) {
         (self.topic, self.partition, self.timestamp, self.headers, self.key, self.value)
     }

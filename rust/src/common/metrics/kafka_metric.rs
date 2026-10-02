@@ -71,6 +71,7 @@ impl KafkaMetric {
     }
 
     /// Set the metric config.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn set_config(&self, config: Arc<MetricConfig>) {
         *self.config.lock().expect("metric config mutex poisoned") = config;
     }

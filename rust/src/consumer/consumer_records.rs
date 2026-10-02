@@ -143,7 +143,8 @@ impl<K, V> ConsumerRecords<K, V> {
     /// Returns an empty slice if no records are present for that partition.
     ///
     /// Corresponds to Java's `ConsumerRecords.records(TopicPartition)`.
-    pub fn records_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>] {
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#records")]
+    pub fn records_with_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>] {
         self.records.get(partition).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -154,7 +155,8 @@ impl<K, V> ConsumerRecords<K, V> {
     /// partition-insertion order.
     ///
     /// Corresponds to Java's `ConsumerRecords.records(String)`.
-    pub fn records_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a {
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#records")]
+    pub fn records_with_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a {
         self.records
             .iter()
             .filter(move |(tp, _)| tp.topic() == topic)

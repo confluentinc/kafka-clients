@@ -54,33 +54,33 @@ impl OffsetCommitMetricsManager {
         );
         let commit_sensor = metrics.sensor("commit-latency").expect("creating commit-latency sensor");
 
-        let commit_latency_avg = metrics.metric_name_description_tags(
+        let commit_latency_avg = metrics.metric_name_with_description_tags(
             "commit-latency-avg",
             &metric_group_name,
             "The average time taken for a commit request",
             BTreeMap::new(),
         );
         commit_sensor
-            .add_metric_name(commit_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(commit_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding commit-latency-avg");
 
-        let commit_latency_max = metrics.metric_name_description_tags(
+        let commit_latency_max = metrics.metric_name_with_description_tags(
             "commit-latency-max",
             &metric_group_name,
             "The max time taken for a commit request",
             BTreeMap::new(),
         );
         commit_sensor
-            .add_metric_name(commit_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(commit_latency_max.clone(), Box::new(Max::new()))
             .expect("adding commit-latency-max");
 
-        let commit_rate = metrics.metric_name_description_tags(
+        let commit_rate = metrics.metric_name_with_description_tags(
             "commit-rate",
             &metric_group_name,
             "The number of commit calls per second",
             BTreeMap::new(),
         );
-        let commit_total = metrics.metric_name_description_tags(
+        let commit_total = metrics.metric_name_with_description_tags(
             "commit-total",
             &metric_group_name,
             "The total number of commit calls",
@@ -110,7 +110,7 @@ impl OffsetCommitMetricsManager {
 
     /// Java: `recordRequestLatency(long responseLatencyMs)`.
     pub(crate) fn record_request_latency(&self, response_latency_ms: i64) {
-        self.commit_sensor.record_value(response_latency_ms as f64);
+        self.commit_sensor.record_with_value(response_latency_ms as f64);
     }
 }
 

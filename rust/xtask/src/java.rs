@@ -88,6 +88,9 @@ pub struct JavaClass {
     /// The fields and enum constants declared directly in the class body, each
     /// with whether it is `@Deprecated`.
     pub fields: BTreeMap<String, bool>,
+    /// The access level of each of `fields`: an enum constant, or a field of
+    /// an interface, is `public`.
+    pub field_visibility: BTreeMap<String, Visibility>,
     /// Whether the class, or a class enclosing it, is `@Deprecated`.
     pub deprecated: bool,
     /// Whether it comes from the test tree.
@@ -106,6 +109,12 @@ pub struct Overload {
     /// Its access modifier, or the implicit one: `public` in an interface,
     /// `private` for an enum constructor, package-private otherwise.
     pub visibility: Visibility,
+    /// Whether it is `static`.
+    pub is_static: bool,
+    /// The names of its parameters, in order.
+    pub param_names: Vec<String>,
+    /// Whether it returns its own class: a static one is a factory.
+    pub returns_class: bool,
 }
 
 /// A Java access level, narrowest first.
@@ -164,19 +173,22 @@ impl JavaClass {
     }
 
     /// The Rust type name the translation rules give this class (CLAUDE.md §2):
-    /// `Exception` becomes `Error`, prefixed by the top-level package for an
-    /// error outside `common` (`consumer.OffsetOutOfRangeException` ->
+    /// the words `Exception` and `Throw` become `Error` and `Return` wherever
+    /// they appear (`DeserializationExceptionOrigin` ->
+    /// `DeserializationErrorOrigin`), and an error outside `common` is prefixed
+    /// by its top-level package (`consumer.OffsetOutOfRangeException` ->
     /// `ConsumerOffsetOutOfRangeError`).
     pub fn rust_name(&self) -> String {
         let name = self.name();
-        let Some(base) = name.strip_suffix("Exception") else {
-            return name.to_string();
-        };
+        let translated = translate_camel_words(name);
+        if !name.ends_with("Exception") {
+            return translated;
+        }
         let prefix = match self.module.first().map(String::as_str) {
             None | Some("common") => String::new(),
             Some(pkg) => upper_first(pkg),
         };
-        format!("{prefix}{base}Error")
+        format!("{prefix}{translated}")
     }
 
     /// Whether `rust` is a Rust name the translation rules give Java method
@@ -186,17 +198,103 @@ impl JavaClass {
     ///   - a getter's `get` prefix may be dropped (`getFoo` → `foo`);
     ///   - an overload appends `_with_<params>` (`foo_bar_with_b`);
     ///   - a constructor becomes `new`, or `with_<params>`;
-    ///   - a name that is a Rust keyword takes a trailing `_`.
-    pub fn is_rust_name_of(&self, method: &str, rust: &str) -> bool {
+    ///   - a setter takes `set_`: an overload with parameters of a method
+    ///     sharing its name with a getter (`timeoutMs(Integer)` →
+    ///     `set_timeout_ms`), or any setter (`validateOnly(boolean)` →
+    ///     `set_validate_only`);
+    ///   - a name that is a Rust keyword takes a trailing `_`;
+    ///   - a static method sharing its name with an instance one, translated to
+    ///     an associated fn without `self` (`has_self` false), follows
+    ///     [`Self::is_rust_static_name_of`].
+    pub fn is_rust_name_of(&self, method: &str, rust: &str, has_self: bool) -> bool {
+        let has = |is_static| self.overloads.iter().any(|o| o.name == method && o.is_static == is_static);
+        if !has_self && has(true) && has(false) {
+            return self.is_rust_static_name_of(method, rust);
+        }
         if method == self.name() {
             return rust == "new" || rust.starts_with("with_");
         }
-        rust_method_bases(method).iter().any(|base| {
-            rust == base
-                || rust
-                    .strip_prefix(base.as_str())
-                    .is_some_and(|rest| rest.starts_with("_with_") || rest == "_")
-        })
+        let rust = rust.strip_prefix("r#").unwrap_or(rust);
+        let is_setter = self.overloads.iter().any(|o| o.name == method && !o.params.is_empty());
+        let named_set = method.strip_prefix("set").is_some_and(|r| r.starts_with(char::is_uppercase));
+        let rust = match rust.strip_prefix("set_") {
+            Some(rest) if is_setter && !named_set => rest,
+            _ => rust,
+        };
+        self.rust_bases(method).iter().any(|base| is_derived_name(rust, base))
+    }
+
+    /// Whether `rust` names static `method`, which shares its name with an
+    /// instance method that keeps the plain name (CLAUDE.md §2):
+    ///   - a factory, returning its class, is `with_<params>`, or
+    ///     `new_with_<params>` when an instance method is already
+    ///     `with_<params>`: `CloseOptions.timeout(Duration timeout)` beside the
+    ///     getter `timeout()` and `withTimeout(Duration)` is `new_with_timeout`;
+    ///   - any other static method is `do_<method>`, plus `_with_<params>` for an
+    ///     overload.
+    pub fn is_rust_static_name_of(&self, method: &str, rust: &str) -> bool {
+        let rust = rust.strip_prefix("r#").unwrap_or(rust);
+        self.static_rust_names(method)
+            .iter()
+            .any(|name| match name.strip_prefix("do_") {
+                Some(_) => is_derived_name(rust, name),
+                None => rust == name,
+            })
+    }
+
+    /// The Rust names [`Self::is_rust_static_name_of`] accepts for static
+    /// `method`, before any `_with_<params>` suffix of a `do_<method>`.
+    pub fn static_rust_names(&self, method: &str) -> Vec<String> {
+        let rust_of = |name: &str| translate_words(&snake_case(name));
+        let mut names = Vec::new();
+        for o in self.overloads.iter().filter(|o| o.name == method && o.is_static) {
+            let name = if !o.returns_class {
+                format!("do_{}", rust_of(method))
+            } else if o.param_names.is_empty() {
+                "new".to_string()
+            } else {
+                let params = o.param_names.iter().map(|n| rust_of(n)).collect::<Vec<_>>().join("_");
+                let with = format!("with_{params}");
+                let taken = self.overloads.iter().any(|i| !i.is_static && rust_of(&i.name) == with);
+                if taken {
+                    format!("new_{with}")
+                } else {
+                    with
+                }
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// The Rust base names of this class's method `method`: its snake_case name,
+    /// and for a getter `getX` also `x` (CLAUDE.md §2), unless the class declares
+    /// an `x` of its own, which owns that name.
+    pub fn rust_bases(&self, method: &str) -> Vec<String> {
+        let owned = |base: &str| {
+            self.methods
+                .iter()
+                .any(|m| m != method && translate_words(&snake_case(m)) == base)
+        };
+        let mut bases = rust_method_bases(method);
+        bases.truncate(if bases.len() > 1 && owned(&bases[1]) {
+            1
+        } else {
+            bases.len()
+        });
+        bases
+    }
+
+    /// Whether `rust` is a Rust name the translation rules give public Java
+    /// field `field` of this class (CLAUDE.md §3: no public fields, so a getter
+    /// `field` and a setter `set_field`).
+    pub fn is_rust_accessor_of(&self, field: &str, rust: &str) -> bool {
+        let base = translate_words(&snake_case(field));
+        let rust = rust.strip_prefix("r#").unwrap_or(rust);
+        let rust = rust.strip_prefix("set_").unwrap_or(rust);
+        is_derived_name(rust, &base)
     }
 }
 
@@ -266,7 +364,13 @@ impl JavaClass {
                 }
             })
             .collect();
-        let widest = overloads.iter().map(|o| o.visibility).max()?;
+        let Some(widest) = overloads.iter().map(|o| o.visibility).max() else {
+            // A field a getter or setter translates (CLAUDE.md §3).
+            return (!is_signature)
+                .then(|| self.field_visibility.get(name))
+                .flatten()
+                .map(|&v| MemberVisibility::Known(v));
+        };
         let public: Vec<String> = overloads
             .iter()
             .filter(|o| o.visibility == Visibility::Public)
@@ -288,6 +392,15 @@ pub enum MemberVisibility {
     /// A method name some of whose overloads are public and some not: the
     /// marker must name the overload. Holds the public signatures.
     Ambiguous(Vec<String>),
+}
+
+/// Whether `rust` is `base`, an overload of it (`base_with_..`) or its
+/// keyword-escaped form (`type_`).
+fn is_derived_name(rust: &str, base: &str) -> bool {
+    rust == base
+        || rust
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with("_with_") || rest == "_")
 }
 
 /// The Rust names a Java method translates to, before any `_with_..` suffix.
@@ -312,6 +425,26 @@ fn translate_words(snake: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("_")
+}
+
+/// Applies CLAUDE.md §2's word substitutions to a PascalCase name, keeping
+/// every other word as written (`SSLException` → `SSLError`).
+fn translate_camel_words(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut start = 0;
+    for (i, c) in name.char_indices().skip(1).chain([(name.len(), 'A')]) {
+        if c.is_uppercase() {
+            out.push_str(match &name[start..i] {
+                "Exception" => "Error",
+                "Exceptions" => "Errors",
+                "Throw" => "Return",
+                "Throws" => "Returns",
+                other => other,
+            });
+            start = i;
+        }
+    }
+    out
 }
 
 /// camelCase → snake_case, keeping acronyms together (`getAPIVersion` →
@@ -617,7 +750,8 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
         Some((first, rest)) if first == "clients" => rest.to_vec(),
         _ => package.to_vec(),
     };
-    for class in scan(source) {
+    for mut class in scan(source) {
+        class.add_implicit_members();
         out.push(JavaClass {
             module: module.clone(),
             package: package.join("."),
@@ -625,6 +759,7 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
             methods: class.overloads.iter().map(|o| o.name.clone()).collect(),
             overloads: class.overloads,
             fields: class.fields,
+            field_visibility: class.field_visibility,
             deprecated: class.deprecated,
             is_test,
         });
@@ -735,9 +870,50 @@ struct Scanned {
     /// Whether it is an interface (or an `@interface`), whose members are
     /// implicitly `public`.
     is_interface: bool,
+    /// Whether it is an enum.
+    is_enum: bool,
+    /// Its access modifier, or the implicit one (`public` inside an interface).
+    visibility: Visibility,
     overloads: Vec<Overload>,
     fields: BTreeMap<String, bool>,
+    field_visibility: BTreeMap<String, Visibility>,
     deprecated: bool,
+}
+
+impl Scanned {
+    /// The members Java declares implicitly: an enum's `values()`,
+    /// `valueOf(String)`, `name()` and `ordinal()`, and the default
+    /// constructor of a class declaring none, as accessible as its class.
+    fn add_implicit_members(&mut self) {
+        let class = self.path.last().cloned().unwrap_or_default();
+        let mut implicit = Vec::new();
+        if self.is_enum {
+            for (name, params) in [
+                ("values", &[][..]),
+                ("valueOf", &["String"][..]),
+                ("name", &[]),
+                ("ordinal", &[]),
+            ] {
+                implicit.push((name.to_string(), params, Visibility::Public));
+            }
+        } else if !self.is_interface {
+            implicit.push((class, &[][..], self.visibility));
+        }
+        for (name, params, visibility) in implicit {
+            if !self.overloads.iter().any(|o| o.name == name) {
+                let is_static = self.is_enum && matches!(name.as_str(), "values" | "valueOf");
+                self.overloads.push(Overload {
+                    name,
+                    params: params.iter().map(ToString::to_string).collect(),
+                    deprecated: false,
+                    visibility,
+                    is_static,
+                    param_names: Vec::new(),
+                    returns_class: false,
+                });
+            }
+        }
+    }
 }
 
 /// An open class body while scanning.
@@ -765,12 +941,15 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut stack: Vec<Open> = Vec::new();
     let mut depth = 0usize;
     let mut paren = 0usize;
-    // A class declaration seen, waiting for its `{`: (name, deprecated, keyword).
-    let mut pending: Option<(String, bool, String)> = None;
+    // A class declaration seen, waiting for its `{`: (name, deprecated,
+    // keyword, access modifier).
+    let mut pending: Option<(String, bool, String, Option<Visibility>)> = None;
     // An `@Deprecated` seen, waiting for the declaration it annotates.
     let mut deprecated = false;
     // An access modifier seen, waiting for the declaration it applies to.
     let mut visibility: Option<Visibility> = None;
+    // A `static` seen, waiting for the declaration it applies to.
+    let mut is_static = false;
     let mut i = 0;
     while i < toks.len() {
         let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
@@ -784,16 +963,24 @@ fn scan(src: &str) -> Vec<Scanned> {
                 continue;
             },
             Tok::Punct('{') => {
-                if let Some((name, dep, keyword)) = pending.take() {
+                if let Some((name, dep, keyword, access)) = pending.take() {
                     let parent = stack.last().map(|o| &out[o.idx]);
                     let mut path: Vec<String> = parent.map(|p| p.path.clone()).unwrap_or_default();
                     let dep = dep || parent.is_some_and(|p| p.deprecated);
+                    let implicit = if parent.is_some_and(|p| p.is_interface) {
+                        Visibility::Public
+                    } else {
+                        Visibility::Package
+                    };
                     path.push(name);
                     out.push(Scanned {
                         path,
                         is_interface: keyword == "interface",
+                        is_enum: keyword == "enum",
+                        visibility: access.unwrap_or(implicit),
                         overloads: Vec::new(),
                         fields: BTreeMap::new(),
+                        field_visibility: BTreeMap::new(),
                         deprecated: dep,
                     });
                     depth += 1;
@@ -805,6 +992,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 if member_level {
                     deprecated = false;
                     visibility = None;
+                    is_static = false;
                 }
                 depth += 1;
             },
@@ -815,26 +1003,35 @@ fn scan(src: &str) -> Vec<Scanned> {
                 depth = depth.saturating_sub(1);
                 deprecated = false;
                 visibility = None;
+                is_static = false;
             },
             Tok::Punct(';') if member_level => {
                 deprecated = false;
                 visibility = None;
+                is_static = false;
                 if let Some(o) = stack.last_mut() {
                     o.enum_constants = false;
                 }
             },
             Tok::Punct('(') => paren += 1,
             Tok::Punct(')') => paren = paren.saturating_sub(1),
-            Tok::Ident(kw) if matches!(kw.as_str(), "class" | "interface" | "enum" | "record") && paren == 0 => {
+            // `record` is only a contextual keyword: `void record(double v)` is a
+            // method, `record Point(int x)` a declaration.
+            Tok::Ident(kw)
+                if paren == 0
+                    && (matches!(kw.as_str(), "class" | "interface" | "enum")
+                        || (kw == "record" && matches!(toks.get(i + 1), Some(Tok::Ident(_))))) =>
+            {
                 // `Foo.class` is a literal, not a declaration; `@interface` is one.
                 let is_literal = i > 0 && toks[i - 1] == Tok::Punct('.');
                 if let (false, Some(Tok::Ident(name))) = (is_literal, toks.get(i + 1)) {
-                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw.clone()));
-                    visibility = None;
+                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw.clone(), visibility.take()));
+                    is_static = false;
                     i += 2;
                     continue;
                 }
             },
+            Tok::Ident(m) if member_level && m == "static" => is_static = true,
             Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
                 visibility = Some(match m.as_str() {
                     "public" => Visibility::Public,
@@ -855,9 +1052,11 @@ fn scan(src: &str) -> Vec<Scanned> {
                 let is_enum = open.is_enum;
                 if is_constant {
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
+                    out[idx].field_visibility.insert(name.clone(), Visibility::Public);
                 } else if next == Some(&Tok::Punct('(')) {
                     if is_method_decl(&toks, i, &out[idx].path) {
-                        let params = params(&toks, i + 1);
+                        let (params, param_names) = params(&toks, i + 1);
+                        let returns_class = returns_class(&toks, i, &out[idx].path);
                         let implicit = if out[idx].is_interface {
                             Visibility::Public
                         } else if is_enum && out[idx].path.last() == Some(name) {
@@ -870,6 +1069,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                             params,
                             deprecated: std::mem::take(&mut deprecated),
                             visibility: visibility.take().unwrap_or(implicit),
+                            is_static: std::mem::take(&mut is_static),
+                            param_names,
+                            returns_class,
                         });
                     }
                 } else if matches!(next, Some(Tok::Punct('=' | ';')))
@@ -877,7 +1079,15 @@ fn scan(src: &str) -> Vec<Scanned> {
                     && name != "0"
                     && !KEYWORDS.contains(&name.as_str())
                 {
+                    let implicit = if out[idx].is_interface {
+                        Visibility::Public
+                    } else {
+                        Visibility::Package
+                    };
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
+                    out[idx]
+                        .field_visibility
+                        .insert(name.clone(), visibility.take().unwrap_or(implicit));
                 }
             },
             _ => {},
@@ -926,11 +1136,12 @@ fn past_parens(toks: &[Tok], open: usize) -> usize {
 }
 
 /// The parameter types of the declaration whose `(` is at `open`, as simple
-/// names: annotations, `final`, generic arguments and parameter names are
-/// dropped, and arrays and varargs become `[]`.
-fn params(toks: &[Tok], open: usize) -> Vec<String> {
+/// names (annotations, `final`, generic arguments and parameter names are
+/// dropped, and arrays and varargs become `[]`), and the parameter names.
+fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>) {
     let close = past_parens(toks, open) - 1;
     let mut out = Vec::new();
+    let mut names = Vec::new();
     let mut current: Vec<Tok> = Vec::new();
     let mut angle = 0usize;
     let mut j = open + 1;
@@ -942,7 +1153,11 @@ fn params(toks: &[Tok], open: usize) -> Vec<String> {
             },
             Tok::Punct('<') => angle += 1,
             Tok::Punct('>') => angle = angle.saturating_sub(1),
-            Tok::Punct(',') if angle == 0 => out.push(param_type(&std::mem::take(&mut current))),
+            Tok::Punct(',') if angle == 0 => {
+                let param = std::mem::take(&mut current);
+                out.push(param_type(&param));
+                names.push(param_name(&param));
+            },
             Tok::Ident(f) if f == "final" => {},
             t if angle == 0 => current.push(t.clone()),
             _ => {},
@@ -951,8 +1166,44 @@ fn params(toks: &[Tok], open: usize) -> Vec<String> {
     }
     if !current.is_empty() {
         out.push(param_type(&current));
+        names.push(param_name(&current));
     }
-    out
+    (out, names)
+}
+
+/// The name of one parameter from its tokens: the last identifier.
+fn param_name(toks: &[Tok]) -> String {
+    toks.iter()
+        .rev()
+        .find_map(|t| match t {
+            Tok::Ident(s) => Some(s.clone()),
+            Tok::Punct(_) => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the method declared by the identifier at `i` returns `class`: its
+/// return type, the token before the name, is the class's simple name, possibly
+/// with generic arguments (`Opts<K> name(`).
+fn returns_class(toks: &[Tok], i: usize, class: &[String]) -> bool {
+    let mut j = i;
+    if toks.get(j.wrapping_sub(1)) == Some(&Tok::Punct('>')) {
+        let mut depth = 0usize;
+        while j > 0 {
+            j -= 1;
+            match toks[j] {
+                Tok::Punct('>') => depth += 1,
+                Tok::Punct('<') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    matches!(j.checked_sub(1).map(|p| &toks[p]), Some(Tok::Ident(t)) if class.last() == Some(t))
 }
 
 /// The simple type of one parameter's tokens (`java.util.Map m` → `Map`,
@@ -1043,6 +1294,114 @@ mod tests {
     }
 
     #[test]
+    fn maps_setter_and_field_names() {
+        let src = r#"
+            package x;
+            public class Opts {
+                public Integer timeoutMs() { return null; }
+                public Opts timeoutMs(Integer timeoutMs) { return this; }
+                public Opts validateOnly(boolean validateOnly) { return this; }
+                public void setFoo(int foo) {}
+                public void record(double value) {}
+                record Point(int x) {}
+                public int size() { return 0; }
+                public Opts getSensor(String name) { return null; }
+                public Opts sensor(String name) { return null; }
+                public int getCount() { return 0; }
+                public static Opts timeout(long timeout) { return null; }
+                public long timeout() { return 0; }
+                public Opts withTimeout(long timeout) { return this; }
+                public static Opts limit(int max) { return null; }
+                public int limit() { return 0; }
+                public static <K> Opts<K> keyed(K key) { return null; }
+                public boolean keyed() { return false; }
+                public static long total(int a) { return 0; }
+                public long total() { return 0; }
+                public static Opts of(long ms) { return null; }
+                public long eventCount;
+                public static final Opts ANY = new Opts();
+            }
+        "#;
+        let opts = class_of(src, &["Opts"]);
+        // A method sharing its name with a getter, or any method with
+        // parameters, may be a setter (CLAUDE.md §2).
+        assert!(opts.is_rust_name_of("timeoutMs", "timeout_ms", true));
+        assert!(opts.is_rust_name_of("timeoutMs", "set_timeout_ms", true));
+        assert!(opts.is_rust_name_of("validateOnly", "set_validate_only", true));
+        assert!(opts.is_rust_name_of("setFoo", "set_foo", true));
+        assert!(!opts.is_rust_name_of("setFoo", "foo", true));
+        assert!(!opts.is_rust_name_of("size", "set_size", true));
+        // `getX` becomes `x`, unless the class declares an `x` that owns it.
+        assert!(opts.is_rust_name_of("getCount", "count", true));
+        assert!(opts.is_rust_name_of("getSensor", "get_sensor", true));
+        assert!(!opts.is_rust_name_of("getSensor", "sensor", true));
+        assert!(opts.is_rust_name_of("sensor", "sensor_with_parents", true));
+        // A static method sharing its name with an instance one: the instance
+        // one keeps the name, a factory is `with_<params>`, or `new_with_<params>`
+        // when an instance method is `with_<params>`, and any other is `do_<name>`.
+        assert!(opts.is_rust_name_of("timeout", "timeout", true));
+        assert!(!opts.is_rust_name_of("timeout", "timeout", false));
+        assert!(opts.is_rust_name_of("timeout", "new_with_timeout", false));
+        assert!(!opts.is_rust_name_of("timeout", "with_timeout", false));
+        assert!(!opts.is_rust_name_of("timeout", "new_timeout", false));
+        assert!(opts.is_rust_name_of("limit", "with_max", false));
+        assert!(!opts.is_rust_name_of("limit", "new_with_max", false));
+        assert!(opts.is_rust_name_of("keyed", "with_key", false));
+        assert!(opts.is_rust_name_of("total", "do_total", false));
+        assert!(opts.is_rust_name_of("total", "do_total_with_a", false));
+        assert!(!opts.is_rust_name_of("total", "with_a", false));
+        assert!(opts.is_rust_name_of("total", "total", true));
+        // A static method with no instance namesake is named as usual.
+        assert!(opts.is_rust_name_of("of", "of", false));
+        assert!(!opts.is_rust_name_of("of", "with_ms", false));
+        // `record` names a method unless a declaration follows it.
+        assert!(opts.methods.contains("record"));
+        assert!(class_of(src, &["Opts", "Point"]).methods.contains("Point"));
+        // A public field becomes a getter and a setter (CLAUDE.md §3).
+        assert!(opts.is_rust_accessor_of("eventCount", "event_count"));
+        assert!(opts.is_rust_accessor_of("eventCount", "set_event_count"));
+        assert!(opts.is_rust_accessor_of("ANY", "any"));
+        assert!(!opts.is_rust_accessor_of("eventCount", "count"));
+    }
+
+    #[test]
+    fn adds_implicit_members() {
+        let src = r#"
+            package x;
+            public class Plain {
+                private int count;
+                long size;
+                public static class Nested {}
+                class Inner {}
+                enum Kind { A, B; public String code() { return ""; } }
+                interface Api { int LIMIT = 1; void call(); }
+            }
+        "#;
+        let vis = |class: &JavaClass, member: &str| match class.visibility(member) {
+            Some(MemberVisibility::Known(v)) => Some(v),
+            other => panic!("`{member}`: {other:?}"),
+        };
+        // A class declaring no constructor has a default one, as accessible
+        // as the class.
+        let plain = class_of(src, &["Plain"]);
+        assert_eq!(vis(&plain, "Plain()"), Visibility::Public.into());
+        assert_eq!(vis(&class_of(src, &["Plain", "Nested"]), "Nested()"), Visibility::Public.into());
+        assert_eq!(vis(&class_of(src, &["Plain", "Inner"]), "Inner()"), Visibility::Package.into());
+        assert_eq!(vis(&plain, "count"), Visibility::Private.into());
+        assert_eq!(vis(&plain, "size"), Visibility::Package.into());
+        // An enum has `values`, `valueOf`, `name` and `ordinal`, and no
+        // default constructor; an interface has neither.
+        let kind = class_of(src, &["Plain", "Kind"]);
+        for member in ["values()", "valueOf(String)", "name()", "ordinal()"] {
+            assert_eq!(vis(&kind, member), Visibility::Public.into(), "{member}");
+        }
+        assert_eq!(kind.visibility("Kind"), None);
+        let api = class_of(src, &["Plain", "Api"]);
+        assert_eq!(api.methods.iter().collect::<Vec<_>>(), ["call"]);
+        assert_eq!(vis(&api, "LIMIT"), Visibility::Public.into());
+    }
+
+    #[test]
     fn scans_visibilities() {
         let src = r#"
             package x;
@@ -1082,8 +1441,10 @@ mod tests {
         assert_eq!(vis(&outer, "tags(String[])"), Some(Visibility::Private));
         assert_eq!(vis(&outer, "tags()"), Some(Visibility::Public));
         assert_eq!(vis(&outer, "toString"), Some(Visibility::Public));
-        // A field, or an unknown member, is no method.
-        assert_eq!(vis(&outer, "F"), None);
+        // A field a getter translates has its own visibility; an unknown
+        // member has none.
+        assert_eq!(vis(&outer, "F"), Some(Visibility::Public));
+        assert_eq!(vis(&outer, "F()"), None);
         assert_eq!(vis(&outer, "missing"), None);
         let api = class_of(src, &["Outer", "Api"]);
         assert_eq!(vis(&api, "call"), Some(Visibility::Public));
@@ -1092,6 +1453,7 @@ mod tests {
         let kind = class_of(src, &["Outer", "Kind"]);
         assert_eq!(vis(&kind, "Kind"), Some(Visibility::Private));
         assert_eq!(vis(&kind, "code"), Some(Visibility::Public));
+        assert_eq!(vis(&kind, "A"), Some(Visibility::Public));
         assert_eq!(vis(&kind, "rank"), Some(Visibility::Package));
     }
 
@@ -1217,19 +1579,21 @@ mod tests {
             methods: BTreeSet::new(),
             overloads: Vec::new(),
             fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
         };
-        assert!(class.is_rust_name_of("send", "send"));
-        assert!(class.is_rust_name_of("send", "send_with_callback"));
-        assert!(!class.is_rust_name_of("send", "sender"));
-        assert!(class.is_rust_name_of("maybeThrowAnyException", "maybe_return_any_error"));
-        assert!(class.is_rust_name_of("getAPIVersion", "get_api_version"));
-        assert!(class.is_rust_name_of("getAPIVersion", "api_version"));
-        assert!(class.is_rust_name_of("KafkaProducer", "new"));
-        assert!(class.is_rust_name_of("KafkaProducer", "with_config"));
-        assert!(class.is_rust_name_of("type", "type_"));
-        assert!(!class.is_rust_name_of("KafkaProducer", "create"));
+        assert!(class.is_rust_name_of("send", "send", true));
+        assert!(class.is_rust_name_of("send", "send_with_callback", true));
+        assert!(!class.is_rust_name_of("send", "sender", true));
+        assert!(class.is_rust_name_of("maybeThrowAnyException", "maybe_return_any_error", true));
+        assert!(class.is_rust_name_of("getAPIVersion", "get_api_version", true));
+        assert!(class.is_rust_name_of("getAPIVersion", "api_version", true));
+        assert!(class.is_rust_name_of("KafkaProducer", "new", true));
+        assert!(class.is_rust_name_of("KafkaProducer", "with_config", true));
+        assert!(class.is_rust_name_of("type", "type_", true));
+        assert!(class.is_rust_name_of("type", "r#type", true));
+        assert!(!class.is_rust_name_of("KafkaProducer", "create", true));
     }
 
     #[test]
@@ -1241,6 +1605,7 @@ mod tests {
             methods: BTreeSet::new(),
             overloads: Vec::new(),
             fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
         };
@@ -1250,6 +1615,15 @@ mod tests {
         assert_eq!(rnf.rust_name(), "ResourceNotFoundError");
         let acl = class(&["common", "acl"], "common.acl", "AclBinding");
         assert_eq!(acl.rust_name(), "AclBinding");
+        let mut origin = class(&["common", "errors"], "common.errors", "RecordDeserializationException");
+        origin.path.push("DeserializationExceptionOrigin".into());
+        assert_eq!(origin.rust_name(), "DeserializationErrorOrigin");
+        let ssl = class(&["common", "errors"], "common.errors", "SSLException");
+        assert_eq!(ssl.rust_name(), "SSLError");
+        let handler = class(&["consumer"], "clients.consumer", "ExceptionsThrowHandler");
+        assert_eq!(handler.rust_name(), "ErrorsReturnHandler");
+        let exceptional = class(&["common"], "common", "ExceptionalThrowable");
+        assert_eq!(exceptional.rust_name(), "ExceptionalThrowable");
         assert!(same_name("SslFactory", "SSLFactory"));
     }
 

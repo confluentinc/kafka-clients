@@ -102,8 +102,8 @@ mod tests {
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
         topic_partitions.set_topic_id(uuid);
 
-        assert_eq!(topic_partitions.topic_id().most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(topic_partitions.topic_id().least_sig_bits(), 0xFEDCBA9876543210);
+        assert_eq!(topic_partitions.topic_id().most_significant_bits(), 0x0123456789ABCDEF);
+        assert_eq!(topic_partitions.topic_id().least_significant_bits(), 0xFEDCBA9876543210);
         assert!(!topic_partitions.topic_id().is_zero());
 
         // Test UUID string conversion (base64 URL encoding without padding)

@@ -435,9 +435,15 @@ async fn test_async_consumer_headers() {
     // then `record.headers().add(...)` thrice. Java relies on producer-driven
     // auto-create; the record lands at offset 0 (empty topic).
     let mut headers = RecordHeaders::new();
-    headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
-    headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
-    headers.add_key_value("headerKey3", Some(b"headerValue3")).expect("add header");
+    headers
+        .add_with_key_value("headerKey", Some(b"headerValue"))
+        .expect("add header");
+    headers
+        .add_with_key_value("headerKey2", Some(b"headerValue2"))
+        .expect("add header");
+    headers
+        .add_with_key_value("headerKey3", Some(b"headerValue3"))
+        .expect("add header");
     let record = ProducerRecord::with_partition_key_headers(
         topic.clone(),
         Some(0),

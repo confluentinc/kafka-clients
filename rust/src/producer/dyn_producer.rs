@@ -76,6 +76,8 @@ impl<K, V, P: super::Producer<K, V>> private::Sealed<K, V> for P {}
 /// ];
 /// assert_eq!(2, producers.len());
 /// ```
+// the dyn-compatible companion of the `Producer` trait (CLAUDE.md §3)
+#[doc(alias = "rust-only")]
 pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     /// See [`Producer::init_transactions`].
     ///

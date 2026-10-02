@@ -1716,7 +1716,7 @@ impl<K, V> KafkaProducer<K, V> {
         if self.partitioner.is_some() {
             // A custom partitioner is handed the *typed* key/value
             // (`KafkaProducer.java:1474-1475` passes `record.key()` / `record.value()`),
-            // so serialize by BORROWING — `serialize_headers` keeps `key`/`value`
+            // so serialize by BORROWING — `serialize_with_headers` keeps `key`/`value`
             // alive — and compute the partition here, with the typed references. That
             // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
             // short-circuits its own partition step so the partitioner runs EXACTLY
@@ -1724,7 +1724,7 @@ impl<K, V> KafkaProducer<K, V> {
             let serialized_key =
                 match self
                     .key_serializer
-                    .serialize_headers(&record_topic, &record_headers, key.as_ref())
+                    .serialize_with_headers(&record_topic, &record_headers, key.as_ref())
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
@@ -1736,7 +1736,7 @@ impl<K, V> KafkaProducer<K, V> {
             let serialized_value =
                 match self
                     .value_serializer
-                    .serialize_headers(&record_topic, &record_headers, value.as_ref())
+                    .serialize_with_headers(&record_topic, &record_headers, value.as_ref())
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
@@ -1772,22 +1772,25 @@ impl<K, V> KafkaProducer<K, V> {
             .await
         } else {
             // No custom partitioner: keep the zero-copy owned path.
-            // `serialize_owned_headers` moves the key/value so a `Vec<u8>` payload
+            // `serialize_owned_with_headers` moves the key/value so a `Vec<u8>` payload
             // is written into the batch without a copy (CLAUDE.md §14); `do_send_bytes`
             // then runs the built-in key-hash partitioning via `compute_partition`.
-            let serialized_key = match self.key_serializer.serialize_owned_headers(&record_topic, &record_headers, key)
-            {
-                Ok(bytes) => bytes,
-                Err(e) if e.is_api_error() => {
-                    return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
-                },
-                Err(e) => return Err(e),
-            };
+            let serialized_key =
+                match self
+                    .key_serializer
+                    .serialize_owned_with_headers(&record_topic, &record_headers, key)
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
 
             let serialized_value =
                 match self
                     .value_serializer
-                    .serialize_owned_headers(&record_topic, &record_headers, value)
+                    .serialize_owned_with_headers(&record_topic, &record_headers, value)
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
@@ -4459,7 +4462,7 @@ mod tests {
         // Add a header pre-send
         record
             .headers_mut()
-            .add_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
+            .add_with_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
             .unwrap();
 
         let result = producer.send(record).await;

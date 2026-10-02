@@ -49,7 +49,7 @@ impl Uuid {
     }
 
     /// Creates a zero UUID (all bits are zero).
-    pub const fn zero() -> Self {
+    pub(crate) const fn zero() -> Self {
         Self::ZERO_UUID
     }
 
@@ -74,17 +74,20 @@ impl Uuid {
     }
 
     /// Returns the most significant 64 bits of this UUID.
-    pub const fn most_sig_bits(&self) -> u64 {
+    #[doc(alias = "org.apache.kafka.common.Uuid#getMostSignificantBits")]
+    pub const fn most_significant_bits(&self) -> u64 {
         self.most_sig_bits
     }
 
     /// Returns the least significant 64 bits of this UUID.
-    pub const fn least_sig_bits(&self) -> u64 {
+    #[doc(alias = "org.apache.kafka.common.Uuid#getLeastSignificantBits")]
+    pub const fn least_significant_bits(&self) -> u64 {
         self.least_sig_bits
     }
 
     /// Checks if this is the zero UUID (all bits are zero).
-    pub const fn is_zero(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_zero(&self) -> bool {
         self.most_sig_bits == 0 && self.least_sig_bits == 0
     }
 
@@ -101,7 +104,7 @@ impl Uuid {
     }
 
     /// Converts this UUID to a 16-byte array in big-endian order.
-    pub fn to_bytes(self) -> [u8; 16] {
+    pub(crate) fn to_bytes(self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
         bytes[0..8].copy_from_slice(&self.most_sig_bits.to_be_bytes());
         bytes[8..16].copy_from_slice(&self.least_sig_bits.to_be_bytes());
@@ -137,7 +140,7 @@ impl Uuid {
 
     /// Returns a base64 URL encoded string (without padding) of the UUID.
     /// This matches the Java implementation's toString() method.
-    pub fn to_base64_string(self) -> String {
+    pub(crate) fn to_base64_string(self) -> String {
         let bytes = self.to_bytes();
         base64_url_encode(&bytes)
     }
@@ -259,8 +262,8 @@ mod tests {
     #[test]
     fn test_zero_uuid() {
         let uuid = Uuid::zero();
-        assert_eq!(uuid.most_sig_bits(), 0);
-        assert_eq!(uuid.least_sig_bits(), 0);
+        assert_eq!(uuid.most_significant_bits(), 0);
+        assert_eq!(uuid.least_significant_bits(), 0);
         assert!(uuid.is_zero());
         assert_eq!(uuid, Uuid::ZERO_UUID);
     }
@@ -268,16 +271,16 @@ mod tests {
     #[test]
     fn test_one_uuid() {
         let uuid = Uuid::ONE_UUID;
-        assert_eq!(uuid.most_sig_bits(), 0);
-        assert_eq!(uuid.least_sig_bits(), 1);
+        assert_eq!(uuid.most_significant_bits(), 0);
+        assert_eq!(uuid.least_significant_bits(), 1);
         assert!(!uuid.is_zero());
     }
 
     #[test]
     fn test_new_uuid() {
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
-        assert_eq!(uuid.most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(uuid.least_sig_bits(), 0xFEDCBA9876543210);
+        assert_eq!(uuid.most_significant_bits(), 0x0123456789ABCDEF);
+        assert_eq!(uuid.least_significant_bits(), 0xFEDCBA9876543210);
         assert!(!uuid.is_zero());
     }
 
@@ -287,8 +290,8 @@ mod tests {
             0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
         ];
         let uuid = Uuid::with_bytes(bytes);
-        assert_eq!(uuid.most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(uuid.least_sig_bits(), 0xFEDCBA9876543210);
+        assert_eq!(uuid.most_significant_bits(), 0x0123456789ABCDEF);
+        assert_eq!(uuid.least_significant_bits(), 0xFEDCBA9876543210);
     }
 
     #[test]

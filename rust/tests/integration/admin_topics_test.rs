@@ -260,7 +260,7 @@ async fn describe_and_delete_topics_by_ids<F: AdminBackendFactory>(ctx: &mut Tes
         .topic_id();
     assert_ne!(
         topic_id,
-        confluent_kafka::common::Uuid::zero(),
+        confluent_kafka::common::Uuid::ZERO_UUID,
         "{backend} backend: list_topics must report a real topic id"
     );
 
@@ -372,7 +372,7 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|e| panic!("{backend} backend: topicId: {e}"));
     assert_ne!(
         topic_id,
-        confluent_kafka::common::Uuid::zero(),
+        confluent_kafka::common::Uuid::ZERO_UUID,
         "{backend} backend: createTopics must report a real topic id"
     );
     let config = metadata.config().unwrap_or_else(|e| panic!("{backend} backend: config: {e}"));

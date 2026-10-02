@@ -262,7 +262,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
                 Err(err) => cb(None, Some(err)),
             }
         }
-        Ok(KafkaFuture::completed(result))
+        Ok(KafkaFuture::completed_future(result))
     }
 
     async fn flush(&self) -> Result<(), Error> {

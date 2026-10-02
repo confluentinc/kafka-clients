@@ -184,6 +184,8 @@ enum BgJoin {
 /// `Pin<Box<dyn Future>>`), per CLAUDE.md §13. None of its methods are on
 /// a per-record hot path.
 #[derive(Clone)]
+// a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer
+#[doc(alias = "rust-only")]
 pub struct ConsumerHandle {
     inner: ConsumerHandleInner,
 }
@@ -10405,14 +10407,14 @@ mod tests {
             }
         });
         consumer
-            .close_with_options(CloseOptions::new_timeout(Duration::from_millis(0)))
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(0)))
             .await
             .expect("ok");
         assert!(consumer.is_closed());
         drop(drainer);
     }
 
-    /// `close_with_options(CloseOptions::new_timeout(..))` is the replacement
+    /// `close_with_options(CloseOptions::new_with_timeout(..))` is the replacement
     /// for Java's deprecated `close(Duration timeout)`, whose body is exactly
     /// `close(CloseOptions.timeout(timeout))`
     /// (`AsyncKafkaConsumer.java:1543-1545`) and which is not translated
@@ -10463,7 +10465,8 @@ mod tests {
         }
 
         let via_options =
-            deadline_delta_for(async |c| c.close_with_options(CloseOptions::new_timeout(user_timeout)).await).await;
+            deadline_delta_for(async |c| c.close_with_options(CloseOptions::new_with_timeout(user_timeout)).await)
+                .await;
         assert!(
             (via_options - 7_000).abs() <= 100,
             "close_with_options must carry the user timeout (delta={via_options})"
@@ -10516,7 +10519,7 @@ mod tests {
 
         let now_before = consumer.time.milliseconds();
         consumer
-            .close_with_options(CloseOptions::new_timeout(Duration::from_secs(300)))
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_secs(300)))
             .await
             .expect("close ok");
         drop(drainer);
@@ -10882,7 +10885,7 @@ mod tests {
         // variants.
         consumer.close().await.expect("idempotent close");
         consumer
-            .close_with_options(CloseOptions::new_timeout(Duration::from_millis(0)))
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(0)))
             .await
             .expect("idempotent close_with_options");
 
@@ -11070,7 +11073,9 @@ mod tests {
         });
 
         consumer
-            .close_with_options(crate::consumer::CloseOptions::new_timeout(Duration::from_millis(timeout_ms)))
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_millis(
+                timeout_ms,
+            )))
             .await
             .expect("close ok");
 

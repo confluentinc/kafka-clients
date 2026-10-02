@@ -52,7 +52,8 @@ impl GroupListing {
     }
 
     /// The type of the group, if available. Mirrors `type()`.
-    pub fn group_type(&self) -> Option<GroupType> {
+    #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#type")]
+    pub fn r#type(&self) -> Option<GroupType> {
         self.group_type
     }
 

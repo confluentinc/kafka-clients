@@ -164,7 +164,7 @@ impl Builder {
         for component in filter.components() {
             let mut fd = ComponentData::new();
             fd.set_entity_type(component.entity_type().to_string());
-            match component.match_spec() {
+            match component.r#match() {
                 ClientQuotaMatch::Any => {
                     fd.set_match_type(DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED);
                     fd.set_match(None);

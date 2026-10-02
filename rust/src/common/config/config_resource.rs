@@ -91,7 +91,8 @@ impl ConfigResource {
     }
 
     /// Return the resource type.
-    pub fn resource_type(&self) -> Type {
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResource#type")]
+    pub fn r#type(&self) -> Type {
         self.resource_type
     }
 

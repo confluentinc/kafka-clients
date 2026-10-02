@@ -486,8 +486,8 @@ impl RecordAccumulator {
     fn register_metrics(free: &Arc<BufferPool>, metrics: &Arc<Metrics>, metric_grp_name: &str) {
         let free_waiting = Arc::clone(free);
         metrics
-            .add_metric_measurable(
-                metrics.metric_name_description_tags(
+            .add_metric_with_measurable(
+                metrics.metric_name_with_description_tags(
                     "waiting-threads",
                     metric_grp_name,
                     "The number of user threads blocked waiting for buffer memory to enqueue their records",
@@ -499,8 +499,8 @@ impl RecordAccumulator {
 
         let free_total = Arc::clone(free);
         metrics
-            .add_metric_measurable(
-                metrics.metric_name_description_tags(
+            .add_metric_with_measurable(
+                metrics.metric_name_with_description_tags(
                     "buffer-total-bytes",
                     metric_grp_name,
                     "The maximum amount of buffer memory the client can use (whether or not it is currently used).",
@@ -512,8 +512,8 @@ impl RecordAccumulator {
 
         let free_available = Arc::clone(free);
         metrics
-            .add_metric_measurable(
-                metrics.metric_name_description_tags(
+            .add_metric_with_measurable(
+                metrics.metric_name_with_description_tags(
                     "buffer-available-bytes",
                     metric_grp_name,
                     "The total amount of buffer memory that is not being used (either unallocated or in the free list).",
@@ -2351,8 +2351,12 @@ mod tests {
         );
 
         let gauge = |name: &str| {
-            let mn =
-                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn = metrics.metric_name_with_description_tags(
+                name,
+                "producer-metrics",
+                "",
+                std::collections::BTreeMap::new(),
+            );
             metrics
                 .metric(&mn)
                 .unwrap_or_else(|| panic!("{name} should be registered"))
@@ -2382,7 +2386,13 @@ mod tests {
         let mut size = 0i32;
         let mut offset_delta = 0i32;
         loop {
-            let record_size = DefaultRecord::size_in_bytes_for(offset_delta, 0, k.len() as i32, v.len() as i32, &[]);
+            let record_size = DefaultRecord::do_size_in_bytes_with_key_size_value_size(
+                offset_delta,
+                0,
+                k.len() as i32,
+                v.len() as i32,
+                &[],
+            );
             if size + record_size > batch_size {
                 return offset_delta;
             }
@@ -2679,7 +2689,8 @@ mod tests {
 
         let k = key();
         let v = value();
-        let msg_size = DefaultRecord::size_in_bytes_for(0, 0, k.len() as i32, v.len() as i32, &[]);
+        let msg_size =
+            DefaultRecord::do_size_in_bytes_with_key_size_value_size(0, 0, k.len() as i32, v.len() as i32, &[]);
         let appends = 1024 / msg_size + 1;
 
         let accum = create_test_accumulator(

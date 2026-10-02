@@ -458,7 +458,12 @@ impl DefaultRecord {
     /// Compute the total serialized size of a record with the given parameters.
     ///
     /// This includes the length prefix varint.
-    pub fn size_in_bytes_for(
+    ///
+    /// Java's static `sizeInBytes` overloads share their name with the instance
+    /// [`DefaultRecord::size_in_bytes`], which keeps it, so they are
+    /// `do_size_in_bytes_with_<params>` (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes(int,long,int,int,Header[])")]
+    pub fn do_size_in_bytes_with_key_size_value_size(
         offset_delta: i32,
         timestamp_delta: i64,
         key_size: i32,
@@ -471,8 +476,10 @@ impl DefaultRecord {
     }
 
     /// Compute the total serialized size from key/value slices.
-    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes")]
-    pub fn size_in_bytes_with_slices(
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes(int,long,ByteBuffer,ByteBuffer,Header[])"
+    )]
+    pub fn do_size_in_bytes_with_key_value(
         offset_delta: i32,
         timestamp_delta: i64,
         key: Option<&[u8]>,
@@ -481,7 +488,7 @@ impl DefaultRecord {
     ) -> i32 {
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
-        Self::size_in_bytes_for(offset_delta, timestamp_delta, key_size, value_size, headers)
+        Self::do_size_in_bytes_with_key_size_value_size(offset_delta, timestamp_delta, key_size, value_size, headers)
     }
 
     /// Compute the upper bound of the record size.
@@ -889,7 +896,7 @@ mod tests {
             assert_eq!(value.as_deref(), log_record.value());
             assert_eq!(hdrs.as_slice(), log_record.headers());
             assert_eq!(
-                DefaultRecord::size_in_bytes_with_slices(
+                DefaultRecord::do_size_in_bytes_with_key_value(
                     offset_delta,
                     timestamp_delta,
                     key.as_deref(),
@@ -1287,7 +1294,7 @@ mod tests {
             DefaultRecord::write_to(&mut out, offset_delta, timestamp_delta, Some(b"key"), Some(b"value"), &headers)
                 .unwrap();
 
-        let computed = DefaultRecord::size_in_bytes_with_slices(
+        let computed = DefaultRecord::do_size_in_bytes_with_key_value(
             offset_delta,
             timestamp_delta,
             Some(b"key"),

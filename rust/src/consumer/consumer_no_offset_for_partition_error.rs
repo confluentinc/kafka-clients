@@ -60,7 +60,8 @@ impl ConsumerNoOffsetForPartitionError {
 
     /// Create the error for a set of partitions, mirroring Java's
     /// `NoOffsetForPartitionException(Collection<TopicPartition>)`.
-    pub fn for_partitions(partitions: impl IntoIterator<Item = TopicPartition>) -> Self {
+    #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException")]
+    pub fn with_partitions(partitions: impl IntoIterator<Item = TopicPartition>) -> Self {
         let partitions: HashSet<TopicPartition> = partitions.into_iter().collect();
         let mut items: Vec<String> = partitions.iter().map(ToString::to_string).collect();
         items.sort();
@@ -75,6 +76,8 @@ impl ConsumerNoOffsetForPartitionError {
     }
 
     /// The error message.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -113,6 +116,8 @@ impl ConsumerNoOffsetForPartitionError {
     /// cause is null in Java too. Present as an inherent method so it shadows
     /// both `ErrorSource::source` and `std::error::Error::source`, keeping
     /// `x.source()` unambiguous and typed.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         None
     }
@@ -152,7 +157,7 @@ mod tests {
     /// Rust form emitted the items bare) and no test noticed.
     #[test]
     fn test_no_offset_for_partitions_plural_message() {
-        let e = ConsumerNoOffsetForPartitionError::for_partitions([
+        let e = ConsumerNoOffsetForPartitionError::with_partitions([
             TopicPartition::new("t".to_string(), 0),
             TopicPartition::new("t".to_string(), 1),
         ]);

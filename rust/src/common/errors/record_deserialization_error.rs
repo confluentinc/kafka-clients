@@ -27,6 +27,7 @@ use crate::common::record::TimestampType;
 /// `RecordDeserializationException.DeserializationExceptionOrigin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException$DeserializationExceptionOrigin")]
 pub enum DeserializationErrorOrigin {
     /// The key could not be deserialized.
     Key,
@@ -159,11 +160,15 @@ impl RecordDeserializationError {
     }
 
     /// The error message.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&crate::common::Error> {
         self.source.as_deref()
     }

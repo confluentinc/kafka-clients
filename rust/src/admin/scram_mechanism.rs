@@ -89,6 +89,7 @@ impl ScramMechanism {
     /// Returns the type indicator for this SASL SCRAM mechanism.
     ///
     /// Mirrors `ScramMechanism.type()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#type")]
     pub fn r#type(self) -> i8 {
         match self {
             ScramMechanism::Unknown => 0,

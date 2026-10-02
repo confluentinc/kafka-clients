@@ -401,7 +401,7 @@ async fn close_overloads_mark_the_consumer_closed() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed());
     consumer
-        .close_with_options(CloseOptions::new_timeout(std::time::Duration::from_secs(1)))
+        .close_with_options(CloseOptions::new_with_timeout(std::time::Duration::from_secs(1)))
         .await
         .expect("close_with_options");
     assert!(consumer.closed(), "close_with_options(..) closes");

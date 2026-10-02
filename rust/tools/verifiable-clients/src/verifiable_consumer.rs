@@ -485,10 +485,10 @@ impl VerifiableConsumer {
         let mut summaries: Vec<RecordSetSummary> = Vec::new();
 
         // Collect partitions up front so the immutable borrow of `records` for
-        // `partitions()` does not overlap the later `records_partition`.
+        // `partitions()` does not overlap the later `records_with_partition`.
         let partitions: Vec<TopicPartition> = records.partitions().cloned().collect();
         for tp in &partitions {
-            let all = records.records_partition(tp);
+            let all = records.records_with_partition(tp);
 
             // Java `subList(0, maxMessages - consumedMessages)` truncation.
             let partition_records: &[ConsumerRecord<String, String>] = if self.has_message_limit()

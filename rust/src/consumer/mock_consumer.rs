@@ -1059,7 +1059,7 @@ where
     async fn close(&mut self) -> Result<(), Error> {
         // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
-        self.close_with_options(CloseOptions::new_timeout(Duration::from_millis(
+        self.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(
             CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS,
         )))
         .await

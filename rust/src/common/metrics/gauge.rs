@@ -29,11 +29,14 @@ pub trait Gauge: Send + Sync {
     ///
     /// * `config` - The configuration for this metric
     /// * `now` - The POSIX time in milliseconds the measurement is being taken
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider#value")]
     fn value(&self, config: &MetricConfig, now: i64) -> MetricValue;
 }
 
 /// A `Gauge` backed by a closure, mirroring Java's functional-interface usage
 /// (e.g. `(config, now) -> metrics.size()`).
+// a Gauge from a closure, standing in for a Java lambda
+#[doc(alias = "rust-only")]
 pub struct ClosureGauge<F>(F)
 where
     F: Fn(&MetricConfig, i64) -> MetricValue + Send + Sync;

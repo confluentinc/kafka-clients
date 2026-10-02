@@ -45,6 +45,7 @@ impl ClassicGroupState {
     /// `toString`).
     ///
     /// Mirrors the private `name` field in Java.
+    #[doc(alias = "org.apache.kafka.common.ClassicGroupState#name")]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unknown => "Unknown",

@@ -408,6 +408,8 @@ impl ConsumerConfig {
     // -------- Getters --------
 
     /// `bootstrap.servers`.
+    // typed getter for `bootstrap.servers`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
     }
@@ -416,78 +418,116 @@ impl ConsumerConfig {
         self.client_dns_lookup
     }
     /// `client.id`.
+    // typed getter for `client.id`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn client_id(&self) -> &str {
         &self.client_id
     }
     /// `group.id`, if any.
+    // typed getter for `group.id`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn group_id(&self) -> Option<&str> {
         self.group_id.as_deref()
     }
     /// `group.instance.id`, if any.
+    // typed getter for `group.instance.id`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
     /// `group.protocol`.
+    // typed getter for `group.protocol`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn group_protocol(&self) -> &str {
         &self.group_protocol
     }
     /// `group.remote.assignor`, if any.
+    // typed getter for `group.remote.assignor`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn group_remote_assignor(&self) -> Option<&str> {
         self.group_remote_assignor.as_deref()
     }
     /// `max.poll.records`.
+    // typed getter for `max.poll.records`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn max_poll_records(&self) -> i32 {
         self.max_poll_records
     }
     /// `max.poll.interval.ms`.
+    // typed getter for `max.poll.interval.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn max_poll_interval_ms(&self) -> i32 {
         self.max_poll_interval_ms
     }
     /// `session.timeout.ms`.
+    // typed getter for `session.timeout.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn session_timeout_ms(&self) -> i32 {
         self.session_timeout_ms
     }
     /// `heartbeat.interval.ms`.
+    // typed getter for `heartbeat.interval.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn heartbeat_interval_ms(&self) -> i32 {
         self.heartbeat_interval_ms
     }
     /// `enable.auto.commit`.
+    // typed getter for `enable.auto.commit`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn enable_auto_commit(&self) -> bool {
         self.enable_auto_commit
     }
     /// `auto.commit.interval.ms`.
+    // typed getter for `auto.commit.interval.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn auto_commit_interval_ms(&self) -> i32 {
         self.auto_commit_interval_ms
     }
     /// `auto.offset.reset`.
+    // typed getter for `auto.offset.reset`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn auto_offset_reset(&self) -> &str {
         &self.auto_offset_reset
     }
     /// `partition.assignment.strategy`.
+    // typed getter for `partition.assignment.strategy`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn partition_assignment_strategy(&self) -> &[String] {
         &self.partition_assignment_strategy
     }
     /// `security.protocol` - the protocol name (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
+    // typed getter for `security.protocol`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn security_protocol(&self) -> &str {
         self.security_protocol.name()
     }
     /// `metadata.recovery.strategy`.
+    // typed getter for `metadata.recovery.strategy`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn metadata_recovery_strategy(&self) -> &str {
         &self.metadata_recovery_strategy
     }
     /// `internal.throw.on.fetch.stable.offset.unsupported`.
+    // typed getter for `internal.throw.on.fetch.stable.offset.unsupported`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
         self.throw_on_fetch_stable_offset_unsupported
     }
     /// `request.timeout.ms`.
+    // typed getter for `request.timeout.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn request_timeout_ms(&self) -> i32 {
         self.request_timeout_ms
     }
     /// `retry.backoff.ms`.
+    // typed getter for `retry.backoff.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn retry_backoff_ms(&self) -> i64 {
         self.retry_backoff_ms
     }
     /// `retry.backoff.max.ms`.
+    // typed getter for `retry.backoff.max.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
     pub fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
     }
@@ -495,12 +535,16 @@ impl ConsumerConfig {
     // -------- Fluent setters --------
 
     /// Set `bootstrap.servers`.
+    // typed setter for `bootstrap.servers`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
     /// Set `client.id`, trimmed as [`ConsumerConfig::new`] trims it (Java's
     /// `ConfigDef.parseType`), so a blank id is generated at construction.
+    // typed setter for `client.id`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = client_id.into().trim().to_string();
         self
@@ -514,33 +558,45 @@ impl ConsumerConfig {
     ///
     /// Trimmed as [`ConsumerConfig::new`] trims it (Java's
     /// `ConfigDef.parseType`), so a blank id is rejected at construction.
+    // typed setter for `group.id`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
         self.group_id = Some(group_id.into().trim().to_string());
         self
     }
     /// Set `group.protocol`.
+    // typed setter for `group.protocol`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_group_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.group_protocol = protocol.into();
         self
     }
     /// Set `auto.offset.reset`.
+    // typed setter for `auto.offset.reset`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
         self.auto_offset_reset = value.into();
         self
     }
     /// Set `enable.auto.commit`.
+    // typed setter for `enable.auto.commit`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
         self.enable_auto_commit = value;
         self
     }
 
     /// Set `request.timeout.ms`.
+    // typed setter for `request.timeout.ms`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_request_timeout_ms(mut self, value: i32) -> Self {
         self.request_timeout_ms = value;
         self
     }
 
     /// Set `retry.backoff.ms`.
+    // typed setter for `retry.backoff.ms`, in place of the properties map
+    #[doc(alias = "rust-only")]
     pub fn set_retry_backoff_ms(mut self, value: i64) -> Self {
         self.retry_backoff_ms = value;
         self

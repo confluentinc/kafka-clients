@@ -81,7 +81,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// Both [`get`](Self::get) and [`get_with_timeout`](Self::get_with_timeout) resolve
     /// immediately with a clone of the result; [`is_done`](Self::is_done)
     /// returns `true`.
-    pub fn completed(result: Result<T, Error>) -> Self
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#completedFuture")]
+    pub fn completed_future(result: Result<T, Error>) -> Self
     where
         T: Clone + Sync,
     {
@@ -175,7 +176,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// thing inline as `KafkaFuture.allOf(...).thenApply(v -> collect each
     /// future.get())`; the Rust port names it because the get-driven model
     /// cannot call `.get()` synchronously inside a `then_apply` closure.
-    pub fn join_map<K>(entries: Vec<(K, KafkaFuture<T>)>) -> KafkaFuture<std::collections::HashMap<K, T>>
+    pub(crate) fn join_map<K>(entries: Vec<(K, KafkaFuture<T>)>) -> KafkaFuture<std::collections::HashMap<K, T>>
     where
         T: Clone + Sync,
         K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
@@ -196,7 +197,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// requires per-key granularity to survive the boundary). `join_map`
     /// cannot be reused for that: its `future.get().await?` abandons the
     /// remaining keys on the first error.
-    pub fn join_map_results<K>(
+    #[cfg(any(feature = "ffi", test))]
+    pub(crate) fn join_map_results<K>(
         entries: Vec<(K, KafkaFuture<T>)>,
     ) -> KafkaFuture<std::collections::HashMap<K, Result<T, Error>>>
     where
@@ -212,6 +214,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// This models the Java `thenApply` cases whose `BaseFunction` throws — for
     /// example `CreateTopicsResult.TopicMetadataAndConfig` accessors that call
     /// `ensureSuccess()` and rethrow a stored exception.
+    // the fallible thenApply variant (admin-client.md §4)
+    #[doc(alias = "rust-only")]
     pub fn then_apply_try<R, F>(&self, function: F) -> KafkaFuture<R>
     where
         T: Clone + Sync,
@@ -236,7 +240,7 @@ impl<T: Send + 'static> std::fmt::Debug for KafkaFuture<T> {
 
 /// Internal `KafkaFutureOps` impl for an already-resolved future.
 ///
-/// Used by [`KafkaFuture::completed`] to wrap a value that is already known
+/// Used by [`KafkaFuture::completed_future`] to wrap a value that is already known
 /// when the future is constructed. The result is cloned on each `get` call
 /// so the future is reusable, matching Java's `Future` semantics.
 struct CompletedFuture<T: Clone + Send + Sync + 'static> {
@@ -407,6 +411,7 @@ where
 /// Mirrors [`JoinMapFuture`] but records each key's `Result` instead of
 /// propagating the first error, so a partially failed batch keeps every
 /// per-key outcome.
+#[cfg(any(feature = "ffi", test))]
 struct JoinMapResultsFuture<K, T>
 where
     K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
@@ -416,8 +421,10 @@ where
 }
 
 /// Shorthand for the per-key outcome map produced by [`JoinMapResultsFuture`].
+#[cfg(any(feature = "ffi", test))]
 type ResultMap<K, T> = std::collections::HashMap<K, Result<T, Error>>;
 
+#[cfg(any(feature = "ffi", test))]
 impl<K, T> KafkaFutureOps<ResultMap<K, T>> for JoinMapResultsFuture<K, T>
 where
     K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
@@ -463,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_resolves_with_ok_value() {
-        let f: KafkaFuture<i32> = KafkaFuture::completed(Ok(42));
+        let f: KafkaFuture<i32> = KafkaFuture::completed_future(Ok(42));
         assert!(f.is_done());
         assert_eq!(f.get().await.unwrap(), 42);
         // Reusable across multiple gets, matching Java Future semantics.
@@ -473,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_resolves_with_err_value() {
-        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(Error::local_illegal_argument("test".to_string())));
+        let f: KafkaFuture<i32> = KafkaFuture::completed_future(Err(Error::local_illegal_argument("test".to_string())));
         assert!(f.is_done());
         assert!(matches!(f.get().await, Err(Error::LocalIllegalArgument(_))));
         assert!(matches!(
@@ -484,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_clone_shares_underlying_result() {
-        let f1: KafkaFuture<String> = KafkaFuture::completed(Ok("hello".to_string()));
+        let f1: KafkaFuture<String> = KafkaFuture::completed_future(Ok("hello".to_string()));
         let f2 = f1.clone();
         assert_eq!(f1.get().await.unwrap(), "hello");
         assert_eq!(f2.get().await.unwrap(), "hello");

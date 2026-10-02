@@ -64,6 +64,7 @@ impl MetricConfig {
     }
 
     /// Set the quota.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#quota")]
     pub fn set_quota(mut self, quota: Quota) -> Self {
         self.quota = Some(quota);
         self
@@ -76,6 +77,7 @@ impl MetricConfig {
     }
 
     /// Set the event window.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#eventWindow")]
     pub fn set_event_window(mut self, window: i64) -> Self {
         self.event_window = window;
         self
@@ -88,13 +90,14 @@ impl MetricConfig {
     }
 
     /// Set the time window in milliseconds.
-    pub fn set_time_window_ms(mut self, window_ms: i64) -> Self {
+    pub(crate) fn set_time_window_ms(mut self, window_ms: i64) -> Self {
         self.time_window_ms = window_ms;
         self
     }
 
     /// Set the time window expressed in the given unit, mirroring Java's
     /// `MetricConfig.timeWindow(long window, TimeUnit unit)`.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#timeWindow")]
     pub fn set_time_window(mut self, window: i64, unit: TimeUnit) -> Self {
         self.time_window_ms = unit.to_millis(window);
         self
@@ -107,6 +110,7 @@ impl MetricConfig {
     }
 
     /// Set the default tags.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#tags")]
     pub fn set_tags(mut self, tags: BTreeMap<String, String>) -> Self {
         self.tags = tags;
         self
@@ -121,6 +125,7 @@ impl MetricConfig {
     /// Set the number of samples. Panics if `samples < 1`, mirroring Java's
     /// `IllegalArgumentException` — this is a configuration-time programming
     /// error rather than a recoverable runtime condition.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
     pub fn set_samples(mut self, samples: i32) -> Self {
         assert!(samples >= 1, "The number of samples must be at least 1.");
         self.samples = samples;
@@ -134,6 +139,7 @@ impl MetricConfig {
     }
 
     /// Set the recording level.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#recordLevel")]
     pub fn set_record_level(mut self, recording_level: RecordingLevel) -> Self {
         self.recording_level = recording_level;
         self

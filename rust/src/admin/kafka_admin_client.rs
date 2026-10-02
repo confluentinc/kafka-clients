@@ -728,7 +728,7 @@ impl KafkaAdminClient {
                 }
             }
             let mut wire_resource = AlterConfigsResource::new();
-            wire_resource.set_resource_type(resource.resource_type().id());
+            wire_resource.set_resource_type(resource.r#type().id());
             wire_resource.set_resource_name(resource.name().to_string());
             wire_resource.set_configs(alterable_configs);
             wire_resources.push(wire_resource);
@@ -2113,8 +2113,8 @@ fn get_list_partition_reassignments_call(
 /// Mirrors `KafkaAdminClient.nodeFor`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
 fn node_for(resource: &ConfigResource) -> Option<i32> {
-    if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
-        || resource.resource_type() == config_resource::Type::BrokerLogger
+    if (resource.r#type() == config_resource::Type::Broker && !resource.is_default())
+        || resource.r#type() == config_resource::Type::BrokerLogger
     {
         // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
         // would throw. Here a parse failure degrades to "any broker" rather
@@ -2174,7 +2174,7 @@ fn get_describe_configs_call(
             .map(|resource| {
                 let mut r = DescribeConfigsResource::new();
                 r.set_resource_name(resource.name().to_string());
-                r.set_resource_type(resource.resource_type().id());
+                r.set_resource_type(resource.r#type().id());
                 r.set_configuration_keys(None);
                 r
             })
@@ -3700,7 +3700,7 @@ impl Admin for KafkaAdminClient {
         for resource in configs.keys() {
             let mut node = node_for(resource);
             if self.shared.metadata_manager.using_bootstrap_controllers()
-                && resource.resource_type() != config_resource::Type::BrokerLogger
+                && resource.r#type() != config_resource::Type::BrokerLogger
             {
                 node = None;
             }
@@ -7297,7 +7297,7 @@ mod tests {
         counts.insert("my_topic".to_string(), NewPartitions::increase_to(3));
         counts.insert(
             "other_topic".to_string(),
-            NewPartitions::increase_to_new_assignments(3, vec![vec![2], vec![3]]),
+            NewPartitions::increase_to_with_new_assignments(3, vec![vec![2], vec![3]]),
         );
         counts
     }
@@ -7530,22 +7530,10 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(
-            TopicPartition::new("my_topic", 0),
-            RecordsToDelete::before_offset_with_offset(3),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 1),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 2),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 3),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7579,7 +7567,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7615,8 +7603,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -11157,7 +11145,7 @@ mod tests {
 
         let description = future.get().await.unwrap();
         assert_eq!(description.group_id(), "g1");
-        assert_eq!(description.group_type(), GroupType::Consumer);
+        assert_eq!(description.r#type(), GroupType::Consumer);
         assert_eq!(description.group_state(), GroupState::Stable);
         assert_eq!(description.partition_assignor(), "uniform");
         // `coordinator()` is the Node the fulfillment request was routed to, and
@@ -11456,7 +11444,7 @@ mod tests {
         let listings = result.valid().get().await.unwrap();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].group_id(), "g1");
-        assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
+        assert_eq!(listings[0].r#type(), Some(GroupType::Consumer));
         assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
     }
 
@@ -11757,7 +11745,7 @@ mod tests {
         assert_eq!(map.len(), 2);
         // Each group's per-partition offsets match the requested spec.
         for group in ["groupA", "groupB"] {
-            let future = result.partitions_to_offset_and_metadata_for_group(group).unwrap();
+            let future = result.partitions_to_offset_and_metadata_with_group_id(group).unwrap();
             assert_eq!(future.get().await.unwrap().len(), 1);
         }
     }

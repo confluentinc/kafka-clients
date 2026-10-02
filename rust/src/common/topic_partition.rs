@@ -45,7 +45,7 @@ impl TopicPartition {
     }
 
     /// Returns a shared reference to the topic name.
-    pub fn topic_arc(&self) -> &Arc<str> {
+    pub(crate) fn topic_arc(&self) -> &Arc<str> {
         &self.topic
     }
 }

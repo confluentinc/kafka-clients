@@ -810,7 +810,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
         let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
-        for rec in records.records_partition(&tp) {
+        for rec in records.records_with_partition(&tp) {
             assert_eq!(
                 rec.offset(),
                 next_offset,

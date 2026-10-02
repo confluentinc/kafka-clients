@@ -30,5 +30,6 @@ pub trait Stat: Send + Sync {
     /// * `config` - The configuration to use for this metric
     /// * `value` - The value to record
     /// * `time_ms` - The POSIX time in milliseconds this value occurred
+    #[doc(alias = "org.apache.kafka.common.metrics.Stat#record")]
     fn record(&self, config: &MetricConfig, value: f64, time_ms: i64);
 }

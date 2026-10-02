@@ -31,6 +31,7 @@ pub struct DescribeProducersOptions {
 
 impl DescribeProducersOptions {
     /// Creates default options (default API timeout, no broker override).
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions#DescribeProducersOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -38,6 +39,7 @@ impl DescribeProducersOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -45,6 +47,7 @@ impl DescribeProducersOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -52,12 +55,14 @@ impl DescribeProducersOptions {
     /// Set the broker id to query for the topic partitions. Mirrors
     /// `DescribeProducersOptions.brokerId(int)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId")]
     pub fn set_broker_id(mut self, broker_id: i32) -> Self {
         self.broker_id = Some(broker_id);
         self
     }
 
     /// The broker id to query, if set. Mirrors `DescribeProducersOptions.brokerId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId")]
     pub fn broker_id(&self) -> Option<i32> {
         self.broker_id
     }

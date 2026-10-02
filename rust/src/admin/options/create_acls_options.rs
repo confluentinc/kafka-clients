@@ -27,6 +27,7 @@ pub struct CreateAclsOptions {
 
 impl CreateAclsOptions {
     /// Creates default options (default API timeout).
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions#CreateAclsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -34,6 +35,7 @@ impl CreateAclsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -41,6 +43,7 @@ impl CreateAclsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

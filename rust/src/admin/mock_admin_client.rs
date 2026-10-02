@@ -162,6 +162,9 @@ struct State {
 /// RPCs will be added with their tiers. All futures returned are immediately
 /// resolved.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient")]
+// Java ships it in the clients test jar for users to test against, as MockProducer / MockConsumer are public
+#[doc(alias = "public-in-rust")]
 pub struct MockAdminClient {
     state: Mutex<State>,
 }
@@ -190,6 +193,7 @@ impl MockAdminClient {
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
     /// keeps `crate::ffi::admin` free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#create")]
     pub fn create(num_brokers: i32) -> Result<Self, Error> {
         let brokers: Vec<Node> = (0..num_brokers)
             .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
@@ -252,6 +256,7 @@ impl MockAdminClient {
     ///
     /// Mirrors Java's `MockAdminClient.Builder.featureLevels` /
     /// `minSupportedFeatureLevels` / `maxSupportedFeatureLevels`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#featureLevels")]
     pub fn set_feature_levels(
         &self,
         feature_levels: HashMap<String, i16>,
@@ -279,6 +284,7 @@ impl MockAdminClient {
     /// partitions.
     ///
     /// Mirrors `MockAdminClient.updateBeginningOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateBeginningOffsets")]
     pub fn update_beginning_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.beginning_offsets.extend(new_offsets);
@@ -288,6 +294,7 @@ impl MockAdminClient {
     /// partitions.
     ///
     /// Mirrors `MockAdminClient.updateEndOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateEndOffsets")]
     pub fn update_end_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.end_offsets.extend(new_offsets);
@@ -297,6 +304,7 @@ impl MockAdminClient {
     /// `list_consumer_group_offsets_with_group_specs` for the given partitions.
     ///
     /// Mirrors `MockAdminClient.updateConsumerGroupOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateConsumerGroupOffsets")]
     pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.committed_offsets.extend(new_offsets);
@@ -313,6 +321,7 @@ impl MockAdminClient {
     /// installs the whole list up front — so this message has no Java
     /// counterpart; it exists because indexing `brokerLogDirs` out of range
     /// would otherwise panic.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#brokerLogDirs")]
     pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let slot = usize::try_from(broker_id)
@@ -333,6 +342,7 @@ impl MockAdminClient {
     /// was already added, or if any partition names a broker the mock does not
     /// have as its leader, in its replica list, or in its ISR
     /// (`MockAdminClient.java:296-309`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#addTopic")]
     pub fn add_topic(
         &self,
         internal: bool,
@@ -404,6 +414,7 @@ impl MockAdminClient {
     ///
     /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// does not exist (`MockAdminClient.java:328-330`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#markTopicForDeletion")]
     pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let topic = state
@@ -415,6 +426,7 @@ impl MockAdminClient {
     }
 
     /// Causes the next `number_of_requests` operations to fail with a timeout.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#timeoutNextRequest")]
     pub fn timeout_next_request(&self, number_of_requests: i32) {
         self.state.lock().unwrap().timeout_next_requests = number_of_requests;
     }
@@ -540,7 +552,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 ///
 /// Corresponds to `MockAdminClient.getResourceDescription`.
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
-    match resource.resource_type() {
+    match resource.r#type() {
         config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
@@ -601,7 +613,7 @@ fn handle_incremental_resource_alteration(
     resource: &ConfigResource,
     ops: &[AlterConfigOp],
 ) -> Result<(), Error> {
-    match resource.resource_type() {
+    match resource.r#type() {
         config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))

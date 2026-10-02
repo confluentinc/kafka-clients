@@ -860,6 +860,8 @@ impl ErrorHierarchy for LocalTimeoutError {}
 #[delegate(ErrorSource)]
 #[delegate(Display)]
 #[non_exhaustive]
+// the crate's flat base error type (CLAUDE.md §12.3)
+#[doc(alias = "rust-only")]
 pub enum Error {
     // Payloads defined in this file: the bare `KafkaException` and the
     // generic `java.lang` / `java.util` runtime errors, which have no

@@ -64,8 +64,8 @@ pub trait Writable {
     /// Write a UUID (128-bit value, most significant bits first).
     #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeUuid")]
     fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
-        self.write_long(uuid.most_sig_bits() as i64)?;
-        self.write_long(uuid.least_sig_bits() as i64)?;
+        self.write_long(uuid.most_significant_bits() as i64)?;
+        self.write_long(uuid.least_significant_bits() as i64)?;
         Ok(())
     }
 

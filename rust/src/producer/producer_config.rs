@@ -763,6 +763,8 @@ impl ProducerConfig {
     /// The partitioner's `K` / `V` must be the record types of the producer built
     /// from this config; otherwise `KafkaProducer::new` fails with
     /// "`<partitioner>` is not an instance of `<expected>`".
+    // the partitioner set through a setter, not a class config (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Box<dyn Partitioner<K, V>>) -> Self {
         self.partitioner_type = None;
         self.partitioner = Some(ConfiguredPartitioner {

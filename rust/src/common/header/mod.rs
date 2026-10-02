@@ -62,17 +62,18 @@ pub trait Headers {
     /// Translates Java's `Headers add(Header header)` (`Headers.java:34`). Java
     /// overloads `add` with `add(String key, byte[] value)`; the two parameter
     /// lists have nothing in common, so under CLAUDE.md §2 neither overload keeps
-    /// the plain name and both are suffixed with their parameter names.
+    /// the plain name and both name their parameters after `_with_`.
     ///
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
+    #[doc(alias = "org.apache.kafka.common.header.Headers#add")]
+    fn add_with_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
     ///
     /// Translates Java's `Headers add(String key, byte[] value)`
-    /// (`Headers.java:44`) — see [`add_header`](Headers::add_header) for why
+    /// (`Headers.java:44`) — see [`add_with_header`](Headers::add_with_header) for why
     /// neither overload keeps the plain name.
     ///
     /// The key and value are borrowed; the allocation is performed internally.
@@ -80,7 +81,8 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
+    #[doc(alias = "org.apache.kafka.common.header.Headers#add")]
+    fn add_with_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.
@@ -110,5 +112,7 @@ pub trait Headers {
     fn to_array(&self) -> &[RecordHeader];
 
     /// Returns an iterator over the headers.
+    // Java's Iterable.iterator, a JDK interface Headers extends
+    #[doc(alias = "rust-only")]
     fn iter(&self) -> std::slice::Iter<'_, RecordHeader>;
 }

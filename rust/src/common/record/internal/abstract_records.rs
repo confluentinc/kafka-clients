@@ -137,7 +137,7 @@ impl AbstractRecords {
                 base_timestamp = Some(record.timestamp());
             }
             let timestamp_delta = record.timestamp() - base_timestamp.unwrap();
-            size += DefaultRecord::size_in_bytes_with_slices(
+            size += DefaultRecord::do_size_in_bytes_with_key_value(
                 offset_delta,
                 timestamp_delta,
                 record.key(),

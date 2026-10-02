@@ -159,6 +159,7 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Configure this interceptor. The default implementation is a no-op.
     ///
     /// Corresponds to Java's `default void configure(Map<String, ?> configs)`.
+    #[doc(alias = "org.apache.kafka.common.Configurable#configure")]
     fn configure(&mut self, _configs: &HashMap<String, String>) {}
 
     /// Close this interceptor. The default implementation is a no-op.

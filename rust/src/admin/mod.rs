@@ -1317,14 +1317,14 @@ mod tests {
             .get()
             .await
             .unwrap();
-        convenience.sort_by_key(|resource| (resource.resource_type() as i32, resource.name().to_string()));
-        explicit.sort_by_key(|resource| (resource.resource_type() as i32, resource.name().to_string()));
+        convenience.sort_by_key(|resource| (resource.r#type() as i32, resource.name().to_string()));
+        explicit.sort_by_key(|resource| (resource.r#type() as i32, resource.name().to_string()));
 
         assert_eq!(convenience, explicit);
         assert!(
             convenience
                 .iter()
-                .any(|resource| resource.resource_type() == config_resource::Type::Topic),
+                .any(|resource| resource.r#type() == config_resource::Type::Topic),
             "an empty type set must not mean an empty result: {convenience:?}"
         );
     }

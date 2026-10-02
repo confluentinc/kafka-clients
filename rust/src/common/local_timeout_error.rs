@@ -42,5 +42,7 @@ message_only_error! {
     /// prefix carries what the package used to. It also says something the
     /// package name would not: these errors are raised *here*, never reported by
     /// a broker, which is why none of them has a wire code.
+    // translates java.util.concurrent.TimeoutException, a JDK exception (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     LocalTimeoutError
 }

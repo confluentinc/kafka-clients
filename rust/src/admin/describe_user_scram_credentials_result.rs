@@ -176,7 +176,7 @@ mod tests {
     fn data_future_completed(results: Vec<WireUserResult>) -> KafkaFuture<DescribeUserScramCredentialsResponseData> {
         let mut data = DescribeUserScramCredentialsResponseData::new();
         data.set_error_code(Errors::None.code()).set_results(results);
-        KafkaFuture::completed(Ok(data))
+        KafkaFuture::completed_future(Ok(data))
     }
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testTopLevelError`.
@@ -184,7 +184,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResultTest#testTopLevelError")]
     async fn test_top_level_error() {
         let data_future: KafkaFuture<DescribeUserScramCredentialsResponseData> =
-            KafkaFuture::completed(Err(Error::new(Errors::UnknownServerError)));
+            KafkaFuture::completed_future(Err(Error::new(Errors::UnknownServerError)));
         let results = DescribeUserScramCredentialsResult::new(data_future);
         assert!(results.all().get().await.is_err());
         assert!(results.users().get().await.is_err());

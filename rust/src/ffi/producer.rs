@@ -263,6 +263,8 @@ pub struct kafka_producer_RecordMetadata_t {
 /// in bulk with [`kafka_producer_ProducerProperties_from_configs`],
 /// then passed to [`kafka_producer_KafkaProducer_new`].
 #[repr(C)]
+// the `Properties` passed to the producer constructor
+#[doc(alias = "rust-only")]
 pub struct kafka_producer_ProducerProperties_t {
     _private: [u8; 0],
 }
@@ -2497,6 +2499,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 /// surface by cbindgen and the C tests, so they cannot be merged without an ABI
 /// break. Only the internal machinery is shared (see `ffi::common`).
 #[repr(C)]
+// a Java `Map<MetricName, Metric>`
+#[doc(alias = "rust-only")]
 pub struct kafka_producer_MetricMap_t {
     _private: [u8; 0],
 }

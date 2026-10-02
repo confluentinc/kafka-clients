@@ -43,6 +43,7 @@ impl Resource {
     }
 
     /// A resource representing the whole cluster.
+    #[doc(alias = "org.apache.kafka.common.resource.Resource#CLUSTER")]
     pub fn cluster() -> Resource {
         Resource::new(ResourceType::Cluster, Resource::CLUSTER_NAME)
     }

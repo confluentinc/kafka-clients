@@ -814,7 +814,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
                         // before deciding whether to actually throttle.
                         if let Some(sensor) = &self.throttle_time_sensor {
-                            sensor.record_value_time_ms(response.throttle_time_ms() as f64, now);
+                            sensor.record_with_value_time_ms(response.throttle_time_ms() as f64, now);
                         }
 
                         // Handle throttle

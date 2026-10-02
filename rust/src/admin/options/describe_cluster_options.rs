@@ -29,6 +29,7 @@ pub struct DescribeClusterOptions {
 
 impl DescribeClusterOptions {
     /// Creates default options.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#DescribeClusterOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -36,6 +37,7 @@ impl DescribeClusterOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -43,18 +45,21 @@ impl DescribeClusterOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether to include cluster authorized operations.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations")]
     pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
         self.include_authorized_operations = include_authorized_operations;
         self
     }
 
     /// Whether to include cluster authorized operations.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
@@ -62,12 +67,14 @@ impl DescribeClusterOptions {
     /// Set whether to include fenced brokers when they are not fenced from the
     /// cluster (only supported by the broker endpoint at DescribeCluster v2+).
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers")]
     pub fn set_include_fenced_brokers(mut self, include_fenced_brokers: bool) -> Self {
         self.include_fenced_brokers = include_fenced_brokers;
         self
     }
 
     /// Whether to include fenced brokers.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers")]
     pub fn include_fenced_brokers(&self) -> bool {
         self.include_fenced_brokers
     }

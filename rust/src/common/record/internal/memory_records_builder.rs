@@ -846,7 +846,8 @@ impl MemoryRecordsBuilder {
                 None => 0i64,
                 Some(base) => timestamp - base,
             };
-            DefaultRecord::size_in_bytes_with_slices(next_offset_delta, timestamp_delta, key, value, headers) as usize
+            DefaultRecord::do_size_in_bytes_with_key_value(next_offset_delta, timestamp_delta, key, value, headers)
+                as usize
         };
 
         // Be conservative and not take compression of the new record into consideration.

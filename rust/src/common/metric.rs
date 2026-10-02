@@ -23,6 +23,8 @@ use crate::common::MetricName;
 /// value kinds the consumer metrics produce.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+// the value `Metric::metric_value` returns, replacing Java's `Object`
+#[doc(alias = "rust-only")]
 pub enum MetricValue {
     /// A measurable (or `Double`-valued gauge) reading.
     Double(f64),

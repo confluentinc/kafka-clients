@@ -63,6 +63,8 @@ impl QuotaViolationError {
     /// The name of the metric that violated its quota.
     ///
     /// Stands in for Java's `metric()` — see the type-level note.
+    // stands in for Java's metric(), keeping only the KafkaMetric's name
+    #[doc(alias = "rust-only")]
     pub fn metric_name(&self) -> &MetricName {
         &self.metric_name
     }
@@ -80,6 +82,8 @@ impl QuotaViolationError {
     }
 
     /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
     }

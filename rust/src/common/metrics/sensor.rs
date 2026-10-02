@@ -45,6 +45,7 @@ pub enum RecordingLevel {
 
 impl RecordingLevel {
     /// The permanent and immutable id of this level.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#id")]
     pub fn id(&self) -> i16 {
         match self {
             RecordingLevel::Info => 0,
@@ -54,6 +55,7 @@ impl RecordingLevel {
     }
 
     /// An English description of the level.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#name")]
     pub fn name(&self) -> &'static str {
         match self {
             RecordingLevel::Info => "INFO",
@@ -244,9 +246,10 @@ impl Sensor {
     // one-argument form held the plain name and the no-arg form was called
     // `record_occurrence`.
 
-    /// Record an occurrence; short-hand for `record_value(1.0)`.
+    /// Record an occurrence; short-hand for `record_with_value(1.0)`.
     ///
     /// Mirrors Java's `record()` (`Sensor.java:183`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
     pub fn record(&self) {
         if self.should_record() {
             self.record_internal(1.0, self.time.milliseconds());
@@ -256,7 +259,8 @@ impl Sensor {
     /// Record a value with this sensor at the current time.
     ///
     /// Mirrors Java's `record(double value)` (`Sensor.java:195`).
-    pub fn record_value(&self, value: f64) {
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
+    pub fn record_with_value(&self, value: f64) {
         if self.should_record() {
             self.record_internal(value, self.time.milliseconds());
         }
@@ -265,7 +269,8 @@ impl Sensor {
     /// Record a value at a known time.
     ///
     /// Mirrors Java's `record(double value, long timeMs)` (`Sensor.java:209`).
-    pub fn record_value_time_ms(&self, value: f64, time_ms: i64) {
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
+    pub fn record_with_value_time_ms(&self, value: f64, time_ms: i64) {
         if self.should_record() {
             self.record_internal(value, time_ms);
         }
@@ -284,9 +289,9 @@ impl Sensor {
         // Java runs `if (checkQuotas) checkQuotas(timeMs);` here
         // (`Sensor.java:239-240`) and lets the `QuotaViolationException`
         // propagate out of `record`. The check itself IS translated — see
-        // [`check_quotas`](Self::check_quotas) / [`check_quotas_time_ms`] — but it
+        // [`check_quotas`](Self::check_quotas) / [`check_quotas_with_time_ms`] — but it
         // cannot be called from here yet, and the blocker is the signature, not
-        // the stats: `record` / `record_value` / `record_value_time_ms` return `()`,
+        // the stats: `record` / `record_with_value` / `record_with_value_time_ms` return `()`,
         // so there is nowhere to put the `Result` that CLAUDE.md §11.1/§12.2
         // requires, and Java's `record(value, timeMs, checkQuotas)` overload —
         // the boolean that selects enforcement — has no Rust counterpart for the
@@ -300,7 +305,7 @@ impl Sensor {
         // `check_quotas()` itself, which is what Java's broker-side
         // `ClientQuotaManager` does too.
         for parent in &self.parents {
-            parent.record_value_time_ms(value, time_ms);
+            parent.record_with_value_time_ms(value, time_ms);
         }
     }
 
@@ -312,7 +317,7 @@ impl Sensor {
     /// it keeps the plain name and its sibling is suffixed (CLAUDE.md §2).
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkQuotas")]
     pub fn check_quotas(&self) -> Result<(), Error> {
-        self.check_quotas_time_ms(self.time.milliseconds())
+        self.check_quotas_with_time_ms(self.time.milliseconds())
     }
 
     /// Check whether any metric with a configured quota has been violated, as of
@@ -330,7 +335,8 @@ impl Sensor {
     ///    `common::metrics::stats::TokenBucket`), so no metric can take that
     ///    branch and only `Quota::acceptable` is consulted. The branch must be
     ///    restored together with `TokenBucket`.
-    pub fn check_quotas_time_ms(&self, time_ms: i64) -> Result<(), Error> {
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkQuotas")]
+    pub fn check_quotas_with_time_ms(&self, time_ms: i64) -> Result<(), Error> {
         // The metrics are cloned out of the guard rather than measured under it:
         // `measurable_value` calls into user-supplied `Measurable` code, and
         // holding the sensor lock across that would let a measurable that
@@ -373,8 +379,9 @@ impl Sensor {
     /// Returns `Ok(true)` if added, `Ok(false)` if the sensor is expired,
     /// `Err` if the metric name already exists in the registry under a
     /// different sensor (Java's `IllegalArgumentException`).
-    pub fn add_metric_name(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
-        self.add_metric_name_config(metric_name, stat, None)
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
+    pub fn add_with_metric_name(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
+        self.add_with_metric_name_config(metric_name, stat, None)
     }
 
     /// Register a metric with this sensor with an optional per-metric config.
@@ -382,7 +389,8 @@ impl Sensor {
     /// Mirrors Java's
     /// `add(MetricName metricName, MeasurableStat stat, MetricConfig config)`
     /// (`Sensor.java:328`).
-    pub fn add_metric_name_config(
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
+    pub fn add_with_metric_name_config(
         &self,
         metric_name: MetricName,
         stat: Box<dyn MeasurableStat>,
@@ -433,7 +441,7 @@ impl Sensor {
     /// this form keeps the plain name (CLAUDE.md §2).
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
     pub fn add(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
-        self.add_config(stat, None)
+        self.add_with_config(stat, None)
     }
 
     /// Register a compound statistic with this sensor which yields multiple
@@ -444,7 +452,12 @@ impl Sensor {
     /// child gets its own `KafkaMetric` reading the (constant) `statConfig`. The
     /// child measurables share state with the compound stat, so a record is
     /// reflected in every child's measured value.
-    pub fn add_config(&self, stat: Box<dyn CompoundStat>, config: Option<Arc<MetricConfig>>) -> Result<bool, Error> {
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
+    pub fn add_with_config(
+        &self,
+        stat: Box<dyn CompoundStat>,
+        config: Option<Arc<MetricConfig>>,
+    ) -> Result<bool, Error> {
         if self.has_expired() {
             return Ok(false);
         }
@@ -586,16 +599,22 @@ mod tests {
     fn test_check_quotas_reports_an_upper_bound_violation() {
         let sensor = standalone(quota_config(Quota::upper_bound(5.0)), 60, RecordingLevel::Info);
         let metric_name = name("value", "test-group");
-        assert!(sensor.add_metric_name(metric_name.clone(), Box::new(Value::new())).unwrap());
+        assert!(
+            sensor
+                .add_with_metric_name(metric_name.clone(), Box::new(Value::new()))
+                .unwrap()
+        );
 
         // Under the bound: no violation, in either accessor.
-        sensor.record_value_time_ms(4.0, 1);
-        assert!(sensor.check_quotas_time_ms(1).is_ok());
+        sensor.record_with_value_time_ms(4.0, 1);
+        assert!(sensor.check_quotas_with_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
 
         // Over it: Java throws `QuotaViolationException(metric, value, bound)`.
-        sensor.record_value_time_ms(10.0, 2);
-        let error = sensor.check_quotas_time_ms(2).expect_err("10.0 exceeds the upper bound of 5.0");
+        sensor.record_with_value_time_ms(10.0, 2);
+        let error = sensor
+            .check_quotas_with_time_ms(2)
+            .expect_err("10.0 exceeds the upper bound of 5.0");
         let Error::QuotaViolation(violation) = &error else {
             panic!("expected a quota violation, got {error:?}");
         };
@@ -626,15 +645,17 @@ mod tests {
         let sensor = standalone(quota_config(Quota::lower_bound(5.0)), 60, RecordingLevel::Info);
         assert!(
             sensor
-                .add_metric_name(name("value", "test-group"), Box::new(Value::new()))
+                .add_with_metric_name(name("value", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
 
-        sensor.record_value_time_ms(10.0, 1);
-        assert!(sensor.check_quotas_time_ms(1).is_ok());
+        sensor.record_with_value_time_ms(10.0, 1);
+        assert!(sensor.check_quotas_with_time_ms(1).is_ok());
 
-        sensor.record_value_time_ms(1.0, 2);
-        let error = sensor.check_quotas_time_ms(2).expect_err("1.0 is below the lower bound of 5.0");
+        sensor.record_with_value_time_ms(1.0, 2);
+        let error = sensor
+            .check_quotas_with_time_ms(2)
+            .expect_err("1.0 is below the lower bound of 5.0");
         let Error::QuotaViolation(violation) = &error else {
             panic!("expected a quota violation, got {error:?}");
         };
@@ -649,11 +670,11 @@ mod tests {
         let sensor = standalone(info_config(), 60, RecordingLevel::Info);
         assert!(
             sensor
-                .add_metric_name(name("value", "test-group"), Box::new(Value::new()))
+                .add_with_metric_name(name("value", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
-        sensor.record_value_time_ms(f64::MAX, 1);
-        assert!(sensor.check_quotas_time_ms(1).is_ok());
+        sensor.record_with_value_time_ms(f64::MAX, 1);
+        assert!(sensor.check_quotas_with_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
     }
 
@@ -665,7 +686,7 @@ mod tests {
         let sensor = Arc::new(standalone(quota_config(Quota::upper_bound(f64::MAX)), 60, RecordingLevel::Info));
         assert!(
             sensor
-                .add_metric_name(name("test-metric", "test-group"), Box::new(Value::new()))
+                .add_with_metric_name(name("test-metric", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
 
@@ -674,7 +695,7 @@ mod tests {
             let sensor = Arc::clone(&sensor);
             handles.push(std::thread::spawn(move || {
                 for j in 0..20i64 {
-                    sensor.record_value_time_ms((j * index) as f64, j);
+                    sensor.record_with_value_time_ms((j * index) as f64, j);
                     sensor.check_quotas().expect("an upper bound of f64::MAX is never violated");
                 }
             }));
@@ -751,10 +772,12 @@ mod tests {
         let sensor = standalone(Arc::new(MetricConfig::new()), i64::MAX, RecordingLevel::Info);
         assert!(!sensor.has_metrics());
         sensor
-            .add_metric_name(name("name1", "group1"), Box::new(CumulativeCount::new()))
+            .add_with_metric_name(name("name1", "group1"), Box::new(CumulativeCount::new()))
             .unwrap();
         assert!(sensor.has_metrics());
-        sensor.add_metric_name(name("name2", "group2"), Box::new(Value::new())).unwrap();
+        sensor
+            .add_with_metric_name(name("name2", "group2"), Box::new(Value::new()))
+            .unwrap();
         assert!(sensor.has_metrics());
     }
 
@@ -787,10 +810,14 @@ mod tests {
         // Before expiry, adds succeed.
         assert!(
             sensor
-                .add_metric_name(name("test1", "grp1"), Box::new(CumulativeCount::new()))
+                .add_with_metric_name(name("test1", "grp1"), Box::new(CumulativeCount::new()))
                 .unwrap()
         );
-        assert!(sensor.add_metric_name(name("test2", "grp1"), Box::new(Value::new())).unwrap());
+        assert!(
+            sensor
+                .add_with_metric_name(name("test2", "grp1"), Box::new(Value::new()))
+                .unwrap()
+        );
         assert_eq!(2, sensor.metrics().len());
         assert!(!sensor.has_expired());
 
@@ -802,12 +829,12 @@ mod tests {
         // NOT registered (count unchanged).
         assert!(
             !sensor
-                .add_metric_name(name("test3", "grp1"), Box::new(CumulativeCount::new()))
+                .add_with_metric_name(name("test3", "grp1"), Box::new(CumulativeCount::new()))
                 .unwrap()
         );
         assert!(
             !sensor
-                .add_metric_name_config(name("test4", "grp1"), Box::new(Value::new()), None)
+                .add_with_metric_name_config(name("test4", "grp1"), Box::new(Value::new()), None)
                 .unwrap()
         );
         assert_eq!(2, sensor.metrics().len());
@@ -815,7 +842,7 @@ mod tests {
         // Java's `record` does not gate on expiry; recording resets
         // `last_record_time`, so the sensor is no longer expired afterwards and
         // the metric count remains unchanged.
-        sensor.record_value(1.0);
+        sensor.record_with_value(1.0);
         assert!(!sensor.has_expired());
         assert_eq!(2, sensor.metrics().len());
     }
@@ -823,7 +850,7 @@ mod tests {
     // ---------------------------------------------------------------------
     // Milestone-9 Phase M8 — pure in-process micro-bench (no broker needed).
     //
-    // Quantifies the per-call cost of `Sensor::record_value_time_ms` on a realistic
+    // Quantifies the per-call cost of `Sensor::record_with_value_time_ms` on a realistic
     // fetch-shaped sensor (a `Meter` = Rate + CumulativeSum, plus `Avg` +
     // `Max` — the stat shape used by `bytes-fetched` / `fetch-latency` and
     // friends). This is the unit of cost that the consumer pays PER FETCH /
@@ -857,14 +884,14 @@ mod tests {
         .unwrap();
         // Realistic fetch-sensor stat shape: a Meter (rate + total) + Avg + Max.
         sensor.add(Box::new(Meter::new(name("rate", "g"), name("total", "g")))).unwrap();
-        sensor.add_metric_name(name("avg", "g"), Box::new(Avg::new())).unwrap();
-        sensor.add_metric_name(name("max", "g"), Box::new(Max::new())).unwrap();
+        sensor.add_with_metric_name(name("avg", "g"), Box::new(Avg::new())).unwrap();
+        sensor.add_with_metric_name(name("max", "g"), Box::new(Max::new())).unwrap();
 
         // Warm up (JIT-free, but warms caches / branch predictors and forces
         // the first sample-buffer allocation outside the timed loop).
         let mut now = time.milliseconds();
         for i in 0..10_000 {
-            sensor.record_value_time_ms(i as f64, now);
+            sensor.record_with_value_time_ms(i as f64, now);
         }
 
         const ITERS: u64 = 2_000_000;
@@ -875,12 +902,12 @@ mod tests {
             if i % 4096 == 0 {
                 now += 1;
             }
-            sensor.record_value_time_ms(i as f64, now);
+            sensor.record_with_value_time_ms(i as f64, now);
         }
         let elapsed = start.elapsed();
         let ns_per_call = elapsed.as_nanos() as f64 / ITERS as f64;
         eprintln!(
-            "M8 micro-bench: Sensor::record_value_time_ms over Meter+Avg+Max = {ns_per_call:.1} ns/call \
+            "M8 micro-bench: Sensor::record_with_value_time_ms over Meter+Avg+Max = {ns_per_call:.1} ns/call \
              ({ITERS} iters in {elapsed:?})"
         );
         // Sanity floor: the work is non-trivial (mutex + 3 compound stats), so

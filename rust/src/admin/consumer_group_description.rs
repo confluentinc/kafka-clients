@@ -110,7 +110,8 @@ impl ConsumerGroupDescription {
     }
 
     /// The group type. Mirrors `type()`.
-    pub fn group_type(&self) -> GroupType {
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#type")]
+    pub fn r#type(&self) -> GroupType {
         self.group_type
     }
 

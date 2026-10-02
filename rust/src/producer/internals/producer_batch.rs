@@ -1645,8 +1645,8 @@ mod tests {
                 .as_ref()
                 .expect("callback must receive Some metadata on failure, never None");
             assert_eq!(
-                expected_tp,
-                metadata.topic_partition(),
+                (expected_tp.topic(), expected_tp.partition()),
+                (metadata.topic(), metadata.partition()),
                 "sentinel keeps the batch's real topic-partition"
             );
             assert_eq!(RecordMetadata::INVALID_OFFSET, metadata.offset());

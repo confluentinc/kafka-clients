@@ -32,6 +32,7 @@ pub struct ListConsumerGroupOffsetsSpec {
 
 impl ListConsumerGroupOffsetsSpec {
     /// Creates a spec that lists all topic partitions of the group.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#ListConsumerGroupOffsetsSpec")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -41,6 +42,7 @@ impl ListConsumerGroupOffsetsSpec {
     ///
     /// Mirrors `topicPartitions(Collection<TopicPartition>)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions")]
     pub fn set_topic_partitions(mut self, topic_partitions: Option<Vec<TopicPartition>>) -> Self {
         self.topic_partitions = topic_partitions;
         self

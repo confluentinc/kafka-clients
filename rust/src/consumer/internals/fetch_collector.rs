@@ -2654,7 +2654,7 @@ mod tests {
         assert_eq!(3, fetch.count(), "only the non-stale partition contributes records");
 
         let records_total = metrics
-            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .metric_instance_with_key_value(&registry.records_consumed_total, &[])
             .unwrap();
         assert_eq!(
             MetricValue::Double(3.0),
