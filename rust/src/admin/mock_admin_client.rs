@@ -88,7 +88,10 @@ const DEFAULT_CLUSTER_ID: &str = "4A5xz_QZTB2CtL4wc0X0Jw";
 const DEFAULT_LOG_DIRS: &[&str] = &["/tmp/kafka-logs"];
 
 /// Internal per-topic metadata held by the mock.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written: `configs` holds raw config values and renders as
+/// its key set only (see [`config_keys`]).
+#[derive(Clone)]
 struct TopicMetadata {
     topic_id: Uuid,
     is_internal: bool,
@@ -105,7 +108,9 @@ struct TopicMetadata {
 }
 
 /// Mutable state, guarded by a mutex (mirrors Java's `synchronized` methods).
-#[derive(Debug)]
+///
+/// `Debug` is hand-written: the config maps hold raw config values and render
+/// as their key sets only (see [`config_keys`]).
 struct State {
     brokers: Vec<Node>,
     controller: Node,
@@ -153,6 +158,120 @@ struct State {
     // Maximum supported feature levels, keyed by feature name (mirrors Java's
     // `maxSupportedFeatureLevels`).
     max_supported_feature_levels: HashMap<String, i16>,
+}
+
+/// Renders a raw config map as its key set only, never a value.
+///
+/// Java's `MockAdminClient` has no `toString()`, neither on the client nor on
+/// its `TopicMetadata`, so there is no Java rendering of these maps to mirror.
+/// They are plain `Map<String, String>`s (`MockAdminClient.java:98-101`,
+/// `:1503`), and a value may be a secret, such as a broker's
+/// `ssl.keystore.password` or a listener's `sasl.jaas.config`, with no
+/// `isSensitive` flag to tell it apart. So no value is printed, just as
+/// `ProducerConfig`'s `Debug` prints no value of its raw `originals` map. The
+/// map is a `BTreeMap`, so the keys are already sorted; they are borrowed, not
+/// copied.
+fn config_keys(configs: &BTreeMap<String, String>) -> BTreeSet<&str> {
+    configs.keys().map(String::as_str).collect()
+}
+
+/// Renders every field as the derive it replaces did, except `configs`, which
+/// renders as its key set only (see [`config_keys`]).
+impl std::fmt::Debug for TopicMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here.
+        let Self {
+            topic_id,
+            is_internal,
+            partitions,
+            partition_log_dirs,
+            configs,
+            marked_for_deletion,
+            fetches_remaining_until_visible,
+        } = self;
+        f.debug_struct("TopicMetadata")
+            .field("topic_id", topic_id)
+            .field("is_internal", is_internal)
+            .field("partitions", partitions)
+            .field("partition_log_dirs", partition_log_dirs)
+            .field("configs", &configs.as_ref().map(config_keys))
+            .field("marked_for_deletion", marked_for_deletion)
+            .field("fetches_remaining_until_visible", fetches_remaining_until_visible)
+            .finish()
+    }
+}
+
+/// Renders every field as the derive it replaces did, except the config maps
+/// (`broker_configs`, `client_metrics_configs`, `group_configs`,
+/// `default_group_configs`, and each topic's `configs`), which render as their
+/// key sets only (see [`config_keys`]). Java's `MockAdminClient` has no
+/// `toString()` to mirror. The delegation tokens render through
+/// [`DelegationToken`]'s `Debug`, which hides the HMAC.
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here.
+        let Self {
+            brokers,
+            controller,
+            cluster_id,
+            all_topics,
+            topic_ids,
+            topic_names,
+            default_partitions,
+            default_replication_factor,
+            timeout_next_requests,
+            broker_configs,
+            client_metrics_configs,
+            group_configs,
+            default_group_configs,
+            broker_log_dirs,
+            replica_moves,
+            reassignments,
+            beginning_offsets,
+            end_offsets,
+            committed_offsets,
+            all_tokens,
+            feature_levels,
+            min_supported_feature_levels,
+            max_supported_feature_levels,
+        } = self;
+        let broker_configs: Vec<BTreeSet<&str>> = broker_configs.iter().map(config_keys).collect();
+        let client_metrics_configs: BTreeMap<&str, BTreeSet<&str>> = client_metrics_configs
+            .iter()
+            .map(|(name, configs)| (name.as_str(), config_keys(configs)))
+            .collect();
+        let group_configs: BTreeMap<&str, BTreeSet<&str>> = group_configs
+            .iter()
+            .map(|(group_id, configs)| (group_id.as_str(), config_keys(configs)))
+            .collect();
+        f.debug_struct("State")
+            .field("brokers", brokers)
+            .field("controller", controller)
+            .field("cluster_id", cluster_id)
+            .field("all_topics", all_topics)
+            .field("topic_ids", topic_ids)
+            .field("topic_names", topic_names)
+            .field("default_partitions", default_partitions)
+            .field("default_replication_factor", default_replication_factor)
+            .field("timeout_next_requests", timeout_next_requests)
+            .field("broker_configs", &broker_configs)
+            .field("client_metrics_configs", &client_metrics_configs)
+            .field("group_configs", &group_configs)
+            .field("default_group_configs", &config_keys(default_group_configs))
+            .field("broker_log_dirs", broker_log_dirs)
+            .field("replica_moves", replica_moves)
+            .field("reassignments", reassignments)
+            .field("beginning_offsets", beginning_offsets)
+            .field("end_offsets", end_offsets)
+            .field("committed_offsets", committed_offsets)
+            .field("all_tokens", all_tokens)
+            .field("feature_levels", feature_levels)
+            .field("min_supported_feature_levels", min_supported_feature_levels)
+            .field("max_supported_feature_levels", max_supported_feature_levels)
+            .finish()
+    }
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -2705,6 +2824,141 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed, vec![token]);
+    }
+
+    /// New test, no Java original: `{:?}` of a mock holding a token does not
+    /// print the token's HMAC. The mock's HMAC is the UTF-8 bytes of the token
+    /// id, and the id itself is rendered (Java's `TokenInformation.toString()`
+    /// prints it too), so the check is on the byte rendering a derived `Debug`
+    /// of the HMAC would produce.
+    #[tokio::test]
+    async fn debug_does_not_render_token_hmac() {
+        let client = admin();
+        let token = client
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(rendered.contains("hmac=[*******]"), "{rendered}");
+        assert!(!rendered.contains(&format!("{:?}", token.hmac())), "HMAC leaked: {rendered}");
+        // The pretty form spreads a byte list over indented lines, so check
+        // for the derived field itself rather than for one fixed layout.
+        let pretty = format!("{client:#?}");
+        assert!(pretty.contains("hmac=[*******]"), "{pretty}");
+        assert!(!pretty.contains("hmac: ["), "HMAC leaked: {pretty}");
+    }
+
+    /// New test, no Java original (Java's `MockAdminClient` has no
+    /// `toString()`): `{:?}` of a mock holding config values renders every
+    /// config map as its key set, never a value. Covers the broker, topic,
+    /// client-metrics and group configs and the group defaults, each holding a
+    /// distinct value.
+    #[tokio::test]
+    async fn debug_does_not_render_config_values() {
+        const BROKER_KEY: &str = "listener.name.sasl_ssl.plain.sasl.jaas.config";
+        const BROKER_SECRET: &str = "broker-jaas-S3cr3t-6a1d";
+        const TOPIC_KEY: &str = "retention.ms";
+        const TOPIC_SECRET: &str = "topic-value-S3cr3t-0c5e";
+        const CLIENT_METRICS_KEY: &str = "interval.ms";
+        const CLIENT_METRICS_SECRET: &str = "metrics-value-S3cr3t-8b27";
+        const GROUP_KEY: &str = "consumer.session.timeout.ms";
+        const GROUP_SECRET: &str = "group-value-S3cr3t-3f90";
+        const DEFAULT_GROUP_KEY: &str = "consumer.heartbeat.interval.ms";
+        const DEFAULT_GROUP_SECRET: &str = "group-default-S3cr3t-d14b";
+
+        let client = admin();
+        client
+            .add_topic(
+                false,
+                "orders",
+                Vec::new(),
+                Some(BTreeMap::from([(TOPIC_KEY.to_string(), TOPIC_SECRET.to_string())])),
+            )
+            .unwrap();
+        let set = |name: &str, value: &str| {
+            AlterConfigOp::new(ConfigEntry::new(name.to_string(), Some(value.to_string())), OpType::Set)
+        };
+        let configs = HashMap::from([
+            (
+                ConfigResource::new(config_resource::Type::Broker, "0".to_string()),
+                vec![set(BROKER_KEY, BROKER_SECRET)],
+            ),
+            (
+                ConfigResource::new(config_resource::Type::ClientMetrics, "metrics".to_string()),
+                vec![set(CLIENT_METRICS_KEY, CLIENT_METRICS_SECRET)],
+            ),
+            (
+                ConfigResource::new(config_resource::Type::Group, "group".to_string()),
+                vec![set(GROUP_KEY, GROUP_SECRET)],
+            ),
+        ]);
+        client
+            .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        {
+            // No public seeding API reaches the group defaults (Java's
+            // `Builder.defaultGroupConfigs`), so seed them directly. The other
+            // values are asserted stored, so the renderings below are what
+            // hides them.
+            let mut state = client.state.lock().unwrap();
+            state
+                .default_group_configs
+                .insert(DEFAULT_GROUP_KEY.to_string(), DEFAULT_GROUP_SECRET.to_string());
+            assert_eq!(state.broker_configs[0][BROKER_KEY], BROKER_SECRET);
+            assert_eq!(state.all_topics["orders"].configs.as_ref().unwrap()[TOPIC_KEY], TOPIC_SECRET);
+            assert_eq!(
+                state.client_metrics_configs["metrics"][CLIENT_METRICS_KEY],
+                CLIENT_METRICS_SECRET
+            );
+            assert_eq!(state.group_configs["group"][GROUP_KEY], GROUP_SECRET);
+        }
+
+        let rendered = format!("{client:?}");
+        assert!(rendered.contains("default_partitions: 1"), "{rendered}");
+        assert!(
+            rendered.contains(&format!(
+                "broker_configs: [{{\"default.replication.factor\", \"{BROKER_KEY}\"}}, \
+                 {{\"default.replication.factor\"}}, {{\"default.replication.factor\"}}]"
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains(&format!("configs: Some({{\"{TOPIC_KEY}\"}})")), "{rendered}");
+        assert!(
+            rendered.contains(&format!(
+                "client_metrics_configs: {{\"metrics\": {{\"{CLIENT_METRICS_KEY}\"}}}}"
+            )),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("group_configs: {{\"group\": {{\"{GROUP_KEY}\"}}}}")),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("default_group_configs: {{\"{DEFAULT_GROUP_KEY}\"}}")),
+            "{rendered}"
+        );
+        let pretty = format!("{client:#?}");
+        for key in [BROKER_KEY, TOPIC_KEY, CLIENT_METRICS_KEY, GROUP_KEY, DEFAULT_GROUP_KEY] {
+            assert!(pretty.contains(&format!("\"{key}\",")), "key {key} missing: {pretty}");
+        }
+        for rendered in [rendered, pretty] {
+            for secret in [
+                BROKER_SECRET,
+                TOPIC_SECRET,
+                CLIENT_METRICS_SECRET,
+                GROUP_SECRET,
+                DEFAULT_GROUP_SECRET,
+            ] {
+                assert!(!rendered.contains(secret), "config value {secret} leaked: {rendered}");
+            }
+            // The broker default is a config value too: only its key renders.
+            assert!(!rendered.contains("\"default.replication.factor\": "), "{rendered}");
+        }
     }
 
     /// New test, no Java original: renewing an unknown HMAC fails with

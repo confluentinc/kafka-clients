@@ -1,9 +1,21 @@
-# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+# Current Status: Milestones 1–15 complete — client tracks Apache Kafka 4.3.1
 
 > **Paths (2026-09-27):** the repository was split into `rust/`, `python/` and
 > `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,
 > `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
 > formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
+
+> **Current state (2026-09-29):** Milestone 15 landed secret redaction aligned
+> with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
+> of `SslConfigs` / `SaslConfigs` are typed `Password`, `ProducerConfig` renders its
+> raw `originals` map as keys only, and `DelegationToken`,
+> `UserScramCredentialUpsertion` and the six SASL / delegation-token wrappers
+> delegate `Debug` to their redacting `Display`; its Phase 2 fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`) and the remaining request,
+> builder and admin-config types whose Java `toString()` masks. Milestone 14 added the
+> `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
+> ducktape system tests. See `design/history/MILESTONES.md` and
+> `design/history/Milestone-15-password-redaction/PLAN.md`.
 
 > **Current state (2026-09-27, re-verified against the tree):** several
 > statements further down this file were true when written and are now

@@ -31,7 +31,7 @@
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off; hi()=PBKDF2 first block; SASL integration gap
 - [M11 G4 admin groups/offsets](m11_g4_admin_groups_offsets_notes.md) — valid()/errors() is whole-value; NOT_READY is STREAMS-only
 - [M11 real-broker findings](m11_real_broker_findings_notes.md) — id-only assertions hide endpoint bugs; pipe masks clippy exit
-- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after mv-restoring a corrupted source, touch it or cargo runs the stale binary
+- [Teeth-check traps](workflow_teeth_check_mtime.md) — touch a mv-restored source; deny(warnings) unused-import mutation = silent compile fail
 - [Phase 1 foundation types](phase1_design_notes.md) — M8 P1: ConsumerRecord Arc<str>, ConsumerError enum, group.protocol default
 - [Phase 2 trait surface](phase2_design_notes.md) — M8 P2: Clone for panic recovery; 'static bounds; Arc<State> in tests
 - [Phase 3 MockConsumer](phase3_design_notes.md) — M8 P3: KafkaError::Wakeup, PollTask alias, async rebalance
@@ -178,3 +178,5 @@
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
 - [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
 - [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
+- [M15 Password redaction](m15_password_redaction_notes.md) — Vec<u8> Debug teeth; raw maps = key sets; file allow(dead_code) kills dead-code teeth
+- [M15 merge + review](m15_merge_review_followup_notes.md) — rust/ move strands new dirs; Java lint rules via stand-in; unsupported pkg → pub(crate)

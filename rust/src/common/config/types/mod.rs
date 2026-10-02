@@ -12,19 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for Kafka clients (org.apache.kafka.common.config).
+//! Configuration value types (org.apache.kafka.common.config.types).
+//!
+//! Java marks this package "not a supported Kafka API" (its `package-info.java`),
+//! so it is crate-private (CLAUDE.md §2). No public signature names a type from
+//! it, so a user meets a [`Password`] only as the `[hidden]` that a config's
+//! `Debug` renders in its place.
 
-pub(crate) mod config_def;
-mod config_error;
-pub mod config_resource;
-mod sasl_configs;
-mod ssl_client_auth;
-mod ssl_configs;
-pub(crate) mod types;
+mod password;
 
-pub(crate) use config_def::ConfigDef;
-pub use config_error::ConfigError;
-pub use config_resource::ConfigResource;
-pub use sasl_configs::SaslConfigs;
-pub use ssl_client_auth::SslClientAuth;
-pub use ssl_configs::SslConfigs;
+pub use password::Password;

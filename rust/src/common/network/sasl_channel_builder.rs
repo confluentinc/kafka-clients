@@ -196,6 +196,7 @@ impl ChannelBuilder for SaslChannelBuilder {
 mod tests {
     use super::*;
     use crate::common::config::SslConfigs;
+    use crate::common::config::types::Password;
     use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test 1: Build channel with SASL_PLAINTEXT creates a channel that is not ready.
@@ -209,7 +210,7 @@ mod tests {
         let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfigs::default()
         };
         let builder = SaslChannelBuilder::new(
@@ -243,7 +244,7 @@ mod tests {
         let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfigs::default()
         };
         let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
@@ -273,7 +274,7 @@ mod tests {
         // Missing username
         let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfigs::default()
         };
         let result = SaslChannelBuilder::new(
@@ -311,7 +312,7 @@ mod tests {
         let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfigs::default()
         };
         let result = SaslChannelBuilder::new(
@@ -324,5 +325,37 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("SASL_PLAINTEXT or SASL_SSL"));
+    }
+
+    /// `{:?}` of a builder holding credentials renders neither the password
+    /// nor the JAAS string: the hand-written `Debug` lists only the
+    /// non-secret fields.
+    #[test]
+    fn test_debug_hides_credentials() {
+        let jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                    username=\"jaas-user\" password=\"jaas-S3cr3t\";";
+        let sasl_config = SaslConfigs {
+            mechanism: "PLAIN".to_string(),
+            jaas_config: Some(Password::new(jaas)),
+            username: Some("alice".to_string()),
+            password: Some(Password::new("direct-S3cr3t")),
+        };
+        let builder = SaslChannelBuilder::new(
+            SecurityProtocol::SaslPlaintext,
+            sasl_config,
+            None,
+            None,
+            "visible-client",
+            LogContext::empty(),
+        )
+        .unwrap();
+
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            for secret in [jaas, "jaas-S3cr3t", "direct-S3cr3t", "PlainLoginModule", "S3cr3t"] {
+                assert!(!rendered.contains(secret), "{secret:?} leaked: {rendered}");
+            }
+            assert!(rendered.contains("\"PLAIN\""), "{rendered}");
+            assert!(rendered.contains("\"visible-client\""), "{rendered}");
+        }
     }
 }

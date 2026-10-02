@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs};
@@ -28,6 +29,12 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
+// `Debug` is derived: every secret this struct holds is a `Password` inside
+// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
+// ever gains a map of the raw user properties (Java's `originals()`), replace
+// the derive with a hand-written `Debug` that renders that map as its key set
+// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
+// does not parse, and Java never prints a raw `originals` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
@@ -157,7 +164,7 @@ impl AdminClientConfig {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
-                        Some(value.to_string())
+                        Some(Password::new(value))
                     };
                 },
                 key if key.starts_with("ssl.") => {
@@ -556,5 +563,60 @@ mod tests {
             AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
             ["a:1".to_string(), "b:1".to_string()]
         );
+    }
+
+    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
+    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
+    /// and `SslConfigs` hold those values as `Password`s.
+    #[test]
+    fn test_debug_redacts_password_configs() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
+            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
+            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+            ("ssl.key.password", "key-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        props.insert("client.id".to_string(), "visible-admin".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        // The secrets did reach the config; they are only hidden from `Debug`.
+        assert_eq!(config.sasl_config().resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(
+            config.ssl_config().key_password.as_ref().map(Password::value),
+            Some("key-S3cr3t")
+        );
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+            }
+            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), secrets.len(), "{rendered}");
+            for visible in [
+                "visible-host:9092",
+                "visible-admin",
+                "\"PLAIN\"",
+                "/visible/truststore.pem",
+            ] {
+                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+            }
+        }
     }
 }
