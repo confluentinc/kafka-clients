@@ -28,7 +28,7 @@ use crate::common::config::types::Password;
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 ///
 /// `Debug` renders the user and the credential info, and
-/// [`Password::HIDDEN`] in place of the salt and the password.
+/// `Password::HIDDEN` in place of the salt and the password.
 #[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion")]
 pub struct UserScramCredentialUpsertion {

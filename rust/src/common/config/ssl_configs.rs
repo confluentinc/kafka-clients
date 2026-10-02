@@ -126,7 +126,7 @@ impl SslConfigs {
 /// so `truststore_type` and `keystore_type` default to `"PEM"`.
 ///
 /// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
-/// [`Password`], so the derived `Debug` renders each of them as `[hidden]`.
+/// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]

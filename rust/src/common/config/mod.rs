@@ -20,7 +20,7 @@ pub mod config_resource;
 mod sasl_configs;
 mod ssl_client_auth;
 mod ssl_configs;
-pub mod types;
+pub(crate) mod types;
 
 pub(crate) use config_def::ConfigDef;
 pub use config_error::ConfigError;

@@ -13,6 +13,11 @@
 // limitations under the License.
 
 //! Configuration value types (org.apache.kafka.common.config.types).
+//!
+//! Java marks this package "not a supported Kafka API" (its `package-info.java`),
+//! so it is crate-private (CLAUDE.md §2). No public signature names a type from
+//! it, so a user meets a [`Password`] only as the `[hidden]` that a config's
+//! `Debug` renders in its place.
 
 mod password;
 

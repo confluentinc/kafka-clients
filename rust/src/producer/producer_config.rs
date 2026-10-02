@@ -56,7 +56,7 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
 ///
 /// `Debug` is hand-written so that it never renders a secret: the typed
-/// secrets are [`Password`]s, and the raw user map (`originals`) renders as
+/// secrets are `Password`s, and the raw user map (`originals`) renders as
 /// its key set only.
 #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig")]
 pub struct ProducerConfig {
@@ -347,8 +347,8 @@ impl Default for ProducerConfig {
 /// Renders every field in declaration order, as the derive it replaces did,
 /// but never a secret.
 ///
-/// The typed secrets are [`Password`]s inside `sasl_config` / `ssl_config` and
-/// render as [`Password::HIDDEN`] on their own. `originals`, the raw user map,
+/// The typed secrets are `Password`s inside `sasl_config` / `ssl_config` and
+/// render as `Password::HIDDEN` on their own. `originals`, the raw user map,
 /// renders as its sorted key set, with no values at all, because Java never
 /// prints a raw `originals` value: `AbstractConfig.logAll()`
 /// (`AbstractConfig.java:371-385`) prints only the values parsed for the keys
