@@ -2277,7 +2277,7 @@ internal static class AdminCallbacks
     /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, two
     /// levels deep: the map from the result, every topic and metadata string from the map.
     /// None of it is owned, none of it is freed here, and all of it dangles the moment
-    /// <see cref="NativeMethods.ListConsumerGroupOffsetsResultDestroy"/> runs — which is why
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_destroy</c> runs — which is why
     /// the copy-out completes inside the walk and the destroy is in the trampoline's
     /// <c>finally</c>, strictly after. No native-backed string or pointer is retained.
     /// </remarks>

@@ -200,17 +200,6 @@ internal static partial class NativeMethods
 
     // ---- kafka_admin_CreateTopicsResult_t — a Category-3 owned borrow-root ----
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int CreateTopicsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_CreateTopicsResult_get_key</c> — the topic name at
-    /// <paramref name="index"/>, <b>borrowed</b> from the result (NUL-terminated,
-    /// ffi §B3 row 2). Entries are sorted by topic name.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr CreateTopicsResultGetKey(IntPtr result, int index);
-
     /// <summary>
     /// <c>kafka_admin_CreateTopicsResult_get_value</c> — the metadata for the topic at
     /// <paramref name="index"/>, <b>borrowed</b>, or null if that topic failed. Exactly
@@ -218,20 +207,6 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr CreateTopicsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_CreateTopicsResult_get_error</c> — that topic's error, or null if
-    /// it was created successfully.
-    /// <para>
-    /// ⚠ <b>The pointer is BORROWED from the result handle.</b> The header is explicit:
-    /// read it with the <c>kafka_common_KafkaError_*</c> accessors, but do <b>not</b>
-    /// destroy it. Use <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> — never
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, which destroys in its
-    /// <c>finally</c> and would double-free when the result root is destroyed.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr CreateTopicsResultGetError(IntPtr result, int index);
 
     /// <summary>
     /// <c>kafka_admin_CreateTopicsResult_destroy</c> — frees the result root,
@@ -331,43 +306,6 @@ internal static partial class NativeMethods
         AdminCallbacks.DeleteTopicsCallback callback,
         IntPtr userData);
 
-    // ---- kafka_admin_DeleteTopicsResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DeleteTopicsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteTopicsResult_get_key</c> — the key at
-    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated, ffi §B3 row 2): the
-    /// topic <em>name</em> for the by-name entry point, the base64 topic <em>id</em> for
-    /// the by-id one.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteTopicsResultGetKey(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteTopicsResult_get_error</c> — that topic's error, or null if it
-    /// was deleted successfully. There is deliberately <b>no</b> <c>get_value</c>: Java's
-    /// per-key future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the
-    /// success value (result shape 2).
-    /// <para>
-    /// ⚠ <b>The pointer is BORROWED from the result handle</b> — read it with the
-    /// <c>kafka_common_KafkaError_*</c> accessors, never destroy it. Use
-    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>, never
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteTopicsResultGetError(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteTopicsResult_destroy</c> — frees the result root,
-    /// invalidating every borrowed sub-handle taken from it. Null-safe, so the completion
-    /// trampoline can call it unconditionally in its <c>finally</c>.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DeleteTopicsResultDestroy(IntPtr result);
-
     // ---- describeTopics (M15/P2a) — the by-name and by-id entry points ----
 
     /// <summary>
@@ -401,30 +339,6 @@ internal static partial class NativeMethods
         int partitionSizeLimitPerResponse,
         AdminCallbacks.DescribeTopicsCallback callback,
         IntPtr userData);
-
-    // ---- kafka_admin_DescribeTopicsResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeTopicsResultCount(IntPtr result);
-
-    /// <inheritdoc cref="DeleteTopicsResultGetKey"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeTopicsResultGetKey(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeTopicsResult_get_value</c> — the description for the topic
-    /// at <paramref name="index"/>, <b>borrowed</b>, or null if that topic failed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeTopicsResultGetValue(IntPtr result, int index);
-
-    /// <inheritdoc cref="DeleteTopicsResultGetError"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeTopicsResultGetError(IntPtr result, int index);
-
-    /// <inheritdoc cref="DeleteTopicsResultDestroy"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeTopicsResultDestroy(IntPtr result);
 
     // ---- kafka_admin_TopicDescription_t — a borrowed child of the result ----
 
@@ -658,35 +572,6 @@ internal static partial class NativeMethods
         AdminCallbacks.CreatePartitionsCallback callback,
         IntPtr userData);
 
-    // ---- kafka_admin_CreatePartitionsResult_t — a Category-3 owned borrow-root ----
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int CreatePartitionsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_CreatePartitionsResult_get_key</c> — the topic name at
-    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated).
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr CreatePartitionsResultGetKey(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_CreatePartitionsResult_get_error</c> — that topic's error, or null
-    /// if its partitions were created.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>): it dies with the result root and must
-    /// <b>never</b> be destroyed — <see cref="KafkaException.FromBorrowedHandle"/>, not
-    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no
-    /// <c>_get_value</c> to declare beside it: Java's per-key future is
-    /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr CreatePartitionsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void CreatePartitionsResultDestroy(IntPtr result);
-
     // ---- deleteRecords (M15/P2b) — composite key + INLINE-SCALAR value ----
 
     /// <summary>
@@ -718,9 +603,6 @@ internal static partial class NativeMethods
 
     // ---- kafka_admin_DeleteRecordsResult_t — a Category-3 owned borrow-root ----
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DeleteRecordsResultCount(IntPtr result);
-
     /// <summary>
     /// <c>kafka_admin_DeleteRecordsResult_get_topic</c> — <b>half</b> of the composite
     /// key at <paramref name="index"/>, borrowed (NUL-terminated). Entries are sorted by
@@ -740,35 +622,6 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int DeleteRecordsResultGetPartition(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteRecordsResult_get_low_watermark</c> — Java's
-    /// <c>DeletedRecords.lowWatermark()</c> for the entry at <paramref name="index"/>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>This is an INLINE SCALAR, not a pointer to a borrowed child.</b> It is the
-    /// reason the walker's value axis had to be generalized in M15/P2b: there is no
-    /// handle to copy out of, so a pointer-shaped value accessor cannot describe it.
-    /// <para>
-    /// ⚠ <b><c>-1</c> is NOT the failure signal.</b> The header gives it three meanings
-    /// at once — "or -1 if that partition failed … or <c>index</c> is out of range" — and
-    /// <c>-1</c> is also a legitimate low watermark. The authoritative signal is
-    /// <see cref="DeleteRecordsResultGetError"/><c> != IntPtr.Zero</c>; a <c>-1</c>
-    /// watermark with a <b>null</b> error is a <b>success</b> carrying <c>-1</c>.
-    /// </para>
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_low_watermark", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern long DeleteRecordsResultGetLowWatermark(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteRecordsResult_get_error</c> — that partition's error, or null
-    /// if it succeeded. <b>BORROWED</b> (<c>const</c>) — read, never destroy.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteRecordsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DeleteRecordsResultDestroy(IntPtr result);
 
     // ---- M15/P3 Stage 1: describeCluster (result shape 5) ----
 
@@ -1133,7 +986,7 @@ internal static partial class NativeMethods
     /// </summary>
     /// <remarks>
     /// ⚠ Here <c>-1</c> <b>is</b> a sentinel and maps to <see langword="null"/>, which is the
-    /// opposite of <see cref="DeleteRecordsResultGetLowWatermark"/>, where <c>-1</c> is a
+    /// opposite of <c>kafka_admin_DeleteRecordsResult_get_low_watermark</c>, where <c>-1</c> is a
     /// legitimate value. <c>0</c> is a real size. See <see cref="LogDirMarshal.VolumeBytes"/>.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_total_bytes", CallingConvention = CallingConvention.Cdecl)]
@@ -1589,44 +1442,6 @@ internal static partial class NativeMethods
         AdminCallbacks.ListOffsetsCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListOffsetsResultCount(IntPtr result);
-
-    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListOffsetsResultGetTopic(IntPtr result, int index);
-
-    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListOffsetsResultGetPartition(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_ListOffsetsResult_get_value</c> — that partition's offset
-    /// information, <b>borrowed</b>, or null if that partition failed.
-    /// </summary>
-    /// <remarks>
-    /// The walker reads the per-key error first, so a null reaching the value reader is the
-    /// unreachable case.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListOffsetsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_ListOffsetsResult_get_error</c> — that partition's error, or null if
-    /// it succeeded. <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Unlike <see cref="ElectLeadersResultGetError"/>, this one really is a per-key
-    /// <em>failure</em>: Java stores one future per partition
-    /// (<c>ListOffsetsResult.java:32</c>), so a non-null error here faults that partition's
-    /// own awaitable.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListOffsetsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ListOffsetsResultDestroy(IntPtr result);
-
     // ---- kafka_admin_ListOffsetsResultInfo_t ----
 
     /// <summary><c>kafka_admin_ListOffsetsResultInfo_offset</c> — Java's <c>offset()</c>.</summary>
@@ -1823,50 +1638,11 @@ internal static partial class NativeMethods
     // ---- kafka_admin_DescribeConsumerGroupsResult_t — a Category-3 owned borrow-root ----
 
     /// <summary>
-    /// <c>kafka_admin_DescribeConsumerGroupsResult_count</c> — how many group entries the
-    /// result carries, Java's <c>describedGroups()</c> size.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ This is a <b>keyed map</b>, not two independent lists: one key list, each key
-    /// carrying <em>either</em> a value <em>or</em> an error. Unlike
-    /// <see cref="ListGroupsResultErrorCount"/>'s RPC there is exactly one count,
-    /// and index <c>i</c> of the key, value and error walks all name the same group.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeConsumerGroupsResultCount(IntPtr result);
-
-    /// <summary>
     /// <c>kafka_admin_DescribeConsumerGroupsResult_get_group_id</c> — the key at one index,
     /// borrowed NUL-terminated UTF-8.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeConsumerGroupsResultGetGroupId(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConsumerGroupsResult_get_value</c> — the description for the
-    /// group at one index, <b>borrowed</b> from the result root, or null when that key
-    /// failed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeConsumerGroupsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeConsumerGroupsResult_get_error</c> — that key's failure.
-    /// <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The header returns <c>const kafka_common_Error_t *</c>, so this goes through
-    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>. Putting it through
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/> would free a handle the result root
-    /// still owns and then free it again at
-    /// <see cref="DescribeConsumerGroupsResultDestroy"/> — a double free, which aborts the
-    /// host.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeConsumerGroupsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeConsumerGroupsResultDestroy(IntPtr result);
 
     // ---- kafka_admin_ConsumerGroupDescription_t ----
 
@@ -2142,43 +1918,11 @@ internal static partial class NativeMethods
     // ---- kafka_admin_DescribeClassicGroupsResult_t — a Category-3 owned borrow-root ----
 
     /// <summary>
-    /// <c>kafka_admin_DescribeClassicGroupsResult_count</c> — how many group entries the
-    /// result carries, Java's <c>describedGroups()</c> size.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A <b>keyed map</b>, the same shape
-    /// <see cref="DescribeConsumerGroupsResultCount"/>'s RPC has: one count, and index
-    /// <c>i</c> of the key, value and error walks all name the same group. Not the
-    /// two-independent-lists sub-shape the <c>list*Groups</c> RPCs use.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeClassicGroupsResultCount(IntPtr result);
-
-    /// <summary>
     /// <c>kafka_admin_DescribeClassicGroupsResult_get_group_id</c> — the key at one index,
     /// borrowed NUL-terminated UTF-8.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeClassicGroupsResultGetGroupId(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeClassicGroupsResult_get_value</c> — the description for the
-    /// group at one index, <b>borrowed</b> from the result root, or null when that key
-    /// failed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeClassicGroupsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DescribeClassicGroupsResult_get_error</c> — that key's failure.
-    /// <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <inheritdoc cref="DescribeConsumerGroupsResultGetError" path="/remarks"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeClassicGroupsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DescribeClassicGroupsResultDestroy(IntPtr result);
 
     // ---- kafka_admin_ClassicGroupDescription_t ----
 
@@ -2313,25 +2057,6 @@ internal static partial class NativeMethods
     // ---- kafka_admin_ListConsumerGroupOffsetsResult_t — a Category-3 owned borrow-root ----
 
     /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_count</c> — how many group entries the
-    /// result carries.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A <b>keyed map</b>, the same shape <see cref="DescribeClassicGroupsResultCount"/>'s
-    /// RPC has: one count, and index <c>i</c> of the key, value and error walks all name the
-    /// same group. Not the two-independent-lists sub-shape the <c>list*Groups</c> RPCs use.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListConsumerGroupOffsetsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_group_id</c> — the key at one index,
-    /// borrowed NUL-terminated UTF-8.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListConsumerGroupOffsetsResultGetGroupId(IntPtr result, int index);
-
-    /// <summary>
     /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_value</c> — that group's committed
     /// offsets, <b>borrowed</b> from the result root, or null when that key failed.
     /// </summary>
@@ -2339,21 +2064,10 @@ internal static partial class NativeMethods
     /// The value is a <c>kafka_admin_OffsetAndMetadataMap_t</c> whose accessors are declared
     /// below. It is borrowed two levels deep — the map from the result, every string from
     /// the map — so the whole map is copied out inside the walk, before
-    /// <see cref="ListConsumerGroupOffsetsResultDestroy"/> runs.
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_destroy</c> runs.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ListConsumerGroupOffsetsResultGetValue(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_error</c> — that key's failure.
-    /// <b>BORROWED</b> — read, never destroy.
-    /// </summary>
-    /// <inheritdoc cref="DescribeConsumerGroupsResultGetError" path="/remarks"/>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListConsumerGroupOffsetsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ListConsumerGroupOffsetsResultDestroy(IntPtr result);
 
     // ---- kafka_admin_OffsetAndMetadataMap_t ----
     //
@@ -2652,33 +2366,6 @@ internal static partial class NativeMethods
         AdminCallbacks.DeleteConsumerGroupsCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DeleteConsumerGroupsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteConsumerGroupsResult_get_group_id</c> — the group id at
-    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated).
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteConsumerGroupsResultGetGroupId(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteConsumerGroupsResult_get_error</c> — that group's error, or null
-    /// if it was deleted successfully.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>): it dies with the result root and must
-    /// <b>never</b> be destroyed — <see cref="KafkaException.FromBorrowedHandle"/>, not
-    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no
-    /// <c>_get_value</c> to declare beside it: Java's per-key future is
-    /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteConsumerGroupsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DeleteConsumerGroupsResultDestroy(IntPtr result);
-
     // ---- M15/P5: removeMembersFromConsumerGroup (RPC 4.9) — M15/P13.1: result shape 3, ONE ----
     // ---- callback over the per-member map plus the core's all() (the only outcome in removeAll) ----
 
@@ -2895,20 +2582,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr CreateAclsResultGetBinding(IntPtr result, int index);
 
-    /// <summary>
-    /// <c>kafka_admin_CreateAclsResult_get_error</c> — that binding's error, or null if it
-    /// was created successfully.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>): read it with
-    /// <see cref="KafkaException.FromBorrowedHandle"/>, never
-    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no <c>_get_value</c>
-    /// beside it — Java's per-binding future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
-    /// error <em>is</em> the success value.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr CreateAclsResultGetError(IntPtr result, int index);
-
     [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void CreateAclsResultDestroy(IntPtr result);
 
@@ -2997,79 +2670,6 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.DeleteAclsCallback callback,
         IntPtr userData);
-
-    // ---- kafka_admin_DeleteAclsResult_t — a Category-3 owned borrow-root, two levels deep ----
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_count</c> — the number of <b>filters</b> (the outer
-    /// axis).
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DeleteAclsResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_filter</c> — the filter at <paramref name="index"/>,
-    /// <b>borrowed</b>; it dies with the result root.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_filter", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteAclsResultGetFilter(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_error</c> — the <b>filter's</b> future failing,
-    /// meaning nothing was deleted for it, or null when it was applied successfully.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
-    /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>FAULT</b> channel: it
-    /// faults that filter's <c>Task</c>. An individual matched ACL that could not be deleted
-    /// is reported by <see cref="DeleteAclsResultGetResultError"/> instead and leaves this
-    /// null (header, <c>kafka_admin_DeleteAclsResult_get_error</c>).
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteAclsResultGetError(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_result_count</c> — how many ACLs the filter at
-    /// <paramref name="index"/> matched (the size of Java's <c>FilterResults.values()</c>),
-    /// or 0 if the filter failed.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DeleteAclsResultGetResultCount(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_binding</c> — the ACL matched by filter
-    /// <paramref name="index"/>, entry <paramref name="resultIndex"/>, <b>borrowed</b>, or
-    /// null.
-    /// <para>
-    /// ⚠ Read <b>independently</b> of <see cref="DeleteAclsResultGetResultError"/>: a matched
-    /// ACL whose delete failed carries both, as Java's entries do
-    /// (<c>KafkaAdminClient.java:2705-2708</c>; M15/P13.2 G4-1). The header says the same
-    /// (<c>kafka_admin_DeleteAclsResult_get_binding</c>: the binding and the result error are
-    /// not exclusive, as in Java's <c>FilterResult</c>) — see <c>DeleteAclsResultMarshal</c>.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteAclsResultGetBinding(IntPtr result, int index, int resultIndex);
-
-    /// <summary>
-    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c> — Java's
-    /// <c>FilterResult.error()</c>: the filter matched this ACL but deleting it failed.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
-    /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>VALUE</b> channel: it
-    /// is stored inside a successfully completed <c>FilterResults</c> and is independent of
-    /// <see cref="DeleteAclsResultGetError"/> (header,
-    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c>). Nor is it exclusive with
-    /// <see cref="DeleteAclsResultGetBinding"/>: an entry whose delete failed carries this error
-    /// <b>and</b> its binding, and the two are read independently (header,
-    /// <c>kafka_admin_DeleteAclsResult_get_binding</c>; M15/P13.2 G4-1).
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DeleteAclsResultGetResultError(IntPtr result, int index, int resultIndex);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void DeleteAclsResultDestroy(IntPtr result);
 
     // ---- M15/P6: describeAcls (result sub-shape 3b — one future over a collection) ----
 
@@ -3264,40 +2864,6 @@ internal static partial class NativeMethods
         AdminCallbacks.AlterClientQuotasCallback callback,
         IntPtr userData);
 
-    // ---- kafka_admin_AlterClientQuotasResult_t — a Category-3 owned borrow-root ----
-
-    /// <summary>
-    /// <c>kafka_admin_AlterClientQuotasResult_count</c> — the number of entities whose
-    /// quotas were altered.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterClientQuotasResultCount(IntPtr result);
-
-    /// <summary>
-    /// <c>kafka_admin_AlterClientQuotasResult_get_entity</c> — the entity at
-    /// <paramref name="index"/>, <b>borrowed</b>; it dies with the result root. Entities are
-    /// sorted by their <c>(entity type, entity name)</c> pairs.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_get_entity", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterClientQuotasResultGetEntity(IntPtr result, int index);
-
-    /// <summary>
-    /// <c>kafka_admin_AlterClientQuotasResult_get_error</c> — that entity's error, or null if
-    /// its quotas were altered successfully.
-    /// <para>
-    /// ⚠ <b>BORROWED</b> (<c>const</c>): read it with
-    /// <see cref="KafkaException.FromBorrowedHandle"/>, never
-    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no <c>_get_value</c>
-    /// beside it — Java's per-entity future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
-    /// error <em>is</em> the success value.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterClientQuotasResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AlterClientQuotasResultDestroy(IntPtr result);
-
     // ====================================================================================
     // M15/P7 — SCRAM credentials, delegation tokens, features.
     // ====================================================================================
@@ -3475,19 +3041,6 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.AlterUserScramCredentialsCallback callback,
         IntPtr userData);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int AlterUserScramCredentialsResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_get_user", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterUserScramCredentialsResultGetUser(IntPtr result, int index);
-
-    /// <summary>That user's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AlterUserScramCredentialsResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void AlterUserScramCredentialsResultDestroy(IntPtr result);
 
     // ---- M15/P7: createDelegationToken (no count, no index — one value on the root) ----
 
@@ -3668,19 +3221,6 @@ internal static partial class NativeMethods
         AdminCallbacks.UpdateFeaturesCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int UpdateFeaturesResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_get_feature", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr UpdateFeaturesResultGetFeature(IntPtr result, int index);
-
-    /// <summary>That feature's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr UpdateFeaturesResultGetError(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void UpdateFeaturesResultDestroy(IntPtr result);
-
     // ---- M15/P8: abortTransaction / forceTerminateTransaction (result shape 6) ----
 
     /// <summary>
@@ -3725,16 +3265,6 @@ internal static partial class NativeMethods
         AdminCallbacks.FenceProducersCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int FenceProducersResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_transactional_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr FenceProducersResultGetTransactionalId(IntPtr result, int index);
-
-    /// <summary>That id's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr FenceProducersResultGetError(IntPtr result, int index);
-
     /// <summary>⚠ <c>-1</c> is <c>ProducerIdAndEpoch.NONE</c>, not an absence discriminant.</summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_producer_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long FenceProducersResultGetProducerId(IntPtr result, int index);
@@ -3756,16 +3286,6 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.DescribeTransactionsCallback callback,
         IntPtr userData);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeTransactionsResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_transactional_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeTransactionsResultGetTransactionalId(IntPtr result, int index);
-
-    /// <summary>That id's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeTransactionsResultGetError(IntPtr result, int index);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_coordinator_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int DescribeTransactionsResultGetCoordinatorId(IntPtr result, int index);
@@ -3831,20 +3351,6 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.DescribeProducersCallback callback,
         IntPtr userData);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeProducersResultCount(IntPtr result);
-
-    /// <summary>⚠ <b>BORROWED</b>; the other half of the composite key.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeProducersResultGetTopic(IntPtr result, int index);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeProducersResultGetPartition(IntPtr result, int index);
-
-    /// <summary>That partition's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeProducersResultGetError(IntPtr result, int index);
 
     /// <summary>⚠ That row's own producer count — never the outer <c>count</c>.</summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_producer_count", CallingConvention = CallingConvention.Cdecl)]
@@ -3922,21 +3428,9 @@ internal static partial class NativeMethods
         AdminCallbacks.ListTransactionsCallback callback,
         IntPtr userData);
 
-    // ⚠ Count / GetBrokerId / GetError are not read by the two-stage bridge (M15/P13.3 F5):
-    // each per-broker callback delivers its broker id and its error as arguments, and its
-    // value carries that one broker at index 0. They stay declared because the header still
-    // exports them.
-
-    /// <summary>⚠ The number of <b>brokers</b>, not of listings.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListTransactionsResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ListTransactionsResultGetBrokerId(IntPtr result, int index);
-
-    /// <summary>That broker's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListTransactionsResultGetError(IntPtr result, int index);
+    // ⚠ Count / GetBrokerId / GetError are not declared (M15/P13.5 X6): the two-stage bridge
+    // (M15/P13.3 F5) never reads them, because each per-broker callback delivers its broker
+    // id and its error as arguments, and its value carries that one broker at index 0.
 
     /// <summary>⚠ That broker's own listing count — never the outer broker count.</summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_listing_count", CallingConvention = CallingConvention.Cdecl)]

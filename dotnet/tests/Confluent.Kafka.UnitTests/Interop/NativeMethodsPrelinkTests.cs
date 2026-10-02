@@ -57,7 +57,7 @@ public sealed class NativeMethodsPrelinkTests
     /// it also catches a declaration that goes missing. Adding or removing a P/Invoke
     /// changes it on purpose.
     /// </remarks>
-    private const int ExpectedImportCount = 653;
+    private const int ExpectedImportCount = 578;
 
     /// <summary>
     /// <see cref="Marshal.Prelink(MethodInfo)"/> succeeds for every P/Invoke, against the
