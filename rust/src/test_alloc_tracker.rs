@@ -23,7 +23,9 @@
 //!
 //! Used by the §27 per-record allocation-budget regression test
 //! (`consumer-threading.md` §27, "Tests required") to assert that the
-//! receive path stays zero-copy.
+//! receive path stays zero-copy, and by the decode-hardening tests to assert
+//! that a length read off the wire does not size an allocation
+//! ([`AllocTrackingGuard::max_allocation`]).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -35,6 +37,17 @@ thread_local! {
     /// Per-thread "is tracking on?" flag — flipped to `true` by
     /// [`AllocTrackingGuard::new`] and back to `false` on drop.
     static TRACK_ENABLED: Cell<bool> = const { Cell::new(false) };
+    /// Per-thread size in bytes of the largest single allocation (or
+    /// reallocation target) requested while [`TRACK_ENABLED`] is `true`.
+    static MAX_ALLOC_SIZE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Counts one allocation of `size` bytes, if tracking is enabled on this thread.
+fn record(size: usize) {
+    if TRACK_ENABLED.with(|t| t.get()) {
+        ALLOC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+        MAX_ALLOC_SIZE.with(|m| m.set(m.get().max(size)));
+    }
 }
 
 /// A `GlobalAlloc` wrapper that delegates to `System` and increments a
@@ -43,10 +56,7 @@ pub(crate) struct TrackingAllocator;
 
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let track = TRACK_ENABLED.with(|t| t.get());
-        if track {
-            ALLOC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
-        }
+        record(layout.size());
         // SAFETY: layout is provided by the caller per GlobalAlloc contract.
         unsafe { System.alloc(layout) }
     }
@@ -55,18 +65,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let track = TRACK_ENABLED.with(|t| t.get());
-        if track {
-            ALLOC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
-        }
+        record(layout.size());
         // SAFETY: layout is provided by the caller per GlobalAlloc contract.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let track = TRACK_ENABLED.with(|t| t.get());
-        if track {
-            ALLOC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
-        }
+        record(new_size);
         // SAFETY: ptr / layout / new_size provided by the caller per GlobalAlloc contract.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -89,9 +93,10 @@ static GLOBAL: TrackingAllocator = TrackingAllocator;
 pub(crate) struct AllocTrackingGuard(());
 
 impl AllocTrackingGuard {
-    /// Enables tracking, resetting the counter to 0.
+    /// Enables tracking, resetting the counter and the largest allocation to 0.
     pub(crate) fn new() -> Self {
         ALLOC_COUNT.with(|c| c.set(0));
+        MAX_ALLOC_SIZE.with(|m| m.set(0));
         TRACK_ENABLED.with(|t| t.set(true));
         Self(())
     }
@@ -101,9 +106,17 @@ impl AllocTrackingGuard {
         ALLOC_COUNT.with(|c| c.get())
     }
 
-    /// Resets the per-thread counter to zero without disabling tracking.
+    /// Returns the size in bytes of the largest single allocation (or
+    /// reallocation target) this thread requested while tracking was enabled.
+    pub(crate) fn max_allocation() -> usize {
+        MAX_ALLOC_SIZE.with(|m| m.get())
+    }
+
+    /// Resets the per-thread counter and largest allocation to zero without
+    /// disabling tracking.
     pub(crate) fn reset() {
         ALLOC_COUNT.with(|c| c.set(0));
+        MAX_ALLOC_SIZE.with(|m| m.set(0));
     }
 }
 
@@ -136,6 +149,20 @@ mod tests {
         let _v: Vec<u8> = Vec::with_capacity(1024);
         let end = AllocTrackingGuard::count();
         assert!(end > start, "expected at least one allocation");
+    }
+
+    #[test]
+    fn test_max_allocation_tracks_the_largest_request() {
+        let _guard = AllocTrackingGuard::new();
+        let small: Vec<u8> = Vec::with_capacity(64);
+        let large: Vec<u8> = Vec::with_capacity(4096);
+        assert_eq!(4096, AllocTrackingGuard::max_allocation());
+        drop((small, large));
+        AllocTrackingGuard::reset();
+        assert_eq!(0, AllocTrackingGuard::max_allocation());
+        let mut grown: Vec<u8> = Vec::with_capacity(16);
+        grown.reserve_exact(8192);
+        assert_eq!(8192, AllocTrackingGuard::max_allocation(), "a realloc counts its new size");
     }
 
     #[test]
