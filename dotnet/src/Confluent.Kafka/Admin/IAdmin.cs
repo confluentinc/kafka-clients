@@ -672,7 +672,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <param name="partitions">
     /// The partitions to ask about, or <see langword="null"/> for <b>every ongoing
     /// reassignment in the cluster</b> — Java's <c>Optional.empty()</c>
-    /// (<c>Admin.java:1246-1247</c>). ⚠ <see langword="null"/> and an <b>empty</b>
+    /// (<c>Admin.java:1248-1249</c>). ⚠ <see langword="null"/> and an <b>empty</b>
     /// collection are <em>different requests</em>. Java's parameter is a <c>Set</c>, so a
     /// repeated partition is one entry.
     /// </param>
@@ -892,8 +892,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// reason (C# default interface methods need .NET Standard 2.1, above this binding's
     /// floor). Like Java (<c>Admin.java:912-918</c>) this delegates to the batched form
     /// with a fresh <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
-    /// partition of the group is returned and any topic partitions set on
-    /// <paramref name="options"/> are ignored.
+    /// partition of the group is returned.
     /// </remarks>
     /// <param name="groupId">The ID of the group whose committed offsets to list.</param>
     /// <param name="options">
@@ -1013,11 +1012,12 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="acls">
     /// The ACL bindings to create. Duplicates collapse, because Java keys its result on a
-    /// map. Every binding is already valid by construction —
-    /// <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY and
-    /// MATCH values the broker would refuse. Those constructors also store an enum value that
-    /// is not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two
-    /// bindings that differ only in such values are duplicates (M15/P13.3 F8).
+    /// map. <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY
+    /// and MATCH values at construction. Those constructors also store an enum value that is
+    /// not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two bindings
+    /// that differ only in such values are duplicates (M15/P13.3 F8). A binding with an
+    /// <c>Unknown</c> field still constructs, and fails its own task, as in Java
+    /// (<c>KafkaAdminClient.java:2615-2621</c>).
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.

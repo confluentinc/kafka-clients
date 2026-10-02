@@ -2478,13 +2478,13 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>ReplicaLogDirInfo</c> when the broker said nothing about it
     /// (<c>KafkaAdminClient.java:3103-3106</c> seeds <c>replicaDirInfoByPartition</c>, and
     /// <c>:3155-3160</c> completes every entry) — and the <b>Rust core does the same</b>
-    /// (<c>rust/src/admin/kafka_admin_client.rs:3705-3708</c> inserts a future for every
-    /// requested replica). So against a real client every requested key gets an entry and
+    /// (<c>KafkaAdminClient::describe_replica_log_dirs_with_options</c> seeds an entry for
+    /// every requested replica). So against a real client every requested key gets an entry and
     /// <c>FailUncompleted</c> never fires.
     /// </para>
     /// <para>
     /// The <b>mock</b> is the exception: it omits replicas of unknown topics outright
-    /// (<c>rust/src/admin/mock_admin_client.rs:1352-1355</c>), so a broker-less test can reach
+    /// (<c>MockAdminClient::describe_replica_log_dirs_with_options</c>), so a broker-less test can reach
     /// the missing-key path. There <c>FailUncompleted</c> faults that key with a message
     /// naming it. That is deliberately <b>not</b> smoothed over by completing locally with a
     /// default: the key here is genuinely sent and the answer genuinely absent, so
@@ -4949,7 +4949,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// ⚠ <c>options.BrokerId</c> is Java's <c>OptionalInt</c> and crosses as an explicit
     /// discriminant plus a value: Java's <c>brokerId(int)</c> setter accepts any <c>int</c>
-    /// (<c>DescribeProducersOptions.java:44</c>), so no sentinel is free and a negative broker
+    /// (<c>DescribeProducersOptions.java:29</c>), so no sentinel is free and a negative broker
     /// id is a request the ABI must be able to carry, so it is passed through as asked.
     /// </remarks>
     internal DescribeProducersResult DescribeProducers(
@@ -5387,7 +5387,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ <b><see langword="null"/> and empty are different requests.</b>
     /// <see langword="null"/> is Java's <c>Optional.empty()</c> — list every ongoing
-    /// reassignment in the cluster (<c>Admin.java:1246-1247</c>) — and sets
+    /// reassignment in the cluster (<c>Admin.java:1248-1249</c>) — and sets
     /// <c>all_partitions</c>. An empty collection asks about no partitions at all.
     /// </para>
     /// </remarks>

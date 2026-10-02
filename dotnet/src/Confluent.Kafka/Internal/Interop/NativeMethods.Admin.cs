@@ -1314,7 +1314,7 @@ internal static partial class NativeMethods
     /// <para>
     /// ⚠ <paramref name="allPartitions"/> is the explicit discriminant for Java's
     /// <c>Optional.empty()</c> — "list every ongoing reassignment in the cluster"
-    /// (<c>Admin.java:1246-1247</c>). The header says the other three arguments are then
+    /// (<c>Admin.java:1248-1249</c>). The header says the other three arguments are then
     /// ignored, and that the flag exists so "'all partitions' and 'an empty selection' stay
     /// distinguishable". Same discipline as <c>elect_leaders</c>' flag.
     /// </para>
