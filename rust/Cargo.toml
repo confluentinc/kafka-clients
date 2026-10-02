@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test-server", "tools/verifiable-clients"]
+members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test-server", "tools/verifiable-clients", "ffi-macros"]
 
 [package]
 name = "confluent-kafka"
@@ -38,7 +38,7 @@ integration-tests = []
 # (native Rust, Python via gRPC, C via gRPC). See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md for details.
 multilanguage-tests = ["integration-tests"]
-ffi = ["dep:cbindgen", "dep:env_logger"]
+ffi = ["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]
 
 [lib]
 name = "confluent_kafka"
@@ -65,6 +65,9 @@ indexmap = "2"
 rustc-hash = "2"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
+# `#[ffi_guard]`, the attribute that keeps a Rust panic from unwinding into a C
+# caller of `src/ffi/` (APPSEC-7665 / NONJAVACLI-4521). Used only by that module.
+ffi-macros = { path = "ffi-macros", optional = true }
 flate2 = "1"
 snap = "1"
 lz4_flex = "0.11"
@@ -146,3 +149,10 @@ exhaustive_enums = "deny"
 # longer meets is itself reported (`unfulfilled_lint_expectations`), so a stale
 # suppression cannot outlive the code that needed it.
 allow_attributes = "deny"
+# Every `unsafe` block and `unsafe impl` carries a `// SAFETY:` comment naming the
+# invariant it relies on and where that invariant is established — the soundness
+# inventory of the FFI layer (NONJAVACLI-4521). The second lint is the inverse: a
+# `// SAFETY:` comment left above code that no longer contains `unsafe` is reported,
+# so a justification cannot outlive the block it was written for.
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"

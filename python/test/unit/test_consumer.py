@@ -17,6 +17,7 @@
 import asyncio
 import gc
 import signal
+import sys
 import threading
 import time
 
@@ -141,6 +142,26 @@ def test_commit_and_committed():
         assert committed[tp].metadata == "meta"
 
 
+def test_committed_does_not_leak_the_leader_epoch():
+    # The C drain created the epoch int and passed it to Py_BuildValue with
+    # "O", which takes a reference of its own, so the creating reference was
+    # never released and every committed() entry with an epoch leaked one int.
+    # 1000 is outside CPython's small-int cache (-5..256), so the epoch is a
+    # fresh object whose reference count means something.
+    with MockConsumer("earliest") as c:
+        tp = _seed(c, records=[(b"k", b"v")])
+        list(c.poll(POLL_TIMEOUT))
+        c.commit({tp: OffsetAndMetadata(5, "meta", 1000)})
+        committed = c.committed([tp])
+        epoch = committed[tp].leader_epoch
+        assert epoch == 1000
+        del committed
+        # With the dict and its OffsetAndMetadata gone, `epoch` is the only
+        # owner left, exactly like `control`; a leak makes the count one higher.
+        control = int("1000")
+        assert sys.getrefcount(epoch) == sys.getrefcount(control)
+
+
 def test_position():
     with MockConsumer("earliest") as c:
         tp = _seed(c, records=[(b"k", b"v")])
@@ -153,6 +174,21 @@ def test_commit_current_positions():
         _seed(c, records=[(b"k", b"v")])
         list(c.poll(POLL_TIMEOUT))
         c.commit()  # commit current positions, no error
+
+
+def test_add_record_rejects_a_2_gib_buffer(two_gib_bytes):
+    # The C API takes int32_t lengths; a plain cast turned 2**31 into a
+    # negative length, which it reads as a null key or value, so the record
+    # was added with its bytes silently dropped. The partition is assigned so
+    # that the length check, not the assignment check, is what rejects it.
+    with MockConsumer("earliest") as c:
+        _seed(c)
+        with pytest.raises(OverflowError, match=r"^key exceeds 2 GiB$"):
+            c.add_record("t", 0, 0, two_gib_bytes, b"v")
+        with pytest.raises(OverflowError, match=r"^value exceeds 2 GiB$"):
+            c.add_record("t", 0, 0, b"k", two_gib_bytes)
+        # Neither call added a record.
+        assert c.poll(POLL_TIMEOUT).is_empty()
 
 
 # -- seek --------------------------------------------------------------------
