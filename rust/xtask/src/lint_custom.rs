@@ -56,6 +56,7 @@ fn rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
         Box::new(NoPublicField),
+        Box::new(NoFixedSizeArray),
         Box::new(JavaName::new()),
         Box::new(NoDeprecatedTranslation::new()),
         Box::new(PublicAudience::new()),
@@ -576,6 +577,110 @@ impl Rule for NoPublicField {
     fn hint(&self) -> &'static str {
         "   Make the field private or `pub(crate)`, and expose it the way Java does:
    a getter `field()`, a setter `set_field(..)`, or a builder."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-no-fixed-size-array
+// ---------------------------------------------------------------------------
+
+/// Checks that no public interface accepts or returns a fixed-size array
+/// `[T; N]` (CLAUDE.md §3, forward compatibility).
+///
+/// An array's length is part of its type, so a Java `byte[]` or `T[]`
+/// translated as `[T; N]` fixes a length Java leaves open: as a parameter it
+/// rejects every other length at compile time, and as a return type a new value
+/// (one more enum constant in `values()`) becomes a breaking change. A slice
+/// (`&[T]`) or a `Vec<T>` carries the length at run time instead.
+///
+/// Scope: the public items of [`NoDeprecatedTranslation`] — each parameter and
+/// the return type of a public function or method, and the type a public `type`
+/// alias names — plus the trait arguments and associated types of a trait impl
+/// for a public type (`impl From<[u8; 16]> for Uuid`). An array anywhere in the
+/// type counts: `&[u8; 16]`, `Option<[u8; 16]>`,
+/// `impl Iterator<Item = [u8; 4]>`. The C FFI (`src/ffi`) and `#[cfg(test)]`
+/// functions are excluded.
+struct NoFixedSizeArray;
+
+impl Rule for NoFixedSizeArray {
+    fn name(&self) -> &'static str {
+        "check-no-fixed-size-array"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let is_ffi = |module: &[String]| module.first().is_some_and(|m| m == "ffi");
+        let mut checked = 0usize;
+        for (file, item) in public_items(krate) {
+            if item.types.is_empty() || is_ffi(&item.module) {
+                continue;
+            }
+            checked += 1;
+            let name = item
+                .owner
+                .map_or_else(|| item.name.clone(), |owner| format!("{owner}::{}", item.name));
+            for (role, ty) in &item.types {
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_type(&mut arrays, ty);
+                for array in arrays.0 {
+                    findings.push(format!(
+                        "{}: {role} of `{name}` holds the fixed-size array `{array}`",
+                        file.display()
+                    ));
+                }
+            }
+        }
+        let types = krate.public_types();
+        for (path, module) in krate.modules.iter().filter(|(path, _)| !is_ffi(path)) {
+            for item in &module.items {
+                let syn::Item::Impl(i) = item else { continue };
+                let Some((_, trait_path, _)) = &i.trait_ else { continue };
+                let syn::Type::Path(self_ty) = &*i.self_ty else {
+                    continue;
+                };
+                let Some(self_ty) = self_ty.path.segments.last() else {
+                    continue;
+                };
+                if !types.contains(&(path.clone(), self_ty.ident.to_string())) {
+                    continue;
+                }
+                checked += 1;
+                let header = format!("`impl {} for {}`", compact(trait_path), self_ty.ident);
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_path(&mut arrays, trait_path);
+                let mut found: Vec<_> = arrays.0.into_iter().map(|a| ("the trait", a)).collect();
+                for it in &i.items {
+                    if let syn::ImplItem::Type(t) = it {
+                        let mut arrays = Arrays::default();
+                        syn::visit::Visit::visit_type(&mut arrays, &t.ty);
+                        found.extend(arrays.0.into_iter().map(|a| ("an associated type", a)));
+                    }
+                }
+                for (role, array) in found {
+                    findings.push(format!(
+                        "{}: {role} of {header} holds the fixed-size array `{array}`",
+                        module.file.display()
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Accept a slice (`&[T]`), checking its length where Java does and returning
+   `IllegalArgumentError`; return a `&'static [T]`, a `Vec<T>` or an iterator;
+   or make the item `pub(crate)` if Java does not expose it."
+    }
+}
+
+/// The outermost fixed-size arrays a visited type holds, as written.
+#[derive(Default)]
+struct Arrays(Vec<String>);
+
+impl<'ast> syn::visit::Visit<'ast> for Arrays {
+    fn visit_type_array(&mut self, array: &'ast syn::TypeArray) {
+        // An array of arrays is one finding: its elements are not visited.
+        self.0.push(compact(array));
     }
 }
 
@@ -1447,6 +1552,39 @@ struct PublicItem {
     owner: Option<String>,
     /// Whether the item is a function: a method or a free function.
     is_fn: bool,
+    /// The types a caller passes or receives through the item, each with its
+    /// role: a function's parameters and return type, the type a `type` alias
+    /// names.
+    types: Vec<(String, syn::Type)>,
+}
+
+/// The parameter types and the return type of `sig`, each with its role.
+fn sig_types(sig: &syn::Signature) -> Vec<(String, syn::Type)> {
+    let mut out: Vec<_> = sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pt) => Some((format!("parameter `{}`", compact(&pt.pat)), (*pt.ty).clone())),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        out.push(("the return type".to_string(), (**ty).clone()));
+    }
+    out
+}
+
+/// `t`'s tokens, spaced as rustfmt would for a type: `From<[u8; 16]>`.
+fn compact(t: &impl ToTokens) -> String {
+    t.to_token_stream()
+        .to_string()
+        .replace(" ;", ";")
+        .replace("& ", "&")
+        .replace(" < ", "<")
+        .replace("< ", "<")
+        .replace(" >", ">")
+        .replace(" ,", ",")
+        .replace(" :: ", "::")
 }
 
 /// The public items of `krate` (see [`NoDeprecatedTranslation`] for the scope).
@@ -1460,7 +1598,11 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
         let reachable = krate.is_reachable(path);
         let is_public_type = |name: &str| types.contains(&(path.clone(), name.to_string()));
         for item in &module.items {
-            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute], owner: Option<&syn::Ident>, is_fn: bool| {
+            let mut push = |name: &syn::Ident,
+                            attrs: &[syn::Attribute],
+                            owner: Option<&syn::Ident>,
+                            is_fn: bool,
+                            types: Vec<(String, syn::Type)>| {
                 if is_fn && is_cfg_test(attrs) {
                     return;
                 }
@@ -1472,25 +1614,40 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                         module: path.clone(),
                         owner: owner.map(ToString::to_string),
                         is_fn,
+                        types,
                     },
                 ))
             };
             match item {
-                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => push(&s.ident, &s.attrs, None, false),
-                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => push(&e.ident, &e.attrs, None, false),
+                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => {
+                    push(&s.ident, &s.attrs, None, false, Vec::new())
+                },
+                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => {
+                    push(&e.ident, &e.attrs, None, false, Vec::new())
+                },
                 syn::Item::Trait(t) if is_public_type(&t.ident.to_string()) => {
-                    push(&t.ident, &t.attrs, None, false);
+                    push(&t.ident, &t.attrs, None, false, Vec::new());
                     for it in &t.items {
                         match it {
-                            syn::TraitItem::Fn(f) => push(&f.sig.ident, &f.attrs, Some(&t.ident), true),
-                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs, Some(&t.ident), false),
+                            syn::TraitItem::Fn(f) => {
+                                push(&f.sig.ident, &f.attrs, Some(&t.ident), true, sig_types(&f.sig))
+                            },
+                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs, Some(&t.ident), false, Vec::new()),
                             _ => {},
                         }
                     }
                 },
-                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(&t.ident, &t.attrs, None, false),
-                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => push(&f.sig.ident, &f.attrs, None, true),
-                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs, None, false),
+                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(
+                    &t.ident,
+                    &t.attrs,
+                    None,
+                    false,
+                    vec![("the aliased type".to_string(), (*t.ty).clone())],
+                ),
+                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => {
+                    push(&f.sig.ident, &f.attrs, None, true, sig_types(&f.sig))
+                },
+                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs, None, false, Vec::new()),
                 syn::Item::Impl(i) if i.trait_.is_none() => {
                     let syn::Type::Path(ty) = &*i.self_ty else { continue };
                     let Some(ty) = ty.path.segments.last() else { continue };
@@ -1500,10 +1657,10 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     for it in &i.items {
                         match it {
                             syn::ImplItem::Fn(f) if is_pub(&f.vis) => {
-                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), true)
+                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), true, sig_types(&f.sig))
                             },
                             syn::ImplItem::Const(c) if is_pub(&c.vis) => {
-                                push(&c.ident, &c.attrs, Some(&ty.ident), false)
+                                push(&c.ident, &c.attrs, Some(&ty.ident), false, Vec::new())
                             },
                             _ => {},
                         }
@@ -1521,6 +1678,7 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                                 module: path.clone(),
                                 owner: None,
                                 is_fn: false,
+                                types: Vec::new(),
                             },
                         ));
                     }
@@ -2890,5 +3048,100 @@ mod cfg_test_tests {
         assert!(!cfg_test("#[cfg_attr(test, allow(dead_code))]"));
         assert!(!cfg_test(r#"#[doc = "test"]"#));
         assert!(!cfg_test(""));
+    }
+}
+
+#[cfg(test)]
+mod no_fixed_size_array_tests {
+    use super::*;
+
+    /// A crate whose every public item exercises one outcome of
+    /// `check-no-fixed-size-array`.
+    const FIXTURE_LIB: &str = r#"
+        pub struct Uuid;
+        impl Uuid {
+            pub fn with_bytes(bytes: [u8; 16]) -> Self {}
+            pub fn with_slice(bytes: &[u8]) -> Self {}
+            pub fn to_bytes(&self) -> [u8; 16] {}
+            pub fn borrowed(&self) -> &'static [u8; 16] {}
+            pub fn nested(&self, values: Option<Vec<[u8; 4]>>) {}
+            pub fn matrix(&self) -> [[u8; 4]; 2] {}
+            pub fn chunks(&self) -> impl Iterator<Item = [u8; 4]> {}
+            pub fn to_vec(&self) -> Vec<u8> {}
+            pub(crate) fn internal(&self) -> [u8; 16] {}
+            #[cfg(test)]
+            pub fn test_only() -> [u8; 2] {}
+            fn private(&self) -> [u8; 16] {}
+        }
+        impl From<[u8; 16]> for Uuid {
+            fn from(bytes: [u8; 16]) -> Self {}
+        }
+        impl std::ops::Index<usize> for Uuid {
+            type Output = [u8; 2];
+            fn index(&self, i: usize) -> &[u8; 2] {}
+        }
+        impl Clone for Uuid {
+            fn clone(&self) -> Self {}
+        }
+        pub trait Source {
+            fn read(&self, buf: &mut [u8; 8]);
+            fn bytes(&self) -> &[u8];
+        }
+        pub type Key = [u8; 32];
+        pub fn pair() -> (i32, [u8; 3]) {}
+        pub fn slices(a: &[u8], b: &mut [u8]) -> Vec<u8> {}
+        pub(crate) struct Hidden;
+        impl From<[u8; 1]> for Hidden {
+            fn from(bytes: [u8; 1]) -> Self {}
+        }
+        mod private {
+            pub struct Unreachable;
+            impl Unreachable {
+                pub fn hidden() -> [u8; 1] {}
+            }
+        }
+        pub mod ffi {
+            pub struct Buffer;
+            impl Buffer {
+                pub fn bytes(&self) -> [u8; 1] {}
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_common_Uuid_new(bytes: *const [u8; 16]) {}
+        }
+    "#;
+
+    #[test]
+    fn test_fixed_size_arrays_in_public_signatures_are_findings() {
+        let dir = std::env::temp_dir().join(format!("xtask-no-fixed-size-array-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = NoFixedSizeArray.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        let mut expected: Vec<String> = [
+            "parameter `bytes` of `Uuid::with_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::to_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::borrowed` holds the fixed-size array `[u8; 16]`",
+            "parameter `values` of `Uuid::nested` holds the fixed-size array `[u8; 4]`",
+            "the return type of `Uuid::matrix` holds the fixed-size array `[[u8; 4]; 2]`",
+            "the return type of `Uuid::chunks` holds the fixed-size array `[u8; 4]`",
+            "the trait of `impl From<[u8; 16]> for Uuid` holds the fixed-size array `[u8; 16]`",
+            "an associated type of `impl std::ops::Index<usize> for Uuid` holds the fixed-size array `[u8; 2]`",
+            "parameter `buf` of `Source::read` holds the fixed-size array `[u8; 8]`",
+            "the aliased type of `Key` holds the fixed-size array `[u8; 32]`",
+            "the return type of `pair` holds the fixed-size array `[u8; 3]`",
+        ]
+        .iter()
+        .map(|f| format!("{file}: {f}"))
+        .collect();
+        expected.sort();
+        findings.sort();
+        assert_eq!(findings, expected);
+        // The public functions and the alias with types (`Uuid`'s eight,
+        // `Source`'s two, `Key`, `pair`, `slices`), and the three trait impls
+        // for `Uuid`.
+        assert_eq!(checked, 16);
     }
 }

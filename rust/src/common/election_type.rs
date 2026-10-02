@@ -68,8 +68,8 @@ impl ElectionType {
     ///
     /// Mirrors `ElectionType.values()`.
     #[doc(alias = "org.apache.kafka.common.ElectionType#values")]
-    pub fn values() -> [Self; 2] {
-        [Self::Preferred, Self::Unclean]
+    pub fn values() -> &'static [Self] {
+        &[Self::Preferred, Self::Unclean]
     }
 }
 

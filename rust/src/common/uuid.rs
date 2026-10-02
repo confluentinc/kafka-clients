@@ -92,8 +92,10 @@ impl Uuid {
     }
 
     /// Creates a UUID from a 16-byte array in big-endian order.
-    #[doc(alias = "org.apache.kafka.common.Uuid#Uuid")]
-    pub fn with_bytes(bytes: [u8; 16]) -> Self {
+    ///
+    /// Java has no such constructor (only `Uuid(long, long)`); this decodes
+    /// `fromString`'s bytes, so it is crate-private.
+    pub(crate) fn with_bytes(bytes: [u8; 16]) -> Self {
         let most_sig_bits = u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);

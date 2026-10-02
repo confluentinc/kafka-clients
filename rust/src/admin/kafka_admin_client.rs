@@ -9523,7 +9523,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testElectLeaders")]
     async fn test_elect_leaders() {
-        for election_type in ElectionType::values() {
+        for &election_type in ElectionType::values() {
             let (admin, mut runnable, time, _nodes) = env();
             let topic1 = TopicPartition::new("topic", 0);
             let topic2 = TopicPartition::new("topic", 2);
