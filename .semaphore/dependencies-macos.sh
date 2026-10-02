@@ -47,8 +47,31 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-mod
 source "$HOME/.cargo/env"
 git submodule update --init --depth=1 kafka
 
+# MACOS_INSTALL_GRPC_CPP=true installs the build dependencies of the native C++
+# gRPC server (make build-grpc-native-c): the grpc++ and protobuf headers and
+# libraries, protoc, grpc_cpp_plugin, and pkg-config. Homebrew provides prebuilt
+# bottles for this agent's macOS version, so no source build is required. Only
+# the job that needs these packages sets this variable.
+if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
+  brew install grpc
+  command -v pkg-config >/dev/null || brew install pkgconf
+fi
+
+# MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
+# native .NET gRPC server (make build-grpc-native-dotnet) runs Grpc.Tools'
+# protoc, and Grpc.Tools ships no macOS arm64 protoc, so on this arm64 agent it
+# runs the macosx_x64 one under Rosetta 2. The check runs an x86_64 slice of
+# /usr/bin/true and skips the install when that already works. Only the job that
+# needs Rosetta sets this variable.
+if [ "${MACOS_ENSURE_ROSETTA:-}" = "true" ]; then
+  if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+    sudo softwareupdate --install-rosetta --agree-to-license
+  fi
+fi
+
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
-# setup above always runs). Set by blocks whose tests need no container.
+# setup above always runs). Intended for blocks whose tests need no container;
+# no block currently sets it.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else
@@ -94,8 +117,8 @@ export CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT=8
 echo "=== macOS agent diagnostics (post-install) ==="
 brew --version
 cmake --version
-rustc --version
-cargo --version
+# From rust/, so rustup resolves the pinned rust/rust-toolchain.toml.
+(cd rust && rustc --version && cargo --version)
 if [ "${MACOS_SKIP_COLIMA:-}" != "true" ]; then
   docker --version
   colima status
