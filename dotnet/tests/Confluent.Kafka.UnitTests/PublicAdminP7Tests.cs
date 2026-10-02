@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -47,6 +48,8 @@ namespace Confluent.Kafka.UnitTests;
 /// </remarks>
 public sealed class PublicAdminP7Tests
 {
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
     // ------------------------------------------------------------------------------------
     // Delegation tokens — create, describe, renew, expire.
     // ------------------------------------------------------------------------------------
@@ -187,24 +190,65 @@ public sealed class PublicAdminP7Tests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>An empty map is REJECTED, with Java's own exception kind and message</b>
-    /// (<c>KafkaAdminClient.java:4590-4592</c>), before anything is enqueued. The binding's
-    /// guard is what makes it an <see cref="ArgumentException"/>: the core refuses an empty map
-    /// only on a real client, and then as a <see cref="KafkaException"/> it returns from the
-    /// submit (M15/P13.3 F6); against this mock its entry point would accept the map and never
-    /// call back, as Java's mock validates nothing — so zero awaitables, and an <c>All()</c>
-    /// that reports success.
+    /// ⚠⚠ <b>The mock ACCEPTS an empty map</b> (M15/P13.5 G6-1), as Java's does:
+    /// <c>MockAdminClient.updateFeatures</c> validates nothing and returns an empty result
+    /// (<c>MockAdminClient.java:1286-1300</c>), and the mock's core entry point never calls
+    /// back for it — so zero awaitables, and an <c>All()</c> that reports success. The real
+    /// client's rejection is <see cref="G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap"/>.
     /// </summary>
     [Fact]
-    public void UpdateFeatures_RejectsAnEmptyMap()
+    public async Task G6_1_UpdateFeatures_MockAcceptsAnEmptyMap()
     {
         using MockAdminClient admin = new MockAdminClient();
+
+        UpdateFeaturesResult result =
+            admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
+
+        Assert.Empty(result.Values);
+        await TestTimeout.Run(() => result.All(), s_deadline);
+    }
+
+    /// <summary>
+    /// ⚠⚠ <b>The real client REJECTS an empty map, with Java's own exception kind and
+    /// message</b> (<c>KafkaAdminClient.java:4590-4592</c>), before anything is enqueued
+    /// (M15/P13.5 G6-1 keeps it). The binding's guard is what makes it an
+    /// <see cref="ArgumentException"/> rather than the core's <see cref="KafkaException"/>
+    /// refusal of the same input (M15/P13.3 F6). No broker is needed: the guard runs before the
+    /// submit, and the client does not connect eagerly.
+    /// </summary>
+    [Fact]
+    public void G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap()
+    {
+        using KafkaAdminClient admin = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
 
-        Assert.Contains(
+        Assert.Equal("featureUpdates", thrown.ParamName);
+        Assert.StartsWith(
             "Feature updates can not be null or empty.", thrown.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// ⚠ <b>A null feature name gets Java's blank-name message</b> (M15/P13.5 G6-9): Java has
+    /// no separate null check, and <c>Utils.isBlank(null)</c> is true
+    /// (<c>KafkaAdminClient.java:4597-4599</c>). A real dictionary cannot hold a null key, so
+    /// the map here is a hostile <see cref="IReadOnlyDictionary{TKey, TValue}"/> that yields one.
+    /// </summary>
+    [Fact]
+    public void G6_9_UpdateFeatures_ANullName_GetsTheBlankNameMessage()
+    {
+        using MockAdminClient admin = new MockAdminClient();
+
+        ArgumentException thrown = Assert.Throws<ArgumentException>(
+            () => admin.UpdateFeatures(
+                new FeatureUpdateEntries(
+                    new KeyValuePair<string, FeatureUpdate>(
+                        null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade)))));
+
+        Assert.Equal("featureUpdates", thrown.ParamName);
+        Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -662,4 +706,39 @@ public sealed class PublicAdminP7Tests
             {
                 Renewers = new[] { new KafkaPrincipal("User", renewer) },
             }).DelegationToken();
+
+    /// <summary>
+    /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary
+    /// cannot — a null key — so the guard against it is reachable from a test.
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="Count"/> and enumeration are exercised by production; the rest of the
+    /// interface is present because the interface requires it, and says so if called.
+    /// </remarks>
+    private sealed class FeatureUpdateEntries : IReadOnlyDictionary<string, FeatureUpdate>
+    {
+        private readonly KeyValuePair<string, FeatureUpdate>[] _entries;
+
+        internal FeatureUpdateEntries(params KeyValuePair<string, FeatureUpdate>[] entries)
+        {
+            _entries = entries;
+        }
+
+        public int Count => _entries.Length;
+
+        public IEnumerable<string> Keys => _entries.Select(entry => entry.Key);
+
+        public IEnumerable<FeatureUpdate> Values => _entries.Select(entry => entry.Value);
+
+        public FeatureUpdate this[string key] => throw new NotSupportedException();
+
+        public bool ContainsKey(string key) => throw new NotSupportedException();
+
+        public bool TryGetValue(string key, out FeatureUpdate value) => throw new NotSupportedException();
+
+        public IEnumerator<KeyValuePair<string, FeatureUpdate>> GetEnumerator() =>
+            ((IEnumerable<KeyValuePair<string, FeatureUpdate>>)_entries).GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator() => _entries.GetEnumerator();
+    }
 }

@@ -425,25 +425,25 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     /// <summary>
-    /// A null element is still rejected <b>before</b> the native call — the pass-through
-    /// keeps this precondition (stricter than Java, which skips a null user at
-    /// <c>KafkaAdminClient.java:4358</c>; a separate finding, G4-3).
+    /// ⚠ <b>A null user is skipped, not rejected</b> (M15/P13.5 G4-3) — Java's request builder
+    /// adds only the non-null names (<c>KafkaAdminClient.java:4357-4360</c>). So
+    /// <c>["alice", null]</c> sends <c>"alice"</c> alone, and <c>[null]</c> sends an empty
+    /// request, which the ABI and the broker read as "describe every user"
+    /// (<c>ScramImage.java:86-87</c>). Neither throws: <see cref="CaptureDescribeUsers"/> runs
+    /// the production submit path, so a surviving rejection fails this test with the throw.
     /// </summary>
     [Fact]
-    public void DescribeUsers_ANullElement_IsRejectedBeforeTheNativeCall()
+    public void G4_3_DescribeUsers_ANullElement_IsSkipped()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        bool submitted = false;
+        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) mixed =
+            CaptureDescribeUsers(new[] { "alice", null! });
+        Assert.Equal(1, mixed.Count);
+        Assert.Equal(new[] { "alice" }, mixed.Users);
 
-        ArgumentException error = Assert.Throws<ArgumentException>(() =>
-            admin.DescribeUserScramCredentials(
-                new[] { "alice", null! },
-                options: null,
-                (handle, pinned, pinnedCount, timeoutMs, callback, data) => submitted = true));
-
-        Assert.Equal("users", error.ParamName);
-        Assert.StartsWith("The users must not contain a null element.", error.Message);
-        Assert.False(submitted, "the submit ran although a precondition failed");
+        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) onlyNull =
+            CaptureDescribeUsers(new string[] { null! });
+        Assert.Equal(0, onlyNull.Count);
+        Assert.Empty(onlyNull.Users);
     }
 
     // ------------------------------------------------------------------------------------

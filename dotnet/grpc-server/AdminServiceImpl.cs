@@ -2040,8 +2040,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 return new Proto.VoidKeyedResponse { Error = TranslateAdmin.RequestError(invalid!) };
             }
 
-            // An empty map is not a no-op: Java rejects it synchronously, and that throw is
-            // exactly what the top-level error is for.
+            // An empty map is forwarded as such: a real client rejects it synchronously, as Java
+            // does, and that throw is exactly what the top-level error is for; a mock, like
+            // Java's, returns an empty result.
             UpdateFeaturesResult result = admin.UpdateFeatures(
                 updates,
                 new UpdateFeaturesOptions

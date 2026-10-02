@@ -101,11 +101,23 @@ internal sealed class NativeAdminClient : IDisposable
         EqualityComparer<TopicPartitionReplica>.Default;
 
     private readonly SafeAdminHandle _handle;
+
+    /// <summary>
+    /// Whether this client was built by <see cref="CreateMock"/> (Java's
+    /// <c>MockAdminClient</c>) rather than <see cref="Create"/> (Java's
+    /// <c>KafkaAdminClient</c>). Both share one handle type and one RPC surface, so this is
+    /// read only where Java's two classes disagree on what reaches the core — the empty-map
+    /// guard of <see cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions?, NativeUpdateFeaturesSubmit)"/>
+    /// (M15/P13.5 G6-1) — and to name the public type in <see cref="ThrowIfClosed"/>
+    /// (M15/P13.5 X9).
+    /// </summary>
+    private readonly bool _isMock;
     private int _closed;
 
-    private NativeAdminClient(SafeAdminHandle handle)
+    private NativeAdminClient(SafeAdminHandle handle, bool isMock)
     {
         _handle = handle;
+        _isMock = isMock;
     }
 
     /// <summary>
@@ -922,7 +934,7 @@ internal sealed class NativeAdminClient : IDisposable
             throw new KafkaException("kafka_admin_AdminClient_new returned a null handle without an error.");
         }
 
-        return new NativeAdminClient(handle);
+        return new NativeAdminClient(handle, isMock: false);
     }
 
     /// <summary>
@@ -954,7 +966,7 @@ internal sealed class NativeAdminClient : IDisposable
             throw new KafkaException("kafka_admin_MockAdminClient_new returned a null handle.");
         }
 
-        return new NativeAdminClient(handle);
+        return new NativeAdminClient(handle, isMock: true);
     }
 
     /// <summary>
@@ -4028,9 +4040,14 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>kafka_admin_AdminClient_describe_user_scram_credentials_async</c>). The broker answers a
     /// repeat itself, with one <c>DUPLICATE_RESOURCE</c> row for that user
     /// (<c>ScramImage.java:126-128</c>), so the response still has one row per distinct user
-    /// and the views' keys stay unique. The null-element rejection is unchanged by this: it
-    /// is stricter than Java, which skips a null user (<c>:4358</c>), and is a separate
-    /// finding (G4-3) this pass-through deliberately leaves alone.
+    /// and the views' keys stay unique.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A null user is skipped, not rejected</b> (M15/P13.5 G4-3) — Java's request
+    /// builder adds only the non-null names (<c>KafkaAdminClient.java:4357-4360</c>), and the
+    /// ABI's own string reader skips a NULL entry too. So <c>[null]</c> sends an empty
+    /// request, which describes every user: Java sends an empty non-null list there, and the
+    /// broker reads empty as "all" (<c>ScramImage.java:86-87</c>).
     /// </para>
     /// </remarks>
     internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
@@ -4051,8 +4068,8 @@ internal sealed class NativeAdminClient : IDisposable
             {
                 if (user is null)
                 {
-                    throw new ArgumentException(
-                        "The users must not contain a null element.", nameof(users));
+                    // Skipped, as Java's request builder skips it (see the remarks).
+                    continue;
                 }
 
                 // A NUL would truncate the name into a different user (AdminStrings).
@@ -4605,13 +4622,23 @@ internal sealed class NativeAdminClient : IDisposable
     /// out. The gRPC servicer already maps a synchronous throw to the top-level error.
     /// </para>
     /// <para>
-    /// ⚠ <b>The empty-map, null- and blank-name and null-update guards stay, and run first.</b>
-    /// They throw Java's own <see cref="ArgumentException"/> messages
+    /// ⚠ <b>The empty-map, blank-name and null-update guards stay, and run first.</b> They
+    /// throw Java's own <see cref="ArgumentException"/> messages
     /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — a precondition exception,
-    /// where the core's refusal of the same input would be a <see cref="KafkaException"/>. They
-    /// also hold on a mock, whose core entry point accepts an empty map (Java's
-    /// <c>MockAdminClient.updateFeatures</c> validates nothing), as they did before. What
-    /// reaches the synchronous refusal through this surface is therefore only what these
+    /// where the core's refusal of the same input would be a <see cref="KafkaException"/>. A
+    /// null name is a blank one, as in Java (<c>Utils.isBlank(null)</c>), so it gets the
+    /// blank-name message (M15/P13.5 G6-9).
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The empty-map guard is the real client's only</b> (M15/P13.5 G6-1). Java's
+    /// <c>MockAdminClient.updateFeatures</c> validates nothing
+    /// (<c>MockAdminClient.java:1286-1300</c>) and returns an empty result for an empty map,
+    /// and the mock's core entry point does the same (header,
+    /// <c>kafka_admin_AdminClient_update_features_async</c>: a null return and no callback),
+    /// so on a mock the guard is skipped and the zero-key countdown settles at once. The
+    /// blank-name and null-update guards are <b>not</b> mock-gated, although Java's mock checks
+    /// neither: a null name cannot be pinned for the ABI at all, and the two share one loop.
+    /// What reaches the synchronous refusal through this surface is therefore only what these
     /// guards cannot see: a name <b>repeated</b> under the caller's own dictionary comparer —
     /// the core's <c>LOCAL_ILLEGAL_ARGUMENT</c> "feature update at index <em>i</em> repeats
     /// feature …" — and anything the core refuses in the future.
@@ -4637,7 +4664,8 @@ internal sealed class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(featureUpdates));
         }
 
-        if (featureUpdates.Count == 0)
+        // The real client's guard only (see the remarks): Java's mock accepts an empty map.
+        if (featureUpdates.Count == 0 && !_isMock)
         {
             throw new ArgumentException(
                 "Feature updates can not be null or empty.", nameof(featureUpdates));
@@ -4657,12 +4685,7 @@ internal sealed class NativeAdminClient : IDisposable
         int next = 0;
         foreach (KeyValuePair<string, FeatureUpdate> entry in featureUpdates)
         {
-            if (entry.Key is null)
-            {
-                throw new ArgumentException(
-                    "The feature updates must not contain a null feature name.", nameof(featureUpdates));
-            }
-
+            // Java's Utils.isBlank(null) is true, so a null name gets this message too.
             if (IsBlank(entry.Key))
             {
                 throw new ArgumentException(
@@ -4702,10 +4725,11 @@ internal sealed class NativeAdminClient : IDisposable
             }
 
             // Shape 4b: one callback per distinct feature, and only when the submit returns
-            // NULL. An empty map is rejected above; a name the caller's comparer repeats is not
-            // de-duplicated, because the core refuses it synchronously (see the remarks) and a
-            // refused call makes no callback at all — so a repeat never leaves this countdown
-            // waiting on a callback that cannot come.
+            // NULL. An empty map reaches here only on a mock, whose submit returns NULL and makes
+            // no callback, so the submit token released below settles it at zero. A name the
+            // caller's comparer repeats is not de-duplicated, because the core refuses it
+            // synchronously (see the remarks) and a refused call makes no callback at all — so
+            // a repeat never leaves this countdown waiting on a callback that cannot come.
             operation.SetPendingCallbacks(keys.Count);
 
             refused = KafkaException.FromHandle(submit(
@@ -6999,11 +7023,16 @@ internal sealed class NativeAdminClient : IDisposable
     private bool TryBeginClose() => Interlocked.Exchange(ref _closed, 1) == 0;
 
     /// <summary>The use-after-dispose guard for every RPC.</summary>
+    /// <remarks>
+    /// The exception names the <b>public</b> type the caller holds (M15/P13.5 X9) — this
+    /// internal class is shared by both, so its own name would point the caller at a type
+    /// they cannot see.
+    /// </remarks>
     private void ThrowIfClosed()
     {
         if (Volatile.Read(ref _closed) != 0)
         {
-            throw new ObjectDisposedException(nameof(NativeAdminClient));
+            throw new ObjectDisposedException(_isMock ? nameof(MockAdminClient) : nameof(KafkaAdminClient));
         }
     }
 }

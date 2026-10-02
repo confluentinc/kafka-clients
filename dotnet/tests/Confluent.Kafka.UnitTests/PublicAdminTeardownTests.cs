@@ -94,6 +94,27 @@ public sealed class PublicAdminTeardownTests
             () => admin.CreateTopics(new[] { new NewTopic("after-dispose", 1, 1) }));
     }
 
+    /// <summary>
+    /// The post-dispose exception names the <b>public</b> type the caller holds, on both
+    /// flavors (M15/P13.5 X9) — not the internal class they share, which a caller cannot see.
+    /// </summary>
+    [Fact]
+    public void X9_CallAfterDispose_NamesThePublicType()
+    {
+        MockAdminClient mock = new MockAdminClient(1);
+        TestTimeout.Run(mock.Dispose, s_deadline);
+        Assert.Equal(
+            nameof(MockAdminClient),
+            Assert.Throws<ObjectDisposedException>(() => mock.ListTopics()).ObjectName);
+
+        KafkaAdminClient real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        TestTimeout.Run(real.Dispose, s_deadline);
+        Assert.Equal(
+            nameof(KafkaAdminClient),
+            Assert.Throws<ObjectDisposedException>(() => real.ListTopics()).ObjectName);
+    }
+
     [Fact]
     public async Task CloseAfterDispose_IsANoOp()
     {

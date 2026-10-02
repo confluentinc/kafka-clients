@@ -1265,7 +1265,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="users">
     /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b>
-    /// user — Java's no-argument overload.
+    /// user — Java's no-argument overload. A null element is skipped, as Java skips it
+    /// (<c>KafkaAdminClient.java:4357-4360</c>), so a list of only nulls describes every user
+    /// too.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
@@ -1273,8 +1275,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="DescribeUserScramCredentialsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="users"/> contains a null element, or a user name containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <paramref name="users"/> contains a user name containing a NUL character or an unpaired
+    /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
@@ -1429,10 +1431,13 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="featureUpdates"/> is empty, or contains a blank or null name, or a null
-    /// update — the two Java rejects before enqueuing anything
-    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — or a feature name
+    /// <paramref name="featureUpdates"/> is empty on a <see cref="KafkaAdminClient"/>, or contains
+    /// a blank or null name (Java's <c>Utils.isBlank</c> treats null as blank, so both get
+    /// Java's blank-name message), or a null update — the two Java rejects before enqueuing
+    /// anything (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — or a feature name
     /// containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// A <see cref="MockAdminClient"/> accepts an empty map and returns an empty result, as
+    /// Java's mock does (<c>MockAdminClient.java:1286-1300</c>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
