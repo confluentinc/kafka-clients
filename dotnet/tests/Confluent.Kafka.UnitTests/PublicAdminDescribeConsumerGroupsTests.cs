@@ -226,27 +226,22 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
     }
 
     /// <summary>
-    /// A negative timeout is refused rather than silently substituting the client default,
-    /// and the message names the property so the caller can find it.
+    /// A negative timeout is not refused (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
+    /// result. The value actually sent is pinned by the submit-seam tests.
     /// </summary>
     [Fact]
-    public async Task DescribeConsumerGroups_RejectsANegativeTimeout()
+    public async Task DescribeConsumerGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         await using MockAdminClient admin = new MockAdminClient(1);
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () =>
             {
                 admin.DescribeConsumerGroups(
                     new[] { "p5-dcg-timeout" },
                     new DescribeConsumerGroupsOptions { TimeoutMs = -1 });
-            });
-
-        Assert.Equal("options", failure.ParamName);
-        Assert.Contains(
-            "DescribeConsumerGroupsOptions.TimeoutMs",
-            failure.Message,
-            StringComparison.Ordinal);
+            }));
     }
 
     /// <summary>

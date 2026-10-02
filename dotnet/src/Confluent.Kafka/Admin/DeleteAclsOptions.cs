@@ -31,10 +31,7 @@ public sealed class DeleteAclsOptions
     /// <c>AbstractOptions.timeoutMs()</c>.
     /// </summary>
     /// <remarks>
-    /// Must not be negative: the ABI reads a negative <c>timeout_ms</c> as <em>unset</em>,
-    /// so passing one would silently mean "use the client default".
-    /// <see cref="IAdmin.DeleteAcls"/> rejects it with
-    /// <see cref="System.ArgumentOutOfRangeException"/> before any native call (ffi §B5).
+    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
     /// </remarks>
     public int? TimeoutMs { get; set; }
 }

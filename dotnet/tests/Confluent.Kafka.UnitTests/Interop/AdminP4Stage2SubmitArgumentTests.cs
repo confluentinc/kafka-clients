@@ -275,11 +275,12 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
     /// <summary>
     /// A <see langword="null"/> timeout maps to a <b>negative</b> <c>timeout_ms</c> — the
-    /// ABI's "unset" — never to <c>0</c>, which means "do not wait"; an explicit one is
-    /// forwarded verbatim; and a negative one is rejected.
+    /// ABI's "unset" — never to <c>0</c>, which means "do not wait"; a non-negative one is
+    /// forwarded verbatim; and a negative one is sent as <c>0</c> (M15/P13.5 X2, Java's
+    /// <c>calcDeadlineMs</c> clamp — see <see cref="CreateTopicsOptions.TimeoutMs"/>).
     /// </summary>
     [Fact]
-    public void Timeouts_MapNullToANegative_AndForwardTheRestVerbatim()
+    public void Timeouts_MapNullToANegative_ClampANegativeToZero_AndForwardTheRest()
     {
         Dictionary<TopicPartition, OffsetSpec> request = new Dictionary<TopicPartition, OffsetSpec>
         {
@@ -297,11 +298,9 @@ public sealed class AdminP4Stage2SubmitArgumentTests
             5_353,
             CaptureReassignments(null, new ListPartitionReassignmentsOptions { TimeoutMs = 5_353 }).TimeoutMs);
 
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ListOffsets(request, new ListOffsetsOptions { TimeoutMs = -1 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ListPartitionReassignments(null, new ListPartitionReassignmentsOptions { TimeoutMs = -1 }));
+        Assert.Equal(0, CaptureOffsets(request, new ListOffsetsOptions { TimeoutMs = -1 }).TimeoutMs);
+        Assert.Equal(
+            0, CaptureReassignments(null, new ListPartitionReassignmentsOptions { TimeoutMs = -1 }).TimeoutMs);
     }
 
     /// <summary>

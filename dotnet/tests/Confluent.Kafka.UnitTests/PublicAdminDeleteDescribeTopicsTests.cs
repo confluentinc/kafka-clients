@@ -271,9 +271,11 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
     /// <summary>
     /// Preconditions are validated <b>before</b> any native call (ffi §B5) and raise .NET
-    /// exceptions, never <see cref="KafkaException"/>. The two negative-number guards are
-    /// deliberately stricter than Java, because the ABI silently rereads a negative as
-    /// "unset" — the caller would never learn the value they asked for was discarded.
+    /// exceptions, never <see cref="KafkaException"/>. The negative
+    /// <c>PartitionSizeLimitPerResponse</c> guard is deliberately stricter than Java, because
+    /// the ABI silently rereads a negative as "unset" — the caller would never learn the value
+    /// they asked for was discarded. A negative <c>TimeoutMs</c> is not rejected (M15/P13.5 X2):
+    /// it is sent as 0, Java's <c>calcDeadlineMs</c> clamp.
     /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeAnyNativeCall()
@@ -291,24 +293,14 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             "The topic names must not contain a null element.", nullName.Message, StringComparison.Ordinal);
         Assert.Equal("topics", nullName.ParamName);
 
-        ArgumentOutOfRangeException deleteTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DeleteTopicsOptions { TimeoutMs = -1 }));
-        Assert.StartsWith(
-            "DeleteTopicsOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            deleteTimeout.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("options", deleteTimeout.ParamName);
-
-        ArgumentOutOfRangeException describeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+                new DeleteTopicsOptions { TimeoutMs = -1 })));
+        Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { TimeoutMs = -5 }));
-        Assert.StartsWith(
-            "DescribeTopicsOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            describeTimeout.Message,
-            StringComparison.Ordinal);
+                new DescribeTopicsOptions { TimeoutMs = -5 })));
 
         ArgumentOutOfRangeException limit = Assert.Throws<ArgumentOutOfRangeException>(
             () => admin.DescribeTopics(
@@ -482,16 +474,24 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     }
 
     /// <summary>
-    /// M15/P13.5 G1-10: the name-collection forms hand their options through, on both
-    /// clients. Each call is compared with the <see cref="TopicCollection"/> form given the
-    /// same options, so the assertion is about forwarding, not about what any one option does.
+    /// M15/P13.5 G1-10: the name-collection forms hand their options through. Each call is
+    /// compared with the <see cref="TopicCollection"/> form given the same options, so the
+    /// assertion is about forwarding, not about what any one option does.
     /// </summary>
+    /// <remarks>
+    /// The <c>PartitionSizeLimitPerResponse</c> rejection is synchronous, so it is compared on
+    /// both clients. A negative <c>TimeoutMs</c> no longer is (M15/P13.5 X2 sends it as 0), so it
+    /// is compared through the outcome instead, on the real client only: with no broker, both
+    /// forms fail through the result with the same timeout error, while a form that dropped its
+    /// options would wait out the client default and fail the bound. The mock ignores timeouts,
+    /// so there the timeout has no outcome to compare.
+    /// </remarks>
     [Fact]
-    public void G1_10_TheNameCollectionForms_ForwardTheirOptions()
+    public async Task G1_10_TheNameCollectionForms_ForwardTheirOptions()
     {
         IAdmin mock = new MockAdminClient(1);
         IAdmin real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             string[] names = { "alpha" };
@@ -502,23 +502,37 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
                 Assert.Equal(
                     Rejection(() => admin.DescribeTopics(TopicCollection.OfTopicNames(names), badLimit)), described);
                 Assert.NotNull(described);
-
-                DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
-                Assert.Equal(
-                    Rejection(() => admin.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout)),
-                    Rejection(() => admin.DeleteTopics(names, deleteTimeout)));
-
-                DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
-                Assert.Equal(
-                    Rejection(() => admin.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout)),
-                    Rejection(() => admin.DescribeTopics(names, describeTimeout)));
             }
+
+            DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
+            AssertSameTimeout(
+                await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All()),
+                await Failure(() => real.DeleteTopics(names, deleteTimeout).All()));
+
+            DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
+            AssertSameTimeout(
+                await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!),
+                await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!));
         }
         finally
         {
             mock.Dispose();
             real.Dispose();
         }
+    }
+
+    /// <summary>The failure an awaited call faults with, bounded by the test deadline.</summary>
+    private static Task<KafkaException> Failure(Func<Task> call) =>
+        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
+
+    /// <summary>
+    /// Both failures are the core's timeout error (REQUEST_TIMED_OUT), and they are the same one.
+    /// </summary>
+    private static void AssertSameTimeout(KafkaException expected, KafkaException actual)
+    {
+        Assert.Equal(7, expected.Code);
+        Assert.Equal(expected.Code, actual.Code);
+        Assert.Equal(expected.Message, actual.Message);
     }
 
     /// <summary>

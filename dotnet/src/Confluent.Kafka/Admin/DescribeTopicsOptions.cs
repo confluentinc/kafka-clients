@@ -33,8 +33,7 @@ public sealed class DescribeTopicsOptions
     /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
     /// </summary>
     /// <remarks>
-    /// Must not be negative, for the reason given on
-    /// <see cref="DeleteTopicsOptions.TimeoutMs"/>.
+    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
     /// </remarks>
     public int? TimeoutMs { get; set; }
 
@@ -74,9 +73,8 @@ public sealed class DescribeTopicsOptions
     /// Must not be negative — <b>stricter than Java</b>, which accepts any <c>int</c>.
     /// The ABI maps a negative back to Java's 2000 default (the private helper
     /// <c>describe_topics_options</c> in <c>rust/src/ffi/admin.rs</c>, whose doc the generated
-    /// header does not carry), so a negative would be silently reinterpreted. That is the
-    /// same reasoning, and the same <see cref="System.ArgumentOutOfRangeException"/>, as
-    /// <see cref="TimeoutMs"/>.
+    /// header does not carry), so a negative would be silently reinterpreted; it is rejected
+    /// with <see cref="System.ArgumentOutOfRangeException"/> before any native call (ffi §B5).
     /// </para>
     /// </remarks>
     public int PartitionSizeLimitPerResponse { get; set; } = 2000;

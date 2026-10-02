@@ -76,15 +76,19 @@ public sealed class PublicAdminP8Tests
         Assert.Equal("spec", error.ParamName);
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void AbortTransaction_RejectsANegativeTimeout()
+    public void AbortTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1),
-                new AbortTransactionOptions { TimeoutMs = -1 }));
+                new AbortTransactionOptions { TimeoutMs = -1 })));
     }
 
     [Fact]
@@ -126,14 +130,18 @@ public sealed class PublicAdminP8Tests
         Assert.Equal("transactionalId", error.ParamName);
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void ForceTerminateTransaction_RejectsANegativeTimeout()
+    public void ForceTerminateTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.ForceTerminateTransaction(
-                "txn-a", new TerminateTransactionOptions { TimeoutMs = -1 }));
+                "txn-a", new TerminateTransactionOptions { TimeoutMs = -1 })));
     }
 
     [Fact]
@@ -251,14 +259,18 @@ public sealed class PublicAdminP8Tests
         Assert.Equal("transactionalIds", element.ParamName);
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void FenceProducers_RejectsANegativeTimeout()
+    public void FenceProducers_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.FenceProducers(
-                new[] { "txn-a" }, new FenceProducersOptions { TimeoutMs = -1 }));
+                new[] { "txn-a" }, new FenceProducersOptions { TimeoutMs = -1 })));
     }
 
     [Fact]
@@ -344,14 +356,18 @@ public sealed class PublicAdminP8Tests
         Assert.Equal("transactionalIds", element.ParamName);
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void DescribeTransactions_RejectsANegativeTimeout()
+    public void DescribeTransactions_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.DescribeTransactions(
-                new[] { "txn-a" }, new DescribeTransactionsOptions { TimeoutMs = -1 }));
+                new[] { "txn-a" }, new DescribeTransactionsOptions { TimeoutMs = -1 })));
     }
 
     [Fact]
@@ -462,20 +478,24 @@ public sealed class PublicAdminP8Tests
         Assert.Equal("partitions", element.ParamName);
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void DescribeProducers_RejectsANegativeTimeout()
+    public void DescribeProducers_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.DescribeProducers(
                 new[] { new TopicPartition("alpha", 0) },
-                new DescribeProducersOptions { TimeoutMs = -1 }));
+                new DescribeProducersOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>
     /// ⚠ A <b>negative broker id</b> is not rejected: Java's <c>brokerId(int)</c> accepts any
-    /// <c>int</c>, so the timeout's guard deliberately does not extend to it.
+    /// <c>int</c>, so it is passed through as asked.
     /// </summary>
     [Fact]
     public async Task DescribeProducers_NegativeBrokerId_IsAccepted()
@@ -543,18 +563,22 @@ public sealed class PublicAdminP8Tests
         AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
     }
 
+    /// <summary>
+    /// A negative timeout is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the submit-seam tests.
+    /// </summary>
     [Fact]
-    public void ListTransactions_RejectsANegativeTimeout()
+    public void ListTransactions_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListTransactions(new ListTransactionsOptions { TimeoutMs = -1 }));
+        Assert.Null(Record.Exception(
+            () => admin.ListTransactions(new ListTransactionsOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>
     /// ⚠ A negative <c>FilteredDuration</c> is <b>not</b> rejected — it is Java's own "no
-    /// duration filter" default, unlike the timeout beside it.
+    /// duration filter" default.
     /// </summary>
     [Fact]
     public async Task ListTransactions_NegativeDuration_IsAccepted()

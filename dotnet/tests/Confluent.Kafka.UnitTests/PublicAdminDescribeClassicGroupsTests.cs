@@ -226,27 +226,22 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     }
 
     /// <summary>
-    /// A negative timeout is refused rather than silently substituting the client default,
-    /// and the message names the property so the caller can find it.
+    /// A negative timeout is not refused (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
+    /// result. The value actually sent is pinned by the submit-seam tests.
     /// </summary>
     [Fact]
-    public async Task DescribeClassicGroups_RejectsANegativeTimeout()
+    public async Task DescribeClassicGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         await using MockAdminClient admin = new MockAdminClient(1);
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () =>
             {
                 admin.DescribeClassicGroups(
                     new[] { "p5-dclg-timeout" },
                     new DescribeClassicGroupsOptions { TimeoutMs = -1 });
-            });
-
-        Assert.Equal("options", failure.ParamName);
-        Assert.Contains(
-            "DescribeClassicGroupsOptions.TimeoutMs",
-            failure.Message,
-            StringComparison.Ordinal);
+            }));
     }
 
     /// <summary>

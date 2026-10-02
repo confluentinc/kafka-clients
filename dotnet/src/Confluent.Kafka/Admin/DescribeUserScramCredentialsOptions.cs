@@ -23,7 +23,10 @@ public sealed class DescribeUserScramCredentialsOptions
 {
     /// <summary>
     /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>. Must not be negative.
+    /// Java's <c>AbstractOptions.timeoutMs()</c>.
     /// </summary>
+    /// <remarks>
+    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </remarks>
     public int? TimeoutMs { get; set; }
 }

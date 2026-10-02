@@ -321,8 +321,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 }));
         Assert.Equal("recordsToDelete", nullTopic.ParamName);
 
-        // A negative timeout is read by the ABI as "unset", so it must be rejected rather
-        // than silently reinterpreted.
+        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0, Java's
+        // calcDeadlineMs clamp, so it fails through the result rather than synchronously.
         foreach (Action negative in new Action[]
                  {
                      () => admin.ListTopics(new ListTopicsOptions { TimeoutMs = -1 }),
@@ -334,9 +334,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
                          new DeleteRecordsOptions { TimeoutMs = -1 }),
                  })
         {
-            ArgumentOutOfRangeException range = Assert.Throws<ArgumentOutOfRangeException>(negative);
-            Assert.Equal("options", range.ParamName);
-            Assert.Contains("must not be negative", range.Message, StringComparison.Ordinal);
+            Assert.Null(Record.Exception(negative));
         }
     }
 

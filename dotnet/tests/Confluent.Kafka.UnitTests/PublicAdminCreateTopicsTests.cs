@@ -473,17 +473,12 @@ public sealed class PublicAdminCreateTopicsTests
         // A null configuration VALUE is no longer a precondition failure: it is Java's null,
         // and it is sent (M15/P13.3 D16 — see NullConfigValue_IsSentAsJavasNull).
 
-        // A negative timeout would be silently reinterpreted by the ABI as "unset", so it
-        // is rejected rather than forwarded.
-        ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        // Nor is a negative timeout (M15/P13.5 X2): it is sent as 0, Java's calcDeadlineMs
+        // clamp, so it fails through the result rather than synchronously.
+        Assert.Null(Record.Exception(
             () => admin.CreateTopics(
                 new[] { new NewTopic("neg", 1, 1) },
-                new CreateTopicsOptions { TimeoutMs = -1 }));
-        Assert.Equal("options", negativeTimeout.ParamName);
-        Assert.StartsWith(
-            "CreateTopicsOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            negativeTimeout.Message,
-            StringComparison.Ordinal);
+                new CreateTopicsOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>

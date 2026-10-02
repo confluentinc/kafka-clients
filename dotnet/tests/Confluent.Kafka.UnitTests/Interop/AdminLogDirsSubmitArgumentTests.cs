@@ -93,23 +93,17 @@ public sealed class AdminLogDirsSubmitArgumentTests
     }
 
     /// <summary>
-    /// A negative timeout is a precondition failure, rejected before any pin or P/Invoke
-    /// (ffi §B5), naming the options type so the caller can tell which argument was wrong.
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's
+    /// <c>calcDeadlineMs</c> clamp (<c>KafkaAdminClient.java:496-499</c>), not a throw. See
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
     /// </summary>
     [Fact]
-    public void ANegativeTimeout_IsRejectedBeforeTheCall()
+    public void X2_ANegativeTimeout_IsSentAsZero()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeLogDirs(new[] { 0 }, new DescribeLogDirsOptions { TimeoutMs = -1 }));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.AlterReplicaLogDirs(
-                new Dictionary<TopicPartitionReplica, string> { [s_replica] = "/data" },
-                new AlterReplicaLogDirsOptions { TimeoutMs = -1 }));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeReplicaLogDirs(
-                new[] { s_replica }, new DescribeReplicaLogDirsOptions { TimeoutMs = -1 }));
+        Assert.Equal(0, CaptureDescribeLogDirs(new DescribeLogDirsOptions { TimeoutMs = -1 }, 0).TimeoutMs);
+        Assert.Equal(0, CaptureAlter(new AlterReplicaLogDirsOptions { TimeoutMs = -1 }, s_move).TimeoutMs);
+        Assert.Equal(
+            0, CaptureDescribeReplicas(new DescribeReplicaLogDirsOptions { TimeoutMs = -1 }, s_replica).TimeoutMs);
     }
 
     /// <summary>

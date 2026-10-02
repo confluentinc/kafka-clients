@@ -412,47 +412,34 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     }
 
     /// <summary>
-    /// M15/P13.5 G3-7: the options-only form hands its options through, on both clients. It
-    /// is compared with <c>(null, options)</c> given the same options, so the assertion is
-    /// about forwarding, not about what the option does.
+    /// M15/P13.5 G3-7: the options-only form hands its options through. It is compared with
+    /// <c>(null, options)</c> given the same options, so the assertion is about forwarding, not
+    /// about what the option does.
     /// </summary>
+    /// <remarks>
+    /// The only option is <c>TimeoutMs</c>, and a negative one is sent as 0 rather than rejected
+    /// (M15/P13.5 X2), so the comparison is through the outcome, on the real client: with no
+    /// broker, both forms fail through the result with the same timeout error, while a form that
+    /// dropped its options would wait out the client default and fail the bound. The mock
+    /// ignores timeouts, so there the option has no outcome to compare.
+    /// </remarks>
     [Fact]
-    public void G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
+    public async Task G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
     {
-        IAdmin mock = new MockAdminClient(1);
-        IAdmin real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
-        try
-        {
-            ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
-            foreach (IAdmin admin in new[] { mock, real })
-            {
-                Assert.Equal(
-                    Rejection(() => admin.ListPartitionReassignments(null, options)),
-                    Rejection(() => admin.ListPartitionReassignments(options)));
-            }
-        }
-        finally
-        {
-            mock.Dispose();
-            real.Dispose();
-        }
-    }
+        using KafkaAdminClient real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
 
-    /// <summary>
-    /// What a call threw, as one comparable string, or <see langword="null"/> if it did not
-    /// throw.
-    /// </summary>
-    private static string? Rejection(Action call)
-    {
-        try
-        {
-            call();
-            return null;
-        }
-        catch (Exception thrown)
-        {
-            return $"{thrown.GetType().FullName}|{(thrown as ArgumentException)?.ParamName}|{thrown.Message}";
-        }
+        KafkaException explicitNull = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(null, options).Reassignments()),
+            s_deadline);
+        KafkaException optionsOnly = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(options).Reassignments()),
+            s_deadline);
+
+        // REQUEST_TIMED_OUT, the core's timeout error, and the same one on both forms.
+        Assert.Equal(7, explicitNull.Code);
+        Assert.Equal(explicitNull.Code, optionsOnly.Code);
+        Assert.Equal(explicitNull.Message, optionsOnly.Message);
     }
 }

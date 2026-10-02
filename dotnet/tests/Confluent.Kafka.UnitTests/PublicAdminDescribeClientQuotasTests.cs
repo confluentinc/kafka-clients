@@ -141,13 +141,10 @@ public sealed class PublicAdminDescribeClientQuotasTests
             Assert.Throws<ArgumentNullException>(
                 () => admin.DescribeClientQuotas(null!)).ParamName);
 
-        ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0.
+        Assert.Null(Record.Exception(
             () => admin.DescribeClientQuotas(
-                ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = -1 }));
-        Assert.StartsWith(
-            "DescribeClientQuotasOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            negativeTimeout.Message,
-            StringComparison.Ordinal);
+                ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>A call after <c>Dispose</c> throws <see cref="ObjectDisposedException"/>.</summary>

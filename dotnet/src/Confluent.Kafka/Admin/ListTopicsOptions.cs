@@ -27,11 +27,7 @@ public sealed class ListTopicsOptions
     /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
     /// </summary>
     /// <remarks>
-    /// Must not be negative. The ABI reads a negative <c>timeout_ms</c> as <em>unset</em>,
-    /// so passing one would silently mean "use the client default" rather than the
-    /// timeout asked for; <see cref="IAdmin.ListTopics"/> rejects it with
-    /// <see cref="System.ArgumentOutOfRangeException"/> before any native call
-    /// (ffi §B5).
+    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
     /// </remarks>
     public int? TimeoutMs { get; set; }
 

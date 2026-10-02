@@ -198,27 +198,19 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     /// <summary>
-    /// A negative <c>TimeoutMs</c> is rejected <b>before</b> any native call, on every RPC
-    /// — the ABI reads a negative timeout as "unset", so forwarding one would silently
-    /// substitute the client default for the value asked for (ffi §B5).
+    /// A negative <c>TimeoutMs</c> is not rejected (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
+    /// result. The value actually sent is pinned by the submit-seam tests.
     /// </summary>
     [Fact]
-    public void NegativeTimeout_IsRejectedBeforeTheNativeCall()
+    public void NegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        ArgumentOutOfRangeException cluster = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeCluster(new DescribeClusterOptions { TimeoutMs = -1 }));
-        Assert.Equal("options", cluster.ParamName);
-        Assert.Contains("DescribeClusterOptions.TimeoutMs must not be negative", cluster.Message, StringComparison.Ordinal);
-
-        ArgumentOutOfRangeException configResources = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListConfigResources(null, new ListConfigResourcesOptions { TimeoutMs = -5 }));
-        Assert.Equal("options", configResources.ParamName);
-        Assert.Contains(
-            "ListConfigResourcesOptions.TimeoutMs must not be negative",
-            configResources.Message,
-            StringComparison.Ordinal);
+        Assert.Null(Record.Exception(
+            () => admin.DescribeCluster(new DescribeClusterOptions { TimeoutMs = -1 })));
+        Assert.Null(Record.Exception(
+            () => admin.ListConfigResources(null, new ListConfigResourcesOptions { TimeoutMs = -5 })));
     }
 
     /// <summary>

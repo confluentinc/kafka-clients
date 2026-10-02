@@ -367,27 +367,22 @@ public sealed class PublicAdminConfigsTests
     }
 
     /// <summary>
-    /// A negative <c>TimeoutMs</c> is rejected <b>before</b> any native call, on both RPCs.
+    /// A negative <c>TimeoutMs</c> is not rejected on either RPC (M15/P13.5 X2): it is sent as
+    /// 0, Java's <c>calcDeadlineMs</c> clamp. The value actually sent is pinned by the
+    /// submit-seam tests.
     /// </summary>
     [Fact]
-    public void NegativeTimeout_IsRejectedBeforeTheNativeCall()
+    public void NegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        ArgumentOutOfRangeException describe = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions { TimeoutMs = -1 }));
-        Assert.Equal("options", describe.ParamName);
-        Assert.Contains(
-            "DescribeConfigsOptions.TimeoutMs must not be negative", describe.Message, StringComparison.Ordinal);
-
-        ArgumentOutOfRangeException alter = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
+            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions { TimeoutMs = -1 })));
+        Assert.Null(Record.Exception(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(),
-                new AlterConfigsOptions { TimeoutMs = -2 }));
-        Assert.Equal("options", alter.ParamName);
-        Assert.Contains(
-            "AlterConfigsOptions.TimeoutMs must not be negative", alter.Message, StringComparison.Ordinal);
+                new AlterConfigsOptions { TimeoutMs = -2 })));
     }
 
     /// <summary>

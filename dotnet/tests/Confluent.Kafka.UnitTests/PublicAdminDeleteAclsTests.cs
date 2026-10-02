@@ -219,13 +219,10 @@ public sealed class PublicAdminDeleteAclsTests
             "The ACL filters must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
         Assert.Equal("filters", nullElement.ParamName);
 
-        ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0.
+        Assert.Null(Record.Exception(
             () => admin.DeleteAcls(
-                new[] { Filter("t") }, new DeleteAclsOptions { TimeoutMs = -1 }));
-        Assert.StartsWith(
-            "DeleteAclsOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            negativeTimeout.Message,
-            StringComparison.Ordinal);
+                new[] { Filter("t") }, new DeleteAclsOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>A call after <c>Dispose</c> throws <see cref="ObjectDisposedException"/>.</summary>

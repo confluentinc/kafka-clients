@@ -318,31 +318,23 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     }
 
     /// <summary>
-    /// A negative timeout is refused rather than silently substituting the client default,
-    /// and the message names the property so the caller can find it — through the
-    /// single-group convenience form as well as the batched one, since the convenience form
-    /// must not swallow the options on its way through.
+    /// A negative timeout is not refused (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp, through the single-group convenience form as well as the
+    /// batched one. The value actually sent is pinned by the submit-seam tests.
     /// </summary>
     [Fact]
-    public async Task ListConsumerGroupOffsets_RejectsANegativeTimeout()
+    public async Task ListConsumerGroupOffsets_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         await using MockAdminClient admin = new MockAdminClient(1);
 
-        ArgumentOutOfRangeException single = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () =>
             {
                 admin.ListConsumerGroupOffsets(
                     "p5-lcgo-timeout",
                     new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
-            });
-
-        Assert.Equal("options", single.ParamName);
-        Assert.Contains(
-            "ListConsumerGroupOffsetsOptions.TimeoutMs",
-            single.Message,
-            StringComparison.Ordinal);
-
-        ArgumentOutOfRangeException batched = Assert.Throws<ArgumentOutOfRangeException>(
+            }));
+        Assert.Null(Record.Exception(
             () =>
             {
                 admin.ListConsumerGroupOffsets(
@@ -351,9 +343,41 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                         ["p5-lcgo-timeout-2"] = new ListConsumerGroupOffsetsSpec(),
                     },
                     new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
-            });
+            }));
+    }
 
-        Assert.Equal("options", batched.ParamName);
+    /// <summary>
+    /// The single-group convenience form must not swallow the options on its way through. It
+    /// is compared with the batched form given the same group and options: with no broker, a
+    /// negative timeout (sent as 0, M15/P13.5 X2) fails both through the result with the same
+    /// timeout error, while a form that dropped its options would wait out the client default
+    /// and fail the bound. The mock ignores timeouts, so this runs on the real client.
+    /// </summary>
+    [Fact]
+    public async Task ListConsumerGroupOffsets_TheSingleGroupForm_ForwardsItsOptions()
+    {
+        using KafkaAdminClient real = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
+
+        KafkaException batched = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(
+                () => real.ListConsumerGroupOffsets(
+                    new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+                    {
+                        ["p5-lcgo-forward"] = new ListConsumerGroupOffsetsSpec(),
+                    },
+                    options).All()),
+            s_deadline);
+        KafkaException single = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(
+                () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All()),
+            s_deadline);
+
+        // REQUEST_TIMED_OUT, the core's timeout error, and the same one on both forms.
+        Assert.Equal(7, batched.Code);
+        Assert.Equal(batched.Code, single.Code);
+        Assert.Equal(batched.Message, single.Message);
     }
 
     /// <summary>

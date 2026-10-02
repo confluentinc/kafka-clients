@@ -422,18 +422,23 @@ public sealed class AdminP4SubmitArgumentTests
             CaptureReassign(request, new AlterPartitionReassignmentsOptions { TimeoutMs = 23_456 }).TimeoutMs);
     }
 
-    /// <summary>A negative timeout is rejected rather than silently meaning "unset".</summary>
+    /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's <c>calcDeadlineMs</c>
+    /// clamp, not a throw. See <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
     [Fact]
-    public void NegativeTimeout_IsRejected()
+    public void X2_NegativeTimeout_IsSentAsZero()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ElectLeaders(ElectionType.Preferred, null, new ElectLeadersOptions { TimeoutMs = -1 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.AlterPartitionReassignments(
-                new Dictionary<TopicPartition, NewPartitionReassignment?>(),
-                new AlterPartitionReassignmentsOptions { TimeoutMs = -1 }));
+        Assert.Equal(
+            0, CaptureElect(ElectionType.Preferred, null, new ElectLeadersOptions { TimeoutMs = -1 }).TimeoutMs);
+        Assert.Equal(
+            0,
+            CaptureReassign(
+                new Dictionary<TopicPartition, NewPartitionReassignment?>
+                {
+                    [new TopicPartition("p4-negative-timeout", 0)] = null,
+                },
+                new AlterPartitionReassignmentsOptions { TimeoutMs = -1 }).TimeoutMs);
     }
 
     private static Captured CaptureElect(

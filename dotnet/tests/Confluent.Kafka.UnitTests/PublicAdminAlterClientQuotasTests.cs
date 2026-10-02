@@ -331,13 +331,11 @@ public sealed class PublicAdminAlterClientQuotasTests
             nullElement.Message,
             StringComparison.Ordinal);
 
-        ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        // A negative timeout is no longer among them (M15/P13.5 X2): it is sent as 0, Java's
+        // calcDeadlineMs clamp, so it fails through the result rather than synchronously.
+        Assert.Null(Record.Exception(
             () => admin.AlterClientQuotas(
-                new[] { Alteration("ok", 1d) }, new AlterClientQuotasOptions { TimeoutMs = -1 }));
-        Assert.StartsWith(
-            "AlterClientQuotasOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            negativeTimeout.Message,
-            StringComparison.Ordinal);
+                new[] { Alteration("ok", 1d) }, new AlterClientQuotasOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>

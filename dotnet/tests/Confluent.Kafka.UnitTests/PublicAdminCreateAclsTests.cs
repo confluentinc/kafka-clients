@@ -188,8 +188,8 @@ public sealed class PublicAdminCreateAclsTests
     }
 
     /// <summary>
-    /// Preconditions are rejected before any native call (ffi §B5): a null collection, a null
-    /// element, and a negative timeout the ABI would silently read as "unset".
+    /// Preconditions are rejected before any native call (ffi §B5): a null collection and a null
+    /// element. A negative timeout is not one (M15/P13.5 X2): it is sent as 0.
     /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
@@ -206,13 +206,9 @@ public sealed class PublicAdminCreateAclsTests
         Assert.StartsWith(
             "The ACL bindings must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
 
-        ArgumentOutOfRangeException negativeTimeout = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.CreateAcls(
-                new[] { Binding("ok") }, new CreateAclsOptions { TimeoutMs = -1 }));
-        Assert.StartsWith(
-            "CreateAclsOptions.TimeoutMs must not be negative; leave it null to use the client default.",
-            negativeTimeout.Message,
-            StringComparison.Ordinal);
+                new[] { Binding("ok") }, new CreateAclsOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>

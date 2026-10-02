@@ -41,11 +41,9 @@ public sealed class CreateTopicsOptions
     /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
     /// </summary>
     /// <remarks>
-    /// Must not be negative. The ABI reads a negative <c>timeout_ms</c> as <em>unset</em>,
-    /// so passing one would silently mean "use the client default" rather than the
-    /// timeout asked for; <see cref="IAdmin.CreateTopics"/> rejects it with
-    /// <see cref="System.ArgumentOutOfRangeException"/> before any native call
-    /// (ffi §B5). <see langword="null"/> is how you ask for the default.
+    /// A negative value is sent as 0, Java's <c>Math.max(0, timeoutMs)</c>: the call is
+    /// already expired and fails through its result with the core's timeout error.
+    /// <see langword="null"/> is how you ask for the default.
     /// </remarks>
     public int? TimeoutMs { get; set; }
 

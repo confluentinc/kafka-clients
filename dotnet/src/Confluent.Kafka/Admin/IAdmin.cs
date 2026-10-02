@@ -100,11 +100,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>). Whether to fail per key
     /// instead is open (audit X10; see the <see cref="NewTopic"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
-    /// client default — the ABI reads a negative timeout as "unset", so a negative value
-    /// would be silently reinterpreted rather than honoured.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null);
 
@@ -145,11 +140,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1924</c>). Whether to fail per key
     /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
-    /// client default — the ABI reads a negative timeout as "unset", so a negative value
-    /// would be silently reinterpreted rather than honoured.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
 
@@ -185,10 +175,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate — as
     /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>, which records how
     /// that is stricter than Java.
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — as
-    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteTopicsResult DeleteTopics(
@@ -232,9 +218,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// instead is open (audit X10; see <see cref="TopicCollection.OfTopicNames"/>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is
-    /// negative — the ABI reads a negative of either as "unset" and would silently
-    /// substitute a default.
+    /// <c>options.PartitionSizeLimitPerResponse</c> is negative — the ABI reads a negative
+    /// as "unset" and would silently substitute a default.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null);
@@ -266,8 +251,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// how that is stricter than Java.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is negative —
-    /// as <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
+    /// <c>options.PartitionSizeLimitPerResponse</c> is negative — as
+    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeTopicsResult DescribeTopics(
@@ -288,11 +273,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <c>kafka_admin_ListTopicsResult_t</c> declares no per-key error accessor — so either
     /// the call fails and the task faults, or the whole map succeeds.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
-    /// client default — the ABI reads a negative timeout as "unset", so a negative value
-    /// would be silently reinterpreted rather than honoured.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListTopicsResult ListTopics(ListTopicsOptions? options = null);
 
@@ -321,9 +301,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="newPartitions"/> contains a null topic name or a null entry, or a
     /// topic name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     CreatePartitionsResult CreatePartitions(
@@ -355,9 +332,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// a null entry, or a topic containing a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
@@ -380,11 +354,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="DescribeClusterResult.AuthorizedOperations"/>: see
     /// <see cref="DescribeClusterResult"/>.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
-    /// client default — the ABI reads a negative timeout as "unset", so a negative value
-    /// would be silently reinterpreted rather than honoured.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null);
 
@@ -414,9 +383,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// give Java's <c>default</c> overloads, and for the same reason (C# default interface
     /// methods need .NET Standard 2.1, above this binding's floor).
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
@@ -448,9 +414,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="resources"/> contains a null element, or a resource name containing a NUL
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeConfigsResult DescribeConfigs(
@@ -487,9 +450,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks). A null
     /// config value (<see cref="AlterConfigOpType.Delete"/>'s) is <em>not</em> rejected.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
@@ -512,9 +472,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// succeeds and that directory's <see cref="LogDirDescription.Error"/> is non-null.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null);
@@ -539,9 +496,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// log directory, contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
@@ -563,9 +517,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="replicas"/> contains a null element, or a replica whose topic
     /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
@@ -597,8 +548,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="electionType"/> is not one of <see cref="ElectionType.Preferred"/>
     /// / <see cref="ElectionType.Unclean"/> — a value Java's enum parameter cannot
-    /// express, but a C# cast can — or <c>options.TimeoutMs</c> is negative (see
-    /// <see cref="ListTopics"/>).
+    /// express, but a C# cast can.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
@@ -641,9 +591,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// with a topic containing a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
@@ -677,9 +624,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// offset's metadata contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks). A null metadata is <em>not</em> rejected.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
@@ -712,9 +656,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="partitions"/> contains a topic partition with a null topic; or
     /// <paramref name="groupId"/>, or a topic, contains a NUL character or an unpaired
     /// surrogate (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -761,9 +702,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// still lists every reassignment, but it is a nullable-annotation warning (CS8625).
     /// Write <c>ListPartitionReassignments()</c> for "every reassignment".
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions = null,
@@ -789,9 +727,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
     /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options);
@@ -829,8 +764,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <c>options.IsolationLevel</c> is not one of
     /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/> /
     /// <see cref="Confluent.Kafka.IsolationLevel.ReadCommitted"/> — a value Java's enum
-    /// parameter cannot express, but a C# cast can — or <c>options.TimeoutMs</c> is
-    /// negative.
+    /// parameter cannot express, but a C# cast can.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListOffsetsResult ListOffsets(
@@ -863,9 +797,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// .NET Standard 2.1, above this binding's floor).
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/> — or a filter
-    /// holds a <see cref="GroupState"/> / <see cref="GroupType"/> value no member defines,
-    /// which Java's enum-typed <c>Set</c> cannot express but a C# cast can.
+    /// A filter holds a <see cref="GroupState"/> / <see cref="GroupType"/> value no member
+    /// defines, which Java's enum-typed <c>Set</c> cannot express but a C# cast can.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <c>options.ProtocolTypes</c> holds a protocol type containing a NUL character or an
@@ -906,10 +839,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
-    /// would silently substitute a default.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null);
@@ -946,10 +875,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
-    /// would silently substitute a default.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null);
@@ -982,10 +907,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="groupId"/> contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
-    /// would silently substitute a default.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
@@ -1024,10 +945,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// selected topic, or a repeated group id, or a group id or selected topic containing a
     /// NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
-    /// would silently substitute a default.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
@@ -1050,9 +967,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteConsumerGroupsResult DeleteConsumerGroups(
@@ -1088,9 +1002,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks). A null reason is <em>not</em> rejected.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options);
@@ -1121,9 +1032,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="acls"/> contains a null element, or a binding whose resource name,
     /// principal or host contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null);
@@ -1156,9 +1064,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks). A null name, principal or host means "any" and is
     /// accepted.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null);
@@ -1187,9 +1092,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// surrogate (see the <see cref="IAdmin"/> remarks). A null component — "any" — is
     /// <em>not</em> rejected.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null);
@@ -1216,9 +1118,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// A component matches exactly but carries no match name, or a component's entity type
     /// or match name contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeClientQuotasResult DescribeClientQuotas(
@@ -1251,9 +1150,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// a type or name, or one of whose ops has a quota name, containing a NUL character or an
     /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null);
@@ -1277,9 +1173,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="users"/> contains a user name containing a NUL character or an unpaired
     /// surrogate (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeUserScramCredentialsResult DescribeUserScramCredentials(
@@ -1307,9 +1200,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// name contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
@@ -1329,9 +1219,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <c>options.Owner</c>'s principal type or name contains a NUL character or an unpaired
     /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options = null);
 
@@ -1350,9 +1237,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// One awaitable over the new expiry timestamp. See <see cref="RenewDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null);
@@ -1370,9 +1254,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// One awaitable over the expiry timestamp. See <see cref="ExpireDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null);
@@ -1395,9 +1276,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// name contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null);
@@ -1412,9 +1290,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// The <b>single</b> awaitable Java publishes, over the whole composite. See
     /// <see cref="DescribeFeaturesResult"/>.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null);
 
@@ -1438,9 +1313,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// A <see cref="MockAdminClient"/> accepts an empty map and returns an empty result, as
     /// Java's mock does (<c>MockAdminClient.java:1286-1300</c>).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="KafkaException">
     /// The native client refused the request before submitting anything — as Java's
@@ -1470,9 +1342,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// silently, or an id containing a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null);
@@ -1493,9 +1362,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
     /// silently, or an id containing a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeTransactionsResult DescribeTransactions(
@@ -1521,9 +1387,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// ABI would skip silently, or with a topic containing a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null);
@@ -1535,17 +1398,14 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="options">
     /// Request filters, or <see langword="null"/> for Java's defaults (every state, every
-    /// producer, no duration filter, no transactional-id pattern).
+    /// producer, no duration filter, no transactional-id pattern). ⚠ A negative
+    /// <c>options.FilteredDuration</c> is <b>not</b> rejected: it is Java's own "no duration
+    /// filter" default.
     /// </param>
     /// <returns>
     /// The three views over one broker-keyed future. ⚠ A broker that fails is not a call
     /// failure — see <see cref="ListTransactionsResult"/>.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>. ⚠ A negative
-    /// <c>options.FilteredDuration</c> is <b>not</b> rejected: it is Java's own "no duration
-    /// filter" default.
-    /// </exception>
     /// <exception cref="ArgumentException">
     /// <c>options.FilteredTransactionalIdPattern</c> contains a NUL character or an unpaired
     /// surrogate (see the <see cref="IAdmin"/> remarks).
@@ -1568,9 +1428,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// or whose topic contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
-    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     AbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options = null);
@@ -1590,9 +1447,6 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> contains a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     TerminateTransactionResult ForceTerminateTransaction(

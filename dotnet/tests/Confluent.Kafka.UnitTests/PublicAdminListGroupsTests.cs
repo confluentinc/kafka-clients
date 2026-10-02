@@ -218,20 +218,16 @@ public sealed class PublicAdminListGroupsTests
     }
 
     /// <summary>
-    /// A negative timeout is a caller mistake, so it is an
-    /// <see cref="ArgumentOutOfRangeException"/> from the call itself — not a faulted task,
-    /// which a caller could ignore.
+    /// A negative timeout is not refused (M15/P13.5 X2): it is sent as 0, Java's
+    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
+    /// result. The value actually sent is pinned by the submit-seam tests.
     /// </summary>
     [Fact]
-    public void ListGroups_ANegativeTimeout_ThrowsRightAway()
+    public void ListGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient();
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 }));
-
-        Assert.Equal("options", failure.ParamName);
-        Assert.Contains("ListGroupsOptions.TimeoutMs", failure.Message, StringComparison.Ordinal);
+        Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 })));
     }
 
     /// <summary>

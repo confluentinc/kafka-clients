@@ -255,25 +255,13 @@ public sealed class AdminP5SubmitArgumentTests
     }
 
     /// <summary>
-    /// A negative timeout is rejected before the submit too, and by the shared validator —
-    /// so <c>listGroups</c> reports it exactly as every other admin RPC does.
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2), by the shared mapping — so
+    /// <c>listGroups</c> treats it exactly as every other admin RPC does: Java's
+    /// <c>calcDeadlineMs</c> clamp, not a throw. See <see cref="CreateTopicsOptions.TimeoutMs"/>.
     /// </summary>
     [Fact]
-    public void NegativeTimeout_IsRejectedBeforeAnythingIsSubmitted()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        bool submitted = false;
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(
-                new ListGroupsOptions { TimeoutMs = -1 },
-                (handle, states, stateCount, protocols, protocolCount, types, typeCount, timeoutMs, callback, userData) =>
-                    submitted = true));
-
-        Assert.False(submitted);
-        Assert.Equal("options", failure.ParamName);
-        Assert.Contains("ListGroupsOptions.TimeoutMs", failure.Message, StringComparison.Ordinal);
-    }
+    public void X2_NegativeTimeout_IsSentAsZero() =>
+        Assert.Equal(0, Capture(new ListGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
 
     /// <summary>Which of the three independent filter axes a parameterised case sets.</summary>
     public enum Axis
@@ -497,26 +485,14 @@ public sealed class AdminP5SubmitArgumentTests
         Assert.Equal(timeoutMs, captured.TimeoutMs);
     }
 
-    /// <summary>A negative timeout is refused before anything is pinned or submitted.</summary>
+    /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
     [Fact]
-    public void Describe_NegativeTimeout_IsRejectedBeforeAnythingIsSubmitted()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        bool submitted = false;
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeConsumerGroups(
-                new[] { "g1" },
-                new DescribeConsumerGroupsOptions { TimeoutMs = -1 },
-                (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true));
-
-        Assert.False(submitted);
-        Assert.Equal("options", failure.ParamName);
-        Assert.Contains(
-            "DescribeConsumerGroupsOptions.TimeoutMs",
-            failure.Message,
-            StringComparison.Ordinal);
-    }
+    public void X2_Describe_NegativeTimeout_IsSentAsZero() =>
+        Assert.Equal(
+            0, CaptureDescribe(new[] { "g1" }, new DescribeConsumerGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
 
     /// <summary>
     /// A null id collection and a null element inside one are both refused, and both name
@@ -664,9 +640,20 @@ public sealed class AdminP5SubmitArgumentTests
     }
 
     /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
+    [Fact]
+    public void X2_DescribeClassic_NegativeTimeout_IsSentAsZero() =>
+        Assert.Equal(
+            0,
+            CaptureDescribeClassic(new[] { "g1" }, new DescribeClassicGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
+
+    /// <summary>
     /// Every precondition is refused before anything is pinned or submitted (ffi §B5), and
-    /// each names the argument it is about — the options for the timeout, <c>groupIds</c>
-    /// for both the missing collection and the null element inside one.
+    /// each names the argument it is about — <c>groupIds</c> for both the missing collection
+    /// and the null element inside one. (A negative timeout is not a precondition: it is sent
+    /// as <c>0</c>, see <see cref="X2_DescribeClassic_NegativeTimeout_IsSentAsZero"/>.)
     /// </summary>
     [Fact]
     public void DescribeClassic_BadArguments_AreRejectedBeforeAnythingIsSubmitted()
@@ -676,17 +663,6 @@ public sealed class AdminP5SubmitArgumentTests
         bool submitted = false;
         NativeAdminClient.NativeDescribeClassicGroupsSubmit submit =
             (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true;
-
-        ArgumentOutOfRangeException badTimeout = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.DescribeClassicGroups(
-                new[] { "g1" },
-                new DescribeClassicGroupsOptions { TimeoutMs = -1 },
-                submit));
-        Assert.Equal("options", badTimeout.ParamName);
-        Assert.Contains(
-            "DescribeClassicGroupsOptions.TimeoutMs",
-            badTimeout.Message,
-            StringComparison.Ordinal);
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
             () => { admin.DescribeClassicGroups(null!, null, submit); });
@@ -894,6 +870,15 @@ public sealed class AdminP5SubmitArgumentTests
     }
 
     /// <summary>
+    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
+    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
+    /// </summary>
+    [Fact]
+    public void X2_Offsets_NegativeTimeout_IsSentAsZero() =>
+        Assert.Equal(
+            0, CaptureOffsets(OneGroup(), new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 }).TimeoutMs);
+
+    /// <summary>
     /// Every precondition is refused before anything is pinned, rooted or submitted
     /// (ffi §B5), and each names the argument it is about.
     /// </summary>
@@ -913,17 +898,6 @@ public sealed class AdminP5SubmitArgumentTests
         NativeAdminClient.NativeListConsumerGroupOffsetsSubmit submit =
             (handle, ids, all, topics, partitions, counts, count, timeoutMs, stable, callback, userData) =>
                 submitted = true;
-
-        ArgumentOutOfRangeException badTimeout = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListConsumerGroupOffsets(
-                OneGroup(),
-                new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 },
-                submit));
-        Assert.Equal("options", badTimeout.ParamName);
-        Assert.Contains(
-            "ListConsumerGroupOffsetsOptions.TimeoutMs",
-            badTimeout.Message,
-            StringComparison.Ordinal);
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
             () => { admin.ListConsumerGroupOffsets(null!, null, submit); });

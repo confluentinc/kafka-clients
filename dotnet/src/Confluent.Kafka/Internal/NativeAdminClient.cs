@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1004,7 +1003,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool retryOnQuotaViolation = true;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateTopicsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             validateOnly = options.ValidateOnly;
             retryOnQuotaViolation = options.RetryOnQuotaViolation;
         }
@@ -1157,7 +1156,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool retryOnQuotaViolation = true;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteTopicsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             retryOnQuotaViolation = options.RetryOnQuotaViolation;
         }
 
@@ -1258,15 +1257,15 @@ internal sealed class NativeAdminClient : IDisposable
         int partitionSizeLimitPerResponse = DefaultPartitionSizeLimitPerResponse;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeTopicsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
 
             if (options.PartitionSizeLimitPerResponse < 0)
             {
                 // The ABI reads a negative as "keep Java's 2000 default"
                 // (describe_topics_options in rust/src/ffi/admin.rs), so a negative would be
-                // silently reinterpreted as that default — the same reasoning as the
-                // timeout guard. See DescribeTopicsOptions.PartitionSizeLimitPerResponse
-                // for why the value currently has no effect on any request.
+                // silently reinterpreted as that default. See
+                // DescribeTopicsOptions.PartitionSizeLimitPerResponse for why the value
+                // currently has no effect on any request.
                 throw new ArgumentOutOfRangeException(
                     nameof(options),
                     options.PartitionSizeLimitPerResponse,
@@ -1373,7 +1372,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool listInternal = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListTopicsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             listInternal = options.ListInternal;
         }
 
@@ -1442,7 +1441,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool retryOnQuotaViolation = true;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreatePartitionsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             validateOnly = options.ValidateOnly;
             retryOnQuotaViolation = options.RetryOnQuotaViolation;
         }
@@ -1584,9 +1583,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// </para>
     /// <para>
     /// An offset of <c>-1</c> is passed through unchanged: it is Java's documented
-    /// "truncate to the high watermark", a <em>value</em> rather than an unset sentinel,
-    /// so the negative-value guard that applies to timeouts deliberately does not apply
-    /// here.
+    /// "truncate to the high watermark", a <em>value</em> rather than an unset sentinel.
     /// </para>
     /// </remarks>
     internal DeleteRecordsResult DeleteRecords(
@@ -1604,7 +1601,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteRecordsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<TopicPartition> keys = new List<TopicPartition>(recordsToDelete.Count);
@@ -1749,7 +1746,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool includeFencedBrokers = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClusterOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             includeAuthorizedOperations = options.IncludeAuthorizedOperations;
             includeFencedBrokers = options.IncludeFencedBrokers;
         }
@@ -1821,7 +1818,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConfigResourcesOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         int[] resourceTypes = DistinctTypeIds(configResourceTypes);
@@ -1893,7 +1890,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool includeDocumentation = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeConfigsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             includeSynonyms = options.IncludeSynonyms;
             includeDocumentation = options.IncludeDocumentation;
         }
@@ -2036,7 +2033,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool validateOnly = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterConfigsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             validateOnly = options.ValidateOnly;
         }
 
@@ -2245,7 +2242,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeLogDirsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<int> keys = new List<int>(brokers.Count);
@@ -2343,7 +2340,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterReplicaLogDirsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<TopicPartitionReplica> keys = new List<TopicPartitionReplica>(replicaAssignment.Count);
@@ -2509,7 +2506,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeReplicaLogDirsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<TopicPartitionReplica> keys = new List<TopicPartitionReplica>(replicas.Count);
@@ -2652,7 +2649,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ElectLeadersOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         // NOT `partitions?.Count == 0` folded in: null is "every partition", empty is "no
@@ -2778,7 +2775,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool allowReplicationFactorChange = true;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterPartitionReassignmentsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             allowReplicationFactorChange = options.AllowReplicationFactorChange;
         }
 
@@ -2989,7 +2986,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterConsumerGroupOffsetsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<TopicPartition> keys = new List<TopicPartition>(offsets.Count);
@@ -3158,7 +3155,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupOffsetsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         // De-duplicated because Java's parameter is a Set: a repeated partition is one
@@ -3289,7 +3286,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
@@ -3372,7 +3369,7 @@ internal sealed class NativeAdminClient : IDisposable
         AdminStrings.Validate(groupId, nameof(groupId));
         AdminStrings.Validate(options.Reason, nameof(options));
 
-        int timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(RemoveMembersFromConsumerGroupOptions));
+        int timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         bool removeAll = options.RemoveAll;
         IReadOnlyCollection<MemberToRemove> members = options.Members;
 
@@ -3502,7 +3499,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateAclsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<AclBinding> keys = DistinctBindings(acls, nameof(acls));
@@ -3603,7 +3600,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteAclsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         List<AclBindingFilter> keys = DistinctFilters(filters, nameof(filters));
@@ -3701,7 +3698,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeAclsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         ResourcePatternFilter pattern = filter.PatternFilter;
@@ -3795,7 +3792,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClientQuotasOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         // Here, over the caller's filter, rather than in ClientQuotaMarshal.Pin, which runs
@@ -3915,7 +3912,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool validateOnly = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterClientQuotasOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             validateOnly = options.ValidateOnly;
         }
 
@@ -4059,7 +4056,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         int timeoutMs = options is null
             ? UnsetTimeoutMs
-            : ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeUserScramCredentialsOptions));
+            : ToNativeTimeoutMs(options.TimeoutMs);
 
         List<string> requested = new List<string>(users?.Count ?? 0);
         if (users is not null)
@@ -4153,7 +4150,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         int timeoutMs = options is null
             ? UnsetTimeoutMs
-            : ValidateTimeoutMs(options.TimeoutMs, nameof(AlterUserScramCredentialsOptions));
+            : ToNativeTimeoutMs(options.TimeoutMs);
 
         List<UserScramCredentialAlteration> rows = new List<UserScramCredentialAlteration>();
         List<string> keys = new List<string>();
@@ -4249,7 +4246,7 @@ internal sealed class NativeAdminClient : IDisposable
         long maxLifetimeMs = -1L;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateDelegationTokenOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             renewers = options.Renewers
                 ?? throw new ArgumentException(
                     "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.",
@@ -4353,7 +4350,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(RenewDelegationTokenOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             renewTimePeriodMs = options.RenewTimePeriodMs;
         }
 
@@ -4420,7 +4417,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ExpireDelegationTokenOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             expiryTimePeriodMs = options.ExpiryTimePeriodMs;
         }
 
@@ -4486,7 +4483,7 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyList<KafkaPrincipal>? owners = null;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeDelegationTokenOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             owners = options.Owners;
         }
 
@@ -4563,7 +4560,7 @@ internal sealed class NativeAdminClient : IDisposable
         int? nodeId = null;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeFeaturesOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             nodeId = options.NodeId;
         }
 
@@ -4675,7 +4672,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool validateOnly = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(UpdateFeaturesOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             validateOnly = options.ValidateOnly;
         }
 
@@ -4809,7 +4806,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         int timeoutMs = options is null
             ? UnsetTimeoutMs
-            : ValidateTimeoutMs(options.TimeoutMs, nameof(FenceProducersOptions));
+            : ToNativeTimeoutMs(options.TimeoutMs);
 
         List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
 
@@ -4890,7 +4887,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         int timeoutMs = options is null
             ? UnsetTimeoutMs
-            : ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeTransactionsOptions));
+            : ToNativeTimeoutMs(options.TimeoutMs);
 
         List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
 
@@ -4953,8 +4950,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// ⚠ <c>options.BrokerId</c> is Java's <c>OptionalInt</c> and crosses as an explicit
     /// discriminant plus a value: Java's <c>brokerId(int)</c> setter accepts any <c>int</c>
     /// (<c>DescribeProducersOptions.java:44</c>), so no sentinel is free and a negative broker
-    /// id is a request the ABI must be able to carry — the timeout's negative guard
-    /// deliberately does not apply to it.
+    /// id is a request the ABI must be able to carry, so it is passed through as asked.
     /// </remarks>
     internal DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions,
@@ -4973,7 +4969,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool hasBrokerId = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeProducersOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             hasBrokerId = options.BrokerId.HasValue;
             brokerId = options.BrokerId ?? 0;
         }
@@ -5083,7 +5079,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         int timeoutMs = options is null
             ? UnsetTimeoutMs
-            : ValidateTimeoutMs(options.TimeoutMs, nameof(ListTransactionsOptions));
+            : ToNativeTimeoutMs(options.TimeoutMs);
 
         // Java's own -1 default. Any negative value is "no filter", so this is a pass-through
         // value rather than a sentinel the binding may normalize.
@@ -5250,7 +5246,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AbortTransactionOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("abortTransaction");
@@ -5325,7 +5321,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(TerminateTransactionOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         SingleAdminOperation<bool> operation =
@@ -5405,7 +5401,7 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs = UnsetTimeoutMs;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListPartitionReassignmentsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
         // NOT `partitions?.Count == 0` folded in — see the null-versus-empty note above.
@@ -5508,7 +5504,7 @@ internal sealed class NativeAdminClient : IDisposable
         IsolationLevel isolationLevel = IsolationLevel.ReadUncommitted;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListOffsetsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             isolationLevel = options.IsolationLevel;
         }
 
@@ -5693,7 +5689,7 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<GroupType> types = Array.Empty<GroupType>();
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListGroupsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
 
             // Each getter already hands back a de-duplicated, immutable, null-element-free
             // copy, so the protocol-type axis needs only the C-string check below.
@@ -5837,7 +5833,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool includeAuthorizedOperations = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeConsumerGroupsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             includeAuthorizedOperations = options.IncludeAuthorizedOperations;
         }
 
@@ -5923,7 +5919,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool includeAuthorizedOperations = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClassicGroupsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             includeAuthorizedOperations = options.IncludeAuthorizedOperations;
         }
 
@@ -6020,7 +6016,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool requireStable = false;
         if (options is not null)
         {
-            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConsumerGroupOffsetsOptions));
+            timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
             requireStable = options.RequireStable;
         }
 
@@ -6558,35 +6554,19 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// Wins the one-shot teardown latch, so exactly one of
-    /// <see cref="Dispose"/> / <see cref="DisposeAsync"/> / <see cref="Close(long)"/>
-    /// performs the close and the handle release.
-    /// </summary>
-    /// <summary>
-    /// Rejects a negative <c>TimeoutMs</c> before any native call (ffi §B5) and maps
-    /// <see langword="null"/> onto the ABI's "unset" sentinel.
+    /// Maps an options <c>TimeoutMs</c> onto the ABI's <c>timeout_ms</c>:
+    /// <see langword="null"/> becomes the "unset" sentinel, and a negative value is sent as 0.
     /// </summary>
     /// <remarks>
-    /// The ABI reads a negative <c>timeout_ms</c> as <em>unset</em>, so a negative would
-    /// silently mean "use the client default" rather than the timeout asked for — the
-    /// caller would never learn their value was discarded. Shared by every RPC so the
-    /// three options types cannot drift apart on the rule or on its message.
+    /// Java's <c>calcDeadlineMs</c> (<c>KafkaAdminClient.java:496-499</c>) computes
+    /// <c>now + Math.max(0, timeoutMs)</c>, and this is that clamp (M15/P13.5 X2); what a
+    /// caller then sees is stated on <see cref="CreateTopicsOptions.TimeoutMs"/>. The clamp
+    /// also keeps a negative off the ABI, which reads a negative <c>timeout_ms</c> as
+    /// <em>unset</em> and would otherwise silently substitute the client default. Shared by
+    /// every RPC so the options types cannot drift apart.
     /// </remarks>
-    private static int ValidateTimeoutMs(int? timeoutMs, string optionsTypeName)
-    {
-        if (timeoutMs is < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                "options",
-                timeoutMs,
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0}.TimeoutMs must not be negative; leave it null to use the client default.",
-                    optionsTypeName));
-        }
-
-        return timeoutMs ?? UnsetTimeoutMs;
-    }
+    private static int ToNativeTimeoutMs(int? timeoutMs) =>
+        timeoutMs is null ? UnsetTimeoutMs : Math.Max(0, timeoutMs.Value);
 
     /// <summary>
     /// De-duplicates a requested string key axis, preserving request order, and rejects a
@@ -7020,6 +7000,11 @@ internal sealed class NativeAdminClient : IDisposable
             "The topic collection must come from TopicCollection.OfTopicNames or TopicCollection.OfTopicIds.",
             parameterName);
 
+    /// <summary>
+    /// Wins the one-shot teardown latch, so exactly one of
+    /// <see cref="Dispose"/> / <see cref="DisposeAsync"/> / <see cref="Close(long)"/>
+    /// performs the close and the handle release.
+    /// </summary>
     private bool TryBeginClose() => Interlocked.Exchange(ref _closed, 1) == 0;
 
     /// <summary>The use-after-dispose guard for every RPC.</summary>
