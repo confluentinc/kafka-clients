@@ -47,3 +47,35 @@ Java references point to Apache Kafka at `26b251a451ce941d3d7a55e6487bcb7f16b5ad
   - `[hidden]` appears exactly seven times, once per typed `Password` field;
   - the `bootstrap.servers` value appears exactly once, through its typed field.
   The `{:?}` rendering must also end with the exact sorted key set. I teeth-checked it with three mutations: rendering the values, hiding every value, and dropping the key set. Each one turned the test red at the intended assertion. The field-order test is unchanged.
+
+## Issue: `DescribeDelegationTokenResponseOptions` exposes token ids through its derived `Debug`
+- **File**: `rust/src/common/requests/describe_delegation_token_response.rs` (`DescribeDelegationTokenResponseOptions<'a>`; lines 55–66 of `src/common/requests/describe_delegation_token_response.rs` at `58622a55`, before the merge moved the crate under `rust/`).
+- **Origin**: the review of the pull request (an inline comment on this file at `58622a55`), relayed by the Manager as round 4 item 1 and verified against the tree.
+- **Severity**: Behavior Mismatch.
+  - Latent: nothing in the crate Debug-prints the options. The type is public, though, so a user's `{:?}` would print the ids.
+  - It is the Phase 2 defect class in a Rust-only `*Options` type, the case plan §11.4 rule 1 names. §11.2 item 11 covered only the Create options.
+- **Java Reference**:
+  - `common/requests/DescribeDelegationTokenResponse.java:131-140`: `toString()` masks a copy of the data, setting each token's id to `"REDACTED"` and its HMAC to `new byte[0]`.
+  - `common/security/token/delegation/DelegationToken.java:71-76`: `toString()` hides the HMAC (`[*******]`) but prints `tokenInformation`, whose `toString()` prints `tokenId`.
+- **Description**: the struct was `#[derive(Debug, Clone, Copy)]` and holds `tokens: &'a [DelegationToken]`. Its `{:?}` rendered each token through `DelegationToken`'s `Debug`, which delegates to the `Display` mirroring Java's `toString()`, and so printed each token id in plain text (`tokenId='…'`). The response these options build renders neither the id nor the HMAC, so the options printed what the response itself hides.
+- **Expected**: a hand-written `Debug`, exhaustively destructured like `CreateDelegationTokenResponseOptions`'s. The tokens render either as a count, or each with its id as `REDACTED` and its HMAC omitted, following the response's masking rather than `DelegationToken`'s. A regression test builds the options from a real `DelegationToken` and asserts both directions: the `{:?}` rendering holds neither the token id nor any HMAC byte, and non-secret fields such as the owner still appear.
+- **Actual**: the derived `Debug`, and no test of it.
+
+**Resolved in `21be3984`** (a fixup of `35d399fa`, answering the review comment on the pull request):
+- The struct derives `Clone` and `Copy` only. Its new `Debug` destructures `Self` exhaustively, so a field added to the struct fails to compile until it is considered there.
+  - `version`, `throttle_time_ms` and `error` render as the derive rendered them.
+  - Each token renders field by field, as `DelegationToken { token_information: TokenInformation { owner, token_requester, renewers, issue_timestamp, max_timestamp, expiry_timestamp, token_id: "REDACTED" }, hmac: [] }`. This is the response's masking, and the `hmac: []` form matches `CreateDelegationTokenResponseOptions`.
+  - The token fields are read through accessors, since they are private to their module, and neither secret is read at all. A field later added to `DelegationToken` or `TokenInformation` therefore stays hidden until it is listed.
+  - `std::fmt::from_fn` builds the nested renderings, so no helper type was added (DoD #7) and nothing is allocated.
+  - The struct's rustdoc now says that `Debug` renders no token's id or HMAC, and the impl's rustdoc cites both Java `toString()`s.
+- The new test `options_debug_redacts_token_id_and_hmac` uses the file's `token(..)` helper, whose HMAC text contains the token id.
+  - It first asserts that `DelegationToken`'s own `Debug` prints the id, so the leak it guards against is real.
+  - It pins the exact `{:?}` rendering. In `{:#?}` it requires `token_id: "REDACTED",` and `hmac: [],`.
+  - In both forms it asserts that neither the token id, nor the HMAC's byte-list `Debug`, nor its Base64 string appears. It also asserts that the owner (`"alice"`), the requester (`"requester"`) and the renewer (`"bob"`) still appear.
+- Teeth-checked with four mutations, each restored afterwards:
+  - restoring the derive;
+  - rendering the real token id;
+  - rendering the real HMAC;
+  - dropping the owner.
+
+  Each turned the test red at the exact-rendering assertion. With that assertion (and the two pretty-form checks) removed, the id and HMAC mutations still fail at "token id leaked" / "hmac leaked", and the owner mutation at "owner missing".

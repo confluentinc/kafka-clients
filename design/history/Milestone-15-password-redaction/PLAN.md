@@ -3,7 +3,9 @@
 **Status:** COMPLETE (2026-09-29) on the branch below; the user opens the PR. Phase 1 done via
 Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` after one Critic finding
 (§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). **Phase 2 (§11) COMPLETE 2026-09-30**
-(commit `35d399fa`, Actor/Critic 85, same branch).
+(commit `35d399fa`, Actor/Critic 85, same branch). **`master` merged and the pull-request review
+answered (§12) 2026-10-02** (merge `091f6f9d`, fixup `21be3984`, Actor 85; the branch is pushed and
+its pull request is open).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -487,3 +489,96 @@ with line references, and these rule suggestions; that filename is git-ignored e
   prints the API key name where Java prints the builder and the error (`NetworkClient.java:586-587`), fixing
   it needs a `Display` bound on `RequestBuilder`; (c) `Errors` logged with `{:?}` shows the Rust variant
   name instead of Java's constant name.
+
+## 12. Merge of `master` and the pull-request review follow-up (2026-10-02, Actor 85)
+
+Two commits on the same branch, made after it was pushed and its pull request opened: a merge of
+`master`, and a fixup answering the one review comment on the pull request. No history was rewritten.
+
+### 12.1 Merge of `master` (`091f6f9d`)
+
+`origin/master` at `4eb87db1` was merged into the branch at `79db2f0f`. Master's changes are kept, and so
+is every Milestone 15 redaction. The merge commit's body lists each conflicted file and its resolution.
+
+- **§1–§11 predate the merge and are left as written.** Master moved the crate under `rust/`, renamed
+  `SslConfig` / `SaslConfig` to `SslConfigs` / `SaslConfigs`, `ConcreteRequest` to `AbstractRequest` and
+  `ConfigResourceType` to `config_resource::Type`, nested each request builder as `Builder` in its request
+  module, made config fields `pub(crate)`, and added `#[non_exhaustive]` and
+  `#[doc(alias = "org.apache.kafka...")]` markers. So read the paths above relative to `rust/` (their line
+  numbers are those of the pre-merge tree), the two config types in the plural, and each
+  `XxxRequestBuilder` as `xxx_request::Builder`. The `RequestBuilder` trait keeps its name.
+- **`Password`** lives at `rust/src/common/config/types/password.rs`. The merge left the branch's `types/`
+  directory under the old top-level `src/`, which master no longer has, so it moved beside the rest of
+  `common::config`. The public path `common::config::types::Password` is unchanged. It carries master's
+  `doc(alias)` markers on the struct, `new` and `value`, and none on `HIDDEN`, as master marks no constant.
+- **`ProducerConfig` derives nothing.** Master dropped `Clone`, because its new `partitioner` field holds a
+  `Box<dyn Any + Send + Sync>`, and §4.3 had already dropped `Debug`. The hand-written `Debug` still
+  destructures every field. It adds master's `client_dns_lookup`, `partitioner_type` and `partitioner` in
+  declaration order (`partitioner_class` is gone). `partitioner` renders through `ConfiguredPartitioner`'s
+  derived `Debug`, which prints the boxed partitioner as `Any { .. }` beside its type name. `originals`
+  still renders as its key set.
+- **Builders and the cancel log.** The `Display` / `Debug` impls of §11.2 items 4–8, and §11.5's `Display`
+  on the metadata builder, now sit on each module's `Builder`. `loggable_request` (§11.5) takes
+  `Option<&AbstractRequest>`.
+- **`ssl_sasl_test.rs` is master's version.** Its helpers build `SslConfigs` / `SaslConfigs` through
+  `AdminClientConfig`'s property parser, which wraps the secrets in `Password`, so the branch's
+  struct-literal wrapping had no site left.
+- **Verified:** workspace 4468 / ffi 4532 / all-features (with `--skip __grpc`) 4755 passed, 0 failed.
+  `format-check`, `check-generated`, `cargo doc` with `-D warnings` and the lint checks listed in §12.3 are
+  clean.
+
+### 12.2 Review follow-up (`21be3984`, a fixup of `35d399fa`)
+
+The review of the pull request found that `DescribeDelegationTokenResponseOptions`, a Rust-only type,
+still derived `Debug`. It holds `tokens: &[DelegationToken]`. `DelegationToken`'s `Debug` mirrors Java's
+`toString()`, which hides the HMAC but prints the token id (`DelegationToken.java:71-76`), while the
+response the options build masks both (`DescribeDelegationTokenResponse.java:131-140`). This is the
+Rust-only `*Options` case §11.4 rule 1 names; §11.2 item 11 covered only the Create options. The leak was
+latent, since nothing in the crate Debug-prints the options, but the type is public.
+
+- **Fix.** The struct derives `Clone` and `Copy` only. A hand-written `Debug`, destructured exhaustively,
+  renders each token as `DelegationToken { token_information: TokenInformation { owner, token_requester,
+  renewers, issue_timestamp, max_timestamp, expiry_timestamp, token_id: "REDACTED" }, hmac: [] }`. That is
+  the response's masking, with `hmac: []` as `CreateDelegationTokenResponseOptions` renders it.
+  - The token fields are read through accessors and neither secret is read, so a field later added to
+    `DelegationToken` or `TokenInformation` stays hidden until it is listed.
+  - `std::fmt::from_fn` (stable on the pinned toolchain) builds the nested renderings, so no helper type is
+    added (DoD #7) and nothing is allocated.
+- **Test `options_debug_redacts_token_id_and_hmac`.**
+  - It first asserts that `DelegationToken`'s own `Debug` prints the id, so the leak it guards against is
+    real.
+  - It pins the exact `{:?}` rendering.
+  - In both `{:?}` and `{:#?}` it asserts that the id, the HMAC's byte-list `Debug` and its Base64 string
+    are absent, and that the owner, requester and renewer are present.
+  - Four mutations each turned it red: restoring the derive, rendering the real id, rendering the real
+    HMAC, and dropping the owner.
+- **Sweep for the same miss.** Nothing else renders a token id or HMAC that Java hides.
+  - The eight Rust wrappers of the Java classes with a masking `toString()` (§11.5), their five nested
+    `Builder`s and both `*ResponseOptions` types all have a hand-written `Debug`. The two
+    `*ResponseOptionsBuilder` types have no `Debug` at all.
+  - The other structs holding a `DelegationToken`:
+    - The two admin results derive `Debug` over `KafkaFuture`, whose `Debug` prints only `is_done`.
+    - The FFI holder has no `Debug`.
+    - `MockAdminClient`'s `State` renders `all_tokens` through `DelegationToken`'s `Debug`, so the id
+      shows and the HMAC is hidden, as in Java's `DelegationToken.toString()`. That is item 12's documented
+      choice, and it is unchanged.
+- **Verified:** workspace 4469 / ffi 4533 / all-features 4756 passed, 0 failed; that is the new test once in
+  each arm. The checks listed in §12.1 are clean. `COMMENTS.DONE.85.md` in this directory records the item
+  and its resolution.
+
+### 12.3 Lint without the `kafka/` sources
+
+`cargo xtask lint` runs `lint-custom` first. Three of its six rules read the Java sources under `kafka/`,
+which this clone does not check out (§10.4): `check-java-name`, `check-no-deprecated-translation` and
+`check-public-audience`. They report "cannot run", so `lint` stops before its remaining steps. Those steps
+were run one by one instead, and all are clean:
+
+- the other three `lint-custom` rules: `check-no-data-carrying-enum-variants`, `check-no-public-field` and
+  `check-dyn-compatible`;
+- `doc-hygiene`;
+- the module-path hygiene check;
+- the three clippy passes (workspace, workspace with `--all-features`, and `xtask`), each with
+  `-D warnings`.
+
+CI's Verify Rust job runs `cargo xtask fetch-java-refs` before `make verify-rust`, whose `lint` step runs
+all six rules.
