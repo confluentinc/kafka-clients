@@ -56,8 +56,9 @@ Java** with no timed *async* form — a **gap**, not a design choice (so there i
 timed *async* close, §4 Disposal). ⚠ `Consumer_commit_async`
 is Java's `commitAsync` — a *sync* call returning `KafkaError*`, **not** a push
 variant (the push variant of `commitSync` is `commit_sync_async`);
-`poll_async` is the only `_async` fn taking a timeout. Admin / transactions are
-**not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+`poll_async` is the only `_async` fn taking a timeout. The admin client is exposed
+as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); producer transactions
+are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
 `cbindgen.toml` (the header is generated, not checked in).
 
 ---
@@ -420,8 +421,9 @@ owned bytes today). ⚠ The typed **producer** is **no longer** deferred — it 
 M11/P5 (generic-only, see the producer sketch above); this line said otherwise until
 M14/P1 corrected it, and the producer completion model (§A7) turned out not to gate it.
 
-The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
-ABI lands (§6.3).
+The **admin client** shipped in M15 as `IAdmin` (`KafkaAdminClient` /
+`MockAdminClient`), a Mode A port over the `kafka_admin_*` ABI; its decisions are in
+`design/current/STATUS.md`.
 
 **Serdes** — the (de)serialization foundation (M6/P1a), the Java
 `Serializer<T>` / `Deserializer<T>` / `Serde<T>` shape in C# over the bytes-only ABI
