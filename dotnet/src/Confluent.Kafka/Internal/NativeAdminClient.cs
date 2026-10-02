@@ -2476,8 +2476,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// outcome for a missing key is a FAULT.</b> Java's real client pre-registers a future
     /// per requested replica and completes each one — defaulting to an empty
     /// <c>ReplicaLogDirInfo</c> when the broker said nothing about it
-    /// (<c>KafkaAdminClient.java:3103-3106</c> seeds <c>replicaDirInfoByPartition</c>, and
-    /// <c>:3155-3160</c> completes every entry) — and the <b>Rust core does the same</b>
+    /// (<c>KafkaAdminClient.java:3104-3107</c> seeds <c>replicaDirInfoByPartition</c>, and
+    /// <c>:3154-3157</c> completes every entry) — and the <b>Rust core does the same</b>
     /// (<c>KafkaAdminClient::describe_replica_log_dirs_with_options</c> seeds an entry for
     /// every requested replica). So against a real client every requested key gets an entry and
     /// <c>FailUncompleted</c> never fires.

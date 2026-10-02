@@ -176,15 +176,16 @@ public sealed class AdminLogDirsLifetimeTests
     /// <remarks>
     /// <para>
     /// ⚠ <b>Reachable through the MOCK ONLY, and that is a contract the header states</b>:
-    /// Java's real client seeds one future per requested replica
-    /// (<c>KafkaAdminClient.java:3066-3068</c>) and completes every one
-    /// (<c>:3141-3145</c>), the Rust core does the same, and the header says so in
-    /// <c>kafka_admin_DescribeReplicaLogDirsResult_count</c>'s own docs — "absence from the
-    /// result is not the signal for an unknown topic; a null current log dir is". Only
+    /// Java's real client seeds one entry per requested replica
+    /// (<c>KafkaAdminClient.java:3104-3107</c> seeds <c>replicaDirInfoByPartition</c>) and
+    /// completes every one (<c>:3154-3157</c>), the Rust core does the same, and the header
+    /// says so in <c>kafka_admin_DescribeReplicaLogDirsResult_count</c>'s own docs — "absence
+    /// from the result is not the signal for an unknown topic; a null current log dir is". Only
     /// <c>MockAdminClient</c> diverges, skipping replicas of topics it does not know
-    /// (<c>mock_admin_client.rs:1352-1355</c>), which is what makes this path testable
-    /// without a broker at all. Its two Stage-3 siblings insert an entry for every input
-    /// they are given (<c>:1227-1229</c>, <c>:1290-1291</c>), so neither reaches it.
+    /// (<c>MockAdminClient::describe_replica_log_dirs_with_options</c>), which is what makes
+    /// this path testable without a broker at all. Its two Stage-3 siblings insert an entry for
+    /// every input they are given (<c>describe_log_dirs_with_options</c>,
+    /// <c>alter_replica_log_dirs_with_options</c>), so neither reaches it.
     /// </para>
     /// <para>
     /// ⚠ <b>The fault is deliberate, not a gap.</b> Completing the key locally with a
