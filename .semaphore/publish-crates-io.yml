@@ -1,69 +1,352 @@
 version: v1.0
 name: publish-crates-io
-# Manual promotion target from semaphore.yml. Run it only on a green build of
-# the current master tip to publish the confluent-kafka version in
-# Cargo.toml; nothing here re-runs the test suite, and any other branch or
-# commit is refused. Verify and publish run on separate single-use VMs, so no
-# build-time code (build scripts, proc macros) runs on the VM where the
-# crates.io token is loaded.
+# Target of the manual "Publish to crates.io" promotion in semaphore.yml.
+# Publishes the confluent-kafka version declared in rust/Cargo.toml to
+# crates.io. Before any secret is loaded, the pipeline refuses to continue
+# unless all of the following hold:
+#   - the build is of the master branch, at the current tip of master;
+#   - CRATE_VERSION, entered when promoting, equals the manifest version;
+#   - the version is not yet on crates.io and is higher than every published
+#     version. The only exception is completing an interrupted publish of the
+#     same version from this workflow (see "Publish to crates.io" below);
+#   - every job in REQUIRED_CI_JOBS passed on this commit, and no job outside
+#     that list reported a result (see the global epilogue in semaphore.yml).
+# The prologue runs before every job, so each job repeats these checks when it
+# starts; if master advances while the pipeline runs, the publish job refuses.
+#
+# "Verify package" and "Smoke test package" build and test the crate on VMs
+# that hold no secrets, and each records the SHA-256 of the .crate it tested.
+# "Publish to crates.io" runs on a separate VM and compiles nothing
+# (`--no-verify`), so no build script or procedural macro executes while the
+# token is loaded. It uploads a .crate only if it is byte-identical to the
+# tested ones, which is possible because `cargo package` output is reproducible
+# for a given commit and toolchain. On success, verify-crates-io-release.yml
+# checks the crate that crates.io serves.
+#
+# The queue limits this project to one publish pipeline at a time, so two
+# promotions cannot upload concurrently.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
+queue:
+  name: crates-io-publish
+  scope: project
+
 global_job_config:
+  env_vars:
+    - name: CRATE
+      value: confluent-kafka
+    # The build-test-release jobs that must pass before a release, by their
+    # exact names in semaphore.yml, separated by ';'. The list must stay in
+    # sync with semaphore.yml: a job that reports a result but is not listed,
+    # or is listed but reports no result, blocks the release until the list is
+    # updated.
+    - name: REQUIRED_CI_JOBS
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64)"
   prologue:
     commands:
       - checkout
-      # PR builds report the PR's target branch in SEMAPHORE_GIT_BRANCH, so the
-      # ref type check is what excludes them.
+      # Helper functions for the checks below and for the job commands.
+      # Semaphore runs a job's prologue and commands in a single shell session,
+      # so the functions remain available to the job.
+      #
+      # refuse: fails the job with a message stating why nothing was published.
+      #
+      # crates_io_index: prints one `<version> <sha256> <live|yanked>` line for
+      # each version of ${CRATE} in the crates.io sparse index, and nothing if
+      # the crate has never been published. Returns non-zero only when the
+      # index cannot be read.
+      #
+      # record_tested_crate: records, under the given name, the SHA-256 of the
+      # .crate tested by the calling job, so that the publish job can confirm it
+      # uploads the same bytes.
+      - |
+        refuse() {
+          echo "Refusing to publish: $*" >&2
+          exit 1
+        }
+        crates_io_index() {
+          local body status
+          body=$(mktemp) || return 1
+          status=$(curl -sS --retry 3 --retry-delay 5 -o "${body}" -w '%{http_code}' \
+            "https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/${CRATE}") || { rm -f "${body}"; return 1; }
+          case "${status}" in
+            200)
+              /usr/bin/python3 -c 'import json, sys; [print(e["vers"], e["cksum"], "yanked" if e["yanked"] else "live") for e in map(json.loads, filter(str.strip, open(sys.argv[1])))]' "${body}" \
+                || { rm -f "${body}"; return 1; }
+              ;;
+            404) ;;
+            *)
+              echo "The crates.io index returned HTTP ${status} for ${CRATE}" >&2
+              rm -f "${body}"
+              return 1
+              ;;
+          esac
+          rm -f "${body}"
+        }
+        record_tested_crate() {
+          local sum
+          sum=$(sha256sum "target/package/${CRATE}-${CRATE_VERSION}.crate") || return 1
+          echo "${sum%% *}" > /tmp/tested.sha256 || return 1
+          echo "Tested ${CRATE}-${CRATE_VERSION}.crate: ${sum%% *}"
+          artifact push workflow /tmp/tested.sha256 --destination "crates-io/${CRATE}-${CRATE_VERSION}/tested/$1" --force
+        }
+      # Pull request builds report the target branch in SEMAPHORE_GIT_BRANCH,
+      # so they are excluded by the ref type. A build whose jobs were redirected
+      # to another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see semaphore.yml) did
+      # not test the commit checked out here.
       - |
         if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
-          echo "Refusing to publish: only a master branch build may publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')" >&2
-          exit 1
+          refuse "only a master branch build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')"
         fi
-      # Promotions can be clicked on any past master build, and a crates.io
-      # version can never be replaced, so only the current tip may publish.
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
+          refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test master"
+        fi
+      # A promotion can be started from any earlier master build, and a
+      # crates.io version can never be replaced, so only the current tip of
+      # master may publish. Semaphore does not stop a multi-line command at its
+      # first failing line, so each step is checked explicitly.
       - |
-        git fetch --quiet origin master
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
-          echo "Refusing to publish: $(git rev-parse HEAD) is not the current tip of master ($(git rev-parse FETCH_HEAD)); promote the latest master build" >&2
+        git fetch --quiet origin master \
+          || refuse "could not fetch origin/master to confirm that this build is its tip"
+        head_sha=$(git rev-parse HEAD) && tip_sha=$(git rev-parse FETCH_HEAD) \
+          || refuse "could not resolve HEAD or origin/master"
+        if [ "${head_sha}" != "${tip_sha}" ]; then
+          refuse "${head_sha} is not the current tip of master (${tip_sha}); promote the latest master build"
+        fi
+      # The version is taken from the reviewed commit; CRATE_VERSION only
+      # confirms it. /usr/bin/python3 is the image's system Python (3.12 on
+      # Ubuntu 24.04), which provides tomllib.
+      - |
+        manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open("rust/Cargo.toml", "rb"))["package"].get("version"); print(v) if isinstance(v, str) else sys.exit("[package] version must be a literal string")') \
+          || refuse "could not read [package] version from rust/Cargo.toml"
+        if [ "${CRATE_VERSION:-}" != "${manifest_version}" ]; then
+          refuse "CRATE_VERSION is '${CRATE_VERSION:-}', but rust/Cargo.toml at this commit has '${manifest_version}'"
+        fi
+      # A version already on crates.io, whether yanked or not, cannot be
+      # published again. A version lower than a published one indicates an
+      # error, since master only moves forward. Versions are ordered by Semantic
+      # Versioning precedence, so 0.2.0-alpha.1 < 0.2.0 < 0.10.0. The exception
+      # is a version whose upload this workflow has already started: the
+      # publish job records upload-started before uploading, so a rerun after an
+      # interrupted upload can complete its checks.
+      - |
+        index=$(crates_io_index) \
+          || refuse "could not read the crates.io index to confirm that ${CRATE} ${CRATE_VERSION} is new"
+        if printf '%s\n' "${index}" | awk -v v="${CRATE_VERSION}" '$1 == v { found = 1 } END { exit !found }'; then
+          if artifact pull workflow "crates-io/${CRATE}-${CRATE_VERSION}/upload-started" --destination /tmp/upload-started --force >/dev/null 2>&1; then
+            echo "${CRATE} ${CRATE_VERSION} is already on crates.io and this workflow started its upload; continuing to finish that publish"
+          else
+            refuse "${CRATE} ${CRATE_VERSION} is already on crates.io, and a published version cannot be replaced; bump [package] version in rust/Cargo.toml"
+          fi
+        else
+          not_lower=$(printf '%s\n' "${index}" | /usr/bin/python3 -c '
+        import sys
+
+        def precedence(version):
+            # Semantic Versioning 2.0.0 precedence. Build metadata is ignored.
+            core, _, pre = version.split("+", 1)[0].partition("-")
+            release = tuple(int(part) for part in core.split("."))
+            if not pre:
+                return (release, 1, ())
+            identifiers = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+            return (release, 0, identifiers)
+
+        candidate = precedence(sys.argv[1])
+        published = [line.split()[0] for line in sys.stdin if line.strip()]
+        not_lower = [v for v in published if precedence(v) >= candidate]
+        if not_lower:
+            print(max(not_lower, key=precedence))
+        ' "${CRATE_VERSION}") || refuse "could not compare ${CRATE_VERSION} with the versions on crates.io"
+          if [ -n "${not_lower}" ]; then
+            refuse "${CRATE_VERSION} is not higher than ${not_lower}, which is already on crates.io"
+          fi
+          echo "${CRATE} ${CRATE_VERSION} is new on crates.io and higher than every published version"
+        fi
+      # A manual promotion can be started from a failed or unfinished pipeline,
+      # so the CI results are checked here. Each required job must have
+      # reported `passed` for exactly this commit, and every job that reported
+      # a result must be in the required list, so a job added to semaphore.yml
+      # cannot be omitted unintentionally. The job-name mapping matches the
+      # epilogue in semaphore.yml.
+      - |
+        head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
+        results_dir=$(mktemp -d) || refuse "could not create a temporary directory"
+        artifact pull workflow ci-result --destination "${results_dir}/ci-result" --force >/dev/null \
+          || refuse "this build has no recorded CI results; wait for build-test-release to finish, then promote again"
+        declare -A required=() reported=()
+        while IFS= read -r job; do
+          [ -n "${job}" ] || continue
+          marker=$(printf '%s' "${job}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+          [ -z "${required[${marker}]+set}" ] \
+            || refuse "two jobs in REQUIRED_CI_JOBS map to the same result name '${marker}'; rename one of them in semaphore.yml"
+          required[${marker}]=${job}
+        done <<< "$(printf '%s' "${REQUIRED_CI_JOBS}" | tr ';' '\n')"
+        while IFS= read -r file; do
+          reported[$(basename "${file}")]=${file}
+        done < <(find "${results_dir}" -type f)
+        problems=""
+        for marker in "${!required[@]}"; do
+          job=${required[${marker}]}
+          if [ -z "${reported[${marker}]+set}" ]; then
+            problems+="  - ${job}: no result (still running, stopped, or the result upload failed)\n"
+            continue
+          fi
+          read -r result sha _ < "${reported[${marker}]}"
+          if [ "${result}" != "passed" ]; then
+            problems+="  - ${job}: ${result:-empty result}\n"
+          elif [ "${sha}" != "${head_sha}" ]; then
+            problems+="  - ${job}: passed on ${sha}, not on ${head_sha}\n"
+          fi
+        done
+        for marker in "${!reported[@]}"; do
+          [ -n "${required[${marker}]+set}" ] \
+            || problems+="  - ${marker}: reported a result but is not in REQUIRED_CI_JOBS; add it to the list\n"
+        done
+        if [ -n "${problems}" ]; then
+          printf 'Refusing to publish: the CI build of this commit is not fully green:\n%bRerun the failed or missing jobs, or update REQUIRED_CI_JOBS, then promote again.\n' "${problems}" >&2
           exit 1
         fi
+        echo "All ${#required[@]} required CI jobs passed on ${head_sha}"
 
 blocks:
   - name: "Verify package"
     dependencies: []
+    execution_time_limit:
+      minutes: 30
     task:
       jobs:
         - name: "cargo package"
           commands:
-            # Not dependencies.sh: it initializes the kafka submodule, which the
-            # publish block doesn't, and both blocks must package the same tree.
+            # dependencies.sh is not used because it initializes the kafka
+            # submodule, which the publish job does not; every job must package
+            # the same tree.
             - sudo apt install -y cmake rustup
             - cd rust
-            - cargo package -p confluent-kafka --locked
-            # crates.io rejects these at upload; cargo package only warns or doesn't check.
+            # Packages and builds the crate as `cargo publish` would.
+            - cargo package -p "${CRATE}" --locked
+            # crates.io rejects a crate without a description or license only
+            # at upload time, after the tests have run, and rust-version and
+            # repository are displayed on the crate page. `cargo package` only
+            # warns about missing values, so they are checked here.
             - |
-              cargo metadata --no-deps --format-version 1 | jq -e '.packages[] | select(.name == "confluent-kafka") | ((.description // "") != "") and (((.license // "") != "") or .license_file != null)' >/dev/null \
-                || { echo "Refusing to publish: crates.io requires a non-empty description and license (or license-file) in [package]" >&2; exit 1; }
-            - |
-              size=$(stat -c%s target/package/confluent-kafka-[0-9]*.crate) || exit 1
-              if [ "$size" -gt 10485760 ]; then
-                echo "Refusing to publish: .crate is ${size} bytes, over crates.io's 10 MiB limit; add an include list to Cargo.toml" >&2
-                exit 1
-              fi
+              cargo metadata --no-deps --format-version 1 \
+                | jq -e --arg crate "${CRATE}" '.packages[] | select(.name == $crate)
+                    | ((.description // "") != "")
+                      and (((.license // "") != "") or .license_file != null)
+                      and ((.rust_version // "") != "")
+                      and ((.repository // "") | startswith("https://"))' >/dev/null \
+                || refuse "[package] in rust/Cargo.toml needs a description, a license (or license-file), a rust-version and an https repository URL"
+            # Checks the package contents (LICENSE and README.md present, no
+            # files that may hold secrets) and size (at most 3 MiB; the
+            # crates.io limit is 10 MiB), then runs the offline smoke test in a
+            # new project that depends on the crate.
+            - cargo xtask package-check
+            - record_tested_crate verify-package
+
+  - name: "Smoke test package"
+    # Tests the packaged crate against a real broker before anything is
+    # uploaded. Each job starts a temporary apache/kafka container (Docker is
+    # available on the Ubuntu image) and runs xtask/smoke/main.rs in a new
+    # project.
+    dependencies: []
+    execution_time_limit:
+      minutes: 40
+    task:
+      prologue:
+        commands:
+          - sudo apt install -y cmake rustup
+          - cd rust
+      jobs:
+        # --msrv builds with the toolchain given by rust-version in
+        # rust/Cargo.toml rather than the one pinned in rust-toolchain.toml, so
+        # the check remains valid if the two diverge.
+        - name: "Rust MSRV, broker round trip"
+          commands:
+            - cargo xtask package-smoke-test --msrv --with-broker
+            - record_tested_crate smoke-msrv
+        - name: "Rust stable, release build, broker round trip"
+          commands:
+            - rustup toolchain install stable --profile minimal
+            - cargo xtask package-smoke-test --with-broker --toolchain stable --release
+            - record_tested_crate smoke-stable
 
   - name: "Publish to crates.io"
-    dependencies: ["Verify package"]
+    dependencies: ["Verify package", "Smoke test package"]
+    execution_time_limit:
+      minutes: 20
     task:
       jobs:
         - name: "cargo publish"
           commands:
             - sudo apt install -y rustup
             - cd rust
-            - cargo package -p confluent-kafka --locked --list
-            # The Vault path keeps the crate's original name.
+            # Packages without building, as `cargo publish --no-verify` does,
+            # and lists the contents so that the job log records what was
+            # uploaded.
+            - cargo package -p "${CRATE}" --locked --no-verify
+            - crate_file="target/package/${CRATE}-${CRATE_VERSION}.crate"
+            - tar -tzf "${crate_file}"
+            # Proceeds only if the crate is byte-identical to the one tested by
+            # "Verify package" and both smoke tests.
+            - |
+              local_sha=$(sha256sum "${crate_file}") || refuse "could not hash ${crate_file}"
+              local_sha=${local_sha%% *}
+              tested_dir=$(mktemp -d) || refuse "could not create a temporary directory"
+              artifact pull workflow "crates-io/${CRATE}-${CRATE_VERSION}/tested" --destination "${tested_dir}/tested" --force >/dev/null \
+                || refuse "this workflow has no tested checksums for ${CRATE} ${CRATE_VERSION}"
+              for tested_by in verify-package smoke-msrv smoke-stable; do
+                tested=$(find "${tested_dir}" -type f -name "${tested_by}" -exec cat {} +)
+                if [ "${tested}" != "${local_sha}" ]; then
+                  refuse "the crate to upload (${local_sha}) is not the crate that ${tested_by} tested (${tested:-no checksum recorded})"
+                fi
+              done
+              echo "Uploading ${crate_file} (${local_sha}), identical to the crate that was verified and smoke-tested"
+            # The Vault path retains the crate's original name.
             - . vault-get-secret --secret-key=CARGO_REGISTRY_TOKEN crates/confluent-kafka-rust
-            # Verified in the previous block; --no-verify keeps build-time code
-            # off this VM while the token is in the environment.
-            - cargo publish -p confluent-kafka --locked --no-verify
+            - test -n "${CARGO_REGISTRY_TOKEN:-}" || refuse "Vault returned no CARGO_REGISTRY_TOKEN for crates/confluent-kafka-rust"
+            # Recorded before the upload, so that a rerun after an interrupted
+            # upload passes the "already on crates.io" check (see the
+            # prologue).
+            - echo "${SEMAPHORE_JOB_ID}" > /tmp/upload-started
+            - artifact push workflow /tmp/upload-started --destination "crates-io/${CRATE}-${CRATE_VERSION}/upload-started" --force
+            # crates.io may accept an upload even when cargo reports an error
+            # (a timeout or a 5xx response), and may reject a rerun with
+            # "already exists" after an earlier attempt succeeded. In either
+            # case, the publish is treated as successful if crates.io lists
+            # this exact crate.
+            - |
+              if ! cargo publish -p "${CRATE}" --locked --no-verify; then
+                echo "cargo publish failed; checking whether crates.io has ${CRATE} ${CRATE_VERSION} anyway"
+                published=""
+                for attempt in $(seq 1 10); do
+                  published=$(crates_io_index | awk -v v="${CRATE_VERSION}" '$1 == v { print $2 }')
+                  [ -z "${published}" ] || break
+                  sleep 30
+                done
+                if [ "${published}" != "${local_sha}" ]; then
+                  refuse "cargo publish failed and crates.io does not list this crate (index checksum: ${published:-none})"
+                fi
+                echo "crates.io lists exactly this crate (${published}); continuing"
+              fi
+            - unset CARGO_REGISTRY_TOKEN
+            # `cargo publish` repackages the crate before uploading it, so
+            # confirm that the uploaded bytes are the tested ones.
+            - |
+              uploaded_sha=$(sha256sum "${crate_file}") || refuse "could not hash ${crate_file} after the upload"
+              uploaded_sha=${uploaded_sha%% *}
+              if [ "${uploaded_sha}" != "${local_sha}" ]; then
+                echo "The uploaded crate (${uploaded_sha}) differs from the tested one (${local_sha}). Yank ${CRATE} ${CRATE_VERSION} and investigate." >&2
+                exit 1
+              fi
+            # Records the checksum of the uploaded bytes, which
+            # verify-crates-io-release.yml compares with what crates.io serves.
+            - echo "${uploaded_sha}  ${CRATE}-${CRATE_VERSION}.crate" > /tmp/crate.sha256
+            - artifact push workflow /tmp/crate.sha256 --destination "crates-io/${CRATE}-${CRATE_VERSION}.sha256" --force
+
+promotions:
+  - name: Verify the published crate
+    pipeline_file: verify-crates-io-release.yml
+    auto_promote:
+      when: "result = 'passed'"
