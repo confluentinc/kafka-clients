@@ -260,3 +260,42 @@ None is in Phase 2 scope, and none leaks a secret. All three are notes for later
   - The pull-request review caught it, and `21be3984` fixes it.
 - **The rule this teaches:** a Rust-only holder must mask like the Java class whose data it carries, not like its
   element type.
+
+## Round 5: review of fixup `3d11391f`, docs `4cd52595` and memory `afbef61f` / `45b0a928`
+
+**Verdict: clean, 0 findings.** Round 4's blocker is resolved, and nothing regressed.
+
+### Verified correct
+- **The fix follows master's precedent.**
+  - `rust/src/common/config/mod.rs:23` is now `pub(crate) mod types;`, the shape of master's
+    `pub(crate) mod authenticator;` / `pub(crate) mod ssl;` in `common::security`.
+  - Behind that module, `Password` and its `HIDDEN`, `new` and `value` stay `pub`, with their `doc(alias)` markers.
+  - That line is the fixup's only non-comment change. The rest is the module doc and the five public-doc links, now
+    code spans.
+- **No public surface names `Password`, by the compiler.**
+  - HEAD passes `cargo check --lib`, with and without `--all-features`, under `#![deny(warnings)]`. So
+    `unnameable_types` and `private_interfaces` stay silent.
+  - A scratch mutant that adds a public getter returning `Option<&Password>` fails with "struct `Password` is
+    reachable but cannot be named".
+  - Nothing outside the lib crate reaches `common::config::types`: not the other workspace crates, the integration
+    tests, the FFI, the C header, the Python bindings or the doc-tests.
+- **Redaction is unchanged.** The fixup touches no `Debug` impl and no test. The redaction tests pass and still assert
+  the masking.
+- **The Java-dependent rules, re-run.**
+  - `lint-custom` ran on a `git archive` copy of HEAD, with round 4's stand-in for `kafka/`. All six rules pass:
+    817 / 231 / 8378 / 1324 / 2331 / 22 items.
+  - Master gives the same counts, except `check-java-name`'s 8373.
+  - That rule checks crate-private items too. The five extra are `Password`'s three markers, its file and its
+    `pub use`: deleting `types/` from a copy brings the count to 8373.
+- **The docs.**
+  - PLAN.md's header, §5, §12.1 and §12.4, and `structure.md`'s crate-private list, are accurate and do not overclaim.
+  - The two `COMMENTS.DONE.85.md` copies are identical.
+  - `afbef61f` committed the Critic's four round-4 files unchanged.
+- **The branch.** The diff against master touches only milestone files, and `git merge-tree` merges it with master
+  cleanly.
+- **Local results.**
+  - `cargo doc` with `-D warnings` and `--all-features`: clean, also in a fresh, uncached build.
+  - `format-check`: clean.
+  - `cargo test --all-features -- --skip __grpc`: 4756 passed, 0 failed.
+  - `cargo xtask lint` exits 1, only because the three Java-dependent rules cannot run without `kafka/`. Its remaining
+    steps, run one by one, are clean.

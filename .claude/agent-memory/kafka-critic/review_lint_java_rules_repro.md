@@ -29,3 +29,15 @@ Without `kafka/`, `cargo xtask lint` cannot run three of the six `lint-custom` r
 - zsh does not word-split `$CMD` strings; use a function.
 - `git add` has no `-q`.
 - `rm` or `rmdir` with `$VAR` paths is refused by the safety check. Use literal absolute paths or `"${P:?}"`.
+- A word starting with `=` (e.g. `echo =====`) triggers zsh `=cmd` expansion and errors; use dashes for separators.
+- `grep --include=*.rs` is globbed by zsh ("no matches found"); quote it: `--include='*.rs'`.
+
+**Re-running in a later round (M15 round 5).**
+- The stand-in is an ordinary git repo: within a session, symlink it into fresh `git archive` copies instead of
+  rebuilding it. Across sessions the scratchpad may be gone; rebuild by the recipe.
+- Cost once the stand-in exists: xtask build about 3 s with its own `CARGO_TARGET_DIR`, `lint-custom` about 8 s per copy.
+- Always pair HEAD with the master control run, and attribute any count delta by deleting the new module in a copy
+  (see [[review-m15-password-redaction]] Lesson 13).
+- If the brief scopes the re-run to `lint-custom` only, say so in the report and argue module-path hygiene from its
+  inputs: it is textual (parent `use` re-exports vs `::<file_module>::<Name>` paths), so unchanged `use` lines and no
+  `::<file_module>::` path mean an unchanged result.

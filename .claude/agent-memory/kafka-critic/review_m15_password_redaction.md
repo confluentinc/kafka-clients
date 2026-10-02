@@ -1,6 +1,6 @@
 ---
 name: review-m15-password-redaction
-description: M15 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges
+description: M15 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); r5 CLOSED clean (pub(crate) mod fix); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges; compiler-mutant proof for "no public signature names X"
 metadata:
   type: project
 ---
@@ -118,5 +118,30 @@ the fields the input *can set*. There were eight `Option<Password>` fields but o
   dropped redaction or test.
 - `cargo xtask lint` stops at lint-custom without `kafka/`, so run doc-hygiene and the three clippy passes
   separately. Module-path hygiene has no standalone task.
+
+**Round 5 (fixup `3d11391f` = `pub(crate) mod types;` + five doc links to code spans, docs, memory): CLOSED clean, 0 findings.**
+
+**Lesson 12: prove "no public signature names X" with a compiler mutant, not a grep.**
+- In a `git archive` copy, add a `pub fn` returning `Option<&X>` to a public type and run `cargo check --lib`. Under
+  `#![warn(unnameable_types)]` + `#![deny(warnings)]` it fails: "struct `X` is reachable but cannot be named".
+- Subtlety: for a `pub` type inside a `pub(crate)` module, `private_interfaces` does NOT fire (it compares nominal
+  visibility, which is `pub`); only `unnameable_types` catches the leak. Check the crate enables it before relying on
+  the compiler.
+
+**Lesson 13: decompose a lint-count delta by deletion.** Delete the new module (and its `mod` line) in a scratch copy and
+re-run `lint-custom`; if the count returns to master's, the delta is fully attributed. `check-java-name` counts
+crate-private items too, so a +N there after privatising is expected; `check-no-public-field` and
+`check-no-deprecated-translation` count public items only, so they drop back to master's.
+
+**Lesson 14: evidence hygiene.**
+- A cached cargo "Finished" under the same `-D warnings` flags is valid (failures record no fingerprint), but a fresh
+  archive build is cheap (doc about 40 s, `check --lib` about 20 s) and independent — do it when the claim carries the
+  verdict.
+- In an archive copy, an `--all-features` build is safe: build.rs writes the C header to `CARGO_MANIFEST_DIR/target/include`,
+  i.e. into the copy. Lesson 3's "no `ffi`" applies only to a scratch crate path-depending on the repo.
+- "Commit X committed my files unchanged": clean `git status` + mtimes predating the fixup and the commit + the commit
+  stat adding exactly those paths.
+- The CLAUDE.md in the system context can be stale: §2's three visibility conditions (on-disk `CLAUDE.md:29-31`) were
+  missing from it. Cite rules from the on-disk file.
 
 - Related: [[review-expectations]], [[review-fix-commit-rereview]], [[review-lint-java-rules-repro]].
