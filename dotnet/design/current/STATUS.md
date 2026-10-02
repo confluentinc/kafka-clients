@@ -53,7 +53,7 @@ Newest first.
     6. P13.4 PM-1's six stale "borrowed error" docs remain as recorded there.
   - **Out of scope, carried:** G1-2, G1-4, G2-2, G2-3, G3-9, G5-5, G7-6, G4-7, G6-5 (core or ABI work); PR #219; the X10 null-input per-key family; X1, X4, X7, G5-4, G7-5, G6-8, G4-8; every Python half.
   - **Next unused dotnet N = 91.**
-  - **Not pushed.** `origin` is at `274523ec`; push the whole range from `274523ec` together (M17/P2 D11).
+  - **Not pushed.** `origin/prashah_dev_dotnet_binding` is at this phase's base `21458241` (fetched 2026-10-02), so the earlier `274523ec..21458241` range is already on the remote. This phase's commits, `f308d137` through this close, are local only.
 
 - **Milestone 17 / Phase 2 — ".NET: adopt master #210 / #209 / #223 through rebased PR #201 — layout move, C ABI rename, Java-deprecated removals": DONE locally (2026-10-02); not pushed. N=89. Mode A.** Branch `prashah_dev_dotnet_binding`, on top of `274523ec` (the M17/P1 close, which `origin` carries). The commits after it are not squashed and not pushed:
   - S1a: `777dfa83` (`git mv bindings/dotnet dotnet`, 743 × R100) and `27b61304` (`bindings/CLAUDE.md` → `dotnet/.claude/rules/bindings.md`, R100; D14).
