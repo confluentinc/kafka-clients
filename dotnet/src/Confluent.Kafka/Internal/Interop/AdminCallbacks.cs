@@ -2068,8 +2068,11 @@ internal static class AdminCallbacks
     /// </para>
     /// <para>
     /// ⚠ In <c>removeAll</c> mode <c>count</c> is 0, so the map is empty and <c>all()</c> is
-    /// the <b>only</b> carrier of a member failure: a bare Kafka error with code -1 and
-    /// Java's "Encounter error when trying to remove: MemberIdentity(...)" message, whose
+    /// the <b>only</b> carrier of a member failure: a bare Kafka error with code -1 and the
+    /// message "Encounter error when trying to remove: MemberIdentity(...)" — Java's
+    /// "Encounter exception …" text (<c>RemoveMembersFromConsumerGroupResult.java:59</c>),
+    /// which the core rewords because the root <c>CLAUDE.md</c> §2 bars the word from Rust
+    /// code — whose
     /// cause — the member's own error — <see cref="KafkaException.FromHandle"/> reads into its
     /// <see cref="Exception.InnerException"/>. See <see cref="KeyedOutcomes{TKey}"/> for the
     /// ownership of the two reads.
@@ -2269,45 +2272,14 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, ClassicGroupDescription> ClassicGroupDescriptionPerKeyValue =
         CopyOutClassicGroupDescription;
 
-    /// <summary>
-    /// <c>listConsumerGroupOffsets</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>OffsetAndMetadataMap_t</c>, copied out entry by entry before the root dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, two
-    /// levels deep: the map from the result, every topic and metadata string from the map.
-    /// None of it is owned, none of it is freed here, and all of it dangles the moment
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_destroy</c> runs — which is why
-    /// the copy-out completes inside the walk and the destroy is in the trampoline's
-    /// <c>finally</c>, strictly after. No native-backed string or pointer is retained.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>
-        ListConsumerGroupOffsetsValue =
-            static (result, index) =>
-                CopyOutOffsetAndMetadataMap(
-                    NativeMethods.ListConsumerGroupOffsetsResultGetValue(result, index));
-
     /// <inheritdoc cref="ConsumerGroupDescriptionPerKeyValue"/>
     internal static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>
         ListConsumerGroupOffsetsPerKeyValue = CopyOutOffsetAndMetadataMap;
 
     /// <summary>
-    /// The result-root destroys, hoisted for the same reason as the accessor sets: a
-    /// method group converted at the call site would allocate a delegate per completion.
-    /// All are null-safe, so the trampoline's <c>finally</c> can call them
-    /// unconditionally.
-    /// </summary>
-    /// <remarks>
-    /// This one has no remaining call site — <c>createTopics</c> moved to the per-key
-    /// shape below, which has no result root to free — and survives as the documentation
-    /// anchor every sibling destroy inherits from. It goes with the shape-1/2 walkers.
-    /// </remarks>
-    private static readonly Action<IntPtr> s_destroyCreateTopicsResult = NativeMethods.CreateTopicsResultDestroy;
-
-    /// <summary>
-    /// <c>createTopics</c>' <b>per-key</b> value destroy (shape 4a). ⚠ <b>Not</b>
-    /// <see cref="s_destroyCreateTopicsResult"/>, which frees a result root the per-key
-    /// path does not have.
+    /// <c>createTopics</c>' <b>per-key</b> value destroy (shape 4a). ⚠ <b>Not</b> a
+    /// result-root destroy such as <see cref="s_destroyListConfigResourcesResult"/>: the
+    /// per-key path has no result root to free.
     /// </summary>
     private static readonly Action<IntPtr> s_destroyTopicMetadataAndConfig =
         NativeMethods.TopicMetadataAndConfigDestroy;
@@ -2347,25 +2319,30 @@ internal static class AdminCallbacks
     private static readonly Action<IntPtr> s_destroyListOffsetsResultInfo =
         NativeMethods.ListOffsetsResultInfoDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    /// <summary>
+    /// The result-root destroys, hoisted for the same reason as the accessor sets: a
+    /// method group converted at the call site would allocate a delegate per completion.
+    /// All are null-safe, so the trampoline's <c>finally</c> can call them
+    /// unconditionally.
+    /// </summary>
     private static readonly Action<IntPtr> s_destroyListConfigResourcesResult =
         NativeMethods.ListConfigResourcesResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult"/>
     private static readonly Action<IntPtr> s_destroyListTopicsResult = NativeMethods.ListTopicsResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult"/>
     private static readonly Action<IntPtr> s_destroyElectLeadersResult = NativeMethods.ElectLeadersResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult" path="/summary"/>
     private static readonly Action<IntPtr> s_destroyAlterConsumerGroupOffsetsResult =
         NativeMethods.AlterConsumerGroupOffsetsResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult" path="/summary"/>
     private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupOffsetsResult =
         NativeMethods.DeleteConsumerGroupOffsetsResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult" path="/summary"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult" path="/summary"/>
     private static readonly Action<IntPtr> s_destroyRemoveMembersFromConsumerGroupResult =
         NativeMethods.RemoveMembersFromConsumerGroupResultDestroy;
 
@@ -2467,11 +2444,11 @@ internal static class AdminCallbacks
             NativeMethods.OffsetAndMetadataMapGetMetadata,
             NativeMethods.OffsetAndMetadataMapGetLeaderEpoch);
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult"/>
     private static readonly Action<IntPtr> s_destroyListPartitionReassignmentsResult =
         NativeMethods.ListPartitionReassignmentsResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    /// <inheritdoc cref="s_destroyListConfigResourcesResult"/>
     private static readonly Action<IntPtr> s_destroyDeleteAclsFilterResults =
         NativeMethods.DeleteAclsFilterResultsDestroy;
 

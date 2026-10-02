@@ -738,11 +738,13 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// awaitable per partition.
     /// </summary>
     /// <param name="topicPartitionOffsets">
-    /// Topic partition → which offset to retrieve for it. ⚠ The seven
-    /// <see cref="OffsetSpec"/> kinds are <em>not</em> interchangeable with their numbers:
+    /// Topic partition → which offset to retrieve for it. ⚠ Against a cluster,
     /// <see cref="OffsetSpec.ForTimestamp"/> with a value that happens to equal a wire
-    /// sentinel is still a timestamp query, and produces a different call from the
-    /// no-argument kind sharing that number.
+    /// sentinel sends the <b>same</b> request as the no-argument kind sharing that number —
+    /// <c>ForTimestamp(-2)</c> and <see cref="OffsetSpec.Earliest"/> both become <c>-2</c>,
+    /// as Java's <c>getOffsetFromSpec</c> collapses them before building the request
+    /// (<c>KafkaAdminClient.java:5176-5192</c>). The two differ only up to that point, and
+    /// on a <see cref="MockAdminClient"/>, which tells them apart.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
@@ -1311,8 +1313,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Java's blank-name message), or a null update — the two Java rejects before enqueuing
     /// anything (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — or a feature name
     /// containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
-    /// A <see cref="MockAdminClient"/> accepts an empty map and returns an empty result, as
-    /// Java's mock does (<c>MockAdminClient.java:1286-1300</c>).
+    /// A <see cref="MockAdminClient"/> accepts an empty map and returns an empty result, and
+    /// accepts a blank (but not a null) name, as Java's mock checks no names
+    /// (<c>MockAdminClient.java:1286-1300</c>).
     /// </exception>
     /// <exception cref="KafkaException">
     /// The native client refused the request before submitting anything — as Java's

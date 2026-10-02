@@ -106,7 +106,12 @@ public sealed class ProducerState
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:91</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:91-100</c>), where
+    /// <c>coordinatorEpoch</c> is an <c>OptionalInt</c> and
+    /// <c>currentTransactionStartOffset</c> an <c>OptionalLong</c>, so each prints as, for
+    /// example, <c>OptionalInt[55]</c> or <c>OptionalInt.empty</c>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
@@ -117,8 +122,10 @@ public sealed class ProducerState
             ProducerEpoch,
             LastSequence,
             LastTimestamp,
-            CoordinatorEpoch.HasValue ? CoordinatorEpoch.Value.ToString(CultureInfo.InvariantCulture) : "null",
+            CoordinatorEpoch.HasValue
+                ? "OptionalInt[" + CoordinatorEpoch.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : "OptionalInt.empty",
             CurrentTransactionStartOffset.HasValue
-                ? CurrentTransactionStartOffset.Value.ToString(CultureInfo.InvariantCulture)
-                : "null");
+                ? "OptionalLong[" + CurrentTransactionStartOffset.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : "OptionalLong.empty");
 }

@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// an empty subclass of <c>AbstractOptions</c>, so <see cref="TimeoutMs"/> is the whole
 /// surface, exactly as for <see cref="DeleteRecordsOptions"/>. Note the resource-type
 /// filter is <b>not</b> an option: Java passes it as the RPC's first parameter
-/// (<c>Admin.java:1812</c>), and so does <see cref="IAdmin.ListConfigResources"/>.
+/// (<c>Admin.java:1802</c>), and so does <see cref="IAdmin.ListConfigResources"/>.
 /// </para>
 /// </remarks>
 public sealed class ListConfigResourcesOptions

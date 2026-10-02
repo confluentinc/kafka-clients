@@ -56,10 +56,10 @@ public sealed class PublicConsumerOffsetValueTypeTests
     public void OffsetAndMetadata_ToString_IncludesAllFields()
     {
         Assert.Equal(
-            "OffsetAndMetadata{offset=42, metadata='meta', leaderEpoch=3}",
+            "OffsetAndMetadata{offset=42, leaderEpoch=3, metadata='meta'}",
             new OffsetAndMetadata(42, "meta", 3).ToString());
         Assert.Equal(
-            "OffsetAndMetadata{offset=7, metadata='', leaderEpoch=null}",
+            "OffsetAndMetadata{offset=7, leaderEpoch=null, metadata=''}",
             new OffsetAndMetadata(7, string.Empty, null).ToString());
     }
 
@@ -78,12 +78,12 @@ public sealed class PublicConsumerOffsetValueTypeTests
         OffsetAndMetadata value = new OffsetAndMetadata(5, "m", epoch);
 
         Assert.Null(value.LeaderEpoch);
-        Assert.Equal("OffsetAndMetadata{offset=5, metadata='m', leaderEpoch=null}", value.ToString());
+        Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=null, metadata='m'}", value.ToString());
 
         // Zero is the boundary Java keeps: "leaderEpoch < 0" is the only rejection.
         OffsetAndMetadata zero = new OffsetAndMetadata(5, "m", 0);
         Assert.Equal(0, zero.LeaderEpoch);
-        Assert.Equal("OffsetAndMetadata{offset=5, metadata='m', leaderEpoch=0}", zero.ToString());
+        Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=0, metadata='m'}", zero.ToString());
     }
 
     /// <summary>

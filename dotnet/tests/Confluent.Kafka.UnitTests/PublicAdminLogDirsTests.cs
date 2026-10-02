@@ -372,7 +372,9 @@ public sealed class PublicAdminLogDirsTests
 
         LogDirDescription two = new LogDirDescription(error, replicas);
         Assert.Same(error, two.Error);
-        Assert.Same(replicas, two.ReplicaInfos);
+
+        // A read-only view over the caller's map since G3-11, not the map itself.
+        Assert.Equal(replicas, two.ReplicaInfos);
         Assert.Null(two.TotalBytes);
         Assert.Null(two.UsableBytes);
         Assert.False(two.IsCordoned);

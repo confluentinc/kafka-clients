@@ -119,7 +119,11 @@ public sealed class ClientQuotaFilter
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:98</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:98</c>). It embeds
+    /// <see cref="ClientQuotaFilterComponent.ToString"/>, which differs from Java's text, so
+    /// this does too.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
     {

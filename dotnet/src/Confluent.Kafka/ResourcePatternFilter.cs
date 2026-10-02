@@ -133,8 +133,10 @@ public sealed class ResourcePatternFilter
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:144</c>) — which labels
-    /// itself <c>ResourcePattern(…)</c>, a Java quirk kept for parity.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:144</c>) — which
+    /// labels itself <c>ResourcePattern(…)</c>, a Java quirk kept for parity.
+    /// ⚠ The shape only, not the exact text: the resource and pattern types print with their .NET
+    /// names (<c>Topic</c>, <c>Literal</c>), where Java prints its constants (<c>TOPIC</c>, <c>LITERAL</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -30,6 +31,26 @@ namespace Confluent.Kafka.Admin;
 public sealed class AlterUserScramCredentialsResult
 {
     private readonly IReadOnlyDictionary<string, Task> _values;
+
+    /// <summary>
+    /// Wraps one awaitable per user — Java's <b>public</b>
+    /// <c>AlterUserScramCredentialsResult(Map&lt;String, KafkaFuture&lt;Void&gt;&gt;)</c>
+    /// (<c>AlterUserScramCredentialsResult.java:38</c>), which a caller can use to fabricate a
+    /// result, for a test double say.
+    /// </summary>
+    /// <remarks>
+    /// The dictionary is held by reference, as Java holds its map, so <see cref="Values"/> and
+    /// <see cref="All"/> read whatever it holds when they are called.
+    /// </remarks>
+    /// <param name="futures">One awaitable per user, keyed by user name.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="futures"/> is null — where Java stores the null and throws
+    /// <c>NullPointerException</c> on first use.
+    /// </exception>
+    public AlterUserScramCredentialsResult(IReadOnlyDictionary<string, Task> futures)
+    {
+        _values = futures ?? throw new ArgumentNullException(nameof(futures));
+    }
 
     internal AlterUserScramCredentialsResult(
         IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer)

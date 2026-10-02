@@ -136,16 +136,16 @@ public sealed class PublicAdminP8TypesTests
     }
 
     [Fact]
-    public void ProducerState_ToStringNamesEveryFieldAndRendersAbsenceAsNull()
+    public void G7_8_ProducerState_ToStringNamesEveryFieldAndRendersOptionalsAsJavaDoes()
     {
         Assert.Equal(
             "ProducerState(producerId=11, producerEpoch=22, lastSequence=33, lastTimestamp=44"
-                + ", coordinatorEpoch=55, currentTransactionStartOffset=66)",
+                + ", coordinatorEpoch=OptionalInt[55], currentTransactionStartOffset=OptionalLong[66])",
             new ProducerState(11L, 22, 33, 44L, 55, 66L).ToString());
 
         Assert.Equal(
             "ProducerState(producerId=11, producerEpoch=22, lastSequence=33, lastTimestamp=44"
-                + ", coordinatorEpoch=null, currentTransactionStartOffset=null)",
+                + ", coordinatorEpoch=OptionalInt.empty, currentTransactionStartOffset=OptionalLong.empty)",
             new ProducerState(11L, 22, 33, 44L, null, null).ToString());
     }
 
@@ -307,17 +307,17 @@ public sealed class PublicAdminP8TypesTests
     }
 
     [Fact]
-    public void TransactionDescription_ToStringNamesEveryFieldAndRendersAbsenceAsNull()
+    public void G7_8_TransactionDescription_ToStringNamesEveryFieldAndRendersOptionalsAsJavaDoes()
     {
         Assert.Equal(
             "TransactionDescription(coordinatorId=1, state=Ongoing, producerId=2, producerEpoch=3"
-                + ", transactionTimeoutMs=4, transactionStartTimeMs=5, topicPartitions=[t-0])",
+                + ", transactionTimeoutMs=4, transactionStartTimeMs=OptionalLong[5], topicPartitions=[t-0])",
             new TransactionDescription(
                 1, TransactionState.Ongoing, 2L, 3, 4L, 5L, new[] { new TopicPartition("t", 0) })
                 .ToString());
 
         Assert.Contains(
-            "transactionStartTimeMs=null",
+            "transactionStartTimeMs=OptionalLong.empty",
             new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, null, null).ToString());
     }
 
@@ -405,10 +405,10 @@ public sealed class PublicAdminP8TypesTests
     public void DescribeProducersOptions_ToStringMatchesJavasShape()
     {
         Assert.Equal(
-            "DescribeProducersOptions(brokerId=3, timeoutMs=500)",
+            "DescribeProducersOptions(brokerId=OptionalInt[3], timeoutMs=500)",
             new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 }.ToString());
         Assert.Equal(
-            "DescribeProducersOptions(brokerId=null, timeoutMs=null)",
+            "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)",
             new DescribeProducersOptions().ToString());
     }
 

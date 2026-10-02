@@ -137,7 +137,11 @@ public sealed class TransactionDescription
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:100</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:100-110</c>), where
+    /// <c>transactionStartTimeMs</c> is an <c>OptionalLong</c>, so it prints as
+    /// <c>OptionalLong[5]</c> or <c>OptionalLong.empty</c>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
@@ -150,7 +154,7 @@ public sealed class TransactionDescription
             ProducerEpoch,
             TransactionTimeoutMs,
             TransactionStartTimeMs.HasValue
-                ? TransactionStartTimeMs.Value.ToString(CultureInfo.InvariantCulture)
-                : "null",
+                ? "OptionalLong[" + TransactionStartTimeMs.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : "OptionalLong.empty",
             string.Join(", ", _topicPartitions));
 }

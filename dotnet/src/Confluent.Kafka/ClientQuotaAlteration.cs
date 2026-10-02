@@ -65,7 +65,11 @@ public sealed class ClientQuotaAlteration
     // Op, :58/:66), so reference equality is the faithful surface. Unlike ClientQuotaEntity this
     // type is never a result key (PLAN D39 names it not).
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:103</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:103</c>). It
+    /// embeds <see cref="Op.ToString"/>, so a whole-number value prints as <c>1</c> where Java
+    /// prints <c>1.0</c>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
     {
@@ -139,7 +143,11 @@ public sealed class ClientQuotaAlteration
             }
         }
 
-        /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:71</c>).</summary>
+        /// <summary>
+        /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:71</c>).
+        /// ⚠ The shape only, not the exact text: a whole-number value prints as <c>1</c>, where
+        /// Java's <c>Double</c> prints <c>1.0</c>.
+        /// </summary>
         /// <returns>The rendering.</returns>
         public override string ToString() =>
             string.Concat(

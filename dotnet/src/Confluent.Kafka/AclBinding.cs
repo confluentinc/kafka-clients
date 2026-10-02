@@ -95,7 +95,11 @@ public sealed class AclBinding
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:71</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:71</c>). It
+    /// embeds <see cref="ResourcePattern.ToString"/> and <see cref="AccessControlEntry.ToString"/>,
+    /// so it prints their enums with .NET names, as they do.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(CultureInfo.InvariantCulture, "(pattern={0}, entry={1})", Pattern, Entry);

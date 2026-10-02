@@ -158,8 +158,10 @@ public sealed class AccessControlEntry
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:84</c> →
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:84</c> →
     /// <c>AccessControlEntryData:76</c>).
+    /// ⚠ The shape only, not the exact text: the operation and permission type print with their .NET
+    /// names (<c>Read</c>, <c>Allow</c>), where Java prints its constants (<c>READ</c>, <c>ALLOW</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

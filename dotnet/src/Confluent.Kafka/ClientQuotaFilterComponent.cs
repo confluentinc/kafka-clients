@@ -119,7 +119,12 @@ public sealed class ClientQuotaFilterComponent
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:106</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering named after Java's <c>toString()</c> (<c>:106</c>), but not the
+    /// same text: Java prints its one <c>Optional&lt;String&gt; match</c> field
+    /// (<c>match=Optional[alice]</c>, <c>match=Optional.empty</c> or <c>match=null</c>), where
+    /// this prints <c>matchType</c> and <c>matchName</c>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Concat(

@@ -55,7 +55,11 @@ public sealed class ScramCredentialInfo
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:58</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:58</c>).
+    /// ⚠ The shape only, not the exact text: the mechanism prints with its .NET
+    /// name (<c>ScramSha256</c>), where Java prints its constant (<c>SCRAM_SHA_256</c>).
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(

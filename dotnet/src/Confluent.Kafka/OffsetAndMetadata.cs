@@ -163,13 +163,14 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
 
     /// <summary>
     /// Returns a debug string of the form
-    /// <c>"OffsetAndMetadata{offset=…, metadata='…', leaderEpoch=…}"</c>.
+    /// <c>"OffsetAndMetadata{offset=…, leaderEpoch=…, metadata='…'}"</c>, in Java's field
+    /// order (<c>OffsetAndMetadata.java:120-125</c>).
     /// </summary>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
-            "OffsetAndMetadata{{offset={0}, metadata='{1}', leaderEpoch={2}}}",
+            "OffsetAndMetadata{{offset={0}, leaderEpoch={1}, metadata='{2}'}}",
             Offset,
-            Metadata,
-            LeaderEpoch is null ? "null" : LeaderEpoch.Value.ToString(CultureInfo.InvariantCulture));
+            LeaderEpoch is null ? "null" : LeaderEpoch.Value.ToString(CultureInfo.InvariantCulture),
+            Metadata);
 }

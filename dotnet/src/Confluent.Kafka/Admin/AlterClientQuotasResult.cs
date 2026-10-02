@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -37,6 +38,26 @@ namespace Confluent.Kafka.Admin;
 public sealed class AlterClientQuotasResult
 {
     private readonly IReadOnlyDictionary<ClientQuotaEntity, Task> _values;
+
+    /// <summary>
+    /// Wraps one awaitable per entity — Java's <b>public</b>
+    /// <c>AlterClientQuotasResult(Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;)</c>
+    /// (<c>AlterClientQuotasResult.java:38</c>), which a caller can use to fabricate a result,
+    /// for a test double say.
+    /// </summary>
+    /// <remarks>
+    /// The dictionary is held by reference, as Java holds its map, so <see cref="Values"/> and
+    /// <see cref="All"/> read whatever it holds when they are called.
+    /// </remarks>
+    /// <param name="futures">One awaitable per entity, keyed by the entity.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="futures"/> is null — where Java stores the null and throws
+    /// <c>NullPointerException</c> on first use.
+    /// </exception>
+    public AlterClientQuotasResult(IReadOnlyDictionary<ClientQuotaEntity, Task> futures)
+    {
+        _values = futures ?? throw new ArgumentNullException(nameof(futures));
+    }
 
     /// <summary>
     /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -32,14 +33,19 @@ public sealed class DescribeClientQuotasResult
     private readonly Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single awaitable — Java's <b>public</b>
     /// <c>DescribeClientQuotasResult(KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;)</c>
-    /// (<c>:38</c>).
+    /// (<c>:39</c>), which a caller can use to fabricate a result, for a test double say.
     /// </summary>
-    internal DescribeClientQuotasResult(
-        Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> future)
+    /// <param name="entities">The awaitable over the entity-to-quota map.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="entities"/> is null — where Java stores the null and throws
+    /// <c>NullPointerException</c> on first use.
+    /// </exception>
+    public DescribeClientQuotasResult(
+        Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities)
     {
-        _future = future;
+        _future = entities ?? throw new ArgumentNullException(nameof(entities));
     }
 
     /// <summary>

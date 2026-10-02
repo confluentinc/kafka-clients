@@ -208,14 +208,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr CreateTopicsResultGetValue(IntPtr result, int index);
 
-    /// <summary>
-    /// <c>kafka_admin_CreateTopicsResult_destroy</c> — frees the result root,
-    /// invalidating every borrowed sub-handle taken from it. Null-safe, so the
-    /// completion trampoline can call it unconditionally in its <c>finally</c>.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void CreateTopicsResultDestroy(IntPtr result);
-
     // ---- kafka_admin_TopicMetadataAndConfig_t — a borrowed child of the result ----
 
     /// <summary>
@@ -2053,21 +2045,6 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.I1)] bool requireStable,
         AdminCallbacks.ListConsumerGroupOffsetsCallback callback,
         IntPtr userData);
-
-    // ---- kafka_admin_ListConsumerGroupOffsetsResult_t — a Category-3 owned borrow-root ----
-
-    /// <summary>
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_value</c> — that group's committed
-    /// offsets, <b>borrowed</b> from the result root, or null when that key failed.
-    /// </summary>
-    /// <remarks>
-    /// The value is a <c>kafka_admin_OffsetAndMetadataMap_t</c> whose accessors are declared
-    /// below. It is borrowed two levels deep — the map from the result, every string from
-    /// the map — so the whole map is copied out inside the walk, before
-    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_destroy</c> runs.
-    /// </remarks>
-    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ListConsumerGroupOffsetsResultGetValue(IntPtr result, int index);
 
     // ---- kafka_admin_OffsetAndMetadataMap_t ----
     //

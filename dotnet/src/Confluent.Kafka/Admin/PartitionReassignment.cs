@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 
 namespace Confluent.Kafka.Admin;
 
@@ -32,9 +33,10 @@ namespace Confluent.Kafka.Admin;
 /// Java as a subset of <see cref="Replicas"/>.
 /// </para>
 /// <para>
-/// <b>All three lists are copied on construction</b>, as Java wraps each in
-/// <c>Collections.unmodifiableList</c> (<c>:33-35</c>), so a caller mutating the list it
-/// passed cannot change a constructed value.
+/// <b>All three lists are copied on construction and exposed read-only</b>, as Java wraps
+/// each in <c>Collections.unmodifiableList</c> (<c>:33-35</c>): a caller mutating the list
+/// it passed cannot change a constructed value, and casting a returned list back to a
+/// mutable one fails the way Java's <c>UnsupportedOperationException</c> does.
 /// </para>
 /// <para>
 /// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read that
@@ -49,9 +51,9 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class PartitionReassignment
 {
-    private readonly List<int> _replicas;
-    private readonly List<int> _addingReplicas;
-    private readonly List<int> _removingReplicas;
+    private readonly ReadOnlyCollection<int> _replicas;
+    private readonly ReadOnlyCollection<int> _addingReplicas;
+    private readonly ReadOnlyCollection<int> _removingReplicas;
 
     /// <summary>
     /// Creates a reassignment report — Java's
@@ -87,9 +89,9 @@ public sealed class PartitionReassignment
             throw new ArgumentNullException(nameof(removingReplicas));
         }
 
-        _replicas = new List<int>(replicas);
-        _addingReplicas = new List<int>(addingReplicas);
-        _removingReplicas = new List<int>(removingReplicas);
+        _replicas = new List<int>(replicas).AsReadOnly();
+        _addingReplicas = new List<int>(addingReplicas).AsReadOnly();
+        _removingReplicas = new List<int>(removingReplicas).AsReadOnly();
     }
 
     /// <summary>
@@ -123,5 +125,5 @@ public sealed class PartitionReassignment
         + ", removingReplicas=" + Render(_removingReplicas)
         + ")";
 
-    private static string Render(List<int> replicas) => "[" + string.Join(", ", replicas) + "]";
+    private static string Render(ReadOnlyCollection<int> replicas) => "[" + string.Join(", ", replicas) + "]";
 }

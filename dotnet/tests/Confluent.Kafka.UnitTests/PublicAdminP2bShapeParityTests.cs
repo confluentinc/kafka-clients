@@ -425,6 +425,19 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Same(type, type.GetMethod(nameof(GetHashCode), Type.EmptyTypes)!.DeclaringType);
     }
 
+    /// <summary>
+    /// G1-17: <see cref="ListTopicsOptions"/> renders as Java's <c>toString()</c>
+    /// (<c>ListTopicsOptions.java:60-64</c>): the flag in lowercase, and no timeout.
+    /// </summary>
+    [Fact]
+    public void G1_17_ListTopicsOptions_ToString_MatchesJava()
+    {
+        Assert.Equal("ListTopicsOptions(listInternal=false)", new ListTopicsOptions().ToString());
+        Assert.Equal(
+            "ListTopicsOptions(listInternal=true)",
+            new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 }.ToString());
+    }
+
     private static void AssertOptionNames(Type optionsType, params string[] expected) =>
         Assert.Equal(
             expected.OrderBy(name => name, StringComparer.Ordinal),

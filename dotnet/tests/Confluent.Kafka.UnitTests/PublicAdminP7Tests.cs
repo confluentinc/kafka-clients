@@ -252,10 +252,13 @@ public sealed class PublicAdminP7Tests
     }
 
     /// <summary>
-    /// ⚠⚠ A <b>blank</b> feature name is rejected with Java's own message and exception kind
-    /// (<c>Utils.isBlank</c>, <c>KafkaAdminClient.java:4597-4599</c>) — including the
-    /// whitespace-only forms, which neither the binding nor the core rejected before and which
-    /// therefore reached the broker as a request Java refuses to send.
+    /// ⚠⚠ A <b>blank</b> feature name is rejected by the real client with Java's own message
+    /// and exception kind (<c>Utils.isBlank</c>, <c>KafkaAdminClient.java:4597-4599</c>) —
+    /// including the whitespace-only forms, which neither the binding nor the core rejected
+    /// before and which therefore reached the broker as a request Java refuses to send. No
+    /// broker is needed: the guard runs before the submit, and the client does not connect
+    /// eagerly. The mock accepts these names (G6-1):
+    /// <see cref="G6_1_UpdateFeatures_MockAcceptsABlankFeatureName"/>.
     /// </summary>
     /// <remarks>
     /// ⚠ The control character <c>U+0001</c> is in the theory because Java's <c>trim</c>
@@ -269,7 +272,8 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public void UpdateFeatures_RejectsABlankFeatureName(string feature)
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using KafkaAdminClient admin = new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(
@@ -297,6 +301,34 @@ public sealed class PublicAdminP7Tests
             });
 
         Assert.Equal(new[] { "a b" }, result.Values.Keys);
+    }
+
+    /// <summary>
+    /// G6-1: <b>the mock ACCEPTS a blank feature name</b>, as Java's mock does —
+    /// <c>MockAdminClient.updateFeatures</c> checks no names (<c>MockAdminClient.java:1286-1300</c>)
+    /// — so the name is sent and the call settles through its own awaitable. Deleting an
+    /// unseeded feature (level 0, a downgrade type) passes the mock's validation, so the
+    /// awaitable completes. The real client's rejection is
+    /// <see cref="UpdateFeatures_RejectsABlankFeatureName"/>.
+    /// </summary>
+    /// <param name="feature">A name the real client calls blank.</param>
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("   \t ")]
+    [InlineData("\u0001")]
+    public async Task G6_1_UpdateFeatures_MockAcceptsABlankFeatureName(string feature)
+    {
+        using MockAdminClient admin = new MockAdminClient();
+
+        UpdateFeaturesResult result = admin.UpdateFeatures(
+            new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
+            {
+                [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+            });
+
+        Assert.Equal(new[] { feature }, result.Values.Keys);
+        await TestTimeout.Run(() => result.All(), s_deadline);
     }
 
     /// <summary>

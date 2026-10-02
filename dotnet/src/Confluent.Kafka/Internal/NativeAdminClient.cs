@@ -4633,10 +4633,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// and the mock's core entry point does the same (header,
     /// <c>kafka_admin_AdminClient_update_features_async</c>: a null return and no callback),
     /// so on a mock the guard is skipped and the zero-key countdown settles at once. The
-    /// blank-name and null-update guards are <b>not</b> mock-gated, although Java's mock checks
-    /// neither: a null name cannot be pinned for the ABI at all, and the two share one loop.
-    /// What reaches the synchronous refusal through this surface is therefore only what these
-    /// guards cannot see: a name <b>repeated</b> under the caller's own dictionary comparer —
+    /// blank-name guard is the real client's only too: on a mock a blank name is sent, as
+    /// Java's mock accepts it, and only a <b>null</b> name is refused, because it cannot be
+    /// pinned for the ABI at all. The null-update guard is not mock-gated: Java's mock fails
+    /// on a null update synchronously as well, with a <c>NullPointerException</c>
+    /// (<c>:1294</c>). What reaches the synchronous refusal through this surface is therefore
+    /// only what these guards cannot see: a name <b>repeated</b> under the caller's own dictionary comparer —
     /// the core's <c>LOCAL_ILLEGAL_ARGUMENT</c> "feature update at index <em>i</em> repeats
     /// feature …" — and anything the core refuses in the future.
     /// </para>
@@ -4682,15 +4684,17 @@ internal sealed class NativeAdminClient : IDisposable
         int next = 0;
         foreach (KeyValuePair<string, FeatureUpdate> entry in featureUpdates)
         {
-            // Java's Utils.isBlank(null) is true, so a null name gets this message too.
-            if (IsBlank(entry.Key))
+            // Java's Utils.isBlank(null) is true, so a null name gets this message too. The
+            // blank check is the real client's only, as Java's mock checks no names; a null
+            // name is refused on a mock as well, since it cannot cross the ABI.
+            if (entry.Key is null || (!_isMock && IsBlank(entry.Key)))
             {
                 throw new ArgumentException(
                     "Provided feature can not be empty.", nameof(featureUpdates));
             }
 
-            // After Java's own blank check, so a name Java calls blank ("\0" is: its trim
-            // strips every char <= ' ') keeps Java's message.
+            // After Java's own blank check, so on the real client a name Java calls blank
+            // ("\0" is: its trim strips every char <= ' ') keeps Java's message.
             AdminStrings.Validate(entry.Key, nameof(featureUpdates));
 
             if (entry.Value is null)
@@ -5485,8 +5489,9 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="OffsetSpec.ForTimestamp"/> maps to the timestamp itself — and those two
     /// ranges overlap, so <c>ForTimestamp(-2)</c> and <see cref="OffsetSpec.Earliest"/>
     /// would be indistinguishable without <c>is_timestamp</c>. The header states it: they
-    /// "both yield <c>-2</c>, yet Java treats them differently up to that point". Collapsing
-    /// the flag is a silent wrong-answer defect.
+    /// "both yield <c>-2</c>, yet Java treats them differently up to that point". Against a
+    /// cluster the core collapses the pair to the same request, as Java does, but the mock
+    /// tells them apart, so collapsing the flag here is a silent wrong-answer defect.
     /// </remarks>
     internal ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,

@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 
@@ -141,7 +142,13 @@ public sealed class LogDirDescription
         }
 
         Error = error;
-        ReplicaInfos = replicaInfos;
+
+        // Java returns Collections.unmodifiableMap over the stored map (:69-70): a read-only
+        // view, so the map cannot be changed through this property, while changes the caller
+        // makes to its own map stay visible, as they do in Java.
+        ReplicaInfos = replicaInfos is IDictionary<TopicPartition, ReplicaInfo> mutable
+            ? new ReadOnlyDictionary<TopicPartition, ReplicaInfo>(mutable)
+            : replicaInfos;
         TotalBytes = totalBytes == UnknownVolumeBytes ? null : totalBytes;
         UsableBytes = usableBytes == UnknownVolumeBytes ? null : usableBytes;
         IsCordoned = isCordoned;
@@ -163,6 +170,11 @@ public sealed class LogDirDescription
     /// The replicas hosted in this directory, keyed by topic partition — Java's
     /// <c>replicaInfos()</c> (<c>:69</c>).
     /// </summary>
+    /// <remarks>
+    /// A read-only view, as Java's <c>Collections.unmodifiableMap</c> is: casting it back to a
+    /// mutable dictionary and changing it throws <see cref="NotSupportedException"/>, the .NET
+    /// counterpart of Java's <c>UnsupportedOperationException</c>.
+    /// </remarks>
     public IReadOnlyDictionary<TopicPartition, ReplicaInfo> ReplicaInfos { get; }
 
     /// <summary>

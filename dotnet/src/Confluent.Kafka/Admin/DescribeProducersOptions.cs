@@ -58,12 +58,19 @@ public sealed class DescribeProducersOptions
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:53</c>).</summary>
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:53-56</c>). Java's
+    /// <c>brokerId</c> is an <c>OptionalInt</c>, so it prints as <c>OptionalInt[3]</c> or
+    /// <c>OptionalInt.empty</c>; its <c>timeoutMs</c> is an <c>Integer</c>, so it prints as a
+    /// number or <c>null</c>.
+    /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "DescribeProducersOptions(brokerId={0}, timeoutMs={1})",
-            BrokerId.HasValue ? BrokerId.Value.ToString(CultureInfo.InvariantCulture) : "null",
+            BrokerId.HasValue
+                ? "OptionalInt[" + BrokerId.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : "OptionalInt.empty",
             TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
 }

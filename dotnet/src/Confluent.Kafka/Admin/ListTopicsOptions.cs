@@ -56,4 +56,13 @@ public sealed class ListTopicsOptions
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode() => ListInternal.GetHashCode();
+
+    /// <summary>
+    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:60-64</c>), which, like
+    /// <see cref="Equals(object?)"/>, leaves out the timeout and prints the flag in Java's
+    /// lowercase form.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() =>
+        "ListTopicsOptions(listInternal=" + (ListInternal ? "true" : "false") + ")";
 }
