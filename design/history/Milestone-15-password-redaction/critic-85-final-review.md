@@ -206,3 +206,57 @@ None is in Phase 2 scope, and none leaks a secret. All three are notes for later
      - Test the helper directly.
      - Mark it `#[deny(dead_code)]`, so the lib-target lint fails if the log line stops calling it.
    - **Proposed text, for beside rule 2:** "Where a test must pin how a log line renders a value and the logger cannot be captured, route the value through a private helper that returns `&dyn Display` and is marked `#[deny(dead_code)]`, and assert on the helper."
+
+## Round 4: review of the master merge `091f6f9d`, fixup `21be3984`, docs `3455a5c0` and memory `3e869523`
+
+### Blocker: `Password` must not be public (CLAUDE.md §2), and CI's `check-public-audience` fails
+- **What is public.** `rust/src/common/config/mod.rs:23` declares `pub mod types;`, and `types/mod.rs:19` re-exports
+  `Password`.
+- **Why that breaks §2.** Java's `common/config/types/package-info.java:19` says "This package is not a supported Kafka
+  API", both at 4.3.1 and at 4.4.0-rc3.
+  - The lint's three §2 conditions are conjunctive, so the class being on the Public list (line 278) is not enough.
+  - Master added both the §2 rule and the lint. The merge kept the branch's earlier `pub mod types;`.
+- **Executed proof.** It ran in a `git archive` copy outside the repository. A throwaway git repo stood in for
+  `kafka/`: its working tree is the pinned commit's `clients/src/{main,test}/java`, with tags `4.3.1` and `4.4.0-rc3`.
+  - On HEAD, `lint-custom` exits 1, with this single finding:
+    "`crate::common::config::types::Password` is public but translates
+    `org.apache.kafka.common.config.types.Password`: its package `common.config.types` is not a supported Kafka API".
+  - On master `4eb87db1` it exits 0.
+- **The fix, verified in that copy.**
+  - Change `pub(crate) mod types;`.
+  - Turn the five public-doc links to `Password` / `Password::HIDDEN` into code spans:
+    - `user_scram_credential_upsertion.rs:31`;
+    - `ssl_configs.rs:129`;
+    - `producer_config.rs:59`, `:350` and `:351`.
+  - With that change, everything passes, and the rule counts equal master's:
+    - `cargo xtask lint`, end to end;
+    - `doc-check`;
+    - `format-check`;
+    - the doctests and the redaction unit tests.
+  - Without the doc edits, `cargo doc` fails with five `private_intra_doc_links` errors.
+- **The other two Java-dependent rules** (`check-java-name`, `check-no-deprecated-translation`) pass on HEAD.
+
+### Verified correct
+- **The merge.**
+  - Every Milestone 15 redaction survived it, by a per-file `+`/`-` parity diff of the milestone delta before and
+    after.
+  - No master hunk was reverted.
+  - The renamed-name touch-ups in cleanly merged files are minimal and correct.
+- **`ProducerConfig`'s hand-written `Debug`** destructures all of master's fields.
+- **The fixup** is faithful to `DescribeDelegationTokenResponse.java:131-140`, and its test is non-vacuous.
+- **The docs** carry master's text plus the M15 notes.
+- **No internal identifiers** appear in the four commits.
+- **Local results.**
+  - `cargo test --all-features -- --skip __grpc`: 4756 passed.
+  - `format-check`: clean.
+  - `cargo xtask lint` exits 1, only because the three Java-dependent rules cannot run without `kafka/`. Its
+    remaining steps, run one by one, are clean.
+
+### Correction to round 3
+- **"Checked, not an issue"** above cleared `DescribeDelegationTokenResponseOptions`'s derived `Debug`. That was a miss.
+  - Its tokens render through `DelegationToken`'s Java-faithful `Debug`, which prints the token id.
+  - But the Java class the options feed, `DescribeDelegationTokenResponse`, masks both the id and the HMAC in
+    `toString()`.
+  - The pull-request review caught it, and `21be3984` fixes it.
+- **The rule this teaches:** a Rust-only holder must mask like the Java class whose data it carries, not like its
+  element type.

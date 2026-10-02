@@ -135,4 +135,5 @@
 - [Loop 50 §9.18 split panic](review_loop50_split_panic.md) — CLOSED clean at pass 5, 0 behavioural. Domain+classifier+predicate must all be derived; sweep commit messages too (1 FP)
 - [Loop 51 §9.1 generator version gate](review_loop51_generator_version_gate.md) — re-derive emission set from specs (name-level diff); right-fix/wrong-justification; comment-parked skips; OUT_DIR mtime trap
 - [M14 verifiable tools](review_m14_verifiable_tools.md) — JVM shutdown hook ≠ ctrl_c: ducktape clean-shutdown defaults to SIGTERM; assert emitted JSON not just counters
-- [M15 Password redaction](review_m15_password_redaction.md) — P1 CLOSED r2, P2 CLOSED r3 clean; raw-map Debug = key set only; `{:?}` sink makes derived-Debug live; pre-existing ≠ phase defect
+- [M15 Password redaction](review_m15_password_redaction.md) — r4: pub in unsupported package fails lint; holder masks like its Java class
+- [Java-dependent lint repro](review_lint_java_rules_repro.md) — run kafka/-reading lint rules via tagged throwaway repo

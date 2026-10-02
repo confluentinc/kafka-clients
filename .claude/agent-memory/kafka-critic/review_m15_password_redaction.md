@@ -1,6 +1,6 @@
 ---
 name: review-m15-password-redaction
-description: M15 Password/secret-redaction review (Critic 85): Phase 1 CLOSED r2, Phase 2 CLOSED r3 with 0 issues — raw-map Debug renders key set only; check live {:?} log sinks before accepting "latent"; pre-existing over-redacting Display the plan says to delegate to is a deviation note, not a phase defect; &dyn Display + deny(dead_code) pins a log argument; git-archive mutation copies
+description: M15 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges
 metadata:
   type: project
 ---
@@ -88,4 +88,35 @@ the fields the input *can set*. There were eight `Option<Password>` fields but o
 - The plan's §11.2 rows 4–5 misstated Java: builder `toString()` is `maskData(data)`, not
   "type only". Check the Java yourself, not the plan's paraphrase of it.
 
-- Related: [[review-expectations]], [[review-fix-commit-rereview]].
+**Round 4 (master merge `091f6f9d` + fixup + docs): 1 blocker, everything else clean.**
+
+**Lesson 9: CLAUDE.md §2's three public-visibility conditions are conjunctive; the Public list answers only one.**
+- `org.apache.kafka.common.config.types.Password` is on `interface-audience-public-4.4.txt` (line 278). But its
+  `package-info.java` at 4.4.0-rc3 says "This package is not a supported Kafka API", so `pub` fails
+  `check-public-audience`. Master runs green; the merge kept the branch's pre-rule `pub mod types;`.
+- The brief asserted "stays `pub` legitimately: line 278". A brief's premise is a claim to verify, not a fact.
+- **How to apply:** for every new or widened `pub` item, check all three: no `internal` segment, no package-info
+  disclaimer at `AUDIENCE_REF`, and on the Public list. 14 packages carry the disclaimer at 4.4.0-rc3, including
+  `common.config.types`, `common.requests`, `common.protocol`, `common.network`, `common.security.ssl` and
+  `common.security.authenticator`.
+- Execute the rule rather than reason about it: [[review-lint-java-rules-repro]].
+- Fix side effect: privatising the module makes public docs' `[`Password`]` links private, and
+  `#![deny(warnings)]` turns that into a `cargo doc` failure. Include the doc-link edits in the fix.
+
+**Lesson 10, false negative (round 3): an element type's Java-faithful Debug does not make its Rust-only holder safe.**
+- I cleared `DescribeDelegationTokenResponseOptions`' derived Debug, because `DelegationToken`'s Debug mirrors Java and
+  hides only the HMAC. The PR review flagged it. The response those options build masks the token id too
+  (`DescribeDelegationTokenResponse.java:131-140`).
+- **How to apply:** compare a Rust-only holder with the `toString()` of the Java class whose data it carries, not with
+  its element's `toString()`.
+
+**Lesson 11, merge-review technique: per-file `+`/`-` parity.**
+- Extract per file, in order, the `+`/`-` lines of the pre-merge milestone delta (`git diff <base> <premerge>`) and
+  of the post-merge delta against master (`git diff <master> <merge>`). Use `-U0`, `grep -E '^[+-]'`, and drop the
+  `+++`/`---` headers. Then diff the two lists.
+- Every residual line must be explained by a master change (renames, `pub(crate)`, aliases). A missing `+` line is a
+  dropped redaction or test.
+- `cargo xtask lint` stops at lint-custom without `kafka/`, so run doc-hygiene and the three clippy passes
+  separately. Module-path hygiene has no standalone task.
+
+- Related: [[review-expectations]], [[review-fix-commit-rereview]], [[review-lint-java-rules-repro]].
