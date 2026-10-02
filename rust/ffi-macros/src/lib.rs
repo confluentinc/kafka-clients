@@ -256,6 +256,9 @@ fn generated_on_panic(sig: &Signature, fallback: Option<Expr>) -> syn::Result<To
         } else {
             quote!(#error)
         };
+        // The emitted block is sound under the entry point's `# Safety`, which
+        // requires a non-null `out_error` to point to a writable slot; the null check
+        // is emitted with it, and `box_error` hands the slot a fresh owned handle.
         quote! {
             if !#out_error.is_null() {
                 unsafe { *#out_error = crate::ffi::common::box_error(#boxed) };

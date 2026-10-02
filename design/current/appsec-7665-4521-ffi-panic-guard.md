@@ -107,6 +107,10 @@ unchecked `PyMem_RawMalloc`, and 64-bit byte lengths truncated to `int32_t`.
   soundness note (today 1,893 `unsafe {` blocks and 187 `unsafe fn` in
   `src/ffi/`) and an evaluation of replacing the hand-written extension with
   PyO3 (no such evaluation exists in the repository). Recorded in §4.
+  *Update 2026-10-02:* the inventory is done as a follow-up on this branch
+  (§5 entry of that date, §6 note 25): every `unsafe` block and `unsafe impl`
+  carries a `// SAFETY:` comment and clippy's `undocumented_unsafe_blocks`
+  denies a new one without. The PyO3 evaluation is still pending.
 
 ## 2. Work items (one commit each, `git commit --no-verify`)
 
@@ -253,8 +257,9 @@ proved wrong or incomplete). The Manager keeps §5.
    say not to check programming preconditions; they were kept deliberately for
    exactly-once safety. Their observable behaviour changes from abort to error
    return (D7).
-4. **Out of scope, user decision pending:** the `unsafe` inventory with
-   soundness notes and the PyO3 evaluation (D11).
+4. **Out of scope for loop 79:** the `unsafe` inventory with soundness notes
+   and the PyO3 evaluation (D11). The inventory was done afterwards on this
+   branch (2026-10-02, §6 note 25); the PyO3 evaluation is still pending.
 5. **Panics inside tokio tasks spawned by the FFI** are contained by tokio
    and surface as a dropped completion; this plan does not change that path.
    It is pre-existing and separate from the boundary guard.
@@ -348,6 +353,33 @@ proved wrong or incomplete). The Manager keeps §5.
   the Note C fix (a D4 amendment — `ffi-macros` plus the 80 sites — recommended
   as a follow-up loop), Jira remediation bullets 3–4 (§4 item 4), and the
   Critic's CLAUDE.md §3 rule suggestion in `COMMENTS.79.md`.
+- 2026-10-02: follow-up on Jira remediation bullet 3, done directly at the
+  user's request without a review loop (Actor-verified only; §6 note 25).
+  Every `unsafe` block and `unsafe impl` in the crate carries a `// SAFETY:`
+  comment (1998 blocks and four impls gained one), every `unsafe fn` in
+  `src/ffi/` has a `# Safety` section, and `[lints.clippy]` denies
+  `undocumented_unsafe_blocks` and `unnecessary_safety_comment`, so
+  `cargo xtask lint` fails on a new undocumented block. The 78 `on_panic`
+  attributes became three-line closures carrying the comment, and
+  `preceded_by_ffi_guard` accepts that shape. Rustdoc contracts were
+  tightened where a comment relied on something they did not say (note 25
+  lists them; no behaviour change). Six findings are recorded in note 25 for
+  the user, not fixed: the consumer and admin `destroy` do not join in-flight
+  awaiters, a panic in a consumer awaiter leaves the access guard held, three
+  destroy functions have no owned producer, the properties handles state no
+  single-thread requirement, the admin `_async` `# Safety` sections omit
+  `callback`/`user_data`, and three producer functions say "valid handle"
+  while null-checking. Gates on the final tree: `make verify` clean — Rust
+  `cargo test --all-features` 4481 / 0 / 3 ignored (lib), 36 (consumer
+  tests), 204 / 0 / 1 ignored (integration) and the two remaining targets
+  8 / 0 and 5 / 0 / 7 ignored; `cargo xtask lint` clean with the two new
+  lints denied; C ctest 7/7; Python 369 passed, 2 skipped, `check-static` 29.
+  The first run failed only in `test_async_consumer_max_poll_interval_ms`
+  (three assignment callbacks instead of two under full-suite load); the
+  test exercises the Rust consumer, which this change does not touch, and
+  passed alone and in the full rerun. Still open for the user: the Note C
+  fix (§4 item 6), the PyO3 evaluation (Jira bullet 4, D11) and the Critic's
+  CLAUDE.md §3 rule suggestion in `COMMENTS.79.md`.
 
 ## 6. Implementation notes (Actor 79)
 
@@ -932,3 +964,117 @@ code and record the difference here.
     - `COMMENTS.DONE.79.md` now holds issue 3, and `COMMENTS.79.md` keeps a
       pointer where it was, next to Notes B and C, which are the Manager's.
       Both files are gitignored (note 22).
+25. **Follow-up, 2026-10-02 (Jira remediation bullet 3; no review loop, the
+    user asked for the fix directly) — every `unsafe` block in `src/ffi/`
+    carries a `// SAFETY:` comment, and clippy denies a new one without.**
+    Comments, rustdoc and lint configuration, plus one test scanner; no entry
+    point changes behaviour, and the generated header changes only where
+    rustdoc text changed.
+    - **Inventory.** `src/ffi/` has 2006 `unsafe {` blocks (`admin.rs` 1020,
+      `consumer.rs` 401, `producer.rs` 360, `common.rs` 119,
+      `consumer_handle.rs` 106); eight already had a comment, 1998 gained
+      one. Of the crate's 18 `unsafe impl`, four lacked one: `Sync` for
+      `FfiConsumerHandle`, `CallbackTarget` and `RecordCallbackTarget`, and
+      `GlobalAlloc` for `TrackingAllocator` in `src/test_alloc_tracker.rs`,
+      the only `unsafe` outside `src/ffi/`. Every `unsafe fn` in `src/ffi/`
+      (the 788 exported entry points, the private helpers and the test
+      stubs) has a `# Safety` section: six test helpers and 34 test-only
+      `unsafe extern "C"` stubs gained one, and the test helper
+      `create_kafka_producer`, which had no caller obligation, is a safe
+      `fn`. The texts were written per file range by ten parallel agents
+      against a checklist derived from the lint's own report, applied and
+      validated by a script (exact line set, one comment per site) and
+      spot-checked, not reviewed line by line.
+    - **Enforcement.** `[lints.clippy]` in `Cargo.toml` adds
+      `undocumented_unsafe_blocks = "deny"` and
+      `unnecessary_safety_comment = "deny"` (the inverse: a `// SAFETY:`
+      comment above code that no longer contains `unsafe`). The table covers
+      the root package only; of the other workspace members only
+      `ffi-macros` contains `unsafe`, the `*out_error` store it emits into
+      every guarded function (D3), whose contract is in the macro's module
+      docs. The second lint matches the token "safety:" in any comment, so
+      two prose comments were reworded (`src/common/network/selector.rs`,
+      `src/mock_client.rs`).
+    - **Placement.** clippy 1.95 accepts only a comment on the lines directly
+      above the `unsafe` token, inside the enclosing body. The one-line
+      `#[ffi_guard(on_panic = |err| unsafe {..})]` form fails twice over:
+      code precedes the block on its line, and the closure body starts on
+      that same line, so a comment above the attribute is never seen. The 78
+      attributes (`admin.rs` 47, `consumer.rs` 21, `producer.rs` 10) became
+      `|err| {`, the comment, `unsafe {..}`, `})]`, which rustfmt leaves
+      alone. `preceded_by_ffi_guard` (`src/ffi/mod.rs`) accordingly accepts
+      comment lines inside a multi-line attribute; a comment directly above
+      `#[unsafe(no_mangle)]` still fails, and `test_preceded_by_ffi_guard`
+      pins both cases.
+    - **What a comment says.** The precondition the block relies on and
+      where it is established: the entry point's `# Safety` for a C-supplied
+      pointer (non-null handle, `count` entries, NUL-terminated string), the
+      `Box::into_raw` site for a handle cast, the single hand-off for a
+      `Box::from_raw` destroy, the typedef contract for a callback
+      invocation, and for an escaping `&'static` handle reference the
+      keep-alive — the producer's `reserve_pending_task` plus the join in
+      `destroy`; for the consumer and admin clients the documented
+      precondition that no operation is in flight. The 78 `on_panic`
+      closures share one text (single invocation; Note C is the known
+      exception). Cross-references name items, never line numbers.
+    - **Contracts tightened**, rustdoc only, where a block relied on
+      something the `# Safety` did not say: `kafka_consumer_Consumer_destroy`
+      and `kafka_admin_AdminClient_destroy` require that no `_async`
+      operation is in flight, and their step-1 comments no longer claim the
+      runtime shutdown cancels one (`shutdown_background` does not wait for a
+      running awaiter); the 20 consumer `_async` entry points and
+      `kafka_admin_AdminClient_close_async` state the `callback`/`user_data`
+      lifetime; `read_offset_map`, `read_alter_config_ops`,
+      `required_string_at`, `optional_string_at`,
+      `kafka_consumer_MockConsumer_add_record`, `send_batch`,
+      `send_batch_async` and seven `ConsumerHandle` functions name the
+      pointer requirements they already relied on; the twelve payload
+      extractors and the two `RecordDeserializationError` header accessors
+      say the returned pointer is borrowed; `OffsetAndMetadata_destroy`,
+      `OffsetAndTimestamp_destroy` and `PartitionInfo_destroy` say a
+      borrowed getter result must not be passed;
+      `kafka_consumer_Consumer_op_callback_t` says the callee owns the error;
+      the `common.rs` dispatcher section comment and `async_void_op` name
+      the cases that fire inline on the calling thread.
+    - **Found, recorded, not fixed** (behaviour changes are outside this
+      follow-up; `OPEN-BUGS.md` is not in the repository, so this note is
+      the record):
+      1. `kafka_consumer_Consumer_destroy` and
+         `kafka_admin_AdminClient_destroy` do not join in-flight `_async`
+         awaiters. tokio 1.52's `shutdown_background()` is
+         `shutdown_timeout(0)`: a task not being polled is dropped, one
+         mid-poll keeps running on a leaked worker thread, so its `&'static`
+         handle reference can outlive the `Box::from_raw` free. Sound only
+         under the C precondition; the producer FFI registers and joins its
+         tasks instead (`reserve_pending_task`).
+      2. A panic inside a consumer awaiter task after `acquire` — the
+         pre-existing path of §4 item 5 — also leaves the access guard held
+         for the life of the handle, so every later operation is rejected
+         with `LocalConcurrentModification`; item 5 records only the dropped
+         completion.
+      3. The three destroy functions above are trap APIs: no FFI function
+         hands out an owned pointer of those types, so the only pointer a
+         caller can pass is a borrowed map or list entry, and `Box::from_raw`
+         on it is an invalid free. Unreachable under correct use; now
+         documented.
+      4. `properties_mut` (admin, consumer, producer) hands out a
+         `&'static mut HashMap` from the handle; nothing says a properties
+         handle must not be used from two threads at once.
+      5. The 47 admin `_async` `# Safety` sections other than `close_async`
+         do not mention `callback`/`user_data`; the comments cite the typedef
+         contract instead.
+      6. `kafka_producer_Producer_metrics`,
+         `kafka_producer_MockProducer_error_next` and
+         `kafka_producer_KafkaProducer_new` say "valid handle" while their
+         bodies null-check; left as they are.
+    - **Gates** (logs in the session scratchpad, `verify2.log`): `make verify`
+      clean on the final tree — build, format-check, check-generated, the
+      xtask lints (doc hygiene included) and clippy with the two new lints
+      denied; `cargo test --all-features` 4481 / 0 / 3 ignored (lib), 36
+      (consumer tests), 204 / 0 / 1 ignored (integration) and the two
+      remaining targets 8 / 0 and 5 / 0 / 7 ignored; C ctest 7/7; Python 369
+      passed, 2 skipped; `check-static` 29 passed. The first run failed only
+      in `test_async_consumer_max_poll_interval_ms`, which saw three
+      assignment callbacks instead of two under full-suite load; it exercises
+      the Rust consumer, which this change does not touch, and passed alone
+      (with its three siblings, 11 s) and in the full rerun.

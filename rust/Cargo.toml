@@ -149,3 +149,10 @@ exhaustive_enums = "deny"
 # longer meets is itself reported (`unfulfilled_lint_expectations`), so a stale
 # suppression cannot outlive the code that needed it.
 allow_attributes = "deny"
+# Every `unsafe` block and `unsafe impl` carries a `// SAFETY:` comment naming the
+# invariant it relies on and where that invariant is established — the soundness
+# inventory of the FFI layer (NONJAVACLI-4521). The second lint is the inverse: a
+# `// SAFETY:` comment left above code that no longer contains `unsafe` is reported,
+# so a justification cannot outlive the block it was written for.
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"

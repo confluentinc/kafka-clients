@@ -86,12 +86,16 @@ mod tests {
 
     /// Whether the attribute that ends on the line just above `index` is an
     /// `#[ffi_guard...]`. The attribute may span several lines, so this walks up
-    /// from its last line to the line that opens it.
+    /// from its last line to the line that opens it. Comment lines inside the
+    /// attribute are part of it (the `on_panic` closures carry the soundness
+    /// comment clippy requires above their `unsafe` block); a comment directly
+    /// above `#[unsafe(no_mangle)]` is not an attribute and fails.
     fn preceded_by_ffi_guard(lines: &[&str], index: usize) -> bool {
         let Some(mut line) = index.checked_sub(1) else {
             return false;
         };
-        if !lines[line].trim_end().ends_with(']') {
+        let last = lines[line].trim();
+        if !last.ends_with(']') || last.starts_with("//") {
             return false;
         }
         loop {
@@ -99,7 +103,7 @@ mod tests {
             if text.starts_with("#[") {
                 return text.starts_with("#[ffi_guard");
             }
-            if line == 0 || text.is_empty() || text.starts_with("//") {
+            if line == 0 || text.is_empty() {
                 return false;
             }
             line -= 1;
@@ -146,8 +150,9 @@ mod tests {
     }
 
     /// The scanner itself: a guard directly above passes, including one whose
-    /// attribute spans lines; anything else between the guard and
-    /// `#[unsafe(no_mangle)]`, or no guard at all, fails.
+    /// attribute spans lines, with or without a `// SAFETY:` comment inside its
+    /// closure; anything else between the guard and `#[unsafe(no_mangle)]`
+    /// (another attribute, a comment line), or no guard at all, fails.
     #[test]
     fn test_preceded_by_ffi_guard() {
         let guarded = ["/// Docs.", "#[ffi_guard]", "#[unsafe(no_mangle)]"];
@@ -159,6 +164,16 @@ mod tests {
             "#[unsafe(no_mangle)]",
         ];
         assert!(preceded_by_ffi_guard(&multi_line, 3));
+        let safety_comment_inside = [
+            "#[ffi_guard(on_panic = |err| {",
+            "    // SAFETY: the guard fires the caller's own callback once.",
+            "    unsafe { callback(box_error(err), user_data) }",
+            "})]",
+            "#[unsafe(no_mangle)]",
+        ];
+        assert!(preceded_by_ffi_guard(&safety_comment_inside, 4));
+        let comment_between = ["#[ffi_guard]", "// see [D8]", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&comment_between, 2));
         let other_attribute_between = ["#[ffi_guard]", "#[allow(dead_code)]", "#[unsafe(no_mangle)]"];
         assert!(!preceded_by_ffi_guard(&other_attribute_between, 2));
         let unguarded = ["/// Docs.", "#[unsafe(no_mangle)]"];

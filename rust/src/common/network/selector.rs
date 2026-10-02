@@ -1595,7 +1595,7 @@ impl Selectable for Selector {
             }
         }
 
-        // Phase 30 cancel-safety: the WAIT may have drained `(token, dir)`
+        // Phase 30 cancel-safety — the WAIT may have drained `(token, dir)`
         // fires into `ready_ids` and cleared their armed flags, then been
         // cancelled by a wakeup / deadline before pass-1 could process them
         // (the break paths above). Those channels are now neither armed nor
