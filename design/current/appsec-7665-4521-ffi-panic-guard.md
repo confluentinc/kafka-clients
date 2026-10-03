@@ -250,7 +250,9 @@ proved wrong or incomplete). The Manager keeps §5.
 
 1. **New crate `ffi-macros`, helpers `ffi_guard_or` / `panic_error`.** No Java
    counterpart: Java has no C boundary, and nothing in `src/ffi/` has one
-   either. Needed because Rust cannot unwind into C.
+   either. Needed because Rust cannot unwind into C. `ffi-macros` is not
+   published: packaging drops it from the manifest and the lock file (§6
+   note 26).
 2. **`*const kafka_common_Error_t` fallback leaks one boxed error per caught
    panic** (D2). The alternative, null, would report success.
 3. **The seven `assert!(count >= 0)` remain** although CLAUDE.md's FFI rules
@@ -380,6 +382,16 @@ proved wrong or incomplete). The Manager keeps §5.
   passed alone and in the full rerun. Still open for the user: the Note C
   fix (§4 item 6), the PyO3 evaluation (Jira bullet 4, D11) and the Critic's
   CLAUDE.md §3 rule suggestion in `COMMENTS.79.md`.
+- 2026-10-03: two CI jobs that first ran on this branch with the master merge
+  `58ea804d` failed; both fixed directly at the user's request, without a
+  review loop. `62fb188f`: CI's doc-check (`-D warnings`) read the bare
+  `<function>` in the `src/ffi` module docs as an unclosed HTML tag; it is a
+  code span now. Then "Check crate package": `cargo package` refuses
+  `ffi-macros`, a path dependency that is not on crates.io, and the crates.io
+  publish pipeline would have failed the same way. The user ruled out
+  publishing it (no new crate under the Confluent name) and chose to drop it
+  at packaging time, in `cargo xtask package-check` and in
+  `.semaphore/publish-crates-io.yml` (§6 note 26).
 
 ## 6. Implementation notes (Actor 79)
 
@@ -1078,3 +1090,46 @@ code and record the difference here.
       assignment callbacks instead of two under full-suite load; it exercises
       the Rust consumer, which this change does not touch, and passed alone
       (with its three siblings, 11 s) and in the full rerun.
+26. **Follow-up, 2026-10-03 (no review loop; the user chose the approach) —
+    packaging drops `ffi-macros`.** `cargo package` requires a registry
+    version for every dependency, optional or not, and `ffi-macros` is a path
+    dependency that is not on crates.io. Its only user, `src/ffi`, is already
+    outside the package (`include`), so the published crate never needs it.
+    - **The edit.** Three lines: `ffi-macros = …` in `[dependencies]`,
+      `, "dep:ffi-macros"` in the `ffi` feature, and ` "ffi-macros",` in
+      `confluent-kafka`'s dependency list in `Cargo.lock`, which then still
+      matches under `--locked`. The repository keeps all three, so
+      `cargo build --features ffi` and the C and Python builds are unchanged.
+    - **`cargo xtask package-check`** (`with_ffi_macros_stripped`,
+      `strip_ffi_macros`) writes the stripped files, runs
+      `cargo package --locked --allow-dirty`, and writes the originals back
+      whatever the result. Each of the three lines must occur exactly once,
+      so a reformatted manifest, or files an interrupted run left stripped,
+      stop the check with a message naming both places to update. `--locked`
+      is new there, so the task now rehearses the pipeline's packaging.
+    - **`.semaphore/publish-crates-io.yml`** makes the same edit in its
+      prologue with two `sed` lines, logs the `git diff`, and passes
+      `--allow-dirty` to its three cargo commands. `sed`, not xtask, departs
+      from CLAUDE.md §8: the file's header promises that no build-time code
+      runs on the VM where the crates.io token is loaded, and `cargo xtask`
+      compiles and runs repository code; the file already runs inline shell
+      (the jq and size checks). `test_publish_pipeline_strips_the_same_lines`
+      builds the two `sed` commands from the xtask's constants, requires them
+      verbatim in the YAML, and runs `strip_ffi_macros` on the real
+      `Cargo.toml` and `Cargo.lock`; changing one `sed` line makes it fail
+      (checked).
+    - **Visible effect.** The published `.cargo_vcs_info.json` records the
+      commit with `"dirty": true`, which is accurate. The packaged
+      `Cargo.toml.orig` keeps the comment explaining the missing dependency.
+    - **Gates** (logs in the session scratchpad): `cargo test -p xtask`
+      30 / 0 (three new); `cargo xtask package-check` passes and leaves
+      `Cargo.toml` and `Cargo.lock` byte-identical (`shasum -c`);
+      format-check, `cargo xtask lint` and `make doc-check` clean. The
+      pipeline was simulated in fresh clones with the change committed, the
+      YAML's two `sed` lines run verbatim under GNU sed in `ubuntu:24.04` (the
+      pipeline's OS). Verify job: `cargo package --locked --allow-dirty`
+      including its verify build, the jq metadata check, a 2.4 MiB `.crate`.
+      Publish job: `cargo package --locked --allow-dirty --list` (969 files,
+      none under `src/ffi`) and
+      `cargo publish --locked --no-verify --allow-dirty --dry-run`, which
+      compiled nothing.
