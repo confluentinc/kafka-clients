@@ -391,7 +391,10 @@ proved wrong or incomplete). The Manager keeps §5.
   publish pipeline would have failed the same way. The user ruled out
   publishing it (no new crate under the Confluent name) and chose to drop it
   at packaging time, in `cargo xtask package-check` and in
-  `.semaphore/publish-crates-io.yml` (§6 note 26).
+  `.semaphore/publish-crates-io.yml` (§6 note 26). The edit needs
+  `--allow-dirty`, which would package any uncommitted change, so the
+  pipeline also refuses to package or publish when the tree differs from the
+  commit by more than that edit (same note, "The guard").
 
 ## 6. Implementation notes (Actor 79)
 
@@ -1108,16 +1111,42 @@ code and record the difference here.
       stop the check with a message naming both places to update. `--locked`
       is new there, so the task now rehearses the pipeline's packaging.
     - **`.semaphore/publish-crates-io.yml`** makes the same edit in its
-      prologue with two `sed` lines, logs the `git diff`, and passes
-      `--allow-dirty` to its three cargo commands. `sed`, not xtask, departs
-      from CLAUDE.md §8: the file's header promises that no build-time code
-      runs on the VM where the crates.io token is loaded, and `cargo xtask`
+      prologue with two `sed` lines and passes `--allow-dirty` to its three
+      cargo commands. `sed`, not xtask, departs from CLAUDE.md §8: the
+      file's header promises that no build-time code runs on the VM where
+      the crates.io token is loaded, and `cargo xtask`
       compiles and runs repository code; the file already runs inline shell
       (the jq and size checks). `test_publish_pipeline_strips_the_same_lines`
       builds the two `sed` commands from the xtask's constants, requires them
       verbatim in the YAML, and runs `strip_ffi_macros` on the real
       `Cargo.toml` and `Cargo.lock`; changing one `sed` line makes it fail
       (checked).
+    - **The guard.** `--allow-dirty` drops cargo's check that the package is
+      the commit for every file, not only the two edited ones. So the
+      prologue records the tree right after the edit
+      (`git status --porcelain --ignored` and `git diff HEAD`, through `tee`,
+      so the job log shows the edit), and each job compares the tree with
+      that record before its first cargo command, stopping on any difference
+      with what changed. It relies on four facts:
+      1. Porcelain paths are relative to the repository root, and
+         `git diff HEAD` covers the whole repository from any directory, so
+         the record (taken at the root) and the check (run in `rust/`)
+         compare equal.
+      2. `git diff HEAD` compares the working tree, which is what cargo
+         packages, with the commit, staged or not. A further change to the
+         already-edited `Cargo.toml` leaves `git status` as it was; only the
+         diff shows it.
+      3. `--ignored`, because cargo packages a git-ignored file that matches
+         `include` (checked: an ignored `src/*.rs` file was in
+         `cargo package --list`).
+      4. cargo's own `rust/target/` is ignored too, so the check comes before
+         the first cargo command, in the publish job before `--list`.
+         Nothing between the check and `cargo publish` runs repository code.
+
+      The check compares with the tree after the edit, not with an expected
+      edit. The two `sed` lines are pinned by the test above, the record
+      shows what they did, and a `sed` that matched nothing leaves
+      `ffi-macros` in the manifest, which `cargo package` refuses.
     - **Visible effect.** The published `.cargo_vcs_info.json` records the
       commit with `"dirty": true`, which is accurate. The packaged
       `Cargo.toml.orig` keeps the comment explaining the missing dependency.
@@ -1132,4 +1161,10 @@ code and record the difference here.
       Publish job: `cargo package --locked --allow-dirty --list` (969 files,
       none under `src/ffi`) and
       `cargo publish --locked --no-verify --allow-dirty --dry-run`, which
-      compiled nothing.
+      compiled nothing. The guard was simulated the same way (`pipeline-sim3/`),
+      with its record and check commands taken verbatim from the YAML. Only
+      the edit passes. It stops on: a git-ignored new `src/` file (which
+      `cargo package --list` did list), an untracked new file, an edited
+      `lib.rs`, an extra line in the edited `Cargo.toml`, a staged new file,
+      and a cargo run before the check (`rust/target/`). Both jobs then
+      passed again with the guard in place.

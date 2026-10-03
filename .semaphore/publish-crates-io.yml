@@ -37,7 +37,13 @@ global_job_config:
       # lines), but no code built from the repository may run on the publish VM.
       - sed -i -e '/^ffi-macros = /d' -e 's/, "dep:ffi-macros"//' rust/Cargo.toml
       - sed -i -e '/^ "ffi-macros",$/d' rust/Cargo.lock
-      - git diff -- rust/Cargo.toml rust/Cargo.lock
+      # `--allow-dirty` would package any change, so log this edit and keep a
+      # copy: before cargo runs, each job checks that the tree still differs
+      # from the commit by exactly this edit. `--ignored` because cargo packages
+      # a git-ignored file that matches `include`; and cargo's own `target/` is
+      # ignored, hence the check before cargo.
+      - |
+        { git status --porcelain --ignored; git diff HEAD; } | tee ~/expected-tree.txt
 
 blocks:
   - name: "Verify package"
@@ -50,6 +56,14 @@ blocks:
             # publish block doesn't, and both blocks must package the same tree.
             - sudo apt install -y cmake rustup
             - cd rust
+            # Only the prologue's ffi-macros edit may differ from the commit.
+            - |
+              if ! { git status --porcelain --ignored; git diff HEAD; } | cmp -s - ~/expected-tree.txt; then
+                echo "Refusing to publish: the tree changed after the ffi-macros edit; only that edit may differ from the commit" >&2
+                git status --short --ignored >&2
+                git diff HEAD --stat >&2
+                exit 1
+              fi
             - cargo package -p confluent-kafka --locked --allow-dirty
             # crates.io rejects these at upload; cargo package only warns or doesn't check.
             - |
@@ -70,6 +84,14 @@ blocks:
           commands:
             - sudo apt install -y rustup
             - cd rust
+            # Only the prologue's ffi-macros edit may differ from the commit.
+            - |
+              if ! { git status --porcelain --ignored; git diff HEAD; } | cmp -s - ~/expected-tree.txt; then
+                echo "Refusing to publish: the tree changed after the ffi-macros edit; only that edit may differ from the commit" >&2
+                git status --short --ignored >&2
+                git diff HEAD --stat >&2
+                exit 1
+              fi
             - cargo package -p confluent-kafka --locked --allow-dirty --list
             # The Vault path keeps the crate's original name.
             - . vault-get-secret --secret-key=CARGO_REGISTRY_TOKEN crates/confluent-kafka-rust
