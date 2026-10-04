@@ -1074,8 +1074,8 @@ class SoakClient(object):
         self._TopicPartition = bindings.TopicPartition
         self._OffsetAndMetadata = bindings.OffsetAndMetadata
 
-        # Counters. Delivery callbacks fire on the C poll thread, so every
-        # counter is guarded.
+        # Counters. Delivery callbacks fire on the C extension's callback
+        # thread, so every counter is guarded.
         self._lock = threading.Lock()
         self.producer_msgid = 0
         self.dr_cnt = 0
@@ -1330,7 +1330,7 @@ class SoakClient(object):
                 latency_ms)
 
     def _on_delivery(self, future, sent_at):
-        """Delivery report. Runs on the C extension's poll thread."""
+        """Delivery report. Runs on the C extension's callback thread."""
         try:
             try:
                 metadata = future.result()

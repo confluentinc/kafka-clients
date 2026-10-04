@@ -533,7 +533,7 @@ the asyncio flavors.
 
 Two consequences:
 
-* **Delivery callbacks fire on the C extension's poll thread**, so every shared
+* **Delivery callbacks fire on the C extension's callback thread**, so every shared
   counter is guarded by one `threading.Lock`.
 * **The producer has no `wakeup()`**: a `send()` parked on backpressure,
   `flush()` and `close()` are all uninterruptible. The consumer *does* have

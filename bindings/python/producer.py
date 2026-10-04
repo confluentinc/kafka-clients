@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
+import sys
 import threading
+import time
 import _confluentkafka as _lib
 from _confluentkafka import ProducerRecord
 from concurrent.futures import (Future)
@@ -162,21 +165,139 @@ def _completion_to_python(result, error):
     return metadata, exception
 
 
+def _latency_probe_enabled():
+    value = os.environ.get("CK_LATENCY_PROBE", "")
+    return value != "" and value != "0"
+
+
+class _LatencyProbe:
+    """Per-record latency breakdown of the send path (``CK_LATENCY_PROBE=1``).
+
+    Diagnostic only; nothing here runs unless the environment variable is set
+    at producer construction. Every record is stamped at four points and, at
+    ``close()``, the mean time spent in each section and its share of the
+    send()-to-callback total are printed to stderr::
+
+        t0  Python send() entered                        (caller thread)
+        t1  the C send entry point returned              (caller thread)
+        t2  record appended to the Rust accumulator: its CreateTime, which
+            the Rust producer assigns at append time (1 ms resolution)
+        t4  Rust reported the record complete            (C, see the .c file)
+        t6  Python completion callback entered           (callback thread)
+
+    Sections: A = t0->t1, B = t1->t2, C = t2->t4, D = t4->t6. Sums are
+    additive, so the section means partition the mean end-to-end latency.
+    The 1 ms floor of t2 is corrected by +0.5 ms on B and -0.5 ms on C.
+    """
+
+    def __init__(self):
+        self.sends = 0
+        self.space_waits = 0
+        self.space_wait_ns = 0
+        self.n = 0
+        self.sum_a = 0
+        self.sum_b = 0
+        self.sum_c = 0
+        self.sum_d = 0
+        self.sum_e2e = 0
+        self.missing_t2 = 0
+        self.missing_t4 = 0
+
+    # -- caller thread ------------------------------------------------------
+    def start(self):
+        self.sends += 1
+        return [time.time_ns(), 0]
+
+    def returned(self, st):
+        st[1] = time.time_ns()
+
+    def space_wait(self, ns):
+        self.space_waits += 1
+        self.space_wait_ns += ns
+
+    # -- completion thread --------------------------------------------------
+    def complete(self, st, metadata, completed_ns, t6):
+        t0 = st[0]
+        t1 = st[1] or t0
+        self.n += 1
+        self.sum_e2e += t6 - t0
+        self.sum_a += t1 - t0
+        if metadata is None:
+            self.missing_t2 += 1
+            t2 = t1
+        else:
+            t2 = metadata.timestamp() * 1_000_000
+        if not completed_ns:
+            self.missing_t4 += 1
+        t4 = completed_ns or t6
+        self.sum_b += t2 - t1
+        self.sum_c += t4 - t2
+        self.sum_d += t6 - t4
+
+    def report(self, metrics_rows=None, out=None):
+        out = out or sys.stderr
+        if self.n == 0:
+            print("[CK_LATENCY_PROBE] no completions recorded", file=out)
+            return
+        n = self.n
+        e2e = self.sum_e2e / n / 1e6
+        a = self.sum_a / n / 1e6
+        b = self.sum_b / n / 1e6 + 0.5
+        c = self.sum_c / n / 1e6 - 0.5
+        d = self.sum_d / n / 1e6
+        rows = [
+            ("A send(): Python -> C entry -> return", a),
+            ("B send() returned -> in Rust accumulator", b),
+            ("C Rust core: accumulator -> completion", c),
+            ("D Rust completion -> Python callback", d),
+        ]
+        lines = [f"[CK_LATENCY_PROBE] {n} completions, {self.sends} sends, "
+                 f"mean send()->callback {e2e:.3f} ms",
+                 f"  {'section':44s} {'mean ms':>9s} {'share':>7s}"]
+        for label, val in rows:
+            share = (val / e2e * 100.0) if e2e > 0 else 0.0
+            lines.append(f"  {label:44s} {val:9.3f} {share:6.1f}%")
+        if self.sends:
+            blocked = self.space_waits / self.sends * 100.0
+            per_send = self.space_wait_ns / self.sends / 1e6
+            lines.append(f"  caller blocked for buffer space on {blocked:.1f}% of "
+                         f"sends, {per_send:.3f} ms per send on average")
+        if self.missing_t2 or self.missing_t4:
+            lines.append(f"  records without CreateTime: {self.missing_t2}, "
+                         f"without C completion stamp: {self.missing_t4}")
+        wanted = ("record-queue-time-avg", "request-latency-avg",
+                  "records-per-request-avg", "batch-size-avg")
+        for row in metrics_rows or []:
+            try:
+                if row.get("group") == "producer-metrics" and row.get("name") in wanted:
+                    lines.append(f"  Rust metric {row['name']:26s} {float(row['value']):9.3f}")
+            except (TypeError, ValueError, AttributeError):
+                pass
+        lines.append("  (t2 is the record CreateTime, 1 ms resolution; "
+                     "B/C carry a +/-0.5 ms floor correction)")
+        print("\n".join(lines), file=out, flush=True)
+
+
 class _ProducerBase:
     """State and helpers shared by the sync and async producers.
 
-    The C extension (`_confluentkafka.c`) owns all the asynchronous work:
-    two background threads batch records and poll their completion futures,
-    then invoke a Python callback ``cb(result, error)`` with the GIL held.
-    Both the sync :class:`Producer` and the async :class:`AsyncProducer`
-    reuse the same C entry points and differ only in the future type the
-    callback resolves and how (see their respective ``send``).
+    ``send`` hands each record straight to the Rust producer on the calling
+    thread (`kafka_producer_Producer_send_with_callback`, GIL released for the
+    call): there is no Python- or C-side buffering, and the record is in the
+    Rust accumulator when ``send`` returns, as in Java. Delivery reports come
+    back on the Rust dispatcher thread; the C extension batches them and
+    invokes the Python callback ``cb(result, error)`` from one C callback
+    thread per producer, taking the GIL once per burst. Both the sync
+    :class:`Producer` and the async :class:`AsyncProducer` reuse the same C
+    entry points and differ only in the future type the callback resolves and
+    how (see their respective ``send``).
     """
 
     def __init__(self):
         self.futures = set()
         self.closed = False
         self.c_producer = None
+        self._probe = _LatencyProbe() if _latency_probe_enabled() else None
 
     def _init_mock(self, auto_complete=True):
         self.c_producer = _lib.Producer_new(auto_complete, self)
@@ -346,6 +467,11 @@ class Producer(_ProducerBase):
                 cancelled or already resolved; exceptions it raises are logged
                 and swallowed.
 
+        Like Java's ``send()``, the call returns once the record is in the
+        producer's buffer. It blocks only while the producer is out of
+        ``buffer.memory`` or waiting for topic metadata, for at most
+        ``max.block.ms``; the GIL is released meanwhile.
+
         .. warning::
            ``on_delivery`` runs on the producer's completion thread, not on the
            caller's — the same contract as Java, where the callback executes on
@@ -356,13 +482,22 @@ class Producer(_ProducerBase):
         self._check_closed()
         self._validate_record(producer_record)
         ret = Future()
+        probe = self._probe
+        st = probe.start() if probe is not None else None
 
-        def cb(result, error):
+        def cb(result, error, completed_ns=0):
+            t6 = time.time_ns() if probe is not None else 0
             # Runs on the C completion thread with the GIL held. Convert the
             # handles once up front, then resolve the future (unless the caller
             # cancelled it or it is already done) and honor the callback
             # obligation on every path.
             metadata, exception = _completion_to_python(result, error)
+            if probe is not None:
+                # Before the future is published: reading the CreateTime
+                # here copies the metadata out of its C handle on this
+                # thread, so a waiter on the future cannot race that lazy
+                # copy from another thread.
+                probe.complete(st, metadata, completed_ns, t6)
             if not ret.cancelled() and not ret.done():
                 if exception is not None:
                     ret.set_exception(exception)
@@ -370,19 +505,14 @@ class Producer(_ProducerBase):
                     ret.set_result(metadata)
             _invoke_on_delivery(on_delivery, metadata, exception)
 
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
-        fut = self._add_future(ret)
-        if full:
-            # Buffer is full: block until the send task frees capacity so a
-            # fast producer cannot accumulate records without bound. Mirrors
-            # Java's send() blocking when buffer.memory is exhausted.
-            # concurrent.futures.Future.result() releases the GIL while waiting,
-            # so the C send task can still run the space callback.
-            space = Future()
-            if not _lib.Producer_on_space_available(
-                    self.c_producer, lambda: space.set_result(None)):
-                space.result()
-        return fut
+        # Direct send on the calling thread (GIL released inside the C call):
+        # the record is in the Rust accumulator when this returns. Blocks only
+        # where Java's send() blocks (buffer.memory exhausted / metadata
+        # missing), for at most max.block.ms.
+        _lib.Producer_send(self.c_producer, producer_record, cb)
+        if probe is not None:
+            probe.returned(st)
+        return self._add_future(ret)
 
     def _run_sync(self, submit, resolve):
         """Submit an async FFI op and wait on an interruptible event.
@@ -551,19 +681,28 @@ class Producer(_ProducerBase):
     def close(self):
         if self.closed:
             return
+        probe_metrics = None
+        if self._probe is not None:
+            try:
+                probe_metrics = self.metrics()
+            except Exception:  # noqa: BLE001 - diagnostics only
+                probe_metrics = None
         self.closed = True
         self._cancel()
-        # Split teardown (see _confluentkafka.c): join the C batching threads,
-        # then drive the Rust-side close through the interruptible _run_sync
-        # path (same as flush), then free. Keeping the Rust close in _run_sync
-        # means a stuck close stays responsive to KeyboardInterrupt on the main
-        # thread rather than blocking in a native wait.
+        # Split teardown (see _confluentkafka.c): reject further sends, then
+        # drive the Rust-side close through the interruptible _run_sync path
+        # (same as flush), then free the handle and join the C callback thread.
+        # Keeping the Rust close in _run_sync means a stuck close stays
+        # responsive to KeyboardInterrupt on the main thread rather than
+        # blocking in a native wait.
         _lib.Producer_shutdown(self.c_producer)
         self._run_sync(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
             self._resolve_void,
         )
         _lib.Producer_destroy(self.c_producer)
+        if self._probe is not None:
+            self._probe.report(probe_metrics)
 
 
 class AsyncProducer(_ProducerBase):
@@ -571,17 +710,19 @@ class AsyncProducer(_ProducerBase):
 
     ``send`` is a coroutine that returns an :class:`asyncio.Future` resolving
     to a :class:`RecordMetadata` (``fut = await producer.send(rec)``; then
-    ``await fut`` for the result). It is a coroutine — rather than a plain
-    method like the sync :class:`Producer` — so it can suspend on backpressure
-    (``await``-ing buffer capacity when the producer is full); the produce
-    itself is non-blocking. That same suspension yields the event loop to the
-    completion drain, so a flooding ``await producer.send(...)`` loop does not
-    starve completions.
+    ``await fut`` for the result). The produce itself runs synchronously on
+    the loop thread — the record goes straight to the Rust producer, exactly
+    as in the sync :class:`Producer` — and blocks the loop only where Java's
+    ``send()`` blocks: while the producer is out of ``buffer.memory`` or
+    waiting for topic metadata, for at most ``max.block.ms``. ``send`` stays a
+    coroutine for API symmetry but never suspends on its own, so a flooding
+    ``await producer.send(...)`` loop should yield (``await asyncio.sleep(0)``)
+    now and then to let the completion drain run.
 
-    Completions from the C background thread are marshalled back onto the event
+    Completions from the C callback thread are marshalled back onto the event
     loop (an ``asyncio.Future`` is not thread-safe).
 
-    Completions are *coalesced*: the C poll task invokes the callback once per
+    Completions are *coalesced*: the C callback thread invokes the callback once per
     record, but rather than waking the event loop once per record (one
     ``call_soon_threadsafe`` each), each callback buffers its
     ``(future, result, error)`` and schedules a single drain only when one is
@@ -592,8 +733,8 @@ class AsyncProducer(_ProducerBase):
 
     def __init__(self):
         super().__init__()
-        # Completions buffered by the C poll task (producer thread), drained on
-        # the event loop. Guarded by a lock since the two run on different
+        # Completions buffered by the C callback thread, drained on the event
+        # loop. Guarded by a lock since the two run on different
         # threads; the critical sections are tiny (append / list swap).
         self._pending = []
         self._drain_scheduled = False
@@ -619,13 +760,6 @@ class AsyncProducer(_ProducerBase):
             else:
                 ret.set_result(metadata)
         _invoke_on_delivery(on_delivery, metadata, exception)
-
-    @staticmethod
-    def _resolve_space(space):
-        """Resolve a space-available future. Runs on the event loop thread
-        (scheduled via call_soon_threadsafe from the C send task)."""
-        if not space.done():
-            space.set_result(None)
 
     def _drain(self):
         """Resolve all buffered completions. Runs on the event loop thread."""
@@ -657,20 +791,24 @@ class AsyncProducer(_ProducerBase):
         runs **on the event loop thread** (inside the completion drain), not on
         the C completion thread, so it may safely touch loop state; it must not
         block the loop.
+
+        The produce itself runs synchronously on the loop thread and the
+        coroutine never suspends by itself; see the class docstring for when
+        it blocks.
         """
         self._check_closed()
         self._validate_record(producer_record)
         loop = asyncio.get_running_loop()
         ret = loop.create_future()
 
-        # Runs on the C background (poll) thread with the GIL held. asyncio
+        # Runs on the C callback thread with the GIL held. asyncio
         # futures must only be mutated on the loop thread, so buffer the
         # completion and wake the loop once per drain (coalescing) rather than
         # once per record. If the loop is already closed we can't schedule
         # anything — convert (and thereby free) the C handles here, and still
         # honor the callback obligation, noting that in this teardown case
         # on_delivery necessarily runs on the completion thread.
-        def cb(result, error):
+        def cb(result, error, completed_ns=0):
             if loop.is_closed():
                 metadata, exception = _completion_to_python(result, error)
                 _invoke_on_delivery(on_delivery, metadata, exception)
@@ -682,22 +820,11 @@ class AsyncProducer(_ProducerBase):
                 self._drain_scheduled = True
                 loop.call_soon_threadsafe(self._drain)
 
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
+        # Direct send on the loop thread (GIL released inside the C call): the
+        # record is in the Rust accumulator when this returns. See the class
+        # docstring for when it blocks.
+        _lib.Producer_send(self.c_producer, producer_record, cb)
         self._add_future(ret)
-        if full:
-            # Buffer is full: await (yielding the loop, non-blocking) until the
-            # send task frees capacity, bounding accumulation — Java's send()
-            # blocks on buffer.memory here. Awaiting also yields to the
-            # completion drain. The space callback runs on the C send task, so
-            # it hops onto the loop via call_soon_threadsafe.
-            space = loop.create_future()
-
-            def space_cb():
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(self._resolve_space, space)
-
-            if not _lib.Producer_on_space_available(self.c_producer, space_cb):
-                await space
         return ret
 
     async def _run_async(self, submit, resolve, free):
@@ -890,11 +1017,12 @@ class AsyncProducer(_ProducerBase):
         self.closed = True
         self._cancel()
         loop = asyncio.get_running_loop()
-        # Split teardown (see _confluentkafka.c): the C batching-thread join and
-        # the final free are blocking C calls, so run them off the event loop;
-        # the Rust-side close is awaited via the async FFI (_run_async) so it is
-        # cooperative with the loop and cancellable, like flush.
-        await loop.run_in_executor(None, _lib.Producer_shutdown, self.c_producer)
+        # Split teardown (see _confluentkafka.c): reject further sends (a flag
+        # flip, inline); await the Rust-side close via the async FFI
+        # (_run_async) so it is cooperative with the loop and cancellable, like
+        # flush; then free the handle and join the C callback thread off the
+        # loop, since that is a blocking C call.
+        _lib.Producer_shutdown(self.c_producer)
         await self._run_async(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
             self._resolve_void,

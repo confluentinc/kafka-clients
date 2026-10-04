@@ -39,12 +39,8 @@ NON_ABORTABLE_CODE = 7
 # resource-constrained runner without touching the assertions.
 FUTURE_TIMEOUT = float(os.environ.get("CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT", "2"))
 
-# Time for the batch thread to dispatch records (batch interval is 10ms)
+# Grace period for a just-sent record to reach the producer's I/O path
 BATCH_DISPATCH = 0.02
-
-# Backpressure bound (PRODUCER_MAX_ACCUMULATED_RECORDS in _confluentkafka.c):
-# the producer blocks once this many records are accumulated un-taken.
-BACKPRESSURE_BOUND = 1000
 
 
 # -- MockProducer lifecycle ---------------------------------------------------
@@ -116,10 +112,10 @@ def test_multiple_sends_incrementing_offsets():
 # -- Manual completion --------------------------------------------------------
 
 def _sync_complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
-    """Retry complete_next() until the C batching thread (10ms interval) has
-    queued the record. A single fixed sleep races that thread: on a loaded
-    machine it can elapse before the record is queued, so complete_next()
-    silently returns False and the future then hangs until FUTURE_TIMEOUT.
+    """Call complete_next(), retrying briefly if no completion is queued yet.
+    With the direct send path the record is on the mock before send() returns,
+    so this normally succeeds first time; the retry stays as a guard so a miss
+    surfaces as an assertion instead of a future hanging until FUTURE_TIMEOUT.
     (Sync counterpart of the async _complete_next_when_ready below.)"""
     deadline = time.monotonic() + timeout
     while not p.complete_next():
@@ -530,17 +526,12 @@ async def test_async_multiple_sends_incrementing_offsets():
 # -- Manual completion --------------------------------------------------------
 
 async def _complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
-    """Retry ``complete_next()`` until it finds the queued record.
+    """Call ``complete_next()``, retrying briefly if no completion is queued.
 
-    ``complete_next()`` only succeeds once the C batching thread (10ms batch
-    interval) has picked up the send and queued a completion on the mock
-    producer. A single fixed sleep before calling it races that thread: on a
-    loaded CI machine the sleep can elapse before the record is queued, so
-    ``complete_next()`` silently returns ``False``, the record is queued a
-    moment later with nobody left to complete it, and the future then hangs
-    until ``FUTURE_TIMEOUT``. Retrying removes the race outright instead of
-    widening the margin.
-    """
+    With the direct send path the record is on the mock before ``send()``
+    returns, so this normally succeeds first time; the retry stays as a guard
+    so a miss surfaces as an assertion instead of a future hanging until
+    FUTURE_TIMEOUT."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not p.complete_next():
@@ -790,98 +781,13 @@ async def test_async_kafka_producer_config_not_dict():
 
 
 # =============================================================================
-# Backpressure tests
-#
-# Once BACKPRESSURE_BOUND records are accumulated but not yet taken by the send
-# task, the producer is "full" and further enqueuing waits for capacity. The
-# mock accepts instantly and would never fill, so a test-only hook
-# (`Producer_test_set_paused`) stalls the send task to build accumulation.
+# Send-path load: back-to-back direct sends all complete
 # =============================================================================
 
 
-def _fill_to_bound_sync(p):
-    """Send BACKPRESSURE_BOUND-1 records (none cross the bound, none block)."""
-    for _ in range(BACKPRESSURE_BOUND - 1):
-        p.send(ProducerRecord("test-topic", b"v"))
-
-
-def test_backpressure_sync_blocks_until_drained():
-    # With the send task paused, the send that crosses the bound blocks the
-    # calling thread until capacity frees (mirrors Java send() on a full buffer).
-    p = MockProducer(auto_complete=True)
-    _lib.Producer_test_set_paused(p.c_producer, True)
-    _fill_to_bound_sync(p)
-
-    done = threading.Event()
-
-    def crossing_send():
-        p.send(ProducerRecord("test-topic", b"v"))
-        done.set()
-
-    t = threading.Thread(target=crossing_send)
-    t.start()
-    try:
-        assert not done.wait(timeout=0.4), "send should block while paused"
-        _lib.Producer_test_set_paused(p.c_producer, False)
-        assert done.wait(timeout=FUTURE_TIMEOUT), "send should unblock on drain"
-    finally:
-        t.join(timeout=FUTURE_TIMEOUT)
-        p.close()
-
-
-def test_backpressure_sync_close_unblocks():
-    # close() must release a sender blocked on backpressure rather than hang.
-    p = MockProducer(auto_complete=True)
-    _lib.Producer_test_set_paused(p.c_producer, True)
-    _fill_to_bound_sync(p)
-
-    done = threading.Event()
-    t = threading.Thread(
-        target=lambda: (p.send(ProducerRecord("test-topic", b"v")), done.set()))
-    t.start()
-    assert not done.wait(timeout=0.4)
-    p.close()  # fires pending space waiters
-    assert done.wait(timeout=FUTURE_TIMEOUT), "close must unblock the sender"
-    t.join(timeout=FUTURE_TIMEOUT)
-
-
-async def test_async_backpressure_suspends_until_drained():
-    # The send that crosses the bound suspends (yields the loop) until the
-    # send task drains; it must not block the loop.
-    async with AsyncMockProducer(auto_complete=True) as p:
-        _lib.Producer_test_set_paused(p.c_producer, True)
-        for _ in range(BACKPRESSURE_BOUND - 1):
-            await p.send(ProducerRecord("test-topic", b"v"))
-
-        task = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"v")))
-        await asyncio.sleep(0.3)
-        assert not task.done(), "crossing send should suspend on backpressure"
-        # The loop is still responsive while the send is suspended.
-        assert await asyncio.sleep(0, result=True)
-
-        _lib.Producer_test_set_paused(p.c_producer, False)
-        await asyncio.wait_for(task, timeout=FUTURE_TIMEOUT)
-        assert task.done()
-
-
-async def test_async_backpressure_close_unblocks():
-    # close() must release a suspended async sender, not hang.
-    p = AsyncMockProducer(auto_complete=True)
-    _lib.Producer_test_set_paused(p.c_producer, True)
-    for _ in range(BACKPRESSURE_BOUND - 1):
-        await p.send(ProducerRecord("test-topic", b"v"))
-
-    task = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"v")))
-    await asyncio.sleep(0.3)
-    assert not task.done()
-    await p.close()  # fires pending space waiters onto the loop
-    await asyncio.wait_for(task, timeout=FUTURE_TIMEOUT)
-    assert task.done()
-
-
-async def test_backpressure_does_not_trigger_when_draining():
-    # When the send task keeps up (not paused), sends below the bound never
-    # block — backpressure is invisible.
+async def test_many_async_sends_all_complete():
+    # Fifty back-to-back direct sends: nothing on the Python side buffers or
+    # blocks them, and every future resolves.
     async with AsyncMockProducer(auto_complete=True) as p:
         futures = [
             await p.send(ProducerRecord("test-topic", b"v"))
