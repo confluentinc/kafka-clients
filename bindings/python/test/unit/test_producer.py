@@ -1700,3 +1700,77 @@ async def test_async_send_suspends_behind_a_record_already_queued_on_the_outbox(
         _lib.Producer_try_send = real_try
         _lib.Producer_test_set_paused(p.c_producer, False)
         await p.close()
+
+
+# -- Async send: periodic yield on the fast path -------------------------------
+#
+# A fast-path send returns without suspending, so a tight
+# `await producer.send(...)` loop gives the event loop no turn and every
+# completion stays buffered until the caller yields. `AsyncProducer.send`
+# therefore yields the loop once after `_YIELD_EVERY` sends in a row without a
+# suspension, when a completion drain is pending. These tests shrink
+# `_YIELD_EVERY` on the instance and hold the loop thread in `_wait_until` (a
+# blocking sleep: the C callback thread can deliver, the loop cannot drain), so
+# whether a send yielded shows in whether the earlier futures are resolved.
+
+def _buffered_completions(p):
+    """Completions waiting for the drain. Read under the lock, so a non-zero
+    count also means the drain is already scheduled on the loop."""
+    with p._pending_lock:
+        return len(p._pending)
+
+
+async def test_async_send_yields_to_the_pending_drain_after_yield_every_sends():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        p._YIELD_EVERY = 4
+        futures = [await p.send(ProducerRecord("test-topic", b"v")) for _ in range(3)]
+        _wait_until(lambda: _buffered_completions(p) == 3)
+        # A drain is pending, but only three sends ran since the loop last had
+        # a turn: the fourth must not suspend.
+        futures.append(await p.send(ProducerRecord("test-topic", b"v")))
+        assert not any(f.done() for f in futures), "send yielded before _YIELD_EVERY sends"
+        # The fifth yields once before taking its record, so the drain runs.
+        futures.append(await p.send(ProducerRecord("test-topic", b"v")))
+        assert all(f.done() for f in futures[:3]), "send did not yield to the pending drain"
+        metas = await asyncio.wait_for(asyncio.gather(*futures), timeout=FUTURE_TIMEOUT)
+        assert [m.offset() for m in metas] == [0, 1, 2, 3, 4]
+
+
+async def test_async_send_does_not_yield_without_a_pending_drain():
+    p = AsyncMockProducer(auto_complete=False)
+    p._YIELD_EVERY = 4
+    try:
+        turns = []
+        asyncio.get_running_loop().call_soon(turns.append, "loop turn")
+        for _ in range(12):
+            await p.send(ProducerRecord("test-topic", b"v"))
+        # Nothing completed, so there was nothing to drain and no send gave up
+        # the loop: the callback queued before the sends has not run.
+        assert turns == [], "send yielded the loop with no completion to drain"
+    finally:
+        await p.close()
+
+
+async def test_async_send_cancelled_at_the_yield_hands_nothing_over():
+    p = AsyncMockProducer(auto_complete=False)
+    p._YIELD_EVERY = 1
+    try:
+        first = await p.send(ProducerRecord("test-topic", b"first"))
+        # Schedule the second send before completing the first, so its first
+        # step runs ahead of the drain that completion schedules: it finds the
+        # drain pending and yields.
+        second = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"second")))
+        _wait_until(p.complete_next)
+        _wait_until(lambda: _buffered_completions(p) == 1)
+        await asyncio.sleep(0)
+        assert not second.done(), "the second send did not yield"
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        meta = await asyncio.wait_for(first, timeout=FUTURE_TIMEOUT)
+        assert meta.offset() == 0
+        # The yield comes before the record is handed over, so the cancelled
+        # send produced nothing; the caller can retry it without a duplicate.
+        assert p.history_count() == 1, "a send cancelled at its yield produced its record"
+    finally:
+        await p.close()

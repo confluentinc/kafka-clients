@@ -605,7 +605,9 @@ class AsyncProducer(_ProducerBase):
     the coroutine ``await``s its handover to the producer, yielding the event
     loop to the completion drain so a flooding ``await producer.send(...)``
     loop does not starve completions. In the common case the record is
-    appended on the calling thread without suspending at all.
+    appended on the calling thread without suspending. A run of such sends
+    gives the loop no turn, so ``send`` yields it once every
+    ``_YIELD_EVERY`` sends while completions are waiting to be drained.
 
     Completions from the C callback thread are marshalled back onto the event
     loop (an ``asyncio.Future`` is not thread-safe).
@@ -619,6 +621,13 @@ class AsyncProducer(_ProducerBase):
     cost — the bottleneck under high produce rates — off the hot path.
     """
 
+    # Sends allowed back to back without suspending before send() yields the
+    # loop once, so buffered completions (and the caller's other tasks) get a
+    # turn. Without it a tight ``await producer.send(...)`` loop on the fast
+    # path leaves every completion waiting until the caller itself yields. A
+    # thousand sends take a few milliseconds at full rate.
+    _YIELD_EVERY = 1000
+
     def __init__(self):
         super().__init__()
         # Completions buffered by the C callback thread, drained on the event
@@ -627,6 +636,9 @@ class AsyncProducer(_ProducerBase):
         self._pending = []
         self._drain_scheduled = False
         self._pending_lock = threading.Lock()
+        # Sends that returned without suspending since send() last gave the
+        # loop a turn. Only touched on the loop thread.
+        self._sends_since_yield = 0
 
     async def __aenter__(self):
         return self
@@ -686,7 +698,19 @@ class AsyncProducer(_ProducerBase):
         runs **on the event loop thread** (inside the completion drain), not on
         the C callback thread, so it may safely touch loop state; it must not
         block the loop.
+
+        Most sends return without suspending. After ``_YIELD_EVERY`` of them
+        in a row, while completions are waiting to be drained, ``send``
+        yields the event loop once before taking the record.
         """
+        # Yield before anything is handed over: a cancellation delivered at
+        # this point leaves nothing sent and no future behind. The flag is read
+        # without the lock; a completion that sets it a moment later only moves
+        # the yield to the next send.
+        if (self._sends_since_yield >= self._YIELD_EVERY
+                and self._drain_scheduled):
+            self._sends_since_yield = 0
+            await asyncio.sleep(0)  # one loop turn: runs the pending _drain
         self._check_closed()
         self._validate_record(producer_record)
         loop = asyncio.get_running_loop()
@@ -716,6 +740,7 @@ class AsyncProducer(_ProducerBase):
         # reached without suspending. False means it would have had to wait,
         # and nothing happened: no callback will fire for this attempt.
         if _lib.Producer_try_send(self.c_producer, producer_record, cb):
+            self._sends_since_yield += 1
             return self._add_future(ret)
 
         # Slow path: queue the record on the outbox and await (yielding the
@@ -730,7 +755,10 @@ class AsyncProducer(_ProducerBase):
 
         already = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
         self._add_future(ret)
-        if not already:
+        if already:
+            self._sends_since_yield += 1
+        else:
+            self._sends_since_yield = 0  # awaiting the handover yields the loop
             await accepted
         return ret
 
