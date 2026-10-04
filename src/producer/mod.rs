@@ -33,7 +33,7 @@ mod record_metadata;
 mod round_robin_partitioner;
 
 pub use callback::Callback;
-pub use kafka_producer::KafkaProducer;
+pub use kafka_producer::{KafkaProducer, TrySendOutcome};
 #[cfg(test)]
 pub(crate) use mock_partitioner::MockPartitioner;
 pub use mock_producer::{MockProducer, MockProducerOptions, MockProducerOptionsBuilder};
