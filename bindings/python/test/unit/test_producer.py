@@ -20,10 +20,11 @@ import os
 import threading
 import time
 import pytest
+from concurrent.futures import Future
 import _confluentkafka as _lib
 from producer import (
     KafkaProducer, MockProducer, ProducerRecord, RecordMetadata, KafkaError,
-    AsyncKafkaProducer, AsyncMockProducer
+    AsyncKafkaProducer, AsyncMockProducer, _completion_to_python
 )
 from consumer import MockConsumer, TopicPartition, OffsetAndMetadata
 
@@ -1523,4 +1524,179 @@ async def test_async_txn_cancelled_await_frees_late_error_handle():
     finally:
         _lib.Producer_commit_transaction_async = real_async
         _lib.KafkaError_destroy = real_destroy
+        await p.close()
+
+
+# -- Send path: fast path on the caller's thread, queued fallback -------------
+#
+# `send` first calls `_lib.Producer_try_send`, which appends the record on the
+# calling thread when the producer can take it without waiting and otherwise
+# does nothing and returns False; `send` then queues the record on the outbox
+# (`_lib.Producer_send`) and waits for the handover, as it always did. The mock
+# producer takes any record at once, so here the fast path is the normal case
+# and the fallback is forced two ways: by faking a would-block answer, and for
+# real by parking the submission task with a record already queued ahead (the
+# FIFO guard: a newer record must not overtake one still waiting on the outbox).
+
+def _spy(sym, calls):
+    """Wrap `_lib.<sym>` so each return value is appended to `calls`; returns
+    the real function for the caller to restore."""
+    real = getattr(_lib, sym)
+
+    def wrapper(*args):
+        out = real(*args)
+        calls.append(out)
+        return out
+
+    setattr(_lib, sym, wrapper)
+    return real
+
+
+def _seed_queued_send(p, record):
+    """Queue `record` on the outbox directly, bypassing the fast path, and
+    return a concurrent Future resolving to its RecordMetadata. With the
+    submission task paused the record stays queued, so the next `send` finds
+    the outbox non-empty."""
+    done = Future()
+
+    def cb(result, error):
+        metadata, exception = _completion_to_python(result, error)
+        if exception is not None:
+            done.set_exception(exception)
+        else:
+            done.set_result(metadata)
+
+    _lib.Producer_send(p.c_producer, record, cb, lambda: None)
+    return done
+
+
+def _wait_until(predicate, timeout=FUTURE_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached in time"
+        time.sleep(0.005)
+
+
+def test_send_takes_the_fast_path_when_the_producer_can_accept_at_once():
+    tries, queued = [], []
+    real_try = _spy("Producer_try_send", tries)
+    real_send = _spy("Producer_send", queued)
+    try:
+        with MockProducer(auto_complete=True) as p:
+            future = p.send(ProducerRecord("test-topic", b"value"))
+            assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
+    assert tries == [True], "try_send did not take the record on the caller's thread"
+    assert queued == [], "send queued the record although try_send had taken it"
+
+
+def test_send_falls_back_to_the_outbox_when_try_send_would_block():
+    queued = []
+    real_try = _lib.Producer_try_send
+    real_send = _spy("Producer_send", queued)
+    try:
+        # "Would block; nothing happened" -- the record must go via the outbox.
+        _lib.Producer_try_send = lambda *args: False
+        with MockProducer(auto_complete=True) as p:
+            future = p.send(ProducerRecord("test-topic", b"value"))
+            assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
+    assert len(queued) == 1, "would-block did not route the record to the outbox"
+
+
+def test_send_waits_behind_a_record_already_queued_on_the_outbox():
+    tries = []
+    real_try = _spy("Producer_try_send", tries)
+    p = MockProducer(auto_complete=True)
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        first = _seed_queued_send(p, ProducerRecord("test-topic", b"first"))
+
+        second = {}
+
+        def send_second():
+            second["future"] = p.send(ProducerRecord("test-topic", b"second"))
+
+        t = threading.Thread(target=send_second)
+        t.start()
+        # The fast path reported would-block (the outbox is not empty) ...
+        _wait_until(lambda: tries)
+        assert tries == [False]
+        # ... so send is Java's blocking send(): still waiting for the handover,
+        # with nothing yet produced -- the second record did not jump the queue.
+        time.sleep(0.1)
+        assert t.is_alive(), "send returned before its record was handed to the producer"
+        assert p.history_count() == 0
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        t.join(FUTURE_TIMEOUT)
+        assert not t.is_alive(), "send did not return once the outbox drained"
+        assert first.result(timeout=FUTURE_TIMEOUT).offset() == 0
+        assert second["future"].result(timeout=FUTURE_TIMEOUT).offset() == 1
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        p.close()
+
+
+async def test_async_send_takes_the_fast_path_when_the_producer_can_accept_at_once():
+    tries, queued = [], []
+    real_try = _spy("Producer_try_send", tries)
+    real_send = _spy("Producer_send", queued)
+    try:
+        async with AsyncMockProducer(auto_complete=True) as p:
+            future = await p.send(ProducerRecord("test-topic", b"value"))
+            meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+            assert meta.offset() == 0
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
+    assert tries == [True], "try_send did not take the record on the caller's thread"
+    assert queued == [], "send queued the record although try_send had taken it"
+
+
+async def test_async_send_falls_back_to_the_outbox_when_try_send_would_block():
+    queued = []
+    real_try = _lib.Producer_try_send
+    real_send = _spy("Producer_send", queued)
+    try:
+        _lib.Producer_try_send = lambda *args: False
+        async with AsyncMockProducer(auto_complete=True) as p:
+            future = await p.send(ProducerRecord("test-topic", b"value"))
+            meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+            assert meta.offset() == 0
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
+    assert len(queued) == 1, "would-block did not route the record to the outbox"
+
+
+async def test_async_send_suspends_behind_a_record_already_queued_on_the_outbox():
+    tries = []
+    real_try = _spy("Producer_try_send", tries)
+    p = AsyncMockProducer(auto_complete=True)
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        first = _seed_queued_send(p, ProducerRecord("test-topic", b"first"))
+
+        task = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"second")))
+        await asyncio.sleep(0.1)
+        # Would-block from the fast path, then suspended on the handover with
+        # nothing yet produced -- the second record did not jump the queue.
+        assert tries == [False]
+        assert not task.done(), "send resumed before its record was handed to the producer"
+        assert p.history_count() == 0
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        future = await asyncio.wait_for(task, timeout=FUTURE_TIMEOUT)
+        meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        assert first.result(timeout=FUTURE_TIMEOUT).offset() == 0
+        assert meta.offset() == 1
+    finally:
+        _lib.Producer_try_send = real_try
+        _lib.Producer_test_set_paused(p.c_producer, False)
         await p.close()

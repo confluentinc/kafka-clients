@@ -165,16 +165,21 @@ def _completion_to_python(result, error):
 class _ProducerBase:
     """State and helpers shared by the sync and async producers.
 
-    The C extension (`_confluentkafka.c`) owns all the asynchronous work:
-    ``send`` queues the record on the Rust producer's outbox (the
-    ``send_async`` FFI, a channel push that never blocks the calling thread),
-    a Rust task hands queued records to the producer, and one C callback
-    thread per producer reports completions by invoking a Python callback
-    ``cb(result, error)`` with the GIL held — taking the GIL once per burst of
-    completions rather than once per record. Both the sync :class:`Producer`
-    and the async :class:`AsyncProducer` reuse the same C entry points and
-    differ only in the future type the callback resolves and how (see their
-    respective ``send``).
+    The C extension (`_confluentkafka.c`) owns all the asynchronous work.
+    ``send`` first tries to hand the record to the Rust producer on the
+    calling thread (the ``try_send`` FFI: an append that never waits, with
+    the GIL released). When the producer could not take it without waiting --
+    no metadata for the topic yet, ``buffer.memory`` exhausted, or earlier
+    records still queued -- nothing has happened, and ``send`` falls back to
+    queuing the record on the producer's outbox (the ``send_async`` FFI, a
+    channel push), from which a Rust task hands it to the producer; ``send``
+    then waits for that handover, Java's ``send()`` return point. Either way
+    one C callback thread per producer reports completions by invoking a
+    Python callback ``cb(result, error)`` with the GIL held — taking the GIL
+    once per burst of completions rather than once per record. Both the sync
+    :class:`Producer` and the async :class:`AsyncProducer` reuse the same C
+    entry points and differ only in the future type the callback resolves,
+    how, and how the fallback waits (see their respective ``send``).
     """
 
     def __init__(self):
@@ -374,12 +379,21 @@ class Producer(_ProducerBase):
                     ret.set_result(metadata)
             _invoke_on_delivery(on_delivery, metadata, exception)
 
-        # Java's send() return point: return once the Rust submission task has
-        # handed the record to the producer. C queues the record and returns at
-        # once; `accepted_cb` fires once from the dispatcher thread and resolves
-        # `accepted`, on which this thread waits. The wait is Python's own lock
-        # wait, so Ctrl+C is handled by Python. Backpressure is buffer.memory /
-        # max.block.ms only; there is no outbox cap.
+        # Fast path: the producer takes the record on this thread when that
+        # needs no waiting (metadata cached, buffer memory free, nothing queued
+        # ahead of it) -- the common case, and Java's send() return point
+        # reached without a queue or a wait. False means it would have had to
+        # wait, and nothing happened: no callback will fire for this attempt.
+        if _lib.Producer_try_send(self.c_producer, producer_record, cb):
+            return self._add_future(ret)
+
+        # Slow path, Java's blocking send(): queue the record on the outbox and
+        # return once the Rust submission task has handed it to the producer. C
+        # queues the record and returns at once; `accepted_cb` fires once from
+        # the dispatcher thread and resolves `accepted`, on which this thread
+        # waits. The wait is Python's own lock wait, so Ctrl+C is handled by
+        # Python. Backpressure is buffer.memory / max.block.ms only; there is
+        # no outbox cap.
         accepted = Future()
 
         def accepted_cb():
@@ -585,11 +599,13 @@ class AsyncProducer(_ProducerBase):
     ``send`` is a coroutine that returns an :class:`asyncio.Future` resolving
     to a :class:`RecordMetadata` (``fut = await producer.send(rec)``; then
     ``await fut`` for the result). It is a coroutine — rather than a plain
-    method like the sync :class:`Producer` — so it can suspend on backpressure
-    (``await``-ing buffer capacity when the producer is full); the produce
-    itself is non-blocking. That same suspension yields the event loop to the
-    completion drain, so a flooding ``await producer.send(...)`` loop does not
-    starve completions.
+    method like the sync :class:`Producer` — so it can suspend on backpressure:
+    when the producer cannot take the record at once (no metadata yet, buffer
+    memory exhausted, earlier records still queued) the record is queued and
+    the coroutine ``await``s its handover to the producer, yielding the event
+    loop to the completion drain so a flooding ``await producer.send(...)``
+    loop does not starve completions. In the common case the record is
+    appended on the calling thread without suspending at all.
 
     Completions from the C callback thread are marshalled back onto the event
     loop (an ``asyncio.Future`` is not thread-safe).
@@ -695,10 +711,17 @@ class AsyncProducer(_ProducerBase):
                 self._drain_scheduled = True
                 loop.call_soon_threadsafe(self._drain)
 
-        # Await (yielding the loop) until the Rust submission task has handed
-        # the record to the producer -- Java's send() return point. The
-        # acceptance callback runs on the Rust dispatcher thread, so it hops
-        # onto the loop via call_soon_threadsafe.
+        # Fast path: the producer takes the record on this thread when that
+        # needs no waiting -- the common case, Java's send() return point
+        # reached without suspending. False means it would have had to wait,
+        # and nothing happened: no callback will fire for this attempt.
+        if _lib.Producer_try_send(self.c_producer, producer_record, cb):
+            return self._add_future(ret)
+
+        # Slow path: queue the record on the outbox and await (yielding the
+        # loop) until the Rust submission task has handed it to the producer --
+        # Java's send() return point. The acceptance callback runs on the Rust
+        # dispatcher thread, so it hops onto the loop via call_soon_threadsafe.
         accepted = loop.create_future()
 
         def accepted_cb():

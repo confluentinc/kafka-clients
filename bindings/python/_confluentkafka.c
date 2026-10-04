@@ -676,6 +676,78 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_RETURN_FALSE;
 }
 
+// The fast path of the Python `send`: hand the record to the producer on this
+// thread if that needs no waiting. Returns True when the producer took it (the
+// completion callback will fire exactly once, like a record queued by
+// Producer_send), False when it would have had to wait -- for metadata, for
+// buffer memory, or for records still queued on the outbox ahead of it -- in
+// which case nothing happened, the callback will never fire, and the Python
+// side queues the record with Producer_send instead. Raises on a synchronous
+// validation failure (callback not invoked).
+//
+// Same GIL handling and the same (record, callback, producer) pin as
+// Producer_send; on False the pin is released here since no callback will.
+static PyObject* py_Producer_try_send(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject *record_obj, *complete_cb;
+
+    if (!PyArg_ParseTuple(args, "KOO", &producer_ptr, &record_obj, &complete_cb)) {
+        return NULL;
+    }
+
+    if (!PyObject_TypeCheck(record_obj, &ProducerRecordType)) {
+        PyErr_SetString(PyExc_TypeError, "Record must be a ProducerRecord object");
+        return NULL;
+    }
+
+    Producer* producer = (Producer*)producer_ptr;
+
+    if (producer->closed) {
+        PyErr_SetString(PyExc_RuntimeError, "Producer is closed");
+        return NULL;
+    }
+
+    PyObject* producer_long = PyLong_FromVoidPtr(producer);
+    if (producer_long == NULL) {
+        return NULL;
+    }
+    PyObject* ud = PyTuple_Pack(3, record_obj, complete_cb, producer_long);
+    Py_DECREF(producer_long);
+    if (ud == NULL) {
+        return NULL;
+    }
+
+    ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
+    kafka_producer_ProducerRecord_t* rs = &record->record_struct;
+    kafka_common_Error_t* err = NULL;
+    kafka_producer_TrySendOutcome_t outcome;
+    Py_BEGIN_ALLOW_THREADS
+    outcome = kafka_producer_Producer_try_send(
+        producer->producer,
+        rs->topic, rs->partition, rs->timestamp,
+        rs->key, rs->key_len, rs->value, rs->value_len,
+        send_direct_trampoline, ud, &err);
+    Py_END_ALLOW_THREADS
+
+    switch (outcome) {
+    case kafka_producer_TrySendOutcome_ACCEPTED:
+        Py_RETURN_TRUE;
+    case kafka_producer_TrySendOutcome_WOULD_BLOCK:
+        Py_DECREF(ud);             // nothing happened: no callback will release the pin
+        Py_RETURN_FALSE;
+    case kafka_producer_TrySendOutcome_ERROR:
+    default:
+        break;
+    }
+    Py_DECREF(ud);                 // sync failure: cb will NOT fire
+    const char* msg = err ? kafka_common_Error_message(err) : NULL;
+    PyErr_SetString(PyExc_RuntimeError, msg ? msg : "send failed");
+    if (err) {
+        kafka_common_Error_destroy(err);
+    }
+    return NULL;
+}
+
 // One-shot callback fired by Rust (on its dispatcher thread): either the outbox
 // has room again (on_space_available) or a record was accepted (Producer_send).
 // Calls the Python callable `cb` with no arguments, then drops the reference
@@ -6964,6 +7036,10 @@ static PyObject* py_ListTransactionsResult_drain(PyObject* self, PyObject* args)
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create Kafka producer"},
+    {"Producer_try_send", py_Producer_try_send, METH_VARARGS,
+     "Hand the record to the producer on this thread if that needs no waiting; "
+     "return True if it did (callback will fire), False if it would have blocked "
+     "(nothing happened; queue it with Producer_send instead)"},
     {"Producer_send", py_Producer_send, METH_VARARGS,
      "Queue record on the Rust outbox; return True if the producer already "
      "accepted it, else False and fire accepted_cb once when it does"},
