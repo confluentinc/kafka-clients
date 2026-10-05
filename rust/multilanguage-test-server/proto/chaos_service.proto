@@ -26,9 +26,12 @@
 //
 // Lifecycle of one workload:
 //   1. The harness calls RunProducer / RunConsumer with a `workload_id` unique
-//      within the server session. The server builds the client from `config`
-//      (forwarded verbatim to the binding's constructor, as CreateProducer /
-//      CreateConsumer do) and starts the loop.
+//      within the server session. The server registers the id (so StopWorkload
+//      and MarkWorkload can find it), sends the response headers at once --
+//      without waiting for a first event, so the harness's call resolves even
+//      for a consumer that never gets an assignment -- builds the client from
+//      `config` (forwarded verbatim to the binding's constructor, as
+//      CreateProducer / CreateConsumer do) and starts the loop.
 //   2. The server streams WorkloadEventBatch messages as events happen.
 //   3. The harness calls StopWorkload(workload_id). The server stops the loop
 //      and drains exactly as the in-process Rust workload does: a producer
@@ -44,10 +47,21 @@
 // Ordering: events for one workload arrive in the order they happened in the
 // binding, which is all the verifier needs (a record's `Sent` before its
 // outcome; a consumer's `Rebalance`, `Consumed` and `Committed` in sequence).
-// No ordering is implied across workloads.
+// Each event is queued from the binding callback or loop step that observed it
+// (the delivery callback, the poll that returned the record), so its position
+// in the stream is the moment the CLIENT observed it -- not the moment the
+// harness reads it, which can be minutes later behind a fast producer. No
+// ordering is implied across workloads; `Rebalance.observed_at_unix_nanos`
+// carries a wall-clock time for that.
 //
-// The harness stamps topic ids itself when an event arrives (see
-// tests/chaos/workload.rs `delivery_callback`), so none are carried here.
+// Topic ids. The harness stamps topic ids itself, so none are carried here,
+// and it must stamp each event with the generation current when the client
+// observed it. It cannot use the time it reads an event for that (see
+// above), so on a topic recreate it calls MarkWorkload on every running
+// workload BEFORE it switches its own topic-id map: every event queued ahead of
+// the resulting `Marker` was observed before the switch and keeps the old id,
+// every event behind it gets the new one (tests/chaos/remote_workload.rs
+// `switch_topic_id`).
 
 syntax = "proto3";
 
@@ -62,6 +76,11 @@ service ChaosWorkloadService {
   // workload's stream ends once the drain is done. Stopping an unknown or
   // already finished workload succeeds (the harness may race the stream end).
   rpc StopWorkload(StopWorkloadRequest) returns (StatusResponse);
+  // Queues a `Marker` carrying `marker` on a running workload's stream, behind
+  // every event the workload queued before this call, and returns once it is
+  // queued. `found` is false for an unknown or already finished workload (no
+  // marker is queued, and that stream carries no further events).
+  rpc MarkWorkload(MarkWorkloadRequest) returns (MarkWorkloadResponse);
 }
 
 message RunProducerRequest {
@@ -107,6 +126,17 @@ message StopWorkloadRequest {
   string workload_id = 1;
 }
 
+message MarkWorkloadRequest {
+  string workload_id = 1;
+  // Echoed in the queued `Marker`; chosen by the harness.
+  uint64 marker = 2;
+}
+
+message MarkWorkloadResponse {
+  // Whether the workload was running and the marker was queued.
+  bool found = 1;
+}
+
 // Events are batched so a fast workload does not pay one stream message per
 // record; a server flushes whatever it has queued each time it writes.
 message WorkloadEventBatch {
@@ -130,7 +160,13 @@ message WorkloadEvent {
     // Both.
     Finished finished = 11;
     Failed failed = 12;
+    Marker marker = 13;
   }
+}
+
+// Queued by MarkWorkload; see "Topic ids" above.
+message Marker {
+  uint64 marker = 1;
 }
 
 // Record `index` is about to be handed to the client (opens its in-flight
@@ -145,6 +181,12 @@ message Delivered {
   int64 offset = 3;
 }
 
+// Delivered and SendFailed are emitted from the record's delivery callback,
+// once per callback invocation: a client that fires a record's callback twice
+// produces two outcome events for it, which the verifier reports. The one
+// exception is the C server's ambiguous synchronous send failure, which it
+// reports itself and then pairs with at most one later callback for the same
+// record (c/grpc_server/server.cc `chaos_settle_send_failure`).
 message SendFailed {
   uint64 index = 1;
   KafkaError error = 2;
@@ -175,6 +217,13 @@ enum RebalanceKind {
 message Rebalance {
   RebalanceKind kind = 1;
   repeated TopicPartitionRef partitions = 2;
+  // Wall-clock time (nanoseconds since the Unix epoch) at which the listener
+  // callback started, on the server's clock. Stream order already orders one
+  // consumer's events; this is for ordering callbacks ACROSS consumers (and
+  // servers), so it is only as good as the clocks agree: servers sharing a host
+  // or a Docker VM share its clock, while a harness on a different host can be
+  // off by its clock skew. 0 = not reported.
+  int64 observed_at_unix_nanos = 3;
 }
 
 message TopicPartitionRef {
@@ -192,9 +241,15 @@ message Committed {
 
 enum ConsumerOp {
   CONSUMER_OP_POLL = 0;
+  // A poll-loop or final commit. With COMMIT_MODE_ASYNC a poll-loop commit's
+  // failure is reported from its completion callback, when it completes.
   CONSUMER_OP_COMMIT = 1;
   CONSUMER_OP_REVOKE_COMMIT = 2;
   CONSUMER_OP_READ_COMMITTED = 3;
+  // close() returned an error. Reported as a consumer error, not as `Failed`:
+  // the workload still drained, and the stream goes on to ConsumerClosed and
+  // Finished, as the in-process Rust consumer records its close error.
+  CONSUMER_OP_CLOSE = 4;
 }
 
 message ConsumerError {
@@ -206,7 +261,8 @@ message ConsumerError {
 // not have been announced as assigned.
 message ConsumerClosing {}
 
-// close() returned.
+// close() returned, with or without an error (a close error is reported just
+// before this, as a ConsumerError with CONSUMER_OP_CLOSE).
 message ConsumerClosed {}
 
 // The workload drained and its client is closed; the stream ends after this.
