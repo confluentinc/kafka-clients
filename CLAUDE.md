@@ -26,7 +26,9 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      `::common::internals::Topic::GROUP_METADATA_TOPIC_NAME`
    - Static functions MUST be exported through only by the struct defining them. E.g:
      `to_byte_buffer_accessor` is accessible through `::common::protocol::MessageUtil::to_byte_buffer_accessor`
-   - Classes whose package contains `internal` MUST  use only `pub(crate)`
+   - Classes whose package contains `internal` MUST NOT be public
+   - Classes whose package contains the disclamer "This module is not a supported API" MUST NOT be public
+   - Classes that ARE NOT annotated as `@InterfaceAudience.Public` since Apache Kafka 4.4 MUST NOT be public
    - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
      - they're all enums of Error
      - each error has its own file
@@ -40,7 +42,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
    - Java interfaces become traits in Rust, except those translated to std traits or to functions, default method implementation on an interface become a default trait function implementation in Rust
     If a Java class implements multiple interfaces and that have a function in common with same signature, implement the function on the struct and delegate to it in both implementations.
-    Constants that should be associated to the trait are exported through the module containing the trait, like nested structs or enums, to make sure they're dyn compatible
+    Constants that should be associated to the trait are exported through the module containing the trait, also nested structs, enums or static methods
+   - The configuration MUST NOT take classes as values or "class" in the property name. A class is Java terminology and we don't use reflection here, every time there's a property with a class the corresponding value needs to be set in the properties struct through a setter and the value must be a trait.
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
    - Overloaded methods: make sure there's:
      - a method with same name (after translation) that has the intersection of parameters from all overloaded methods, if that method exists in Java.
@@ -60,17 +63,26 @@ Suggestions for changes are possible through the process highlighted in [agent-r
        - `fooBar(a, b)`, `fooBar(a, c)`, `fooBar(a, b, c, d)`  -> `foo_bar_with_b(a, b)`, `foo_bar_with_c(a, c)`, `foo_bar_with_b_c_d(a, b, c, d)`
         - later: `foo_bar_with_b(a, b, c, d, e)` -> `foo_bar_with_options(options)`, `FooBarOptionsBuilder::new().set_a(a).build()`
         - later: `fooBar(b)`, `fooBar(c)` -> `FooBarOptionsBuilder::new().build()`
-3. **C FFI Conventions**:
+3. **Forward compatibility**
+  The Rust client need to stay always forward compatible with any change that is done to the Java public API. Each type of change that doesn't require a major version in Java MUST not require a major version in Rust, that should be possible by maintaining the same design an not adopting ad-hoc solutions for each adaptation. Here are some of the rules:
+    - Rust public enums and struct MUST be "#[non_exhaustive]" in case new values are added to Java ones
+    - There should be no public field in public structures: getter, setters or builders are used depending on what's also used in Java client
+    - Traits must be dyn-compatible: in Java we can put objects of different types in collections with an interface as generic argument. Exception are made for performance oriented trait such as the `Producer` but they must have a corresponding dyn trait such as `DynProducer` so they pay the cost only when needed
+    - classes that are translated from Java MUST have the same name as Java, considering the translation rules, except when there are other rules changing their name
+    - methods that are translated from Java methods must not be public if they're not public in Java implementation
+    - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package
+    - deprecated API MUST NOT be translated since the first major version of the client. Ensure this is not affecting the ability to implement later some large features that are not implemented at the moment such as the classic consumer group, because of changes to public traits
+4. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
       is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
-      (§10.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
+      (§12.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
       struct, which never crosses the boundary on its own.
     - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
-    - Classes whose package contains the disclamer "This module is not a supported API" MUST NOT have C bindings.
+    - Classes that aren't public in Rust crate MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
       `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every
-      hierarchy predicate from §10.4, e.g. `is_kafka_error` ->
+      hierarchy predicate from §12.4, e.g. `is_kafka_error` ->
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
       only way a C caller can classify an error beyond its numeric code.
@@ -92,15 +104,15 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       registration's release hook named `<Type>_user_data_destroy_t`.
 
 
-3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
-4. **Comments and documentation**: Keep similar comments as the Java source,
+5. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
+6. **Comments and documentation**: Keep similar comments as the Java source,
 translate javadoc to rustdoc. Never change the contract of public API.
-5. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `Error` — silently completing or hanging futures is worse than an explicit error.
-6. **Scripts**: Use xtask Rust programs instead of shell scripts
-7. **License**: All translated code, except GPL with CPE from OpenJDK, includes the Apache 2.0 license header.
+7. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `Error` — silently completing or hanging futures is worse than an explicit error.
+8. **Scripts**: Use xtask Rust programs instead of shell scripts
+9. **License**: All translated code, except GPL with CPE from OpenJDK, includes the Apache 2.0 license header.
     Copyright holder for Apache licensed code is Confluent Inc.
-8. **Non-blocking IO**: Use non-blocking IO (Tokio) with a single Selector for multiple TCP connections, as with Java Selector class.
-9. **Concurrency**: 
+10. **Non-blocking IO**: Use non-blocking IO (Tokio) with a single Selector for multiple TCP connections, as with Java Selector class.
+11. **Concurrency**: 
     1. If a method is blocking in Java it should async in Rust
     2. Translate callbacks you find in Java client to code that is executed 
        after awaiting the corresponding call in Rust.
@@ -111,7 +123,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
        - `tokio::select!` cancels the losing branch's future mid-execution. Never put operations with side effects (incrementing a counter, sending on a channel, writing to a buffer) inside a `select!` arm unless the future is cancellation-safe. Use `biased;` when ordering matters.
        - Holding a `MutexGuard` across an `.await` point deadlocks the async runtime — always drop locks before awaiting.
     7. About naming, whenever we're talking about a "thread" in Java let's use the term "task" in Rust. E.g. in log messages.
-10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
+12. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.
     2. Return a `Result` when Java code throws an exception even if unchecked but recoverable.
@@ -169,7 +181,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
            complements of one another: `Serialization` and `Wakeup` are
            `KafkaException`s that are not `ApiException`s, so they answer `true` to
            `is_kafka_error()` and `false` to `is_api_error()`.
-11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack. On hot paths (send path, batch drain, wire framing, per-record processing), also account for costs Java's JIT/GC masks but Rust makes explicit:
+13. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack. On hot paths (send path, batch drain, wire framing, per-record processing), also account for costs Java's JIT/GC masks but Rust makes explicit:
     - Identifiers cloned on every message (topic names, client IDs): prefer `Arc<str>` over `String` to make clones cheap
     - A single numeric field shared across tasks: prefer `AtomicI64`/`AtomicU64` over `Mutex<i64>` to avoid lock contention
     - Hot-path async dispatch: avoid `Pin<Box<dyn Future>>` per call — prefer concrete `async fn` return types or generic dispatch
@@ -178,15 +190,15 @@ translate javadoc to rustdoc. Never change the contract of public API.
     **"Hot path" definition**: per-record / per-message dispatch (send-path record build, batch drain, deserialize/serialize, wire framing). This does **not** include per-RPC or per-batch top-level API surfaces (e.g. the `Producer` / `Consumer` dispatch trait used at `send()` / `poll()` granularity) — there, one `Pin<Box<dyn Future>>` per call is amortized over many records and is negligible. `#[async_trait]` is acceptable for those top-level surfaces.
 
     Outside hot paths, prefer the simpler type (`String`, `Mutex`) unless profiling shows otherwise.
-12. **Parameters and return values of public API**: Accept the most general borrowed form for input parameters. Borrow immutably, and return immutable values.
+14. **Parameters and return values of public API**: Accept the most general borrowed form for input parameters. Borrow immutably, and return immutable values.
     Return a borrowed reference in case the data is still owned by the original struct (getter for example).
     When ownership is transferred to the caller prefer returning the struct (making use of RVO) over Box or Rc or Arc.
     Don't copy byte arrays holding the key, value or headers passed to ProduceRecord or received in ConsumeRecord. This zero-copy requirement extends through the entire write path: serialized bytes must be written directly into the batch buffer (no intermediate buffer), batch finalization must not copy already-serialized bytes, and wire sends must use vectored I/O (`IoSlice` / `write_vectored`) so the framing header and payload are sent without assembling a single contiguous buffer. On the receive path, the symmetric rule applies: fetched bytes are owned by one buffer in `CompletedFetch`, every downstream type borrows slices from it, and the `Deserializer<T>` trait takes `&[u8]` (sync, no `#[async_trait]`) — see `consumer-threading.md` §27.
-13. **Consumer-specific rules**: see [consumer-threading.md](.claude/rules/consumer-threading.md) for `AsyncKafkaConsumer` API shape, background-task design, `wakeup()` cancellation, `SubscriptionState` ownership, group-protocol scope, receive-path zero-copy, and `ConsumerRebalanceListener` invocation thread. These rules supplement #8/#9/#11/#12 inside the consumer module.
+15. **Consumer-specific rules**: see [consumer-threading.md](.claude/rules/consumer-threading.md) for `AsyncKafkaConsumer` API shape, background-task design, `wakeup()` cancellation, `SubscriptionState` ownership, group-protocol scope, receive-path zero-copy, and `ConsumerRebalanceListener` invocation thread. These rules supplement #10/#11/#13/#14 inside the consumer module.
 
 ## Python Binding Conventions
 
-The Python client, package `confluent_kafka` in `bindings/python/`, is built only on the C FFI of §3. Its surface and implementation are generated from this section, the Java source, the C FFI header and the previous release's interface; the same inputs give the same result on every run.
+The Python client, package `confluent_kafka` in `python/`, is built only on the C FFI of §4. Its surface and implementation are generated from this section, the Java source, the C FFI header and the previous release's interface; the same inputs give the same result on every run.
 
 - **General rules**
   - Rule 1: Java decides the content — classes, methods, parameters, types, defaults and behaviour. Python decides only the form, through the idiom translations below. A deliberate content change is marked *(deviation)*; anything else needs a new rule. Nothing comes from confluent-kafka-python or readability, and Javadoc is read only for nullability.
@@ -292,7 +304,7 @@ The Python client, package `confluent_kafka` in `bindings/python/`, is built onl
     - `str(e)` is Java's `getMessage()`: the string the Java constructor passes to `super(...)` (`TopicAuthorizationError(unauthorized_topics={"t"})` -> `"Not authorized to access topics: [t]"`), `""` when that is `null`, and for Java's `Throwable(Throwable)` `cause.toString()`: `"<module>.<class>"`, plus `": <message>"` when the cause has one.
     - A call giving none of the parameters is matched like any other: `KafkaError()` is Java's `KafkaException()`, while `TopicAuthorizationError()`, `ConfigError()` and `RetriableCommitFailedError()` are rejected by `java_forms`, since Java has no no-argument constructor for them.
     - `KafkaError` defines one `__reduce__` that rebuilds any error from its constructor arguments by name, so `copy` and `pickle` work.
-  - Java's payload getters are methods (`RecordDeserializationError.topic_partition()`, `offset()`, `key_buffer()`, `value_buffer()`, `origin()`; `TopicAuthorizationError.unauthorized_topics()`). They return what the constructor was given, or the Java-given default `java_forms` filled for the matched overload (`TopicAuthorizationError(message="x").unauthorized_topics()` -> `set()`, since Java's `(String message)` passes `emptySet()`); an error from the core is constructed with the payload read from the FFI accessors of §3.
+  - Java's payload getters are methods (`RecordDeserializationError.topic_partition()`, `offset()`, `key_buffer()`, `value_buffer()`, `origin()`; `TopicAuthorizationError.unauthorized_topics()`). They return what the constructor was given, or the Java-given default `java_forms` filled for the matched overload (`TopicAuthorizationError(message="x").unauthorized_topics()` -> `set()`, since Java's `(String message)` passes `emptySet()`); an error from the core is constructed with the payload read from the FFI accessors of §4.
   - No `code()` and no `is_*` predicates: the type is the predicate (`except RetriableError`). The FFI id is the private class attribute `_ffi_id` with one `id → class` table. Core -> Python: construct the class of the id, chained from its cause; an unknown id raises `KafkaError`. Python -> core: `type(error)._ffi_id`; the base `KafkaError` carries the core's id for a bare `KafkaException`, `UNKNOWN_SERVER_ERROR` (−1), which `UnknownServerError` owns in the table.
   - An error the user injects into a mock (`set_poll_exception`, `set_send_exception`, `error_next`, …) is raised again as the very same instance; where the mock runs in the core, the binding keeps the instance per injection slot (the setter whose call then fails, not the id) and raises it when the core reports that error, the `_ffi_id` only choosing what the core reports.
 - **Serialization**
@@ -317,19 +329,19 @@ The Python client, package `confluent_kafka` in `bindings/python/`, is built onl
   - `close()` releases every callback the client holds.
 - **Implementation over the FFI**
   - The client classes, their async peers, `MockConsumer` and `MockShareConsumer` call the FFI. Every other class — value types, records, enums, errors, `CloseOptions`, the serdes and `MockProducer` — is a direct Python translation of its Java source (`MockProducer` because Java's sends complete in the caller, which the FFI's completion dispatcher cannot give).
-  - Python adds no FFI entry points. Each Java overload of an FFI-backed class calls the entry point whose name §2 (Rust name) and §3 (C prefix) derive for it; overloads §2 folds into one Rust method with `Option` parameters share one, and Python passes absent arguments as null. Generation looks up only that derived name.
+  - Python adds no FFI entry points. Each Java overload of an FFI-backed class calls the entry point whose name §2 (Rust name) and §4 (C prefix) derive for it; overloads §2 folds into one Rust method with `Option` parameters share one, and Python passes absent arguments as null. Generation looks up only that derived name.
   - An overload whose derived entry-point name is not in the header is not generated — a parameter, a method, or a whole class or family when all its overloads are missing — and `java_forms` and the stubs leave it out. A mock does not generate what its base class does not.
   - The Python method calls the entry point of the overload the given arguments select (by which are given, or `isinstance` for a union-typed parameter). A waiting call uses the entry point's `_async` completion form when there is one, else its plain form; an `async def` needs the `_async` form. Each `_async` function's rustdoc states, self-contained, the thread its callback runs on.
   - Within what is generated, a mock implements every method and constructor argument Java's mock implements: `MockProducer(cluster=…, partitioner=…)` uses the cluster for `partitions_for()` and the partitioner to choose partitions, calling their Java methods by snake_case name. A mock method raises only where Java's mock throws.
-  - A blocking call waits on the shared completion dispatcher of `src/ffi/common.rs` (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`) — never a second dispatcher — and while waiting drains the caller-thread callback queue, running those callbacks on the waiting thread. An async call awaits an `asyncio.Future` completed through `loop.call_soon_threadsafe` and drains the same queue on the loop.
+  - A blocking call waits on the shared completion dispatcher of `rust/src/ffi/common.rs` (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`) — never a second dispatcher — and while waiting drains the caller-thread callback queue, running those callbacks on the waiting thread. An async call awaits an `asyncio.Future` completed through `loop.call_soon_threadsafe` and drains the same queue on the loop.
 - **Behaviour with no other home**
   - `ConsumerRecords(*, records)` (Java's deprecated records-only constructor): `next_offsets()` logs a rate-limited error and returns `{}`.
-  - Header values handed out are `memoryview`s (into the fetch batch for fetched records) or `None`; `headers()` is `()` when empty, never `None`. §12's no-copy rule covers header values too.
+  - Header values handed out are `memoryview`s (into the fetch batch for fetched records) or `None`; `headers()` is `()` when empty, never `None`. §14's no-copy rule covers header values too.
   - `ProducerRecord(value=None)` is sent as a null value (a tombstone), never as `b""`.
   - `close()` twice is harmless; any other call after it raises `IllegalStateError`, as in Java.
   - Async sends that returned before a transaction-control call belong to it (`producer-transactions.md` §13).
 - **Tests and typing**
-  - Translate Java's tests of every translated class (`KafkaProducerTest`, `MockConsumerTest`, `ConsumerRecordsTest`, …) to pytest under `bindings/python/test/unit`, asserting Java's messages; skip only a test whose subject is out of scope or not generated, with the reason in the test file.
+  - Translate Java's tests of every translated class (`KafkaProducerTest`, `MockConsumerTest`, `ConsumerRecordsTest`, …) to pytest under `python/test/unit`, asserting Java's messages; skip only a test whose subject is out of scope or not generated, with the reason in the test file.
   - For every public method: a positional call raises `TypeError`, every illegal combination raises `IllegalArgumentError` with the exact message, every stub works.
   - The error-hierarchy test checks each class's parent chain against the Java source in both directions and each `_ffi_id` against the FFI enum. Built-in serdes pass Java's test vectors both natively and as Python callables.
   - Full annotations (`from __future__ import annotations`, Python ≥ 3.10) and `.pyi` stubs for generated modules; `mypy --strict` over the package runs in `make verify`, with a typing test asserting inference through `assert_type`.
@@ -347,7 +359,12 @@ Use LSP plugins when available and working, notify when it's not working, avoid 
 ## Source Reference
 Java source in `kafka/` directory (Apache Kafka 4.3.1)
 
+The public-API and deprecation rules are checked against a later release: `@InterfaceAudience.Public`
+(§2) against Kafka 4.4, and deprecations (§3) against 4.3.1 plus 4.4. The exact tags are
+`AUDIENCE_REF` and `DEPRECATION_REFS` in `xtask/src/java.rs`; `cargo xtask fetch-java-refs` fetches them.
+
 ## Development Workflow
+The Rust code lives in `rust/`, the bindings in `python/` and `c/`. Run the `cargo` commands below from `rust/`; run `make` targets from the repository root.
 - **Build**: `cargo build`
 - **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
 - **Format**: `cargo xtask format`
@@ -355,8 +372,8 @@ Java source in `kafka/` directory (Apache Kafka 4.3.1)
 - **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
 - **Lint Fix**: `cargo xtask lint-fix` (automatically fix clippy warnings)
 - **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only)
-- **Coverage (unit)**: `cargo xtask coverage` (report at coverage/html/index.html)
-- **Coverage (lcov)**: `cargo xtask coverage-lcov` (writes coverage/lcov.info)
+- **Coverage (unit)**: `cargo xtask coverage` (report at rust/coverage/html/index.html)
+- **Coverage (lcov)**: `cargo xtask coverage-lcov` (writes rust/coverage/lcov.info)
 - **Coverage (all tests)**: `cargo xtask coverage-all` (requires Docker)
 
 ## Definition of Done

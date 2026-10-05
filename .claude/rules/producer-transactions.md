@@ -5,7 +5,7 @@ producer's idempotence and transaction support
 (`org.apache.kafka.clients.producer.internals.TransactionManager` and its
 dependency closure) from Java to Rust. It supplements `CLAUDE.md` — when these
 rules conflict with general translation guidance, the transaction-specific rule
-wins inside `src/producer/`.
+wins inside `rust/src/producer/`.
 
 Rules are grouped by topic. Each numbered section is a single design decision:
 the rule itself, **Why** (rationale, usually referencing the Java contract), and
@@ -143,7 +143,7 @@ Two hard rules for the Sender task, both extending
   1. No `MutexGuard` on `TransactionManager` may be held across any `.await`.
   2. The network poll MUST NOT be raced in a `tokio::select!`.
 
-**Why:** Rule 1 is CLAUDE.md §9.6.2 — holding a guard across an await deadlocks
+**Why:** Rule 1 is CLAUDE.md §11.6.2 — holding a guard across an await deadlocks
 the runtime. `Sender.java:459-518`
 (`maybeSendAndPollTransactionalRequest`) calls roughly ten
 `TransactionManager` methods interleaved with three `client.poll(...)` calls
@@ -292,7 +292,7 @@ batches from their owner instead.
 **Why:** Storing `ProducerBatch` by value in the entry would require a second
 owner of a non-`Clone` type, which does not compile. The alternative —
 `Arc<Mutex<ProducerBatch>>` throughout the accumulator and Sender — would add a
-per-batch lock acquisition to the drain path, which CLAUDE.md §11 names as a hot
+per-batch lock acquisition to the drain path, which CLAUDE.md §13 names as a hot
 path, and would be a large refactor of the crate's most load-bearing code for no
 behavioral gain.
 
@@ -360,14 +360,14 @@ than a clean local error.
   - `increment_sequence` → reuse
     `crate::common::record::default_record_batch::increment_sequence`.
   - `decrement_sequence` → plain subtraction, and return
-    `Err(KafkaError)` (per CLAUDE.md §10.2, not `panic!`) when negative,
+    `Err(KafkaError)` (per CLAUDE.md §12.2, not `panic!`) when negative,
     preserving Java's message text. A test MUST assert the message.
 
 ## 9. Flat error codes lose Java's exception hierarchy — two relations matter
 
 Phase 1 deliberately did not create typed error structs for the transaction
 exceptions, because none of them carries payload beyond a message and every wire
-code already exists in `src/common/protocol/errors.rs`. That decision stands.
+code already exists in `rust/src/common/protocol/errors.rs`. That decision stands.
 
 But it reasons about *payload*, and Java's transaction dispatch also reasons
 about *subtyping*. Two relations are load-bearing and MUST be preserved
@@ -486,7 +486,7 @@ for *any* field". That is no longer true: the generator now emits the check,
 gated on `!field.ignorable()` exactly as Java gates it, for the 100 of 227
 version-gated fields that are non-ignorable. The normative rule below is
 unchanged — it is now enforced by `non_ignorable_check_applies` in
-`generator/src/lib.rs` and pinned by
+`rust/generator/src/lib.rs` and pinned by
 `generator::tests::test_non_ignorable_check_skips_ignorable_fields`.
 
 **How to apply:**
@@ -527,15 +527,15 @@ compounding was *potential*, not observed: neither `Enable2Pc` nor
 so no value was being dropped on that path. PLAN §9.1 records the retraction of
 the claim that it was.
 
-Only `INIT_PRODUCER_ID` sets the flag true in **`generator/messages/`** — the corpus
+Only `INIT_PRODUCER_ID` sets the flag true in **`rust/generator/messages/`** — the corpus
 `build.rs` compiles, and therefore the one that decides what the Rust accessors
-return. (`generator/messages/` now matches `kafka/` 4.2 on this flag: only
+return. (`rust/generator/messages/` now matches `kafka/` 4.2 on this flag: only
 `InitProducerIdRequest.json` sets it true in either corpus.) For every other API the
 two accessors agree **today**.
 
 **The corpus matters, so always name it.** In `kafka/` 4.2 — what CLAUDE.md's
 "Source Reference" points at — only `InitProducerIdRequest.json` sets the flag true;
-the other four had their latest versions released by 4.2. `generator/messages/` is a
+the other four had their latest versions released by 4.2. `rust/generator/messages/` is a
 pre-4.2 snapshot (36 of 197 specs differ; PLAN §9.9), so a flag claim checked
 against `kafka/` will appear false when it is true of the built code, and vice
 versa. Three findings in the Phase 2 review loop were this one error. Cite the file.

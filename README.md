@@ -1,18 +1,42 @@
 # Rust-Based Kafka Clients
 
+> [!WARNING]
+> **Preview:** The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open, see [RFCs and feedback](#rfcs-and-feedback).
+
 A high-fidelity, architecture-preserving Rust translation of the Apache Kafka Java client (client only), generated instruction-by-instruction from the original Java sources. This project aims to provide a native Rust Kafka client with the same API, structure, and semantics as the official Java client, following Rust idioms and conventions where appropriate.
 
-It also contains bindings for multiple languages, automatically generated following translation rules, optimized and reviewed for performance as well. The Python client, `confluent_kafka`, is described in [bindings/python/README.md](bindings/python/README.md).
+It also contains bindings for multiple languages, automatically generated following translation rules, optimized and reviewed for performance as well. The Python client, `confluent_kafka`, is described in [python/README.md](python/README.md).
 
-## Project Overview
+## Status
 
-- **Source:** Translated from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1)
-- **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
-- **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
-- **Schema:** All Kafka message schemas are generated from the official JSON definitions
-- **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
+**Rust Client: Preview**. The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
 
-## Prerequisites
+**Python, C and .NET Clients: In Development**. The API is subject to large changes and the stability is not guaranteed.
+
+## Repository Structure
+
+```
+rust/                   # The Rust client — see rust/README.md
+python/                 # Python binding — see python/README.md
+c/                      # C binding — see c/README.md
+kafka/                  # Apache Kafka Java sources (submodule), the translation reference
+design/                 # Design documents (design/current describes the code as it stands)
+rfc/                    # Repository-level RFCs
+tools/                  # Non-Rust tooling (Java perf test, translation agent, ...)
+Makefile                # Cross-language targets, delegating to each language's Makefile
+```
+
+Every language builds on the Rust library: the bindings link
+`rust/target/<profile>/libconfluent_kafka` and compile against the C header
+`rust/target/include/confluent_kafka.h`.
+
+## RFCs and feedback
+
+The design of these clients is proposed through RFCs in the [`rfc/`](rfc/) folder, covering topics such as repository structure, versioning, client APIs, licensing, contributions, release and distribution, and AI-assisted migration.
+
+We want your feedback while these proposals are still open. To comment on an RFC, open a [GitHub issue](https://github.com/confluentinc/kafka-clients/issues) or start a [GitHub discussion](https://github.com/confluentinc/kafka-clients/discussions) that references the RFC. See [rfc/README.md](rfc/README.md) for the status of each proposal and how the review process works.
+
+## Getting Started
 
 ### Clone with submodules
 
@@ -26,86 +50,34 @@ Or if already cloned:
 git submodule update --init
 ```
 
-### Install development tools
+### Set up
 
 ```bash
-cargo install cargo-llvm-cov grcov && rustup component add llvm-tools
+make init
 ```
 
-- **cargo-llvm-cov**: LLVM source-based code coverage instrumentation
-- **grcov**: HTML coverage report generator
-- **llvm-tools**: LLVM binaries required by cargo-llvm-cov
+- Initializes the submodules, creates the shared Python `venv/`, and installs
+  the Python development dependencies.
 
-## Directory Structure
+## Building and Testing
 
-```
-src/
-├── lib.rs              # Root library module
-├── common/             # Common types (UUID, protocol, etc.)
-├── message/            # Message schema generation
-│   └── ...             # FieldType, FieldSpec, StructSpec, etc.
-message-specs/          # 197 Kafka JSON RPC definitions
-build.rs                # Build script (generates code, formats output)
-tests/
-└── generated_messages_test.rs  # Integration tests for generated messages
-```
-
-## Building the Project
-
-All automation is handled via [xtask](https://github.com/matklad/cargo-xtask) commands.
-
-**Note:** The project is configured with `#![deny(warnings)]` to treat all compiler warnings as errors, ensuring code quality and maintainability.
-
-### 1. Build the Library
+The root `Makefile` builds and tests every language:
 
 ```bash
-cargo build
-```
-- Runs the code generator, formats all generated code, and builds the library.
-
-### 2. Format All Code
-
-```bash
-cargo xtask format
-```
-- Formats all source and generated Rust code using `rustfmt`.
-
-### 3. Check Formatting (CI-friendly)
-
-```bash
-cargo xtask format-check
-```
-- Checks formatting of all code (source + generated). Fails if any file is not properly formatted.
-
-### 4. Check Only Generated Code Formatting
-
-```bash
-cargo xtask check-generated
-```
-- Checks formatting of generated files only, without modifying them. Useful for CI.
-
-## Running Tests
-
-```bash
-cargo test
-```
-- Runs all unit and integration tests, including round-trip wire protocol and generated message tests.
-
-## Code Coverage
-
-```bash
-cargo xtask coverage          # Unit tests, HTML report at coverage/html/index.html
-cargo xtask coverage-lcov     # Unit tests, lcov output at coverage/lcov.info
-cargo xtask coverage-all      # Unit + integration tests (requires Docker)
+make build     # the Rust library, then the C and Python bindings
+make test      # every language's tests
+make verify    # build, format and lint checks, and every test suite
 ```
 
-## Regenerating Code
+Per-language targets exist too, e.g. `make build-c`, `make test-python`,
+`make verify-rust`. Each of them delegates to the language's own Makefile
+(`rust/Makefile`, `python/Makefile`, `c/Makefile`), which can also be run
+directly, e.g. `make -C rust test`. The root only orders the builds across
+languages and sets up what they share (submodules, git hooks, the Python venv).
 
-Generated code is automatically updated on build. To force regeneration:
-
-```bash
-cargo clean && cargo build
-```
+To work on one language directly, see its README:
+[rust/README.md](rust/README.md) (cargo: building, formatting, linting, tests,
+coverage), [python/README.md](python/README.md) and [c/README.md](c/README.md).
 
 ## License
 
