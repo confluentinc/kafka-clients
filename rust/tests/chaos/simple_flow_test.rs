@@ -24,14 +24,27 @@ use std::time::Duration;
 
 use super::actions::ChaosAction;
 use super::common::broker_control::StopKind;
-use super::harness::ChaosHarness;
+use super::harness::{CONSUMER_STOP_DEADLINE, ChaosHarness, PRODUCER_STOP_DEADLINE};
+use super::isolation::signals;
+use super::run_test::{ProtectedRun, drive_protected};
 use super::workload::{CommitMode, WorkloadSpec};
+
+const WARMUP: Duration = Duration::from_secs(5);
+const DOWN: Duration = Duration::from_secs(5);
+const WAIT_UP: Duration = Duration::from_secs(60);
+const SETTLE: Duration = Duration::from_secs(5);
+const DRAIN: Duration = Duration::from_secs(15);
 
 /// Produce and consume continuously while broker 2 is cleanly rolled once;
 /// no acknowledged record may be lost.
+///
+/// Driven through the same protected path as `chaos_run`
+/// ([`drive_protected`]): watchdogs, signal handling, bounded close phases,
+/// a bounded workload stop when the scenario panics, and a forced exit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "chaos: slow, Docker-heavy, destructive; run with --ignored"]
 async fn simple_flow_clean_broker_roll() {
+    signals::install();
     let harness = ChaosHarness::start("chaos-simple-flow", 3, 6).await;
 
     // Plug in a Rust producer and a Rust consumer.
@@ -40,41 +53,43 @@ async fn simple_flow_clean_broker_roll() {
         WorkloadSpec::parse("consumer:rust", 1).unwrap(),
     ];
     let workloads = harness.build_workloads(&specs, 1000, 100, CommitMode::Sync).await;
-    let verifier = harness.verifier();
 
     // The chaos timeline: warm up, roll broker 2 cleanly once, let traffic
     // flow after recovery. Runs concurrently with the workloads.
     let brokers = harness.brokers();
     let admin = harness.admin();
     let scenario = async {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(WARMUP).await;
         ChaosAction::BrokerRoll {
             node_id: 2,
             kind: StopKind::Clean,
-            down: Duration::from_secs(5),
-            wait_up: Duration::from_secs(60),
+            down: DOWN,
+            wait_up: WAIT_UP,
             topics: vec!["chaos-simple-flow".to_string()],
         }
         .execute(&brokers, admin, &None)
         .await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(SETTLE).await;
     };
 
-    workloads
-        .drive(
-            Duration::from_secs(15),
-            Duration::from_secs(3),
-            verifier.clone(),
-            harness.recreate_settle(),
-            scenario,
-        )
-        .await;
-
-    let verdict = verifier.verdict(3);
-    eprintln!("{verdict}");
-
-    harness.shutdown();
-
-    assert!(verdict.is_pass(), "chaos simple-flow verdict was not PASS:\n{verdict}");
-    assert!(verdict.delivered > 0, "no records were acknowledged — workload never ran");
+    // The roll: its down window, the rejoin wait, three leader samples of up
+    // to 10 s and 30 s for the stop / start (as `watchdog_budget` counts a
+    // roll); then both close phases, the drain, and a margin.
+    let roll = DOWN + WAIT_UP + Duration::from_secs(3 * 10 + 30);
+    let watchdog =
+        WARMUP + roll + SETTLE + PRODUCER_STOP_DEADLINE + DRAIN + CONSUMER_STOP_DEADLINE + Duration::from_secs(120);
+    drive_protected(
+        &harness,
+        workloads,
+        scenario,
+        ProtectedRun {
+            name: "chaos simple-flow",
+            watchdog,
+            drain: DRAIN,
+            idle_threshold: Duration::from_secs(3),
+            min_partitions: 3,
+            reports: &None,
+        },
+    )
+    .await;
 }
