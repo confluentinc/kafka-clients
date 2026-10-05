@@ -1,0 +1,275 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ChaosWorkloadService: runs a whole chaos-harness workload inside a binding's
+// gRPC server (tests/chaos/, `--workload producer:python` and friends).
+//
+// The other services in this directory mirror the client API one call at a
+// time: `Send` returns only once the record is acknowledged, so a chaos
+// producer driven through them has exactly one record in flight, and every call
+// is cut off by the harness channel's 30 s timeout during a long outage. Here
+// the server runs the produce or consume loop itself, against its own binding,
+// at the harness's target rate, with the binding's own batching, retries and
+// rebalance listener, and streams what happens back as events. The harness
+// keeps everything else: fault injection, the topic-id map, the verifier.
+//
+// Lifecycle of one workload:
+//   1. The harness calls RunProducer / RunConsumer with a `workload_id` unique
+//      within the server session. The server registers the id (so StopWorkload
+//      and MarkWorkload can find it), sends the response headers at once --
+//      without waiting for a first event, so the harness's call resolves even
+//      for a consumer that never gets an assignment -- builds the client from
+//      `config` (forwarded verbatim to the binding's constructor, as
+//      CreateProducer / CreateConsumer do) and starts the loop.
+//   2. The server streams WorkloadEventBatch messages as events happen.
+//   3. The harness calls StopWorkload(workload_id). The server stops the loop
+//      and drains exactly as the in-process Rust workload does: a producer
+//      closes (every outstanding record settles first), a consumer commits,
+//      reads its commits back, closes. Those events are streamed too.
+//   4. The server sends a final batch ending in `Finished` and ends the stream.
+//
+// A stream that ends any other way -- `Failed`, a gRPC error status, or an end
+// without `Finished` -- means the workload died, and the harness fails the run.
+// If the harness goes away (the RPC is cancelled), the server stops the
+// workload and closes the client.
+//
+// Ordering: events for one workload arrive in the order they happened in the
+// binding, which is all the verifier needs (a record's `Sent` before its
+// outcome; a consumer's `Rebalance`, `Consumed` and `Committed` in sequence).
+// Each event is queued from the binding callback or loop step that observed it
+// (the delivery callback, the poll that returned the record), so its position
+// in the stream is the moment the CLIENT observed it -- not the moment the
+// harness reads it, which can be minutes later behind a fast producer. No
+// ordering is implied across workloads; `Rebalance.observed_at_unix_nanos`
+// carries a wall-clock time for that.
+//
+// Topic ids. The harness stamps topic ids itself, so none are carried here,
+// and it must stamp each event with the generation current when the client
+// observed it. It cannot use the time it reads an event for that (see
+// above), so on a topic recreate it calls MarkWorkload on every running
+// workload BEFORE it switches its own topic-id map: every event queued ahead of
+// the resulting `Marker` was observed before the switch and keeps the old id,
+// every event behind it gets the new one (tests/chaos/remote_workload.rs
+// `switch_topic_id`).
+
+syntax = "proto3";
+
+package confluent.kafka.test;
+
+import "producer_service.proto";
+
+service ChaosWorkloadService {
+  rpc RunProducer(RunProducerRequest) returns (stream WorkloadEventBatch);
+  rpc RunConsumer(RunConsumerRequest) returns (stream WorkloadEventBatch);
+  // Asks a running workload to stop and drain. Returns immediately; the
+  // workload's stream ends once the drain is done. Stopping an unknown or
+  // already finished workload succeeds (the harness may race the stream end).
+  rpc StopWorkload(StopWorkloadRequest) returns (StatusResponse);
+  // Queues a `Marker` carrying `marker` on a running workload's stream, behind
+  // every event the workload queued before this call, and returns once it is
+  // queued. `found` is false for an unknown or already finished workload (no
+  // marker is queued, and that stream carries no further events).
+  rpc MarkWorkload(MarkWorkloadRequest) returns (MarkWorkloadResponse);
+}
+
+message RunProducerRequest {
+  string workload_id = 1;
+  // Client configuration, forwarded verbatim to the binding's producer
+  // constructor (bootstrap, client.id, acks, idempotence, security keys, ...).
+  map<string, string> config = 2;
+  string topic = 3;
+  // Target records per second on an absolute schedule; 0 = as fast as the
+  // client accepts records.
+  uint32 target_rps = 4;
+  // Value size in bytes. Every record's key is its 8-byte big-endian index
+  // (starting at 0); its value is the same 8 bytes followed by zero padding up
+  // to `msg_size`, or the first `msg_size` of those bytes when smaller.
+  uint32 msg_size = 5;
+}
+
+enum CommitMode {
+  COMMIT_MODE_SYNC = 0;
+  COMMIT_MODE_ASYNC = 1;
+}
+
+message RunConsumerRequest {
+  string workload_id = 1;
+  // Client configuration, forwarded verbatim to the binding's consumer
+  // constructor (bootstrap, group.id, group.protocol, client.id, ...).
+  map<string, string> config = 2;
+  // Subscribe to all of these, with a rebalance listener that reports each
+  // callback and commits (then reads back) inside on_partitions_revoked.
+  repeated string topics = 3;
+  // How to commit after every non-empty poll.
+  CommitMode commit_mode = 4;
+  uint32 poll_timeout_ms = 5;
+  // Committed-offset read-backs. With COMMIT_MODE_SYNC, after a successful
+  // poll-loop commit, read the assignment's committed offsets back at most
+  // this often. In either mode, also read them back after the final (sync)
+  // commit and after the commit inside on_partitions_revoked (except while
+  // closing). 0 disables all read-backs.
+  uint32 commit_check_interval_ms = 6;
+}
+
+message StopWorkloadRequest {
+  string workload_id = 1;
+}
+
+message MarkWorkloadRequest {
+  string workload_id = 1;
+  // Echoed in the queued `Marker`; chosen by the harness.
+  uint64 marker = 2;
+}
+
+message MarkWorkloadResponse {
+  // Whether the workload was running and the marker was queued.
+  bool found = 1;
+}
+
+// Events are batched so a fast workload does not pay one stream message per
+// record; a server flushes whatever it has queued each time it writes.
+message WorkloadEventBatch {
+  repeated WorkloadEvent events = 1;
+}
+
+message WorkloadEvent {
+  oneof event {
+    // Producer.
+    Sent sent = 1;
+    Delivered delivered = 2;
+    SendFailed send_failed = 3;
+    ProducerStats producer_stats = 4;
+    // Consumer.
+    Consumed consumed = 5;
+    Rebalance rebalance = 6;
+    Committed committed = 7;
+    ConsumerError consumer_error = 8;
+    ConsumerClosing consumer_closing = 9;
+    ConsumerClosed consumer_closed = 10;
+    // Both.
+    Finished finished = 11;
+    Failed failed = 12;
+    Marker marker = 13;
+  }
+}
+
+// Queued by MarkWorkload; see "Topic ids" above.
+message Marker {
+  uint64 marker = 1;
+}
+
+// Record `index` is about to be handed to the client (opens its in-flight
+// window). Always before that record's Delivered / SendFailed.
+message Sent {
+  uint64 index = 1;
+}
+
+message Delivered {
+  uint64 index = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+// Delivered and SendFailed are emitted from the record's delivery callback,
+// once per callback invocation: a client that fires a record's callback twice
+// produces two outcome events for it, which the verifier reports. The one
+// exception is the C server's ambiguous synchronous send failure, which it
+// reports itself and then pairs with at most one later callback for the same
+// record (c/grpc_server/server.cc `chaos_settle_send_failure`).
+message SendFailed {
+  uint64 index = 1;
+  KafkaError error = 2;
+}
+
+// Sent once, when the send loop stops, before the producer closes: how many
+// records the loop handed to the client and over how long.
+message ProducerStats {
+  uint64 sent = 1;
+  double elapsed_seconds = 2;
+}
+
+// A record whose key is an 8-byte big-endian index. Records with any other key
+// are not the harness's and are not reported.
+message Consumed {
+  uint64 index = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 offset = 4;
+}
+
+enum RebalanceKind {
+  REBALANCE_KIND_ASSIGNED = 0;
+  REBALANCE_KIND_REVOKED = 1;
+  REBALANCE_KIND_LOST = 2;
+}
+
+message Rebalance {
+  RebalanceKind kind = 1;
+  repeated TopicPartitionRef partitions = 2;
+  // Wall-clock time (nanoseconds since the Unix epoch) at which the listener
+  // callback started, on the server's clock. Stream order already orders one
+  // consumer's events; this is for ordering callbacks ACROSS consumers (and
+  // servers), so it is only as good as the clocks agree: servers sharing a host
+  // or a Docker VM share its clock, while a harness on a different host can be
+  // off by its clock skew. 0 = not reported.
+  int64 observed_at_unix_nanos = 3;
+}
+
+message TopicPartitionRef {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+// One partition of a committed() read-back, taken right after one of this
+// consumer's own successful sync commits with no poll in between.
+message Committed {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+enum ConsumerOp {
+  CONSUMER_OP_POLL = 0;
+  // A poll-loop or final commit. With COMMIT_MODE_ASYNC a poll-loop commit's
+  // failure is reported from its completion callback, when it completes.
+  CONSUMER_OP_COMMIT = 1;
+  CONSUMER_OP_REVOKE_COMMIT = 2;
+  CONSUMER_OP_READ_COMMITTED = 3;
+  // close() returned an error. Reported as a consumer error, not as `Failed`:
+  // the workload still drained, and the stream goes on to ConsumerClosed and
+  // Finished, as the in-process Rust consumer records its close error.
+  CONSUMER_OP_CLOSE = 4;
+}
+
+message ConsumerError {
+  ConsumerOp op = 1;
+  KafkaError error = 2;
+}
+
+// The consumer is about to close: partitions close releases from here on may
+// not have been announced as assigned.
+message ConsumerClosing {}
+
+// close() returned, with or without an error (a close error is reported just
+// before this, as a ConsumerError with CONSUMER_OP_CLOSE).
+message ConsumerClosed {}
+
+// The workload drained and its client is closed; the stream ends after this.
+message Finished {}
+
+// The workload could not run (e.g. the client could not be built) or its loop
+// died. The stream ends after this.
+message Failed {
+  KafkaError error = 1;
+}
