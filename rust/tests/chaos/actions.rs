@@ -159,7 +159,7 @@ impl ChaosAction {
                 for topic in topics {
                     match mode {
                         ReassignMode::ChangeLeader => {
-                            change_leader(topic, admin, reports).await;
+                            change_leader(topic, live_brokers, admin, reports).await;
                         },
                         ReassignMode::ReassignPartitions => {
                             reassign_partitions(topic, live_brokers, admin, reports).await;
@@ -270,7 +270,11 @@ async fn wait_restarted(
 /// Asserts the leader actually moved on at least one partition (a bare
 /// preferred election is a no-op when leaders are already preferred, which
 /// would otherwise pass silently).
-async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
+///
+/// The new preferred leader is always one of `live_brokers` (see
+/// [`change_leader_target`]), so a broker kept down by `--leave-broker-down`
+/// is never planned as leader.
+async fn change_leader(topic: &str, live_brokers: &[i32], admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: change-leader for topic {topic}");
 
     // A describe that fails or times out on a churning cluster is an environment
@@ -286,11 +290,9 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
     let mut plan: HashMap<i32, i32> = HashMap::new();
     for (&partition, state) in &before {
-        if state.replicas.len() < 2 {
+        let Some(rotated) = change_leader_target(&state.replicas, state.leader, live_brokers) else {
             continue;
-        }
-        let mut rotated = state.replicas.clone();
-        rotated.rotate_left(1);
+        };
         plan.insert(partition, rotated[0]);
         reassignments.insert(
             TopicPartition::new(topic, partition),
@@ -298,7 +300,7 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
         );
     }
     if reassignments.is_empty() {
-        eprintln!("chaos: no partitions with >=2 replicas to change leader for");
+        eprintln!("chaos: no partitions with another live replica to change leader to");
         return;
     }
 
@@ -458,6 +460,26 @@ fn reassign_target(partition: i32, replicas: &[i32], live_brokers: &[i32]) -> (V
     target.rotate_left(1);
     target.push(outside[partition.unsigned_abs() as usize % outside.len()]);
     (target, true)
+}
+
+/// The replica list change-leader reorders one partition to: the replicas
+/// rotated by the fewest steps that put a live broker other than the current
+/// leader first, so that broker becomes preferred leader. Same set, no data
+/// moves.
+///
+/// A broker outside `live_brokers` (kept down by `--leave-broker-down`) is
+/// never put first: the preferred election could not move leadership there, so
+/// the partition would never reach its plan. `None` when no other replica is
+/// live, and the partition is skipped.
+fn change_leader_target(replicas: &[i32], leader: Option<i32>, live_brokers: &[i32]) -> Option<Vec<i32>> {
+    (1..replicas.len()).find_map(|steps| {
+        let head = replicas[steps];
+        (live_brokers.contains(&head) && Some(head) != leader).then(|| {
+            let mut rotated = replicas.to_vec();
+            rotated.rotate_left(steps);
+            rotated
+        })
+    })
 }
 
 /// Whether two replica lists hold the same brokers, in any order.
@@ -764,6 +786,31 @@ mod tests {
         assert!(!moves);
         assert_eq!(target, vec![2, 3, 1]);
         assert!(same_replica_set(&target, &[1, 2, 3]));
+    }
+
+    /// All replicas live: rotate by one, so the next replica leads.
+    #[test]
+    fn change_leader_target_rotates_by_one_when_every_replica_is_live() {
+        assert_eq!(change_leader_target(&[1, 2, 3], Some(1), &[1, 2, 3]), Some(vec![2, 3, 1]));
+    }
+
+    /// The next replica is on a broker kept down: skip past it, never plan it
+    /// as leader.
+    #[test]
+    fn change_leader_target_skips_a_replica_on_a_down_broker() {
+        assert_eq!(change_leader_target(&[1, 2, 3], Some(1), &[1, 3]), Some(vec![3, 1, 2]));
+        // Replication 2 with the other replica down: no live broker to lead.
+        assert_eq!(change_leader_target(&[1, 2], Some(1), &[1, 3]), None);
+        assert_eq!(change_leader_target(&[3, 2], Some(3), &[1, 3]), None);
+    }
+
+    /// The next replica already leads (leadership moved off the preferred
+    /// replica): pick one that changes the leader.
+    #[test]
+    fn change_leader_target_skips_the_current_leader() {
+        assert_eq!(change_leader_target(&[1, 2, 3], Some(2), &[1, 2, 3]), Some(vec![3, 1, 2]));
+        // A single replica has nothing to rotate to.
+        assert_eq!(change_leader_target(&[1], Some(1), &[1, 2]), None);
     }
 
     #[test]
