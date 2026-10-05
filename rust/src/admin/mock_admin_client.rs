@@ -432,6 +432,24 @@ fn index_out_of_bounds(index: i32, length: usize) -> Error {
     Error::local_illegal_argument(format!("Index {index} out of bounds for length {length}"))
 }
 
+/// The check of Java's `controller(Node)` (`MockAdminClient.java:279-280`): the
+/// controller must be one of the brokers.
+fn check_controller(brokers: &[Node], controller: &Node) -> Result<(), Error> {
+    if !brokers.contains(controller) {
+        return Err(Error::local_illegal_argument(
+            "The controller node must be in the list of brokers",
+        ));
+    }
+    Ok(())
+}
+
+impl Default for MockAdminClient {
+    /// Same as [`MockAdminClient::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockAdminClient {
     /// The cluster id a [`Builder`] uses unless
     /// [`set_cluster_id`](Builder::set_cluster_id) overrides it.
@@ -452,6 +470,70 @@ impl MockAdminClient {
         Builder::new()
     }
 
+    /// Creates a mock with one broker, [`Node::no_node`], which is also the
+    /// controller.
+    ///
+    /// Mirrors Java's `public MockAdminClient()` (`MockAdminClient.java:223-225`),
+    /// `this(Collections.singletonList(Node.noNode()), Node.noNode())`. It cannot
+    /// fail: the controller is the only broker.
+    pub fn new() -> Self {
+        let node = Node::no_node().clone();
+        Self::with_brokers_controller(vec![node.clone()], node)
+            .expect("the only broker is the controller, so the controller check passes")
+    }
+
+    /// Creates a mock with the given brokers and controller.
+    ///
+    /// Mirrors Java's `public MockAdminClient(List<Node> brokers, Node controller)`
+    /// (`MockAdminClient.java:227-239`): [`DEFAULT_CLUSTER_ID`](Self::DEFAULT_CLUSTER_ID),
+    /// one default partition, a default replication factor of `brokers.len()`
+    /// (unlike [`Builder::build`]'s `min(brokers.len(), 3)`),
+    /// [`DEFAULT_LOG_DIRS`](Self::DEFAULT_LOG_DIRS) for every broker, no raft
+    /// controller and empty feature-level and default-group-config maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// controller node must be in the list of brokers", when `controller` is not
+    /// one of `brokers` (Java's constructor calls `controller(Node)`, which
+    /// throws `IllegalArgumentException`).
+    pub fn with_brokers_controller(brokers: Vec<Node>, controller: Node) -> Result<Self, Error> {
+        let broker_log_dirs = vec![Self::default_log_dirs(); brokers.len()];
+        // Java passes `brokers.size()` as the `int defaultReplicationFactor`; the
+        // mock stores it as a `short` like the Builder path does.
+        let default_replication_factor = brokers.len() as i16;
+        Self::with_state(
+            brokers,
+            controller,
+            Self::DEFAULT_CLUSTER_ID.to_string(),
+            1,
+            default_replication_factor,
+            broker_log_dirs,
+            false,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    /// Makes `controller` the controller node reported by `describe_cluster`.
+    ///
+    /// Mirrors Java's public setter `controller(Node)`
+    /// (`MockAdminClient.java:278-282`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// controller node must be in the list of brokers", when `controller` is not
+    /// one of the mock's brokers; the controller is then left unchanged.
+    pub fn set_controller(&self, controller: Node) -> Result<(), Error> {
+        let mut state = self.state.lock().unwrap();
+        check_controller(&state.brokers, &controller)?;
+        state.controller = controller;
+        Ok(())
+    }
+
     /// The log directories of one broker, as owned strings.
     fn default_log_dirs() -> Vec<String> {
         Self::DEFAULT_LOG_DIRS.iter().map(|dir| (*dir).to_string()).collect()
@@ -460,7 +542,8 @@ impl MockAdminClient {
     /// Translated from Java's private constructor
     /// `MockAdminClient(List<Node>, Node, String, int, int, List<List<String>>,
     /// boolean, Map, Map, Map, Map)` (`MockAdminClient.java:241-276`), which
-    /// [`Builder::build`] calls.
+    /// [`Builder::build`] and the public constructors [`new`](Self::new) /
+    /// [`with_brokers_controller`](Self::with_brokers_controller) call.
     ///
     /// # Errors
     ///
@@ -482,11 +565,7 @@ impl MockAdminClient {
         max_supported_feature_levels: HashMap<String, i16>,
         default_group_configs: HashMap<String, String>,
     ) -> Result<Self, Error> {
-        if !brokers.contains(&controller) {
-            return Err(Error::local_illegal_argument(
-                "The controller node must be in the list of brokers",
-            ));
-        }
+        check_controller(&brokers, &controller)?;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
         let broker_configs: Vec<BTreeMap<String, String>> = brokers
@@ -692,6 +771,32 @@ impl MockAdminClient {
             .get_mut(name)
             .ok_or_else(|| Error::local_illegal_argument(format!("Topic {name} did not exist.")))?;
         topic.marked_for_deletion = true;
+        Ok(())
+    }
+
+    /// Hides a topic from the next `fetches_remaining_until_visible` fetches.
+    ///
+    /// Mirrors Java's `setFetchesRemainingUntilVisible(String, int)`
+    /// (`MockAdminClient.java:1575-1581`). Each `list_topics`, `describe_topics`
+    /// (by name or by id) and topic `describe_configs` that would return the
+    /// topic decrements the counter instead, until it reaches zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "No such
+    /// topic as <name>", if the topic does not exist. Java throws a bare
+    /// `RuntimeException`, which has no closer counterpart in the crate.
+    pub fn set_fetches_remaining_until_visible(
+        &self,
+        topic_name: &str,
+        fetches_remaining_until_visible: i32,
+    ) -> Result<(), Error> {
+        let mut state = self.state.lock().unwrap();
+        let metadata = state
+            .all_topics
+            .get_mut(topic_name)
+            .ok_or_else(|| Error::local_illegal_argument(format!("No such topic as {topic_name}")))?;
+        metadata.fetches_remaining_until_visible = fetches_remaining_until_visible;
         Ok(())
     }
 
@@ -1143,8 +1248,23 @@ impl Admin for MockAdminClient {
                         result.insert(requested.clone(), handle.future());
                         continue;
                     }
-                    match state.all_topics.get(requested) {
+                    // Java's `handleDescribeTopicsByNames` (`MockAdminClient.java:489-500`):
+                    // a visible topic is described unless its fetch countdown is still
+                    // running, in which case the countdown is decremented and the topic
+                    // is reported as not found.
+                    let visible = match state.all_topics.get_mut(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
+                            if metadata.fetches_remaining_until_visible > 0 {
+                                metadata.fetches_remaining_until_visible -= 1;
+                                None
+                            } else {
+                                Some(&*metadata)
+                            }
+                        },
+                        _ => None,
+                    };
+                    match visible {
+                        Some(metadata) => {
                             handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 requested.clone(),
                                 metadata.is_internal,
@@ -1179,11 +1299,23 @@ impl Admin for MockAdminClient {
                         result.insert(*requested, handle.future());
                         continue;
                     }
-                    let found = state
-                        .topic_names
-                        .get(requested)
-                        .and_then(|name| state.all_topics.get(name).map(|m| (name.clone(), m)))
-                        .filter(|(_, m)| !m.marked_for_deletion);
+                    // Java's `handleDescribeTopicsUsingIds` (`MockAdminClient.java:528-542`),
+                    // with the same fetch countdown as the by-name path.
+                    let state = &mut *state;
+                    let found = match state.topic_names.get(requested) {
+                        Some(name) => match state.all_topics.get_mut(name) {
+                            Some(metadata) if !metadata.marked_for_deletion => {
+                                if metadata.fetches_remaining_until_visible > 0 {
+                                    metadata.fetches_remaining_until_visible -= 1;
+                                    None
+                                } else {
+                                    Some((name.clone(), &*metadata))
+                                }
+                            },
+                            _ => None,
+                        },
+                        None => None,
+                    };
                     match found {
                         Some((name, metadata)) => {
                             handle.complete(TopicDescription::with_authorized_operations_topic_id(
@@ -1199,7 +1331,8 @@ impl Admin for MockAdminClient {
                         None => {
                             handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicId,
-                                format!("Topic id {requested} not found."),
+                                // Java's text has no space after "id" (`MockAdminClient.java:545`).
+                                format!("Topic id{requested} not found."),
                             ));
                         },
                     }
@@ -2403,6 +2536,99 @@ mod tests {
         assert_eq!(created.feature_levels, fresh.feature_levels);
         assert_eq!(created.min_supported_feature_levels, fresh.min_supported_feature_levels);
         assert_eq!(created.max_supported_feature_levels, fresh.max_supported_feature_levels);
+    }
+
+    // --- Public constructors (MockAdminClient.java:223-282) ---------------------
+
+    fn four_nodes() -> Vec<Node> {
+        (0..4).map(|id| Node::new(id, format!("h{id}"), 9092)).collect()
+    }
+
+    /// `new MockAdminClient(brokers, controller)` (`MockAdminClient.java:227-239`):
+    /// the given brokers and controller, `DEFAULT_CLUSTER_ID`, one default
+    /// partition, a default replication factor of `brokers.size()` (not the
+    /// Builder's `min(n, 3)`), `DEFAULT_LOG_DIRS` per broker, each broker's
+    /// `default.replication.factor` config seeded with that factor, no raft
+    /// controller and empty feature and group-config maps.
+    #[tokio::test]
+    async fn with_brokers_controller_matches_java_constructor() {
+        let nodes = four_nodes();
+        let mock = MockAdminClient::with_brokers_controller(nodes.clone(), nodes[2].clone())
+            .expect("the controller is one of the brokers");
+
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.nodes().get().await.unwrap(), nodes);
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
+        assert_eq!(result.cluster_id().get().await.unwrap(), MockAdminClient::DEFAULT_CLUSTER_ID);
+
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.default_partitions, 1);
+        assert_eq!(state.default_replication_factor, 4, "brokers.size(), not min(4, 3)");
+        assert_eq!(state.broker_log_dirs, vec![default_dirs(); 4]);
+        assert_eq!(
+            state.broker_configs,
+            vec![BTreeMap::from([("default.replication.factor".to_string(), "4".to_string())]); 4]
+        );
+        assert!(!state.using_raft_controller);
+        assert!(state.feature_levels.is_empty());
+        assert!(state.min_supported_feature_levels.is_empty());
+        assert!(state.max_supported_feature_levels.is_empty());
+        assert!(state.default_group_configs.is_empty());
+    }
+
+    /// `new MockAdminClient()` (`MockAdminClient.java:223-225`) is
+    /// `this(singletonList(Node.noNode()), Node.noNode())`: one broker with id -1,
+    /// which is also the controller.
+    #[tokio::test]
+    async fn new_has_one_no_node_broker_that_is_the_controller() {
+        let mock = MockAdminClient::new();
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        let nodes = result.nodes().get().await.unwrap();
+        assert_eq!(nodes, vec![Node::no_node().clone()]);
+        assert_eq!(nodes[0].id(), -1);
+        let controller = result.controller().get().await.unwrap().unwrap();
+        assert_eq!(&controller, Node::no_node());
+
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.default_replication_factor, 1);
+        assert_eq!(
+            state.broker_configs,
+            vec![BTreeMap::from([(
+                "default.replication.factor".to_string(),
+                "1".to_string()
+            )])]
+        );
+    }
+
+    /// The constructor calls `controller(Node)` (`MockAdminClient.java:255`),
+    /// which throws `IllegalArgumentException` for a node outside the broker list.
+    #[test]
+    fn with_brokers_controller_rejects_a_controller_outside_the_brokers() {
+        let err = MockAdminClient::with_brokers_controller(four_nodes(), Node::new(7, "h7".to_string(), 9092))
+            .expect_err("the controller is not a broker");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+    }
+
+    /// The public setter `controller(Node)` (`MockAdminClient.java:278-282`)
+    /// replaces the controller when the node is a broker and throws, leaving the
+    /// controller unchanged, when it is not.
+    #[tokio::test]
+    async fn set_controller_requires_a_broker() {
+        let nodes = four_nodes();
+        let mock = MockAdminClient::with_brokers_controller(nodes.clone(), nodes[2].clone()).unwrap();
+
+        mock.set_controller(nodes[3].clone()).expect("node 3 is a broker");
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 3);
+
+        let err = mock
+            .set_controller(Node::new(7, "h7".to_string(), 9092))
+            .expect_err("node 7 is not a broker");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 3);
     }
 
     /// Growing appends `Node(id, "localhost", 1000 + id)` with the default log
@@ -3668,6 +3894,123 @@ mod tests {
         assert_eq!(error.message(), "Broker 7 does not exist.");
         let error = mock.set_broker_log_dirs(-1, vec!["/data".to_string()]).unwrap_err();
         assert_eq!(error.message(), "Broker -1 does not exist.");
+    }
+
+    // --- setFetchesRemainingUntilVisible (MockAdminClient.java:1575-1581) -------
+
+    fn admin_with_topic(name: &str) -> MockAdminClient {
+        let mock = admin();
+        let leader = seeded_broker(0);
+        mock.add_topic(
+            false,
+            name,
+            vec![partition_info(
+                0,
+                Some(leader),
+                vec![seeded_broker(0)],
+                vec![seeded_broker(0)],
+            )],
+            None,
+        )
+        .expect("the leader is a seeded broker");
+        mock
+    }
+
+    /// `handleDescribeTopicsByNames` (`MockAdminClient.java:490-500`): while the
+    /// counter is positive, each describe decrements it and reports
+    /// `UnknownTopicOrPartitionException("Topic <name> not found.")`.
+    #[tokio::test]
+    async fn describe_topics_by_name_hides_the_topic_until_visible() {
+        let mock = admin_with_topic("t");
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        for _ in 0..2 {
+            let result = mock.describe_topics_with_topics_options(
+                TopicCollection::of_topic_names(vec!["t".to_string()]),
+                DescribeTopicsOptions::new(),
+            );
+            let err = result.topic_name_values().unwrap()["t"]
+                .get()
+                .await
+                .expect_err("not visible yet");
+            assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "got {err:?}");
+            assert_eq!(err.message(), "Topic t not found.");
+        }
+        let result = mock.describe_topics_with_topics_options(
+            TopicCollection::of_topic_names(vec!["t".to_string()]),
+            DescribeTopicsOptions::new(),
+        );
+        let description = result.topic_name_values().unwrap()["t"].get().await.expect("now visible");
+        assert_eq!(description.name(), "t");
+    }
+
+    /// `handleDescribeTopicsUsingIds` (`MockAdminClient.java:532-542`): the same
+    /// countdown, reporting `UnknownTopicIdException("Topic id" + id +
+    /// " not found.")` -- Java's message has no space after "id".
+    #[tokio::test]
+    async fn describe_topics_by_id_hides_the_topic_until_visible() {
+        let mock = admin_with_topic("t");
+        let topic_id = mock.state.lock().unwrap().topic_ids["t"];
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        for _ in 0..2 {
+            let result = mock.describe_topics_with_topics_options(
+                TopicCollection::of_topic_ids(vec![topic_id]),
+                DescribeTopicsOptions::new(),
+            );
+            let err = result.topic_id_values().unwrap()[&topic_id]
+                .get()
+                .await
+                .expect_err("not visible yet");
+            assert!(matches!(err, Error::UnknownTopicId(_)), "got {err:?}");
+            assert_eq!(err.message(), format!("Topic id{topic_id} not found."));
+        }
+        let result = mock.describe_topics_with_topics_options(
+            TopicCollection::of_topic_ids(vec![topic_id]),
+            DescribeTopicsOptions::new(),
+        );
+        let description = result.topic_id_values().unwrap()[&topic_id].get().await.expect("now visible");
+        assert_eq!(description.name(), "t");
+    }
+
+    /// Java throws `RuntimeException("No such topic as " + topicName)` for a
+    /// topic the mock does not have.
+    #[test]
+    fn set_fetches_remaining_until_visible_rejects_an_unknown_topic() {
+        let mock = admin();
+        let err = mock
+            .set_fetches_remaining_until_visible("nope", 1)
+            .expect_err("nope does not exist");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "No such topic as nope");
+    }
+
+    /// `listTopics` (`MockAdminClient.java:449-454`) and the topic arm of
+    /// `getResourceDescription` (`:860-863`) count down the same counter.
+    #[tokio::test]
+    async fn list_topics_and_describe_configs_count_down_the_same_counter() {
+        let mock = admin_with_topic("t");
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        let listed = mock
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "first fetch hides t: {listed:?}");
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
+        let err = mock
+            .describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
+            .values()[&resource]
+            .get()
+            .await
+            .expect_err("second fetch hides t");
+        assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "got {err:?}");
+        let listed = mock
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.contains("t"), "the counter reached zero: {listed:?}");
     }
 
     #[test]
