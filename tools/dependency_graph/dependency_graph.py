@@ -166,11 +166,11 @@ def _parse_imports_fallback(content, fqcn_files, simple_to_fqcns, file_pkg):
     return deps
 
 
-def build_dependency_graph(root_fqcn, fqcn_files, simple_to_fqcns):
-    """Build dependency graph starting from root_fqcn via BFS."""
+def build_dependency_graph(root_fqcns, fqcn_files, simple_to_fqcns):
+    """Build dependency graph starting from the root_fqcns via BFS."""
     graph = defaultdict(set)  # fqcn -> set of fqcns it depends on
     visited = set()
-    queue = deque([root_fqcn])
+    queue = deque(root_fqcns)
 
     while queue:
         current = queue.popleft()
@@ -323,12 +323,11 @@ def read_marked_classes(mark_file, simple_to_fqcns):
     return marked
 
 
-def build_tree(graph, root_fqcn, all_nodes):
-    """Build a spanning tree from root via BFS."""
+def build_tree(graph, root_fqcns, all_nodes):
+    """Build a spanning forest from the roots via BFS."""
     tree_edges = []
-    visited = set()
-    queue = deque([root_fqcn])
-    visited.add(root_fqcn)
+    visited = set(root_fqcns)
+    queue = deque(root_fqcns)
 
     while queue:
         node = queue.popleft()
@@ -341,12 +340,12 @@ def build_tree(graph, root_fqcn, all_nodes):
     return tree_edges, visited
 
 
-def generate_graph(graph, all_nodes, sorted_classes, marked_fqcns, output, output_format, root_fqcn):
+def generate_graph(graph, all_nodes, sorted_classes, marked_fqcns, output, output_format, root_fqcns):
     """Generate Graphviz tree graph and render to file."""
-    tree_edges, tree_nodes = build_tree(graph, root_fqcn, all_nodes)
+    tree_edges, tree_nodes = build_tree(graph, root_fqcns, all_nodes)
 
     dot = graphviz.Digraph(
-        name="KafkaProducer Dependencies",
+        name=" + ".join(simple_name(r) for r in root_fqcns) + " Dependencies",
         format=output_format,
         engine="dot",
         graph_attr={
@@ -372,18 +371,19 @@ def generate_graph(graph, all_nodes, sorted_classes, marked_fqcns, output, outpu
         },
     )
 
-    # Root node
-    dot.node(
-        root_fqcn,
-        label=simple_name(root_fqcn),
-        fillcolor="lightblue",
-        color="darkblue",
-        penwidth="2",
-        fontsize="11",
-    )
+    # Root nodes
+    for root_fqcn in root_fqcns:
+        dot.node(
+            root_fqcn,
+            label=simple_name(root_fqcn),
+            fillcolor="lightblue",
+            color="darkblue",
+            penwidth="2",
+            fontsize="11",
+        )
 
     for fqcn in tree_nodes:
-        if fqcn == root_fqcn:
+        if fqcn in root_fqcns:
             continue
         label = simple_name(fqcn)
         if fqcn in marked_fqcns:
@@ -410,8 +410,17 @@ def generate_graph(graph, all_nodes, sorted_classes, marked_fqcns, output, outpu
     print(f"Completion: {marked_in_graph}/{total} classes done ({pct:.1f}%)", file=sys.stderr)
 
 
-def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
-    """Generate a JSON tree structure with root_fqcn at the root.
+def json_root(root_fqcns):
+    """The `root` field of the JSON outputs: a FQCN for one root, a list for several."""
+    return root_fqcns[0] if len(root_fqcns) == 1 else list(root_fqcns)
+
+
+def generate_json_tree(graph, root_fqcns, all_nodes, marked_fqcns, output):
+    """Generate a JSON tree structure with the root_fqcns at the root.
+
+    With a single root, `tree` is that root's node; with several, `tree` is a
+    list holding one node per root, and a class shared by two roots appears
+    under the first root that reaches it.
 
     The JSON structure represents the dependency spanning tree where each node has:
     - fqcn: Fully qualified class name
@@ -424,9 +433,8 @@ def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
     """
     # Build spanning tree via BFS (same as the graph visualization)
     tree_structure = {}  # fqcn -> list of child fqcns
-    visited = set()
-    queue = deque([root_fqcn])
-    visited.add(root_fqcn)
+    visited = set(root_fqcns)
+    queue = deque(root_fqcns)
 
     while queue:
         node = queue.popleft()
@@ -446,12 +454,13 @@ def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
             "children": [build_node(child) for child in tree_structure.get(fqcn, [])]
         }
 
-    # Build the tree starting from root
-    tree = build_node(root_fqcn)
+    # Build the tree starting from the roots
+    trees = [build_node(root_fqcn) for root_fqcn in root_fqcns]
+    tree = trees[0] if len(trees) == 1 else trees
 
     # Add metadata
     result = {
-        "root": root_fqcn,
+        "root": json_root(root_fqcns),
         "total_classes": len(all_nodes),
         "marked_classes": len(marked_fqcns & all_nodes),
         "tree_nodes": len(visited),
@@ -467,7 +476,7 @@ def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
     return result
 
 
-def generate_flat_json(graph, all_nodes, sorted_classes, marked_fqcns, output, root_fqcn):
+def generate_flat_json(graph, all_nodes, sorted_classes, marked_fqcns, output, root_fqcns):
     """Generate a flat JSON with all classes and their direct dependencies.
 
     This is useful for tools that need the full dependency information
@@ -484,7 +493,7 @@ def generate_flat_json(graph, all_nodes, sorted_classes, marked_fqcns, output, r
         })
 
     result = {
-        "root": root_fqcn,
+        "root": json_root(root_fqcns),
         "total_classes": len(all_nodes),
         "marked_classes": len(marked_fqcns & all_nodes),
         "completion_percent": round(len(marked_fqcns & all_nodes) / len(all_nodes) * 100, 1) if all_nodes else 0,
@@ -502,7 +511,8 @@ def generate_flat_json(graph, all_nodes, sorted_classes, marked_fqcns, output, r
 def main():
     parser = argparse.ArgumentParser(description="Generate a dependency graph for a Java class.")
     parser.add_argument("--kafka-dir", default="kafka/", help="Root directory of Kafka Java source")
-    parser.add_argument("--root-class", default="KafkaProducer", help="Root class to analyze")
+    parser.add_argument("--root-class", action="append", default=None,
+                        help="Root class to analyze; repeat it for several roots (default: KafkaProducer)")
     parser.add_argument("--mark-file", default=None, help="Text file with class names to mark (one per line)")
     parser.add_argument("--output-format", default="png", choices=["png", "svg", "pdf"], help="Output format for graph")
     parser.add_argument("--output", default="dependency_graph", help="Output filename (without extension)")
@@ -516,27 +526,31 @@ def main():
     fqcn_files, simple_to_fqcns = find_java_files(args.kafka_dir)
     print(f"Found {len(fqcn_files)} classes.", file=sys.stderr)
 
-    # Resolve root class to FQCN
-    root_fqcn = args.root_class
-    if "." not in root_fqcn:
-        candidates = simple_to_fqcns.get(root_fqcn, set())
-        if len(candidates) == 1:
-            root_fqcn = next(iter(candidates))
-        elif len(candidates) > 1:
-            print(f"Multiple classes named '{root_fqcn}':", file=sys.stderr)
-            for c in sorted(candidates):
-                print(f"  {c}", file=sys.stderr)
-            print("Please specify the full package name.", file=sys.stderr)
-            sys.exit(1)
-        else:
-            print(f"Error: root class '{root_fqcn}' not found in {args.kafka_dir}", file=sys.stderr)
-            sys.exit(1)
+    # Resolve root classes to FQCNs
+    root_fqcns = []
+    for root_fqcn in args.root_class or ["KafkaProducer"]:
+        if "." not in root_fqcn:
+            candidates = simple_to_fqcns.get(root_fqcn, set())
+            if len(candidates) == 1:
+                root_fqcn = next(iter(candidates))
+            elif len(candidates) > 1:
+                print(f"Multiple classes named '{root_fqcn}':", file=sys.stderr)
+                for c in sorted(candidates):
+                    print(f"  {c}", file=sys.stderr)
+                print("Please specify the full package name.", file=sys.stderr)
+                sys.exit(1)
+            else:
+                print(f"Error: root class '{root_fqcn}' not found in {args.kafka_dir}", file=sys.stderr)
+                sys.exit(1)
+        if root_fqcn not in root_fqcns:
+            root_fqcns.append(root_fqcn)
 
-    print(f"Root class: {root_fqcn}", file=sys.stderr)
+    for root_fqcn in root_fqcns:
+        print(f"Root class: {root_fqcn}", file=sys.stderr)
 
     # Step 2: Build dependency graph
     print(f"Building dependency graph...", file=sys.stderr)
-    graph, reachable = build_dependency_graph(root_fqcn, fqcn_files, simple_to_fqcns)
+    graph, reachable = build_dependency_graph(root_fqcns, fqcn_files, simple_to_fqcns)
     print(f"Found {len(reachable)} classes in dependency graph.", file=sys.stderr)
 
     # Step 3: Topological sort
@@ -549,12 +563,12 @@ def main():
 
     # Step 5: Generate JSON output if requested
     if args.json or args.json_only:
-        generate_json_tree(graph, root_fqcn, reachable, marked_fqcns, args.output)
-        generate_flat_json(graph, reachable, sorted_classes, marked_fqcns, args.output, root_fqcn)
+        generate_json_tree(graph, root_fqcns, reachable, marked_fqcns, args.output)
+        generate_flat_json(graph, reachable, sorted_classes, marked_fqcns, args.output, root_fqcns)
 
     # Step 6: Generate graph (unless --json-only)
     if not args.json_only:
-        generate_graph(graph, reachable, sorted_classes, marked_fqcns, args.output, args.output_format, root_fqcn)
+        generate_graph(graph, reachable, sorted_classes, marked_fqcns, args.output, args.output_format, root_fqcns)
 
     # Step 7: Print topologically sorted list
     print("\n=== Topologically Sorted Classes (no dependencies first) ===")

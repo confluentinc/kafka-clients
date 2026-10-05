@@ -38,15 +38,29 @@ python3 tools/dependency_graph/dependency_graph.py \
   --output dependency_graph
 ```
 
+Repeat `--root-class` to analyse several roots at once. The graph is the union of their
+dependency closures, which is how `remaining_classes.txt` is produced for the whole client:
+
+```bash
+python3 tools/dependency_graph/dependency_graph.py \
+  --kafka-dir kafka/ \
+  --root-class org.apache.kafka.clients.producer.KafkaProducer \
+  --root-class org.apache.kafka.clients.consumer.KafkaConsumer \
+  --root-class org.apache.kafka.clients.admin.Admin \
+  --mark-file marked_classes.txt \
+  --json-only
+```
+
 ### Options
 
 | Flag              | Default              | Description                                              |
 |-------------------|----------------------|----------------------------------------------------------|
 | `--kafka-dir`     | `kafka/`             | Root directory of Kafka Java source files                |
-| `--root-class`    | `KafkaProducer`      | Root class to start the dependency analysis from         |
+| `--root-class`    | `KafkaProducer`      | Root class to start the analysis from; repeatable        |
 | `--mark-file`     | (none)               | Text file with FQCNs of completed classes (one per line) |
 | `--output-format` | `png`                | Output format: `png`, `svg`, or `pdf`                    |
 | `--output`        | `dependency_graph`   | Output filename (without extension)                      |
+| `--json-only`     | off                  | Write only the JSON and text outputs; skip Graphviz      |
 
 ### Mark file format
 
@@ -61,7 +75,7 @@ Marked classes appear green in the graph. Unmarked classes are written to `remai
 
 ## Output
 
-- **Graph image** (`dependency_graph.png/svg/pdf`) — LR tree layout with the root class on the left. Green nodes are marked classes, light yellow are remaining, light blue is the root.
+- **Graph image** (`dependency_graph.png/svg/pdf`) — LR tree layout with the root class(es) on the left. Green nodes are marked classes, light yellow are remaining, light blue are the roots.
 - **Topological class list** printed to stdout, with cycle information.
 - **`remaining_classes.txt`** — FQCNs of unmarked classes in topological order.
 - **Completion percentage** printed after generation.
