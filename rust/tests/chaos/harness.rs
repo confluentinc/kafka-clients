@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use confluent_kafka::admin::{Admin, AdminClientConfig, CreateTopicsResult, KafkaAdminClient, NewTopic};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, CreateTopicsResult, NewTopic};
 use confluent_kafka::common::{TopicCollection, Uuid};
 
 use super::common::broker_control::BrokerControl;
@@ -164,7 +164,6 @@ impl ChaosHarness {
     /// the producer's value size (`--msg-size`): a value too large for the
     /// broker's default `message.max.bytes` raises it cluster-wide
     /// ([`record_size_limit`]).
-    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_topics(
         topics: &[String],
         brokers: u16,
@@ -236,10 +235,7 @@ impl ChaosHarness {
                 ("bootstrap.servers".to_string(), cluster.bootstrap_servers().to_string()),
                 ("client.id".to_string(), "chaos-admin".to_string()),
             ]);
-            Box::new(
-                KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config"))
-                    .expect("admin client"),
-            )
+            AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
         };
         if security_protocol != SecurityProtocol::Plaintext {
             eprintln!(
