@@ -150,7 +150,9 @@ blocks:
                   continue
                 fi
                 read -r result sha _ < "${reported[${marker}]}"
-                if [ "${result}" != "passed" ]; then
+                if [ "${result}" = "running" ]; then
+                  problems+="  - ${job}: started but recorded no result (still running, stopped, or its result upload failed)\n"
+                elif [ "${result}" != "passed" ]; then
                   problems+="  - ${job}: ${result:-empty result}\n"
                 elif [ "${sha}" != "${head_sha}" ]; then
                   problems+="  - ${job}: passed on ${sha}, not on ${head_sha}\n"

@@ -116,18 +116,31 @@ global_job_config:
           git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
           git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
         fi
+      # Replaces this job's previous result with `running` (see the epilogue
+      # below), so that a rerun that is still running, was stopped, or could not
+      # upload its result does not leave an earlier `passed` in place.
+      - |
+        marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+        result_file=$(mktemp) \
+          && printf 'running %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
+          && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
+          || echo "Warning: could not record that this job started; an earlier result of this job remains recorded"
       - sem-version python 3.10
   # Records the CI results that create-release-tag.yml checks before creating
   # a release tag. Each job writes `<result> <commit tested> <job id>` to
-  # ci-result/<job name> in the workflow's artifacts. The commit is the working
-  # tree's HEAD rather than SEMAPHORE_GIT_SHA, so a job that switched branches
+  # ci-result/<job name> in the workflow's artifacts: `running` when it starts
+  # (the prologue above), then `passed` or `failed` when it ends. Because each
+  # write replaces the previous one, only the latest run of a job counts. The
+  # commit is the working tree's HEAD rather than SEMAPHORE_GIT_SHA, so a job
+  # that switched branches
   # (see the prologue) cannot attest to the commit being tagged. Results are
   # recorded on every build; create-release-tag.yml decides which builds may be
   # tagged. The job name is reduced to characters that are safe in an artifact
   # path, and LC_ALL=C ensures that Linux and macOS (BSD tr) map multibyte
   # characters such as the em dash identically; create-release-tag.yml applies
-  # the same mapping. A failed upload produces only a warning, and
-  # create-release-tag.yml then reports the job as having no result.
+  # the same mapping. A failed upload produces only a warning: if the final
+  # result cannot be recorded, the job stays `running`, and
+  # create-release-tag.yml refuses to tag the commit.
   epilogue:
     on_pass:
       commands:
@@ -136,7 +149,7 @@ global_job_config:
           result_file=$(mktemp) \
             && printf 'passed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
             && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
-            || echo "Warning: could not record this job's result; create-release-tag.yml will treat it as missing"
+            || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
     on_fail:
       commands:
         - |
@@ -144,7 +157,7 @@ global_job_config:
           result_file=$(mktemp) \
             && printf 'failed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
             && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
-            || echo "Warning: could not record this job's result; create-release-tag.yml will treat it as missing"
+            || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
 
 blocks:
   - name: "Verify Rust (Linux amd64)"
