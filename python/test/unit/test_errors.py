@@ -432,8 +432,8 @@ def test_invalid_topic_constructors() -> None:
     assert str(InvalidTopicError(invalid_topics=["a"])) == "Invalid topics: [a]"
     assert InvalidTopicError(message="m").invalid_topics() == set()
     assert InvalidTopicError().invalid_topics() == set()
-    # `message` is UNSET: an explicit None is Java's (String) null.
-    assert str(InvalidTopicError(message=None)) == ""  # type: ignore[call-overload]
+    # An explicit None is Java's (String) null: getMessage() is null, str(e) "".
+    assert str(InvalidTopicError(message=None)) == ""
 
 
 def test_no_offset_for_partition_constructors() -> None:

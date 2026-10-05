@@ -56,7 +56,7 @@ class InvalidTopicError(InvalidConfigurationError):
     def __init__(
         self,
         *,
-        message: str = UNSET,
+        message: str | None = UNSET,
         cause: BaseException | None = None,
         invalid_topics: Iterable[str] = UNSET,
         _java_form: int = -1,

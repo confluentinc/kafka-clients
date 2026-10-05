@@ -54,7 +54,7 @@ class RecordTooLargeError(ApiError):
     def __init__(
         self,
         *,
-        message: str = UNSET,
+        message: str | None = UNSET,
         cause: BaseException | None = None,
         record_too_large_partitions: Mapping[TopicPartition, int] | None = UNSET,
         _java_form: int = -1,

@@ -1707,7 +1707,10 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         } else {
             Dflt::NoneDefault
         };
-        let nullable = java_defaults.iter().any(|d| d == "None");
+        // `message` is nullable everywhere: Java's `(String) null` is a legal
+        // message, `getMessage()` is then null, which `str(e)` maps to `""`
+        // (CLAUDE.md, Errors).
+        let nullable = java_defaults.iter().any(|d| d == "None") || p == "message";
         let field_nullable = forms
             .iter()
             .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
@@ -2103,7 +2106,10 @@ fn stub_param(
         return Ok(format!("cause: {ty} | None = None"));
     }
     if !optional {
-        if p.field_nullable && ty != "Any" {
+        // A required `message` still takes Java's `(String) null` (see the
+        // model's `nullable`), so its stub says so; mypy otherwise rejects a
+        // call the runtime accepts.
+        if (p.field_nullable || p.name == "message") && ty != "Any" {
             return Ok(format!("{}: {ty} | None", p.name));
         }
         return Ok(format!("{}: {ty}", p.name));
@@ -2117,6 +2123,9 @@ fn stub_param(
         (_, Some(v)) if v == "None" => format!("{}: {ty} | None = None", p.name),
         (_, Some(v)) => format!("{}: {ty} = {v}", p.name),
         (Dflt::Const(c), None) => format!("{}: {ty} = {c}", p.name),
+        // An optional `message` with no Java value to show (`UNSET`): still
+        // nullable, as above.
+        _ if p.name == "message" && ty != "Any" => format!("{}: {ty} | None = ...", p.name),
         _ => format!("{}: {ty} = ...", p.name),
     })
 }
@@ -3216,6 +3225,8 @@ mod tests {
         // (String message) passes Collections.emptySet() to (message, topics).
         assert_eq!(m.forms[0].defaults.get("unauthorized_topics").map(String::as_str), Some("()"));
         assert_eq!(param(&m, "message").default, Dflt::NoneDefault);
+        // Java's (String) null is a legal message, so the stubs type it `str | None`.
+        assert!(param(&m, "message").nullable);
         assert_eq!(param(&m, "unauthorized_topics").default, Dflt::Unset);
         assert_eq!(
             m.forms[1].effect.message,
