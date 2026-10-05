@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn only_a_chaos_matrix_process_counts_as_the_runner() {
         assert!(is_runner_command(
-            "target/debug/xtask chaos-matrix --out o --matrix tests/chaos/matrix/rust-client.txt\n"
+            "target/debug/xtask chaos-matrix --out o --matrix my-matrix.txt\n"
         ));
         assert!(!is_runner_command("target/debug/xtask chaos-matrix-status --watch 30"));
         assert!(!is_runner_command("/usr/bin/vim notes.txt"));

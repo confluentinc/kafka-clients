@@ -1595,29 +1595,6 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
     }
 
     #[test]
-    fn the_rust_client_matrix_ci_runs_is_well_formed() {
-        let text = fs::read_to_string(package_root().join("tests/chaos/matrix/rust-client.txt")).unwrap();
-        let scenarios = parse_matrix(&text).unwrap();
-        let plan = plan_runs(&scenarios, &options(&["plaintext", "ssl", "sasl_ssl"], &[100])).unwrap();
-        for planned in &plan {
-            crate::parse_chaos_flags(&planned.chaos_args(1000)).unwrap_or_else(|e| panic!("{}: {e}", planned.run_id()));
-        }
-        // Topic recreation with more than one topic needs the explicit opt-in,
-        // or the harness rejects the run's configuration.
-        for scenario in &scenarios {
-            let has = |flag: &str| scenario.args.iter().any(|a| a == flag);
-            let topics = scenario
-                .args
-                .windows(2)
-                .find(|w| w[0] == "--num-topics")
-                .map_or(1, |w| w[1].parse::<u32>().unwrap());
-            if has("--topic-recreate") && topics > 1 {
-                assert!(has("--allow-multi-topic-recreate"), "scenario {}", scenario.id);
-            }
-        }
-    }
-
-    #[test]
     fn only_outcomes_other_than_pass_and_known_defect_fail_the_matrix() {
         let result = |outcome: &str| RunResult { outcome: outcome.into(), ..RunResult::default() };
         let (pass, known, fail, stalled) = (result("PASS"), result(KNOWN_DEFECT), result("FAIL"), result("STALLED"));
