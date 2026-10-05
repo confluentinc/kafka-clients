@@ -220,8 +220,10 @@ doc-check:
 
 # Package the crate as it would be published, fail if the compressed `.crate`
 # is above 3 MiB, and build a fresh project that depends on it.
+# `--locked`: a Cargo.lock that does not match the manifests fails here, on the
+# pull request, rather than in the release, which packages with `--locked`.
 package-check:
-	cargo xtask package-check
+	cargo --locked xtask package-check
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the
