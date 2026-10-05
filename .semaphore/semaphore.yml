@@ -86,6 +86,12 @@ agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
+# A release tag build runs CI, then the publish and the post-publish checks one
+# after another, which takes longer than an ordinary build. The limit is explicit
+# so that it does not depend on Semaphore's default for a pipeline.
+execution_time_limit:
+  hours: 2
+
 global_job_config:
   env_vars:
     # The crate that the "Release:" blocks publish.
@@ -407,7 +413,7 @@ blocks:
             # files that may hold secrets) and size (at most 3 MiB; the
             # crates.io limit is 10 MiB), then runs the offline smoke test in a
             # new project that depends on the crate.
-            - cargo xtask package-check
+            - cargo --locked xtask package-check
             - record_tested_crate verify-package
 
   - name: "Release: pre-publish smoke test"
@@ -453,12 +459,12 @@ blocks:
         # the check remains valid if the two diverge.
         - name: "Rust MSRV, broker round trip"
           commands:
-            - cargo xtask package-smoke-test --msrv --with-broker
+            - cargo --locked xtask package-smoke-test --msrv --with-broker
             - record_tested_crate smoke-msrv
         - name: "Rust stable, release build, broker round trip"
           commands:
             - rustup toolchain install stable --profile minimal
-            - cargo xtask package-smoke-test --with-broker --toolchain stable --release
+            - cargo --locked xtask package-smoke-test --with-broker --toolchain stable --release
             - record_tested_crate smoke-stable
 
   - name: "Release: publish to crates.io"
@@ -765,11 +771,11 @@ blocks:
       jobs:
         - name: "Rust MSRV, broker round trip"
           commands:
-            - cargo xtask package-smoke-test --registry --msrv --with-broker
+            - cargo --locked xtask package-smoke-test --registry --msrv --with-broker
         - name: "Rust stable, release build, broker round trip"
           commands:
             - rustup toolchain install stable --profile minimal
-            - cargo xtask package-smoke-test --registry --with-broker --toolchain stable --release
+            - cargo --locked xtask package-smoke-test --registry --with-broker --toolchain stable --release
 
   - name: "Release: post-publish smoke test (macOS arm64)"
     # Build and offline smoke test only. The broker round trip is covered on
@@ -793,7 +799,7 @@ blocks:
       jobs:
         - name: "Rust MSRV, offline smoke test"
           commands:
-            - cargo xtask package-smoke-test --registry --msrv
+            - cargo --locked xtask package-smoke-test --registry --msrv
 
 promotions:
   - name: Start translation plan
