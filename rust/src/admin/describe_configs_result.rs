@@ -56,3 +56,26 @@ impl DescribeConfigsResult {
         KafkaFuture::join_map(entries)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::config_resource;
+
+    /// The constructor stays `pub(crate)` (Java's is `protected`), so this
+    /// in-crate test, not the `tests/admin` crate, checks that a result built
+    /// from completed futures reads them back through `values()` and `all()`.
+    #[tokio::test]
+    async fn values_and_all_read_back_the_futures_it_was_built_from() {
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
+        let result = DescribeConfigsResult::new(HashMap::from([(
+            resource.clone(),
+            KafkaFuture::completed(Ok(Config::new(Vec::new()))),
+        )]));
+        let config = result.values()[&resource].get().await.expect("completed future");
+        assert_eq!(config.entries().count(), 0);
+        let all = result.all().get().await.expect("completed futures");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[&resource].entries().count(), 0);
+    }
+}
