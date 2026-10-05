@@ -29,13 +29,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::actions::{ChaosAction, LEADER_PLAN_SETTLE, ReassignMode};
-use super::common::broker_control::{BrokerControl, StopKind};
+use super::actions::{ChaosAction, LEADER_PLAN_SETTLE, REASSIGN_COMPLETE_MAX, ReassignMode};
+use super::common::broker_control::{BrokerControl, CLEAN_STOP_GRACE, StopKind};
 use super::config::{ActionKind, ChaosConfig};
-use super::harness::{ChaosHarness, WorkloadPool};
-use super::isolation;
+use super::harness::{CONSUMER_STOP_DEADLINE, ChaosHarness, PRODUCER_STOP_DEADLINE, RunningWorkloads, WorkloadPool};
+use super::isolation::{self, ForcedExit, signals};
 use super::reports::{self, ReportsHandle, RunReports};
-use super::workload::Backend;
+use super::workload::{Backend, Role};
 use confluent_kafka::admin::Admin;
 use futures_util::FutureExt as _;
 use rand::rngs::StdRng;
@@ -75,6 +75,23 @@ const ABORT_STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// How long after teardown the process is forced to exit if it has not.
 const FORCED_EXIT_AFTER: Duration = Duration::from_secs(60);
+
+/// How long the whole wind-down after the drive may take before the process
+/// is forced to exit: stopping an abandoned run's workloads, the verdict and
+/// the reports (a few seconds), and the cluster teardown, then the usual grace
+/// period. Armed before any of it, so a wind-down step that hangs or panics
+/// cannot leave the process running.
+const WIND_DOWN_BUDGET: Duration = Duration::from_secs(
+    ABORT_STOP_WAIT.as_secs() + 60 + isolation::TEARDOWN_BUDGET.as_secs() + FORCED_EXIT_AFTER.as_secs(),
+);
+
+/// Bound on one `describe_topics` in the actions' leader sampling
+/// (`partition_state` in `actions.rs`).
+const DESCRIBE_TIMEOUT_S: u64 = 10;
+
+/// Bound on building one gRPC-backed workload: the first one per backend
+/// starts its server container (`backend_pool::get_or_start`).
+const GRPC_BUILD_S: u64 = 60;
 
 /// Printed when a passing run is forced to exit; the matrix runner classifies
 /// it as a pass (`xtask/src/chaos_matrix.rs`).
@@ -196,8 +213,8 @@ fn roll_order(config: &ChaosConfig, cycle: u32) -> Vec<u16> {
     order
 }
 
-/// Run one chaos action for the current cycle. Used for both the primary
-/// `--action` and the per-cycle overlays (A1 — compose fault types).
+/// Run one chaos action for the current cycle: every fault flag that fires
+/// this cycle, and the per-cycle overlays (A1 — compose fault types).
 #[expect(clippy::too_many_arguments)]
 async fn run_action(
     action: ActionKind,
@@ -346,6 +363,9 @@ async fn chaos_run() {
         eprintln!("chaos: configuration OK");
         return;
     }
+    // Before any cluster exists: a Ctrl-C / SIGTERM at any point of the run
+    // must tear its cluster down (see `isolation::signals`).
+    signals::install();
 
     // Resolve the reproducibility seed. `0` means "unset": pick a fresh one and
     // print it so a run that finds a bug can be replayed with `--seed <printed>`.
@@ -506,8 +526,8 @@ async fn chaos_run() {
             }
 
             // Run every configured action that fires this cycle, in listed
-            // order (A1 — compose fault types). Each `--action KIND[:everyN]`
-            // fires on cycles every, 2*every, … (`every`=1 → every cycle).
+            // order (A1 — compose fault types). Each fault flag's cadence N
+            // fires on cycles N, 2N, … (N = 1 → every cycle).
             for spec in &cfg.actions {
                 if !spec.fires(cycle_1based) {
                     continue;
@@ -559,26 +579,51 @@ async fn chaos_run() {
     // scenario + drive. A healthy run finishes in a small fraction of this; the
     // cap exists ONLY so a WEDGED cluster — all brokers down and unable to
     // recover, a broker that never rejoins, a cluster degraded past making any
-    // progress — fails fast (with container cleanup via `shutdown`) instead of
-    // hanging indefinitely. It scales with the run: warmup + per-cycle worst
-    // case (a roll may wait up to `up_wait_s` for a rejoin) + drain, plus
-    // margin. Every per-call path already has its own timeout (broker
+    // progress — fails fast (with container cleanup) instead of hanging
+    // indefinitely. It scales with the run: warmup + per-cycle worst case (a
+    // roll may wait up to `up_wait_s` for a rejoin) + the close phases + drain,
+    // plus margin. Every per-call path already has its own timeout (broker
     // wait_operational, describe sampling); this is the last-resort net for any
     // wedge those don't individually cover.
-    //
-    // Per cycle, budget every action that can fire: a broker-roll cycle rolls
-    // EVERY broker in turn (each waiting `stop_s`, up to `up_wait_s` for the
-    // rejoin, plus bounded describe sampling), a recreate waits for the delete
-    // and the create (30 s each) plus its dwell, and reassign / change-leader
-    // wait for reassignments and the leader plan to settle. Budgeting a single
-    // roll per cycle, as this once did, aborted healthy multi-broker runs as
-    // "wedged".
-    //
-    // `--random` ignores `config.actions`: any of the four faults can fire on
-    // any cycle, with one broker rolled for up to `RANDOM_MAX_DOWN_S` and a
-    // dwell of up to `RANDOM_MAX_DWELL_S`, plus the pre-action jitter of up to
-    // `between_s`. Budget for all of them, or a random run that happens to draw
-    // recreates and reassignments is aborted as wedged.
+    let watchdog = watchdog_budget(&config);
+    drive_protected(
+        harness_ref,
+        workloads,
+        scenario,
+        ProtectedRun {
+            name: "chaos run",
+            watchdog,
+            drain: config.drain_dur(),
+            idle_threshold: config.idle_threshold_dur(),
+            min_partitions: config.min_partitions(),
+            reports: reports_ref,
+        },
+    )
+    .await;
+}
+
+/// The global watchdog budget of a run configured by `config`.
+///
+/// Per cycle, budget every action that can fire: a broker-roll cycle rolls
+/// EVERY broker in turn (each waiting `stop_s`, up to `up_wait_s` for the
+/// rejoin, plus three leader samples of up to [`DESCRIBE_TIMEOUT_S`] per
+/// topic), a recreate waits for the delete and the create (30 s each) plus its
+/// dwell, and reassign / change-leader, per topic, wait for the reassignment
+/// (bounded by [`REASSIGN_COMPLETE_MAX`]) and the leader plan to settle. Budgeting a single roll per cycle, as this once did, aborted
+/// healthy multi-broker runs as "wedged".
+///
+/// `--random` ignores `config.actions`: any of the four faults can fire on
+/// any cycle, with one broker rolled for up to `RANDOM_MAX_DOWN_S` and a
+/// dwell of up to `RANDOM_MAX_DWELL_S`, plus the pre-action jitter of up to
+/// `between_s`. Budget for all of them, or a random run that happens to draw
+/// recreates and reassignments is aborted as wedged.
+///
+/// Outside the cycles: building the gRPC workloads (and every gRPC consumer
+/// the run adds), and the two close phases, which the drive bounds itself
+/// ([`PRODUCER_STOP_DEADLINE`], [`CONSUMER_STOP_DEADLINE`]) so that a close
+/// hang is reported as such before this budget runs out.
+fn watchdog_budget(config: &ChaosConfig) -> Duration {
+    let num_topics = u64::from(config.num_topics.max(1));
     let has = |pred: fn(&ActionKind) -> bool| config.random || config.actions.iter().any(|a| pred(&a.kind));
     let (rolled_per_cycle, down_s, dwell_s, jitter_s) = if config.random {
         (1, RANDOM_MAX_DOWN_S, RANDOM_MAX_DWELL_S, config.between_s)
@@ -592,23 +637,37 @@ async fn chaos_run() {
     } else {
         (0, 0, config.dwell_s, 0)
     };
-    let leader_plan_extra = u64::from(config.num_topics.max(1)) * LEADER_PLAN_SETTLE.as_secs().saturating_sub(10);
-    let per_cycle = rolled_per_cycle * (config.up_wait_s + down_s + 30)
+    // One roll: the down window, the rejoin wait, three leader samples (before
+    // the stop, while down, after the start) of one describe per topic each,
+    // and 40 s for the stop / start themselves and the ISR check's last
+    // describe overrunning `up_wait_s`. A clean stop (also possible in random
+    // mode) may take up to its full `docker stop` grace.
+    let clean_stop_s = if config.random || !config.unclean {
+        CLEAN_STOP_GRACE.as_secs()
+    } else {
+        0
+    };
+    let per_roll = down_s + config.up_wait_s + 3 * DESCRIBE_TIMEOUT_S * num_topics + 40 + clean_stop_s;
+    // One migration (reassign or change-leader) of one topic: the wait for any
+    // reassignment in progress plus the wait for its own (one shared
+    // `REASSIGN_COMPLETE_MAX` deadline), the before- and after-describes, the
+    // alter (30 s) and elect RPCs, and the leader-plan settle with its last
+    // describe overrunning it.
+    let per_migrated_topic = REASSIGN_COMPLETE_MAX.as_secs() + LEADER_PLAN_SETTLE.as_secs() + 90;
+    let per_cycle = rolled_per_cycle * per_roll
         + jitter_s
         + if has(|k| matches!(k, ActionKind::TopicRecreate)) {
             60 + dwell_s
         } else {
             0
         }
-        // The leader-plan check waits up to `LEADER_PLAN_SETTLE` per topic
-        // (the base figures below were sized for a 10 s settle).
         + if has(|k| matches!(k, ActionKind::ReassignPartitions)) {
-            90 + leader_plan_extra
+            num_topics * per_migrated_topic
         } else {
             0
         }
         + if has(|k| matches!(k, ActionKind::ChangeLeader)) {
-            30 + leader_plan_extra
+            num_topics * per_migrated_topic
         } else {
             0
         }
@@ -620,32 +679,105 @@ async fn chaos_run() {
         } else {
             0
         }
+        // A gRPC consumer added by churn (up to `max - min` per cycle) or by
+        // `--rebalance-add-cycle` (once) is built inside the scenario.
+        + if config.added_consumer_backend().is_grpc() {
+            u64::from(
+                config
+                    .consumer_churn_max
+                    .zip(config.consumer_churn_min)
+                    .map_or(0, |(max, min)| max - min),
+            ) * GRPC_BUILD_S
+        } else {
+            0
+        }
         + config.between_s
         + 30;
-    let watchdog = Duration::from_secs(config.warmup_s + u64::from(config.cycles) * per_cycle + config.drain_s + 120);
+    // gRPC workload builds outside the per-cycle figure: one per gRPC spec
+    // before the scenario (a producer spec builds one producer per topic),
+    // plus the one consumer `--rebalance-add-cycle` adds in its cycle.
+    let grpc_builds: u64 = config
+        .workloads
+        .iter()
+        .filter(|w| w.backend.is_grpc())
+        .map(|w| if w.role == Role::Producer { num_topics } else { 1 })
+        .sum::<u64>()
+        + u64::from(config.rebalance_add_cycle.is_some() && config.added_consumer_backend().is_grpc());
+    Duration::from_secs(
+        config.warmup_s
+            + u64::from(config.cycles) * per_cycle
+            + grpc_builds * GRPC_BUILD_S
+            + PRODUCER_STOP_DEADLINE.as_secs()
+            + config.drain_s
+            + CONSUMER_STOP_DEADLINE.as_secs()
+            + 120,
+    )
+}
+
+/// Everything [`drive_protected`] needs besides the harness, the workloads and
+/// the scenario.
+pub(super) struct ProtectedRun<'a> {
+    /// Names the run in the final assertion (`"<name> verdict was not PASS"`).
+    pub name: &'static str,
+    /// Wall-clock cap on the whole drive ([`watchdog_budget`]).
+    pub watchdog: Duration,
+    /// See [`RunningWorkloads::drive`].
+    pub drain: Duration,
+    /// See [`RunningWorkloads::drive`].
+    pub idle_threshold: Duration,
+    /// Passed to the verdict.
+    pub min_partitions: usize,
+    /// The run's reports, if any (`--reports`).
+    pub reports: &'a ReportsHandle,
+}
+
+/// Drive `workloads` and `scenario` with every lifecycle protection, then
+/// judge the run, write its reports, tear the cluster down and fail the test
+/// if the run failed. Shared by every chaos scenario, so each gets:
+///
+/// - the heartbeat watchdog, for a scenario task that blocks outright;
+/// - the global wall-clock watchdog ([`ProtectedRun::watchdog`]);
+/// - an orderly abort on the first Ctrl-C / SIGTERM ([`signals`]; the caller
+///   installs the handler at the start of its run);
+/// - a bounded stop of the workloads when the drive is abandoned;
+/// - a forced exit armed BEFORE the wind-down, so a hanging or panicking
+///   report or teardown step cannot leave the process running;
+/// - reports written even when the drive panicked, and the drive's own panic
+///   re-raised as the failure cause even if a wind-down step panicked too.
+///
+/// Every fault action fails by panicking (a broker that never rejoins, a
+/// describe that cannot complete, ...), and those unwinds used to skip the
+/// report-writing — losing verdict.txt and summary.txt for exactly the runs
+/// that need them. Hence the panic is caught, reported, torn down, then
+/// re-raised.
+pub(super) async fn drive_protected<Fut>(
+    harness: &ChaosHarness,
+    workloads: RunningWorkloads,
+    scenario: Fut,
+    run: ProtectedRun<'_>,
+) where
+    Fut: std::future::Future<Output = ()>,
+{
+    let verifier = harness.verifier();
+    let watchdog = run.watchdog;
     // Last-resort net for the scenario task itself blocking, which would stop
     // the watchdog below as well (see `isolation`).
     isolation::start_heartbeat_watchdog(harness.heartbeat(), HEARTBEAT_STALE, harness.cluster_teardown());
     let drive = workloads.drive(
-        config.drain_dur(),
-        config.idle_threshold_dur(),
+        run.drain,
+        run.idle_threshold,
         verifier.clone(),
         harness.recreate_settle(),
         scenario,
     );
 
-    // How the drive ended. Every fault action fails by panicking (a broker that
-    // never rejoins, a describe that cannot complete, ...), and those unwinds
-    // used to skip the report-writing below — losing verdict.txt and
-    // summary.txt for exactly the runs that need them. Catch the panic, report,
-    // tear down, then re-raise it. Ctrl-C is handled the same way: without a
-    // handler the process dies mid-run and leaks the whole cluster.
     enum DriveOutcome {
         Finished,
         Wedged,
         Panicked(Box<dyn std::any::Any + Send>),
         Interrupted,
     }
+    signals::enable_orderly_abort();
     let outcome = tokio::select! {
         biased;
         res = tokio::time::timeout(watchdog, std::panic::AssertUnwindSafe(drive).catch_unwind()) => match res {
@@ -653,16 +785,35 @@ async fn chaos_run() {
             Ok(Err(payload)) => DriveOutcome::Panicked(payload),
             Err(_) => DriveOutcome::Wedged,
         },
-        _ = tokio::signal::ctrl_c() => DriveOutcome::Interrupted,
+        () = signals::abort_requested() => DriveOutcome::Interrupted,
     };
+    // From here a first signal lets the wind-down below finish (it is the
+    // orderly abort) and a second tears down and exits at once. One that
+    // arrived just as the drive ended is carried out here, as a normal
+    // wind-down.
+    signals::end_orderly_abort();
     // The drive no longer beats, whichever way it ended.
-    harness.heartbeat().disarm();
+    let heartbeat = harness.heartbeat();
+    heartbeat.disarm();
+
+    // From here the run only winds down. Bound all of it, before any of it can
+    // hang (a workload that never stops, a docker call, the runtime's own
+    // shutdown) or panic past this point. Re-armed with the outcome once the
+    // cluster is gone.
+    let forced_exit = ForcedExit::arm(
+        WIND_DOWN_BUDGET,
+        101,
+        format!(
+            "chaos: FORCED EXIT — the wind-down (stopping workloads, verdict, reports, teardown) did not complete \
+             within {WIND_DOWN_BUDGET:?}"
+        ),
+    );
 
     // An abandoned drive leaves its workloads running on their threads. Stop
     // them and give them a bounded time to close. A producer's close settles
     // its in-flight sends, so the verdict does not score sends that only the
     // abort left open. A workload that does not finish is named and left
-    // behind; the forced exit below ends it.
+    // behind; the forced exit ends it.
     if !matches!(outcome, DriveOutcome::Finished) {
         let stuck = harness.workload_threads().stop_and_wait(ABORT_STOP_WAIT).await;
         if !stuck.is_empty() {
@@ -674,16 +825,17 @@ async fn chaos_run() {
         }
     }
 
-    let verdict = verifier.verdict(config.min_partitions());
     let failure_header = match &outcome {
         DriveOutcome::Finished => None,
         DriveOutcome::Wedged => {
+            let phase = heartbeat.phase();
             eprintln!(
-                "chaos: WATCHDOG — run exceeded {watchdog:?} without finishing; the cluster is wedged \
-                 (e.g. brokers down and unable to recover). Aborting; partial verdict below."
+                "chaos: WATCHDOG — run exceeded {watchdog:?} without finishing (stuck in the {phase} phase); the \
+                 cluster is wedged (e.g. brokers down and unable to recover). Aborting; partial verdict below."
             );
             Some(format!(
-                "=== Chaos verdict: FAIL (watchdog) ===\n  run exceeded {watchdog:?} without completing; cluster wedged"
+                "=== Chaos verdict: FAIL (watchdog) ===\n  run exceeded {watchdog:?} without completing (stuck in the \
+                 {phase} phase); cluster wedged"
             ))
         },
         DriveOutcome::Panicked(payload) => {
@@ -692,35 +844,54 @@ async fn chaos_run() {
             Some(format!("=== Chaos verdict: FAIL (panic) ===\n  {message}"))
         },
         DriveOutcome::Interrupted => {
-            eprintln!("chaos: INTERRUPTED (Ctrl-C); tearing the cluster down. Partial verdict below.");
-            Some("=== Chaos verdict: FAIL (interrupted) ===\n  run interrupted by Ctrl-C".to_string())
+            eprintln!("chaos: INTERRUPTED (Ctrl-C / SIGTERM); tearing the cluster down. Partial verdict below.");
+            Some("=== Chaos verdict: FAIL (interrupted) ===\n  run interrupted by a signal".to_string())
         },
     };
-    eprintln!("{verdict}");
 
-    // Persist reports BEFORE the pass/fail assertion so a failing, wedged,
-    // panicked or interrupted run still leaves its verdict, leader-change log,
-    // client log, and signature summary on disk for diagnosis.
-    if let Some(r) = reports {
-        let body = match &failure_header {
-            Some(header) => format!("{header}\n{verdict}"),
-            None => verdict.to_string(),
-        };
-        r.write_verdict(&body);
-        let dir = Arc::try_unwrap(r).ok().expect("sole owner of reports at finish").finish();
-        eprintln!("chaos: reports written to {}", dir.display());
-    }
+    // Judge and persist the reports BEFORE the pass/fail assertion so a
+    // failing, wedged, panicked or interrupted run still leaves its verdict,
+    // leader-change log, client log, and signature summary on disk for
+    // diagnosis. Caught: a panic here (a poisoned verifier, say) must neither
+    // skip the teardown nor mask the drive's own failure.
+    let judged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let verdict = verifier.verdict(run.min_partitions);
+        eprintln!("{verdict}");
+        if let Some(r) = run.reports {
+            let body = match &failure_header {
+                Some(header) => format!("{header}\n{verdict}"),
+                None => verdict.to_string(),
+            };
+            r.write_verdict(&body);
+            eprintln!("chaos: reports written to {}", r.finish().display());
+        }
+        verdict
+    }));
+    let judged = judged.map_err(|payload| {
+        let message = isolation::panic_message(payload.as_ref());
+        eprintln!("chaos: the verdict/report step panicked: {message}");
+        // Still leave a verdict.txt saying why there is no verdict.
+        if let Some(r) = run.reports {
+            let header = failure_header.as_deref().unwrap_or("=== Chaos verdict: FAIL (panic) ===");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                r.write_verdict(&format!("{header}\n  no verdict: the verdict/report step panicked: {message}"));
+                r.finish();
+            }));
+        }
+        message
+    });
 
-    harness.shutdown();
+    harness.teardown();
 
     // Reports are on disk and the cluster is gone. A client task that never
     // yields keeps the test runtime from shutting down, so the process could
     // still hang here (P3-1MiB, Sep 2026 matrix). Bound it.
-    let passed = matches!(outcome, DriveOutcome::Finished) && verdict.is_pass() && verdict.delivered > 0;
+    let passed = matches!(outcome, DriveOutcome::Finished)
+        && judged.as_ref().is_ok_and(|verdict| verdict.is_pass() && verdict.delivered > 0);
     if passed {
-        isolation::arm_forced_exit(FORCED_EXIT_AFTER, 0, FORCED_EXIT_AFTER_PASS.to_string());
+        forced_exit.rearm(FORCED_EXIT_AFTER, 0, FORCED_EXIT_AFTER_PASS.to_string());
     } else {
-        isolation::arm_forced_exit(
+        forced_exit.rearm(
             FORCED_EXIT_AFTER,
             101,
             "chaos: FORCED EXIT — the process did not terminate after teardown (the run had already failed)"
@@ -728,14 +899,21 @@ async fn chaos_run() {
         );
     }
 
+    // The drive's failure comes first: a wind-down panic is at most its
+    // consequence (and was printed above).
     match outcome {
         DriveOutcome::Finished => {},
         DriveOutcome::Wedged => panic!(
-            "chaos run WEDGED: exceeded watchdog {watchdog:?} without finishing (cluster could not make progress)"
+            "{} WEDGED: exceeded watchdog {watchdog:?} without finishing (cluster could not make progress)",
+            run.name
         ),
         DriveOutcome::Panicked(payload) => std::panic::resume_unwind(payload),
-        DriveOutcome::Interrupted => panic!("chaos run interrupted by Ctrl-C (cluster torn down)"),
+        DriveOutcome::Interrupted => panic!("{} interrupted by a signal (cluster torn down)", run.name),
     }
-    assert!(verdict.is_pass(), "chaos run verdict was not PASS:\n{verdict}");
+    let verdict = match judged {
+        Ok(verdict) => verdict,
+        Err(message) => panic!("{}: the verdict/report step panicked: {message}", run.name),
+    };
+    assert!(verdict.is_pass(), "{} verdict was not PASS:\n{verdict}", run.name);
     assert!(verdict.delivered > 0, "no records were acknowledged — workload never ran");
 }

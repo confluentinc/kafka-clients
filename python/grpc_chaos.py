@@ -32,6 +32,11 @@ workload exercises the same client behaviour as a run with a Rust one:
 * the drain is the same: the producer closes (every record settles first), the
   consumer commits, reads back, reports it is closing, closes.
 
+Every event is queued from the callback or loop step that observed it, and
+``MarkWorkload`` queues its marker on the same FIFO, so the harness can tell
+which events its client observed before a topic-id switch however far behind
+the stream it reads (chaos_service.proto, "Topic ids").
+
 ``ChaosWorkloadService`` serves the synchronous server (grpc_server.py): each
 workload runs on its own thread with the synchronous client.
 ``AsyncChaosWorkloadService`` serves the asyncio server (grpc_server_async.py):
@@ -127,6 +132,65 @@ def _send_failed(index, exc):
     return chpb.WorkloadEvent(send_failed=chpb.SendFailed(index=index, error=_error(exc)))
 
 
+class _RecordOutcomes:
+    """Settles each record from its delivery callback, exactly once against a
+    ``send()`` that raised.
+
+    A ``send()`` can raise after the binding has queued the record (while it
+    waits for buffer space), and then the record's callback still fires. So a
+    raise is reported as ``SendFailed`` only if the callback has not fired yet,
+    and the first callback after such a report is absorbed (logged): either
+    way the record is settled once. Any other callback is reported, including a
+    second one for the same record, so the verifier sees a client that settles
+    a record twice.
+
+    An error while building the outcome event is not left to the binding, which
+    logs and swallows whatever a delivery callback raises (the record would then
+    look unsettled and the client would be blamed): it is logged and ends the
+    workload with ``Failed``, as a server-side fault.
+    """
+
+    def __init__(self, emit, workload_id):
+        self._emit = emit
+        self._workload_id = workload_id
+        self._lock = threading.Lock()
+
+    def on_delivery(self, index):
+        """The delivery callback for record ``index``, and its settlement
+        state for :meth:`send_raised`."""
+        state = [0, False]  # callbacks fired, send() failure reported
+
+        def on_delivery(metadata, exception):
+            with self._lock:
+                state[0] += 1
+                absorbed = state[1] and state[0] == 1
+            if absorbed:
+                LOG.warning("chaos producer %s: record %d settled by its failed send(); its callback "
+                            "fired afterwards with %s", self._workload_id, index,
+                            "an error" if exception is not None else "metadata")
+                return
+            try:
+                event = _outcome(index, metadata, exception)
+            except Exception as e:  # noqa: BLE001
+                LOG.exception("chaos producer %s: building record %d's outcome failed",
+                              self._workload_id, index)
+                event = _failed(e)
+            self._emit(event)
+
+        return on_delivery, state
+
+    def send_raised(self, index, state, exc):
+        """``send()`` of record ``index`` raised ``exc``."""
+        with self._lock:
+            report = state[0] == 0 and not state[1]
+            state[1] = True
+        if report:
+            self._emit(_send_failed(index, exc))
+        else:
+            LOG.warning("chaos producer %s: send() of record %d raised after its callback had "
+                        "settled it: %s", self._workload_id, index, exc)
+
+
 def _stats(sent, elapsed):
     return chpb.WorkloadEvent(producer_stats=chpb.ProducerStats(sent=sent, elapsed_seconds=elapsed))
 
@@ -145,10 +209,12 @@ def _consumed_events(records):
 
 
 def _rebalance(kind, partitions):
+    observed_at = time.time_ns()
     refs = sorted((tp.topic, tp.partition) for tp in partitions)
     return chpb.WorkloadEvent(rebalance=chpb.Rebalance(
         kind=_REBALANCE_KIND[kind],
-        partitions=[chpb.TopicPartitionRef(topic=t, partition=p) for t, p in refs]))
+        partitions=[chpb.TopicPartitionRef(topic=t, partition=p) for t, p in refs],
+        observed_at_unix_nanos=observed_at))
 
 
 def _committed_events(offsets):
@@ -159,6 +225,21 @@ def _committed_events(offsets):
 
 def _consumer_error(op, exc):
     return chpb.WorkloadEvent(consumer_error=chpb.ConsumerError(op=op, error=_error(exc)))
+
+
+def _commit_callback(emit):
+    """The ``commit_async`` completion callback: reports a failed commit, which
+    otherwise nobody would see (the call itself only initiates the commit)."""
+
+    def on_commit(_offsets, exception):
+        if exception is not None:
+            emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, exception))
+
+    return on_commit
+
+
+def _marker(marker):
+    return chpb.WorkloadEvent(marker=chpb.Marker(marker=marker))
 
 
 def _closing():
@@ -255,6 +336,7 @@ def _run_producer_sync(request, emit, stop):
     topic = request.topic
     msg_size = request.msg_size
     interval = 1.0 / request.target_rps if request.target_rps else 0.0
+    outcomes = _RecordOutcomes(emit, request.workload_id)
     started = time.monotonic()
     next_due = started
     index = 0
@@ -264,10 +346,7 @@ def _run_producer_sync(request, emit, stop):
             # Open the record's in-flight window before handing it over; the
             # delivery callback's event closes it.
             emit(_sent(index))
-
-            def on_delivery(metadata, exception, index=index):
-                emit(_outcome(index, metadata, exception))
-
+            on_delivery, settlement = outcomes.on_delivery(index)
             try:
                 # Not awaited: the binding reports the outcome through
                 # on_delivery, which lets it batch and pipeline. send() itself
@@ -275,7 +354,7 @@ def _run_producer_sync(request, emit, stop):
                 # application.
                 producer.send(record, on_delivery=on_delivery)
             except Exception as e:  # noqa: BLE001
-                emit(_send_failed(index, e))
+                outcomes.send_raised(index, settlement, e)
             index += 1
             if interval:
                 next_due += interval
@@ -322,6 +401,7 @@ def _run_consumer_sync(request, emit, stop):
     poll_timeout = request.poll_timeout_ms / 1000.0
     check_interval = request.commit_check_interval_ms / 1000.0
     sync_commit = request.commit_mode == chpb.COMMIT_MODE_SYNC
+    on_commit = _commit_callback(emit)
     last_check = time.monotonic()
 
     def read_back():
@@ -346,7 +426,9 @@ def _run_consumer_sync(request, emit, stop):
             if sync_commit:
                 consumer.commit()
             else:
-                consumer.commit_async()
+                # The call only initiates the commit; its failure arrives
+                # through on_commit.
+                consumer.commit_async(callback=on_commit)
         except Exception as e:  # noqa: BLE001
             emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
             continue
@@ -368,8 +450,8 @@ def _run_consumer_sync(request, emit, stop):
     try:
         _close_consumer_sync(consumer, handle)
     except Exception as e:  # noqa: BLE001
-        emit(_failed(e))
-        return
+        # The consumer's error, not the workload's: it drained and is closed.
+        emit(_consumer_error(chpb.CONSUMER_OP_CLOSE, e))
     emit(_closed())
     emit(_finished())
 
@@ -402,26 +484,42 @@ def _close_quietly(close):
 
 
 class _Registry:
-    """workload_id -> stop signal, shared by the Run* and StopWorkload RPCs."""
+    """workload_id -> (stop signal, emit), shared by the Run*, StopWorkload and
+    MarkWorkload RPCs."""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._stops = {}
+        self._workloads = {}
 
-    def add(self, workload_id, stop):
+    def add(self, workload_id, stop, emit):
         with self._lock:
-            if workload_id in self._stops:
+            if workload_id in self._workloads:
                 return False
-            self._stops[workload_id] = stop
+            self._workloads[workload_id] = (stop, emit)
             return True
 
     def remove(self, workload_id):
         with self._lock:
-            self._stops.pop(workload_id, None)
+            self._workloads.pop(workload_id, None)
 
     def get(self, workload_id):
+        """The running workload's ``(stop, emit)``, or ``None``."""
         with self._lock:
-            return self._stops.get(workload_id)
+            return self._workloads.get(workload_id)
+
+    def stop(self, workload_id):
+        entry = self.get(workload_id)
+        if entry is not None:
+            entry[0].set()
+
+    def mark(self, workload_id, marker):
+        """Queue a ``Marker`` behind every event the workload queued so far;
+        whether it was running."""
+        entry = self.get(workload_id)
+        if entry is None:
+            return False
+        entry[1](_marker(marker))
+        return True
 
 
 def _duplicate_id(workload_id):
@@ -444,20 +542,26 @@ class ChaosWorkloadService(chpb_grpc.ChaosWorkloadServiceServicer):
         return self._run(request, context, _run_consumer_sync)
 
     def StopWorkload(self, request, context):
-        stop = self._registry.get(request.workload_id)
-        if stop is not None:
-            stop.set()
+        self._registry.stop(request.workload_id)
         return pb.StatusResponse()
+
+    def MarkWorkload(self, request, context):
+        # SimpleQueue.put is thread-safe, and FIFO with the workload's own puts.
+        return chpb.MarkWorkloadResponse(found=self._registry.mark(request.workload_id, request.marker))
 
     def _run(self, request, context, loop):
         stop = threading.Event()
-        if not self._registry.add(request.workload_id, stop):
+        events = queue.SimpleQueue()
+        if not self._registry.add(request.workload_id, stop, events.put):
             yield _duplicate_id(request.workload_id)
             return
+        # Headers now, not with the first event: the harness's call resolves on
+        # them, and a consumer that is never assigned anything may emit nothing
+        # for a long time (chaos_service.proto, lifecycle step 1).
+        context.send_initial_metadata(())
         # The harness going away (cancelled RPC) stops the workload, which then
         # drains and closes its client on its own thread.
         context.add_callback(stop.set)
-        events = queue.SimpleQueue()
         worker = threading.Thread(
             target=self._guarded, args=(loop, request, events.put, stop),
             name=f"chaos-{request.workload_id}", daemon=True)
@@ -530,6 +634,7 @@ async def _run_producer_async(request, emit, stop):
     topic = request.topic
     msg_size = request.msg_size
     interval = 1.0 / request.target_rps if request.target_rps else 0.0
+    outcomes = _RecordOutcomes(emit, request.workload_id)
     started = time.monotonic()
     next_due = started
     index = 0
@@ -537,16 +642,13 @@ async def _run_producer_async(request, emit, stop):
         while not stop.is_set():
             record = kp.ProducerRecord(topic, _value(index, msg_size), _key(index), -1, -1)
             emit(_sent(index))
-
-            def on_delivery(metadata, exception, index=index):
-                emit(_outcome(index, metadata, exception))
-
+            on_delivery, settlement = outcomes.on_delivery(index)
             try:
                 # Awaits only buffer capacity; the returned future is not
                 # awaited, the outcome arrives through on_delivery.
                 await producer.send(record, on_delivery=on_delivery)
             except Exception as e:  # noqa: BLE001
-                emit(_send_failed(index, e))
+                outcomes.send_raised(index, settlement, e)
             index += 1
             if interval:
                 next_due += interval
@@ -603,6 +705,9 @@ async def _run_consumer_async(request, emit, stop):
     poll_timeout = request.poll_timeout_ms / 1000.0
     check_interval = request.commit_check_interval_ms / 1000.0
     sync_commit = request.commit_mode == chpb.COMMIT_MODE_SYNC
+    # A plain function: it runs on the binding's dispatcher thread, and emit
+    # hops onto the loop from there.
+    on_commit = _commit_callback(emit)
     last_check = time.monotonic()
 
     async def read_back():
@@ -627,7 +732,7 @@ async def _run_consumer_async(request, emit, stop):
             if sync_commit:
                 await consumer.commit()
             else:
-                consumer.commit_async()
+                consumer.commit_async(callback=on_commit)
         except Exception as e:  # noqa: BLE001
             emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
             continue
@@ -647,8 +752,8 @@ async def _run_consumer_async(request, emit, stop):
     try:
         await _close_consumer_async(consumer, handle)
     except Exception as e:  # noqa: BLE001
-        emit(_failed(e))
-        return
+        # The consumer's error, not the workload's: it drained and is closed.
+        emit(_consumer_error(chpb.CONSUMER_OP_CLOSE, e))
     emit(_closed())
     emit(_finished())
 
@@ -675,26 +780,32 @@ class AsyncChaosWorkloadService(chpb_grpc.ChaosWorkloadServiceServicer):
         self._registry = _Registry()
 
     async def RunProducer(self, request, context):
-        async for batch in self._run(request, _run_producer_async):
+        async for batch in self._run(request, context, _run_producer_async):
             yield batch
 
     async def RunConsumer(self, request, context):
-        async for batch in self._run(request, _run_consumer_async):
+        async for batch in self._run(request, context, _run_consumer_async):
             yield batch
 
     async def StopWorkload(self, request, context):
-        stop = self._registry.get(request.workload_id)
-        if stop is not None:
-            stop.set()
+        self._registry.stop(request.workload_id)
         return pb.StatusResponse()
 
-    async def _run(self, request, loop_fn):
+    async def MarkWorkload(self, request, context):
+        # On the loop thread, so emit queues the marker directly, FIFO with
+        # the workload's events (those from the binding's threads hop onto the
+        # loop first, in the order the binding produced them).
+        return chpb.MarkWorkloadResponse(found=self._registry.mark(request.workload_id, request.marker))
+
+    async def _run(self, request, context, loop_fn):
         stop = asyncio.Event()
-        if not self._registry.add(request.workload_id, stop):
-            yield _duplicate_id(request.workload_id)
-            return
         events = asyncio.Queue()
         emit = _loop_emitter(asyncio.get_running_loop(), events)
+        if not self._registry.add(request.workload_id, stop, emit):
+            yield _duplicate_id(request.workload_id)
+            return
+        # Headers now, not with the first event; see ChaosWorkloadService._run.
+        await context.send_initial_metadata(())
         task = asyncio.create_task(self._guarded(loop_fn, request, emit, stop))
         try:
             while True:

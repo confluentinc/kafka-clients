@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{Admin, NewPartitionReassignment};
+use confluent_kafka::admin::{Admin, NewPartitionReassignment, PartitionReassignment};
 use confluent_kafka::common::{ElectionType, TopicCollection, TopicPartition};
 
 use super::common::broker_control::{BrokerControl, StopKind};
@@ -35,6 +35,32 @@ pub const LEADER_PLAN_SETTLE: Duration = Duration::from_secs(30);
 /// How often [`verify_leader_plan`] re-issues the preferred election while it
 /// waits.
 const LEADER_PLAN_REELECT_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a change-leader or reassign-partitions action waits, per topic, for
+/// the topic's reassignments to finish: one leftover from an earlier action
+/// before planning, plus its own after submitting it. Moving a partition copies
+/// all of its data, which grows every cycle under a large-message workload, so
+/// this is generous. Past it the action's checks are SKIPPED with a WARN rather
+/// than failing the run: how fast the cluster copies data is not a client
+/// verdict.
+pub const REASSIGN_COMPLETE_MAX: Duration = Duration::from_secs(300);
+
+/// Bound on one `describe_topics` in [`partition_state`]. On a degraded cluster
+/// the admin client can retry internally without ever resolving.
+const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on one `list_partition_reassignments` attempt in
+/// [`wait_reassignments_complete`].
+const LIST_REASSIGNMENTS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on submitting a reassignment (`alter_partition_reassignments`).
+const ALTER_REASSIGNMENTS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on one preferred-leader election request ([`elect_preferred`]).
+const ELECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often [`wait_reassignments_complete`] logs that it is still waiting.
+const REASSIGN_PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 /// Leader-migration mechanism for `--action change-leader|reassign-partitions`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +155,14 @@ impl ChaosAction {
                 // sampling): before stop, while down, after start — logging which
                 // partitions migrated away and which came back, PER topic.
                 let before = leaders_of_topics(topics, admin).await;
-                brokers.stop(*node_id, *kind).await;
+                if !brokers.stop(*node_id, *kind).await
+                    && let Some(r) = reports
+                {
+                    // `stop` has already logged the WARN.
+                    r.record_leader_change(&format!(
+                        "broker-roll node={node_id}: WARN clean stop was NOT clean (SIGKILLed after the grace period)"
+                    ));
+                }
 
                 // Down-window. If a mid-down hook was supplied, run it here (so a
                 // rebalance overlaps the leader migration), then wait out the
@@ -148,9 +181,8 @@ impl ChaosAction {
                 let down_state = leaders_of_topics(topics, admin).await;
                 log_leader_migration_all(&format!("broker {node_id} down"), &before, &down_state, reports);
 
-                let started_at = std::time::SystemTime::now();
-                brokers.start(*node_id).await;
-                wait_restarted(brokers, admin, *node_id, started_at, *wait_up, topics).await;
+                let started_at = brokers.start(*node_id).await;
+                wait_restarted(brokers, admin, *node_id, &started_at, *wait_up, topics).await;
                 let after = leaders_of_topics(topics, admin).await;
                 log_leader_migration_all(&format!("broker {node_id} back up"), &down_state, &after, reports);
                 eprintln!("chaos: broker {node_id} back up");
@@ -177,13 +209,12 @@ impl ChaosAction {
                 // cluster crash.
                 futures_util::future::join_all(nodes.iter().map(|n| brokers.stop(*n, StopKind::Unclean))).await;
                 tokio::time::sleep(*outage).await;
-                let started_at = std::time::SystemTime::now();
-                futures_util::future::join_all(nodes.iter().map(|n| brokers.start(*n))).await;
+                let started_at = futures_util::future::join_all(nodes.iter().map(|n| brokers.start(*n))).await;
                 // The brokers recover in parallel; wait for each in turn (the
                 // first wait dominates). No topic list: after a whole-cluster
                 // crash every replica restarts together, so there is no ISR to
                 // rejoin that the process start does not already cover.
-                for node_id in nodes {
+                for (node_id, started_at) in nodes.iter().zip(&started_at) {
                     wait_restarted(brokers, admin, *node_id, started_at, *wait_up, &[]).await;
                 }
                 eprintln!("chaos: all brokers back up after the outage");
@@ -192,8 +223,8 @@ impl ChaosAction {
     }
 }
 
-/// Wait, within `wait_up` overall, until a broker started at `started_at` is
-/// genuinely back:
+/// Wait, within `wait_up` overall, until a broker started at `started_at` (the
+/// daemon-side start time [`BrokerControl::start`] returned) is genuinely back:
 ///
 /// 1. the new process has logged `Kafka Server started`
 ///    ([`BrokerControl::wait_server_started`]);
@@ -212,7 +243,7 @@ async fn wait_restarted(
     brokers: &BrokerControl<'_>,
     admin: &dyn Admin,
     node_id: u16,
-    started_at: std::time::SystemTime,
+    started_at: &str,
     wait_up: Duration,
     topics: &[String],
 ) {
@@ -233,8 +264,18 @@ async fn wait_restarted(
     let mut lagging: Vec<String> = Vec::new();
     loop {
         lagging.clear();
-        for topic in topics {
-            match partition_state(topic, admin).await {
+        // All topics at once, each describe bounded by what is left of
+        // `wait_up` (at least 1 s, so the check at the deadline still runs):
+        // one describe per topic in turn could overrun `wait_up` by 10 s per
+        // topic.
+        let bound = deadline
+            .saturating_duration_since(Instant::now())
+            .clamp(Duration::from_secs(1), DESCRIBE_TIMEOUT);
+        let states =
+            futures_util::future::join_all(topics.iter().map(|topic| partition_state_within(topic, admin, bound)))
+                .await;
+        for (topic, state) in topics.iter().zip(states) {
+            match state {
                 Some(state) => lagging.extend(
                     state
                         .iter()
@@ -267,21 +308,25 @@ async fn wait_restarted(
 /// leaders. This is librdkafka's change-leader mechanism — distinct from
 /// reassign-partitions, which changes the replica set and moves data.
 ///
-/// Asserts the leader actually moved on at least one partition (a bare
-/// preferred election is a no-op when leaders are already preferred, which
-/// would otherwise pass silently).
+/// Checks the leader actually moved on enough partitions (a bare preferred
+/// election is a no-op when leaders are already preferred, which would
+/// otherwise pass silently); see [`verify_leader_plan`].
 ///
 /// The new preferred leader is always one of `live_brokers` (see
 /// [`change_leader_target`]), so a broker kept down by `--leave-broker-down`
 /// is never planned as leader.
+///
+/// Whatever the cluster gets in the way of (a describe or submit that fails on
+/// a churning cluster, a reassignment that does not finish within
+/// [`REASSIGN_COMPLETE_MAX`]) skips the action's checks with a WARN instead of
+/// panicking the run before it can produce a verdict: it is an environment
+/// hiccup, not a client verdict.
 async fn change_leader(topic: &str, live_brokers: &[i32], admin: &dyn Admin, reports: &ReportsHandle) {
+    const LABEL: &str = "change-leader";
     eprintln!("chaos: change-leader for topic {topic}");
+    let deadline = Instant::now() + REASSIGN_COMPLETE_MAX;
 
-    // A describe that fails or times out on a churning cluster is an environment
-    // hiccup, not a client verdict: skip the action loudly instead of panicking
-    // the run before it can produce a verdict.
-    let Some(before) = partition_state(topic, admin).await else {
-        eprintln!("chaos: change-leader for {topic} SKIPPED: could not describe the topic (before-snapshot)");
+    let Some(before) = settled_partition_state(LABEL, topic, admin, deadline, reports).await else {
         return;
     };
 
@@ -300,24 +345,23 @@ async fn change_leader(topic: &str, live_brokers: &[i32], admin: &dyn Admin, rep
         );
     }
     if reassignments.is_empty() {
-        eprintln!("chaos: no partitions with another live replica to change leader to");
+        warn_skipped(
+            LABEL,
+            topic,
+            &format!("no partition has another live replica ({live_brokers:?}) to make leader, nothing changed"),
+            reports,
+        );
         return;
     }
 
-    admin
-        .alter_partition_reassignments(&reassignments)
-        .all()
-        .get()
-        .await
-        .expect("change-leader reorder failed");
-    wait_reassignments_complete(topic, admin).await;
-
-    // Elect the new preferred leaders.
-    if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
-        eprintln!("chaos: preferred-leader election returned: {err} (often benign)");
+    if !submit_and_wait(LABEL, topic, &reassignments, admin, deadline, reports).await {
+        return;
     }
 
-    verify_leader_plan("change-leader", topic, &before, &plan, admin, reports).await;
+    // Elect the new preferred leaders.
+    elect_preferred(LABEL, admin).await;
+
+    verify_leader_plan(LABEL, topic, &before, &plan, admin, reports).await;
 }
 
 /// Move replicas around for every partition of `topic`: read the current
@@ -334,26 +378,29 @@ async fn change_leader(topic: &str, live_brokers: &[i32], admin: &dyn Admin, rep
 /// 3 brokers at replication 3) there is no broker to move onto. The partition
 /// is then only reordered, which is the change-leader mechanism and moves no
 /// data; the run says so, and the replica-set check is skipped for it.
+///
+/// Cluster-side failures skip the checks with a WARN, as for
+/// [`change_leader`].
 async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admin, reports: &ReportsHandle) {
+    const LABEL: &str = "reassign-partitions";
     eprintln!("chaos: reassigning partitions for topic {topic}");
+    let deadline = Instant::now() + REASSIGN_COMPLETE_MAX;
 
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
-    let Some(before) = partition_state(topic, admin).await else {
-        eprintln!("chaos: reassign-partitions for {topic} SKIPPED: could not describe the topic (before-snapshot)");
+    let Some(before) = settled_partition_state(LABEL, topic, admin, deadline, reports).await else {
         return;
     };
 
     // 2. Compute each partition's target replica list. `plan` records the
     //    intended new leader per partition (target[0]); `moved` the partitions
-    //    whose replica set changes (a replica swapped onto another broker).
+    //    whose replica set changes (a replica moved onto another broker).
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
     let mut plan: HashMap<i32, i32> = HashMap::new();
     let mut moved: Vec<i32> = Vec::new();
     for (&partition, state) in &before {
-        if state.replicas.len() < 2 {
-            continue; // nothing to move with a single replica
-        }
-        let (target, moves_data) = reassign_target(partition, &state.replicas, live_brokers);
+        let Some((target, moves_data)) = reassign_target(partition, &state.replicas, state.leader, live_brokers) else {
+            continue;
+        };
         plan.insert(partition, target[0]);
         if moves_data {
             moved.push(partition);
@@ -363,7 +410,15 @@ async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admi
     }
 
     if reassignments.is_empty() {
-        eprintln!("chaos: no partitions with >=2 replicas to reassign");
+        warn_skipped(
+            LABEL,
+            topic,
+            &format!(
+                "no partition has a live broker ({live_brokers:?}) to move a replica onto or another live replica \
+                 to make leader, nothing changed"
+            ),
+            reports,
+        );
         return;
     }
     if moved.len() < reassignments.len() {
@@ -376,16 +431,11 @@ async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admi
         );
     }
 
-    // 3. Submit.
-    admin
-        .alter_partition_reassignments(&reassignments)
-        .all()
-        .get()
-        .await
-        .expect("alter_partition_reassignments failed");
-
-    // 4. Wait for the reassignments to complete (the --verify analog).
-    wait_reassignments_complete(topic, admin).await;
+    // 3. Submit, and 4. wait for the reassignments to complete (the --verify
+    //    analog).
+    if !submit_and_wait(LABEL, topic, &reassignments, admin, deadline, reports).await {
+        return;
+    }
 
     // 5. Elect the new preferred leaders. A reassignment changes the replica
     //    order (hence the *preferred* leader) but does not itself move the
@@ -393,9 +443,7 @@ async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admi
     //    Trigger the election explicitly so the leader change is deterministic
     //    and observable — the same step `kafka-reassign-partitions.sh` users
     //    take.
-    if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
-        eprintln!("chaos: preferred-leader election after reassign returned: {err} (often benign)");
-    }
+    elect_preferred(LABEL, admin).await;
 
     // 6. Prove the replica sets actually changed (an empty pending list is also
     //    the state where nothing moved). Reassign moves data, so this is a
@@ -404,13 +452,15 @@ async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admi
     //    could only be reordered (step 2) have nothing to check here.
     if moved.is_empty() {
         eprintln!("chaos: reassign-partitions for {topic}: no replica set was planned to change; effect check SKIPPED");
-        verify_leader_plan("reassign", topic, &before, &plan, admin, reports).await;
+        verify_leader_plan(LABEL, topic, &before, &plan, admin, reports).await;
         return;
     }
     let Some(after) = partition_state(topic, admin).await else {
-        eprintln!(
-            "chaos: reassign-partitions for {topic}: could not describe the topic after the reassignment; \
-             effect check SKIPPED"
+        warn_skipped(
+            LABEL,
+            topic,
+            "could not describe the topic after the reassignment, effect check",
+            reports,
         );
         return;
     };
@@ -431,35 +481,159 @@ async fn reassign_partitions(topic: &str, live_brokers: &[i32], admin: &dyn Admi
 
     // 7. Verify each partition's leader matches the plan (target[0]), per
     //    partition, not just an aggregate count (A3).
-    verify_leader_plan("reassign", topic, &before, &plan, admin, reports).await;
+    verify_leader_plan(LABEL, topic, &before, &plan, admin, reports).await;
+}
+
+/// The BEFORE snapshot a migrate action plans from, once `topic` has no
+/// reassignment in progress; `None` (after a WARN) if that cannot be had by
+/// `deadline`.
+///
+/// A reassignment still running (one an earlier action gave up waiting for)
+/// lists its adding and removing replicas together as the partition's
+/// replicas, e.g. 4 replicas at replication 3. Planning from that list and
+/// submitting it would cancel the move and keep every replica, permanently
+/// raising the replication factor, so wait for it to finish first.
+async fn settled_partition_state(
+    label: &str,
+    topic: &str,
+    admin: &dyn Admin,
+    deadline: Instant,
+    reports: &ReportsHandle,
+) -> Option<std::collections::BTreeMap<i32, PartitionState>> {
+    if let Err(reason) = wait_reassignments_complete(topic, admin, deadline).await {
+        warn_skipped(
+            label,
+            topic,
+            &format!(
+                "an earlier reassignment did not finish within {REASSIGN_COMPLETE_MAX:?} ({reason}), nothing \
+                 submitted"
+            ),
+            reports,
+        );
+        return None;
+    }
+    let state = partition_state(topic, admin).await;
+    if state.is_none() {
+        warn_skipped(
+            label,
+            topic,
+            "could not describe the topic (before-snapshot), nothing submitted",
+            reports,
+        );
+    }
+    state
+}
+
+/// Submit `reassignments`, then wait (until `deadline`) for `topic` to have no
+/// reassignment in progress. `true` when both succeeded; otherwise a WARN says
+/// why the action's checks are skipped.
+///
+/// The wait runs even when the submit failed: the request may have been
+/// applied to some partitions, and the next action must not start in the
+/// middle of their move.
+async fn submit_and_wait(
+    label: &str,
+    topic: &str,
+    reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+    admin: &dyn Admin,
+    deadline: Instant,
+    reports: &ReportsHandle,
+) -> bool {
+    let result = admin.alter_partition_reassignments(reassignments);
+    let submit = result.all();
+    let submitted = match tokio::time::timeout(ALTER_REASSIGNMENTS_TIMEOUT, submit.get()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(format!("alter_partition_reassignments failed: {err}")),
+        Err(_) => Err(format!(
+            "alter_partition_reassignments timed out after {ALTER_REASSIGNMENTS_TIMEOUT:?}"
+        )),
+    };
+    let completed = wait_reassignments_complete(topic, admin, deadline).await;
+    if let Err(reason) = submitted {
+        warn_skipped(label, topic, &format!("{reason}, checks"), reports);
+        return false;
+    }
+    if let Err(reason) = completed {
+        warn_skipped(
+            label,
+            topic,
+            &format!("reassignment not complete within {REASSIGN_COMPLETE_MAX:?} ({reason}), checks"),
+            reports,
+        );
+        return false;
+    }
+    true
+}
+
+/// Log a WARN (and record it in `leader-changes.txt`) that a migrate action on
+/// `topic` skipped something: `what` says what and why, and reads before
+/// "SKIPPED".
+fn warn_skipped(label: &str, topic: &str, what: &str, reports: &ReportsHandle) {
+    let line = format!("{label} for {topic}: {what} SKIPPED");
+    eprintln!("chaos: WARN {line}");
+    if let Some(r) = reports {
+        r.record_leader_change(&line);
+    }
+}
+
+/// Issue a preferred-leader election for every partition, bounded by
+/// [`ELECT_TIMEOUT`]. A failure is only logged: the election reports partitions
+/// whose preferred leader already leads, or is not yet in the ISR, as errors,
+/// and the leader-plan check is what judges the outcome.
+async fn elect_preferred(label: &str, admin: &dyn Admin) {
+    let result = admin.elect_leaders(ElectionType::Preferred, None);
+    let all = result.all();
+    match tokio::time::timeout(ELECT_TIMEOUT, all.get()).await {
+        Ok(Ok(())) => {},
+        Ok(Err(err)) => eprintln!("chaos:   {label}: preferred-leader election returned: {err} (often benign)"),
+        Err(_) => {
+            eprintln!("chaos:   {label}: preferred-leader election timed out after {ELECT_TIMEOUT:?} (tolerated)")
+        },
+    }
 }
 
 /// The replica list reassign-partitions moves one partition to, and whether
-/// that changes the replica *set* (so data moves).
+/// that changes the replica *set* (so data moves); `None` when the partition
+/// cannot be changed at all.
 ///
-/// One replica is removed — one on a broker outside `live_brokers` if the set
-/// has one (a broker kept down by `--leave-broker-down`), else the preferred
-/// leader. The rest are rotated by one, so a different broker becomes preferred
-/// leader, and a live broker outside the set is appended; it has to copy the
-/// partition from the leader. Which outside broker is picked by `partition`,
-/// spreading the new replicas across the candidates reproducibly.
+/// A live broker outside the set is added; it has to copy the partition from
+/// the leader. Which outside broker is picked by `partition`, spreading the new
+/// replicas across the candidates reproducibly. One replica is removed — one on
+/// a broker outside `live_brokers` if the set has one (a broker kept down by
+/// `--leave-broker-down`), else the preferred leader — and the rest are rotated
+/// by one, the new replica going last. A lone replica is simply replaced by the
+/// new one. If that list would lead on the current `leader` (or on a broker that
+/// is not live), it is rotated to the first live broker that is not the leader,
+/// so the leader-plan check proves a move; the new replica always qualifies.
 ///
 /// When every live broker already holds a replica there is nothing to move
-/// onto, and the list is only rotated: the same set in a different order, which
-/// moves no data (`false`).
-fn reassign_target(partition: i32, replicas: &[i32], live_brokers: &[i32]) -> (Vec<i32>, bool) {
+/// onto, and the list is only reordered as change-leader does
+/// ([`change_leader_target`]): the same set in a different order, which moves
+/// no data (`false`), or `None` if no other replica is live.
+fn reassign_target(
+    partition: i32,
+    replicas: &[i32],
+    leader: Option<i32>,
+    live_brokers: &[i32],
+) -> Option<(Vec<i32>, bool)> {
+    if replicas.is_empty() {
+        return None;
+    }
     let outside: Vec<i32> = live_brokers.iter().copied().filter(|b| !replicas.contains(b)).collect();
     if outside.is_empty() {
-        let mut rotated = replicas.to_vec();
-        rotated.rotate_left(1);
-        return (rotated, false);
+        return change_leader_target(replicas, leader, live_brokers).map(|rotated| (rotated, false));
     }
     let drop = replicas.iter().position(|r| !live_brokers.contains(r)).unwrap_or(0);
     let mut target: Vec<i32> = replicas.to_vec();
     target.remove(drop);
-    target.rotate_left(1);
+    if !target.is_empty() {
+        target.rotate_left(1);
+    }
     target.push(outside[partition.unsigned_abs() as usize % outside.len()]);
-    (target, true)
+    if let Some(head) = target.iter().position(|b| live_brokers.contains(b) && Some(*b) != leader) {
+        target.rotate_left(head);
+    }
+    Some((target, true))
 }
 
 /// The replica list change-leader reorders one partition to: the replicas
@@ -546,9 +720,7 @@ async fn verify_leader_plan(
         }
         if Instant::now() >= next_election {
             next_election = Instant::now() + LEADER_PLAN_REELECT_EVERY;
-            if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
-                eprintln!("chaos:   {label}: preferred-leader re-election returned: {err} (often benign)");
-            }
+            elect_preferred(label, admin).await;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -618,16 +790,18 @@ async fn verify_leader_plan(
 /// Current leader per `(topic, partition)` across `topics` (the multi-topic
 /// broker-roll leader sampling). A partition with no leader (e.g. its broker is
 /// down) maps to `None`.
+///
+/// The topics are described concurrently, so one sample takes at most
+/// [`DESCRIBE_TIMEOUT`] however many topics there are; a roll takes three.
 async fn leaders_of_topics(
     topics: &[String],
     admin: &dyn Admin,
 ) -> std::collections::BTreeMap<(String, i32), Option<i32>> {
+    let states = futures_util::future::join_all(topics.iter().map(|topic| partition_state(topic, admin))).await;
     let mut out = std::collections::BTreeMap::new();
-    for topic in topics {
-        if let Some(state) = partition_state(topic, admin).await {
-            for (p, s) in state {
-                out.insert((topic.clone(), p), s.leader);
-            }
+    for (topic, state) in topics.iter().zip(states) {
+        for (p, s) in state.into_iter().flatten() {
+            out.insert((topic.clone(), p), s.leader);
         }
     }
     out
@@ -661,27 +835,46 @@ fn log_leader_migration_all(
 
 /// Poll `list_partition_reassignments` until none of `topic`'s partitions has a
 /// reassignment in progress (the `kafka-reassign-partitions.sh --verify`
-/// analog), bounded by a 60s deadline. Reassignments of other topics are not
-/// counted.
-async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+/// analog), until `deadline`. Reassignments of other topics are not counted.
+///
+/// `Err` with the last observation if `deadline` passes first. A listing that
+/// fails or times out is retried and never read as "nothing in progress": that
+/// returned while data was still moving, so the replica-set check passed
+/// vacuously and the next change-leader could plan from the combined adding +
+/// removing replica list (see [`settled_partition_state`]).
+async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin, deadline: Instant) -> Result<(), String> {
+    let start = Instant::now();
+    let mut next_progress = start + REASSIGN_PROGRESS_EVERY;
     loop {
-        let pending = admin
-            .list_partition_reassignments()
-            .reassignments()
-            .get()
-            .await
-            .map(|m| m.keys().filter(|tp| tp.topic() == topic).count())
-            .unwrap_or(0);
-        if pending == 0 {
-            return;
+        // At least 1 s, so the attempt at the deadline still gets an answer.
+        let bound = deadline
+            .saturating_duration_since(Instant::now())
+            .clamp(Duration::from_secs(1), LIST_REASSIGNMENTS_TIMEOUT);
+        let result = admin.list_partition_reassignments();
+        let listing = result.reassignments();
+        let last = match tokio::time::timeout(bound, listing.get()).await {
+            Ok(Ok(reassignments)) => match pending_for_topic(&reassignments, topic) {
+                0 => return Ok(()),
+                pending => format!("{pending} partition(s) still reassigning"),
+            },
+            Ok(Err(err)) => format!("list_partition_reassignments failed: {err}"),
+            Err(_) => format!("list_partition_reassignments timed out after {bound:?}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(last);
         }
-        assert!(
-            Instant::now() < deadline,
-            "reassignment for {topic} still has {pending} in-progress after 60s"
-        );
+        if Instant::now() >= next_progress {
+            next_progress = Instant::now() + REASSIGN_PROGRESS_EVERY;
+            eprintln!("chaos:   {topic}: {last} after {}s, still waiting", start.elapsed().as_secs());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// How many of `topic`'s partitions are in a `list_partition_reassignments`
+/// listing.
+fn pending_for_topic(reassignments: &HashMap<TopicPartition, PartitionReassignment>, topic: &str) -> usize {
+    reassignments.keys().filter(|tp| tp.topic() == topic).count()
 }
 
 /// The observed state of one partition from `describe_topics`.
@@ -695,8 +888,18 @@ struct PartitionState {
 }
 
 /// Current `(leader, replicas)` for each partition of `topic`, or `None` if the
-/// describe could not complete (tolerated on the leader-sampling path).
+/// describe could not complete within [`DESCRIBE_TIMEOUT`] (tolerated on the
+/// leader-sampling path).
 async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collections::BTreeMap<i32, PartitionState>> {
+    partition_state_within(topic, admin, DESCRIBE_TIMEOUT).await
+}
+
+/// [`partition_state`] with the describe bounded by `timeout` instead.
+async fn partition_state_within(
+    topic: &str,
+    admin: &dyn Admin,
+    timeout: Duration,
+) -> Option<std::collections::BTreeMap<i32, PartitionState>> {
     let described = admin
         .describe_topics_with_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
         .all_topic_names()
@@ -708,7 +911,7 @@ async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collecti
     // `wait_operational`. A timeout here converts that hang into a tolerated skip
     // (same as an outright describe error): leader sampling is best-effort, so
     // `None` just means "couldn't sample this time", and the roll proceeds.
-    let descriptions = match tokio::time::timeout(Duration::from_secs(10), described.get()).await {
+    let descriptions = match tokio::time::timeout(timeout, described.get()).await {
         Ok(Ok(d)) => d,
         Ok(Err(err)) => {
             eprintln!("chaos: describe_topics for {topic} failed (tolerated, sampling continues): {err}");
@@ -758,14 +961,46 @@ mod tests {
     #[test]
     fn reassign_target_moves_a_replica_onto_an_outside_broker() {
         let live = [1, 2, 3, 4, 5];
-        let (target, moves) = reassign_target(0, &[1, 2, 3], &live);
+        let (target, moves) = reassign_target(0, &[1, 2, 3], Some(1), &live).unwrap();
         assert!(moves);
         assert_eq!(target, vec![3, 2, 4]);
         assert!(!same_replica_set(&target, &[1, 2, 3]));
         // The outside broker is spread by partition.
-        assert_eq!(reassign_target(1, &[1, 2, 3], &live).0, vec![3, 2, 5]);
+        assert_eq!(reassign_target(1, &[1, 2, 3], Some(1), &live), Some((vec![3, 2, 5], true)));
         // Replication 2: the old second replica leads, the new one follows.
-        assert_eq!(reassign_target(0, &[2, 4], &live), (vec![4, 1], true));
+        assert_eq!(reassign_target(0, &[2, 4], Some(2), &live), Some((vec![4, 1], true)));
+        // No current leader: any live head will do.
+        assert_eq!(reassign_target(0, &[1, 2, 3], None, &live), Some((vec![3, 2, 4], true)));
+    }
+
+    /// The rotated list would lead on the current leader (leadership had moved
+    /// off the preferred replica): lead on the next live non-leader instead,
+    /// still moving a replica onto the outside broker.
+    #[test]
+    fn reassign_target_never_plans_the_current_leader() {
+        let live = [1, 2, 3, 4, 5];
+        let (target, moves) = reassign_target(0, &[1, 2, 3], Some(3), &live).unwrap();
+        assert!(moves);
+        assert_eq!(target, vec![2, 4, 3]);
+        assert!(same_replica_set(&target, &[2, 3, 4]));
+        // Replication 2 led by the replica that would stay first: the new
+        // replica leads.
+        assert_eq!(reassign_target(0, &[2, 4], Some(4), &live), Some((vec![1, 4], true)));
+    }
+
+    /// A lone replica (replication 1) is moved to a live broker outside the
+    /// set, which becomes the leader: a real data move, not a no-op.
+    #[test]
+    fn reassign_target_moves_a_lone_replica() {
+        let live = [1, 2, 3];
+        assert_eq!(reassign_target(0, &[2], Some(2), &live), Some((vec![1], true)));
+        assert_eq!(reassign_target(1, &[2], Some(2), &live), Some((vec![3], true)));
+        // Leaderless (its broker is down): moved all the same.
+        assert_eq!(reassign_target(0, &[2], None, &live), Some((vec![1], true)));
+        // Nowhere to move it, and nothing to reorder.
+        assert_eq!(reassign_target(0, &[2], Some(2), &[2]), None);
+        // No replicas at all: nothing to plan from.
+        assert_eq!(reassign_target(0, &[], None, &live), None);
     }
 
     /// A replica on a broker that is not live (kept down) is the one dropped,
@@ -773,19 +1008,46 @@ mod tests {
     #[test]
     fn reassign_target_drops_the_replica_on_a_down_broker() {
         let live = [1, 3, 4];
-        let (target, moves) = reassign_target(0, &[1, 2, 3], &live);
+        let (target, moves) = reassign_target(0, &[1, 2, 3], Some(1), &live).unwrap();
         assert!(moves);
         assert_eq!(target, vec![3, 1, 4]);
         assert!(target.iter().all(|b| live.contains(b)));
+        // ... and the head still skips the current leader.
+        assert_eq!(reassign_target(0, &[1, 2, 3], Some(3), &live), Some((vec![1, 4, 3], true)));
     }
 
-    /// Every live broker already holds a replica: only a reorder is possible.
+    /// Every live broker already holds a replica: only a reorder is possible,
+    /// planned as change-leader plans it (live head, not the current leader).
     #[test]
     fn reassign_target_only_reorders_when_no_broker_is_outside_the_set() {
-        let (target, moves) = reassign_target(0, &[1, 2, 3], &[1, 2, 3]);
+        let (target, moves) = reassign_target(0, &[1, 2, 3], Some(1), &[1, 2, 3]).unwrap();
         assert!(!moves);
         assert_eq!(target, vec![2, 3, 1]);
         assert!(same_replica_set(&target, &[1, 2, 3]));
+        assert_eq!(
+            reassign_target(0, &[1, 2, 3], Some(2), &[1, 2, 3]),
+            Some((vec![3, 1, 2], false))
+        );
+        // Replication 2 with the other replica down: no move, no reorder.
+        assert_eq!(reassign_target(0, &[1, 2], Some(1), &[1]), None);
+    }
+
+    /// Only the topic's own partitions count as in progress.
+    #[test]
+    fn pending_for_topic_counts_only_that_topic() {
+        let moving = || PartitionReassignment::new(vec![1, 2, 3, 4], vec![4], vec![1]);
+        let reassignments: HashMap<TopicPartition, PartitionReassignment> = [
+            (TopicPartition::new("a", 0), moving()),
+            (TopicPartition::new("a", 2), moving()),
+            (TopicPartition::new("ab", 0), moving()),
+            (TopicPartition::new("b", 1), moving()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(pending_for_topic(&reassignments, "a"), 2);
+        assert_eq!(pending_for_topic(&reassignments, "b"), 1);
+        assert_eq!(pending_for_topic(&reassignments, "c"), 0);
+        assert_eq!(pending_for_topic(&HashMap::new(), "a"), 0);
     }
 
     /// All replicas live: rotate by one, so the next replica leads.
