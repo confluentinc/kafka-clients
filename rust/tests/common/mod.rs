@@ -24,7 +24,7 @@
 // `dead_code` is expected where a module is a utility library shared by separate
 // integration test crates, so rustc can't see the cross-crate usage.
 #[cfg(feature = "integration-tests")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub mod broker_control;
 #[cfg(feature = "integration-tests")]
 pub mod cluster_config;

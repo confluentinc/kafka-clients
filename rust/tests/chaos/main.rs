@@ -35,6 +35,10 @@
 //!
 //! or via `cargo xtask chaos`.
 
+// The shared helpers serve every integration test crate; the chaos harness
+// uses only a small part of it.
+#[cfg_attr(feature = "integration-tests", expect(dead_code))]
+#[cfg_attr(feature = "multilanguage-tests", expect(unused_imports))]
 #[path = "../common/mod.rs"]
 mod common;
 
