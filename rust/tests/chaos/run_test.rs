@@ -138,7 +138,6 @@ fn random_plan(rng: &mut StdRng, cfg: &ChaosConfig) -> Option<PlannedAction> {
 }
 
 /// Execute one randomly-planned action (its parameters are already resolved).
-#[allow(clippy::too_many_arguments)]
 async fn run_planned(
     plan: PlannedAction,
     cfg: &ChaosConfig,
@@ -199,7 +198,7 @@ fn roll_order(config: &ChaosConfig, cycle: u32) -> Vec<u16> {
 
 /// Run one chaos action for the current cycle. Used for both the primary
 /// `--action` and the per-cycle overlays (A1 — compose fault types).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_action(
     action: ActionKind,
     cfg: &ChaosConfig,
@@ -304,7 +303,7 @@ async fn churn_consumers(pool: &WorkloadPool<'_>, backend: Backend, min: u32, ma
 /// **first** broker only (`--rebalance-mid-roll`). The remaining brokers roll
 /// normally. This is what makes the group reassignment kicked off by the hook
 /// overlap the leader migration caused by the first broker being down.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_broker_roll_with_hook<F>(
     cfg: &ChaosConfig,
     cycle: u32,

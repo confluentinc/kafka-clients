@@ -100,7 +100,6 @@ pub enum Role {
 ///
 /// `Async` is exercised by Phase 3 commit-mode variants; Phase 1 uses `Sync`.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum CommitMode {
     Sync,
     Async,
@@ -812,7 +811,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use confluent_kafka::consumer::{AutoOffsetResetStrategy, Consumer, MockConsumer};
+    use confluent_kafka::consumer::{Consumer, MockConsumer};
     use confluent_kafka::producer::{MockProducer, RecordMetadata};
 
     use super::*;
@@ -842,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn rebalance_listener_records_each_callback_and_commits_on_revoke() {
         let verifier = Arc::new(ConservationVerifier::new());
-        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new("earliest").expect("valid auto.offset.reset");
         let listener = ChaosRebalanceListener {
             consumer: "consumer-rust-1".into(),
             handle: mock.handle(),
@@ -881,7 +880,7 @@ mod tests {
     /// read-back error; the closing gate shows up as none.
     #[tokio::test]
     async fn revoke_commit_success_reads_committed_offsets_back_unless_closing() {
-        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new("earliest").expect("valid auto.offset.reset");
         let tp = TopicPartition::new("t".to_string(), 0);
         let read_back_errors = |verifier: &ConservationVerifier| {
             verifier
@@ -967,10 +966,8 @@ mod tests {
             ]
         );
         assert!(
-            verdict
-                .error_breakdown
-                .iter()
-                .any(|(text, n)| *n == 1 && text == "consumer committed() read-back: no committed()"),
+            verdict.error_breakdown.iter().any(|(text, n)| *n == 1
+                && text == "consumer committed() read-back: UnsupportedVersionError: no committed()"),
             "{verdict}"
         );
     }
