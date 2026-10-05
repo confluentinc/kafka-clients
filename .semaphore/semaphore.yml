@@ -57,10 +57,20 @@ name: build-test-release
 # It runs in a detached git worktree and pushes new commits when promotions
 # run either manually or automatically.
 #
-# "Publish to crates.io" is a manual promotion (publish-crates-io.yml) that
-# publishes the confluent-kafka version in rust/Cargo.toml from a green build of
-# the current master tip. It asks for that version (CRATE_VERSION) as a
-# confirmation. Every job records its result and the commit it tested as
+# Releases are driven by git tags:
+#   1. Merge the change that sets [package] version in rust/Cargo.toml to
+#      master.
+#   2. On the build of that master commit, run the manual "Create release tag"
+#      promotion (create-release-tag.yml) and enter the same version. It pushes
+#      the tag v<version>. A release version may carry an -alpha.N, -beta.N or
+#      -rc.N suffix.
+#   3. The tag push runs this pipeline on the tag. When every job passes,
+#      "Publish to crates.io" (publish-crates-io.yml) starts automatically.
+# A release tag pushed by other means follows the same path from step 3. Other
+# tags, such as -dev tags used to test the release process, run this pipeline
+# but never publish.
+#
+# Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
 # below). The publish pipeline refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on this commit and no other job reported a result, so adding,
@@ -315,18 +325,29 @@ promotions:
     pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
-  - name: Publish to crates.io
-    pipeline_file: publish-crates-io.yml
+  # Manual. Tags the commit of this master build as v<RELEASE_VERSION>, which
+  # starts a release (see the header). RELEASE_VERSION serves as a typed
+  # confirmation: unless it equals [package] version in rust/Cargo.toml at this
+  # commit, no tag is created.
+  - name: Create release tag
+    pipeline_file: create-release-tag.yml
     parameters:
       env_vars:
-        # A typed confirmation, not the source of the version. The pipeline
-        # refuses unless it equals [package] version in rust/Cargo.toml, so an
-        # accidental click cannot publish.
-        - name: CRATE_VERSION
+        - name: RELEASE_VERSION
           required: true
-          description: "The confluent-kafka version being released. Must equal
-            [package] version in rust/Cargo.toml at this commit, or nothing is
-            published."
+          description: "The confluent-kafka version to release, without a
+            leading v (for example 0.2.0 or 0.2.0-rc.1). Must equal [package]
+            version in rust/Cargo.toml at this commit."
+  # Starts automatically when the build of a release tag passes. The tag
+  # pattern must stay identical to `release_tag_pattern` in
+  # publish-crates-io.yml, which validates the tag again, together with the
+  # version, the master history and the CI results, before anything is
+  # published. A manual promotion is needed only to resume an interrupted
+  # publish from the same tag build; on any other build the pipeline refuses.
+  - name: Publish to crates.io
+    pipeline_file: publish-crates-io.yml
+    auto_promote:
+      when: "result = 'passed' AND tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
