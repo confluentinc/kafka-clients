@@ -39,7 +39,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 
 use confluent_kafka::common::{Error, TopicPartition, Uuid};
-use confluent_kafka::consumer::{ConsumerHandle, ConsumerRebalanceListener, OffsetAndMetadata};
+use confluent_kafka::consumer::{
+    ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, OffsetAndMetadata, OffsetCommitCallback,
+};
 use confluent_kafka::producer::{Callback, Producer, ProducerRecord};
 
 use super::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory, RustNativeFactory};
@@ -573,7 +575,8 @@ impl ChaosRebalanceListener {
     /// What `on_partitions_revoked` does with the outcome of its commit. A
     /// successful commit is followed by a read-back of what the broker now holds
     /// for the partitions being handed over: the next owner resumes from there,
-    /// so it must be exactly this consumer's progress + 1 (the verifier checks).
+    /// so it must be this consumer's progress + 1 (the verifier checks; see
+    /// `ConservationState::record_committed` for the one tolerated lag).
     /// Not during close — see `closing`. A failed commit is recorded under its
     /// own operation so the verdict tells it apart from the poll-loop commits.
     async fn after_revoke_commit(&self, partitions: &[TopicPartition], commit: Result<(), Error>) {
@@ -634,8 +637,9 @@ pub(crate) const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// [`WorkloadEvent::Committed`] per partition — or the error of the read-back
 /// itself. Callers invoke it only right after one of the consumer's own
 /// `commit_sync` calls succeeded with no poll in between, so each committed
-/// offset must equal the consumer's last consumed offset + 1; the verifier
-/// does the comparison (`ConservationState::record_committed`).
+/// offset should equal the consumer's last consumed offset + 1; the verifier
+/// does the comparison, and tolerates a partition the commit skipped while it
+/// awaited validation (`ConservationState::record_committed`).
 fn record_committed(
     verifier: &dyn Verifier,
     consumer: &str,
@@ -663,6 +667,109 @@ fn record_committed(
     }
 }
 
+/// The `OffsetCommitCallback` of every `commit_async` in the consumer loop.
+/// `commit_async` returns as soon as the commit is queued, so its own result
+/// only covers the hand-off; the commit's outcome arrives here, delivered on
+/// the consumer's task during a later `poll` / `commit_sync` / `close`. A
+/// failed commit is recorded like a failed sync commit.
+struct ChaosCommitCallback {
+    consumer: String,
+    verifier: Arc<dyn Verifier>,
+}
+
+#[async_trait]
+impl OffsetCommitCallback for ChaosCommitCallback {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        if let Some(err) = error {
+            eprintln!("chaos {}: async commit failed: {err}", self.consumer);
+            self.verifier.record(WorkloadEvent::ConsumerError {
+                consumer: self.consumer.clone(),
+                op: ConsumerOp::Commit,
+                error: err.to_string(),
+            });
+        }
+    }
+}
+
+/// Check a consumed record against what the producer workloads write (see
+/// `build_value`): the key is the 8-byte big-endian index, the value that
+/// index's encoding at `msg_size` bytes. Returns the index, or what is wrong.
+/// A missing value is accepted only at `msg_size` 0, where a binding may send
+/// an empty value as null.
+fn check_record(record: &ConsumerRecord<Vec<u8>, Vec<u8>>, msg_size: usize) -> Result<u64, String> {
+    let key = record
+        .key()
+        .ok_or_else(|| "key is missing (expected the 8-byte index)".to_string())?;
+    let index = match <[u8; 8]>::try_from(key.as_slice()) {
+        Ok(bytes) => u64::from_be_bytes(bytes),
+        Err(_) => return Err(format!("key is {} byte(s), expected the 8-byte index", key.len())),
+    };
+    let expected = build_value(index, msg_size);
+    match record.value() {
+        Some(value) if *value == expected => Ok(index),
+        Some(value) => Err(format!(
+            "value of {} byte(s) does not match the producer's encoding of index {index} ({msg_size} byte(s))",
+            value.len()
+        )),
+        None if msg_size == 0 => Ok(index),
+        None => Err(format!("value is missing (expected {msg_size} byte(s) encoding index {index})")),
+    }
+}
+
+/// Record one consumed record: `Consumed` when it is what a producer wrote,
+/// `Corrupted` otherwise (see `check_record`). `topic_id` is the record's
+/// topic's current id.
+fn record_consumed(
+    verifier: &dyn Verifier,
+    consumer: &str,
+    record: &ConsumerRecord<Vec<u8>, Vec<u8>>,
+    topic_id: Uuid,
+    msg_size: usize,
+) {
+    let topic = record.topic().to_string();
+    let event = match check_record(record, msg_size) {
+        Ok(index) => WorkloadEvent::Consumed {
+            consumer: consumer.to_string(),
+            index,
+            topic,
+            topic_id,
+            partition: record.partition(),
+            offset: record.offset(),
+        },
+        Err(detail) => {
+            eprintln!(
+                "chaos {consumer}: corrupted record at {topic}-{} offset {}: {detail}",
+                record.partition(),
+                record.offset()
+            );
+            WorkloadEvent::Corrupted {
+                consumer: consumer.to_string(),
+                topic,
+                partition: record.partition(),
+                offset: record.offset(),
+                detail,
+            }
+        },
+    };
+    verifier.record(event);
+}
+
+/// Record the outcome of the consumer's `close()`, then `ConsumerClosed`. A
+/// close error is not fatal to the workload: every close step still runs
+/// (the release callbacks included), and the verifier checks on
+/// `ConsumerClosed` that everything owned was released.
+fn record_close(verifier: &dyn Verifier, consumer: &str, close: Result<(), Error>) {
+    if let Err(err) = close {
+        eprintln!("chaos {consumer}: close error: {err}");
+        verifier.record(WorkloadEvent::ConsumerError {
+            consumer: consumer.to_string(),
+            op: ConsumerOp::Close,
+            error: err.to_string(),
+        });
+    }
+    verifier.record(WorkloadEvent::ConsumerClosed { consumer: consumer.to_string() });
+}
+
 #[async_trait(?Send)]
 impl<F> Workload for ConsumerWorkload<F>
 where
@@ -686,6 +793,11 @@ where
             ))
             .await
             .expect("failed to build chaos consumer");
+        // In-process: this consumer's events reach the verifier in real-time
+        // order with every other in-process consumer's, and its listener
+        // records each assignment before the partition's records are returned.
+        self.verifier
+            .record(WorkloadEvent::ConsumerStarted { consumer: label.clone(), in_process: true });
 
         // Subscribe to EVERY topic in the run (librdkafka passes all `-t` flags
         // to each consumer), not just one — so a multi-topic run's consumers
@@ -727,29 +839,23 @@ where
             let mut got_any = false;
             for record in &records {
                 got_any = true;
-                if let Some(bytes) = record.key()
-                    && let Ok(arr) = bytes.as_slice().try_into()
-                {
-                    let topic = record.topic();
-                    // Map the record's own topic to that topic's id (a consumer
-                    // reads from every topic; ids differ per topic and per
-                    // recreate generation). Falls back to zero if unresolved.
-                    let topic_id = self.ctx.topic_id_for(topic);
-                    self.verifier.record(WorkloadEvent::Consumed {
-                        consumer: label.clone(),
-                        index: u64::from_be_bytes(arr),
-                        topic: topic.to_string(),
-                        topic_id,
-                        partition: record.partition(),
-                        offset: record.offset(),
-                    });
-                }
+                // Map the record's own topic to that topic's id (a consumer
+                // reads from every topic; ids differ per topic and per
+                // recreate generation). Falls back to zero if unresolved.
+                let topic_id = self.ctx.topic_id_for(record.topic());
+                record_consumed(self.verifier.as_ref(), &label, record, topic_id, self.ctx.msg_size);
             }
 
             if got_any {
                 let commit = match self.ctx.commit_mode {
                     CommitMode::Sync => consumer.commit_sync().await,
-                    CommitMode::Async => consumer.commit_async().await,
+                    // The outcome arrives through the callback; an error here
+                    // means the commit was not even queued.
+                    CommitMode::Async => {
+                        let callback =
+                            Arc::new(ChaosCommitCallback { consumer: label.clone(), verifier: self.verifier.clone() });
+                        consumer.commit_async_with_callback(callback).await
+                    },
                 };
                 match commit {
                     Err(err) => {
@@ -782,7 +888,9 @@ where
         match consumer.commit_sync().await {
             // Last read-back: with no poll after this commit, every assigned
             // partition's committed offset must be this consumer's last
-            // consumed offset + 1, or the next owner starts in the wrong place.
+            // consumed offset + 1 (or, for a partition still awaiting
+            // validation, an earlier position of this assignment), or the next
+            // owner starts in the wrong place.
             Ok(()) => {
                 let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
                 record_committed(self.verifier.as_ref(), &label, consumer.committed(&assigned).await);
@@ -802,10 +910,11 @@ where
         // owned (see `ConservationState::closing`).
         closing.store(true, Ordering::Relaxed);
         self.verifier.record(WorkloadEvent::ConsumerClosing { consumer: label.clone() });
-        consumer.close().await.expect("chaos consumer close failed");
         // `close()` must have released every owned partition through the
-        // listener first; the verifier checks that on this event.
-        self.verifier.record(WorkloadEvent::ConsumerClosed { consumer: label });
+        // listener first; the verifier checks that on `ConsumerClosed`, which
+        // is recorded whether or not close reported an error.
+        let close = consumer.close().await;
+        record_close(self.verifier.as_ref(), &label, close);
     }
 }
 
@@ -936,6 +1045,11 @@ mod tests {
     fn record_committed_emits_one_event_per_partition_and_reports_read_back_errors() {
         let verifier = ConservationVerifier::new();
         let tp = |p: i32| TopicPartition::new("t".to_string(), p);
+        verifier.record(WorkloadEvent::Rebalance {
+            consumer: "consumer-rust-1".into(),
+            callback: RebalanceCallback::Assigned,
+            partitions: vec![("t".to_string(), 0), ("t".to_string(), 1)],
+        });
         for (p, offset) in [(0, 41), (1, 7)] {
             verifier.record(WorkloadEvent::Consumed {
                 consumer: "consumer-rust-1".into(),
@@ -970,6 +1084,130 @@ mod tests {
                 && text == "consumer committed() read-back: UnsupportedVersionError: no committed()"),
             "{verdict}"
         );
+    }
+
+    fn consumer_record(key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
+        ConsumerRecord::new("t", 2, 9, key, value)
+    }
+
+    /// A consumed record is checked against the producers' encoding: a record
+    /// that matches becomes `Consumed`; a wrong key, a wrong or truncated value,
+    /// or a missing one becomes `Corrupted`, which fails the run with the
+    /// detail of what was wrong.
+    #[test]
+    fn consumed_records_are_checked_against_the_producer_encoding() {
+        let key = |i: u64| Some(i.to_be_bytes().to_vec());
+        assert_eq!(check_record(&consumer_record(key(7), Some(build_value(7, 16))), 16), Ok(7));
+        assert_eq!(check_record(&consumer_record(key(7), Some(build_value(7, 3))), 3), Ok(7));
+        // At msg_size 0 an empty value may arrive as null.
+        assert_eq!(check_record(&consumer_record(key(7), Some(Vec::new())), 0), Ok(7));
+        assert_eq!(check_record(&consumer_record(key(7), None), 0), Ok(7));
+        assert_eq!(
+            check_record(&consumer_record(None, Some(build_value(7, 16))), 16),
+            Err("key is missing (expected the 8-byte index)".to_string())
+        );
+        assert_eq!(
+            check_record(&consumer_record(Some(vec![1, 2, 3]), Some(build_value(7, 16))), 16),
+            Err("key is 3 byte(s), expected the 8-byte index".to_string())
+        );
+        assert_eq!(
+            check_record(&consumer_record(key(7), Some(build_value(8, 16))), 16),
+            Err("value of 16 byte(s) does not match the producer's encoding of index 7 (16 byte(s))".to_string())
+        );
+        assert_eq!(
+            check_record(&consumer_record(key(7), Some(build_value(7, 12))), 16),
+            Err("value of 12 byte(s) does not match the producer's encoding of index 7 (16 byte(s))".to_string())
+        );
+        assert_eq!(
+            check_record(&consumer_record(key(7), None), 16),
+            Err("value is missing (expected 16 byte(s) encoding index 7)".to_string())
+        );
+
+        let verifier = ConservationVerifier::new();
+        verifier.record(WorkloadEvent::Delivered {
+            index: 7,
+            topic: "t".into(),
+            topic_id: Uuid::zero(),
+            partition: 2,
+            offset: 9,
+        });
+        let good = consumer_record(key(7), Some(build_value(7, 16)));
+        record_consumed(&verifier, "consumer-rust-1", &good, Uuid::zero(), 16);
+        let verdict = verifier.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        let bad = consumer_record(key(7), Some(build_value(8, 16)));
+        record_consumed(&verifier, "consumer-rust-1", &bad, Uuid::zero(), 16);
+        let verdict = verifier.verdict(1);
+        assert_eq!(verdict.corrupted_records, 1, "{verdict}");
+        assert_eq!(
+            verdict.reasons,
+            vec![
+                "corrupted records: 1 record(s) whose key or value does not match the producer's encoding (sample: \
+                 [\"consumer-rust-1: t-2 offset 9: value of 16 byte(s) does not match the producer's encoding of \
+                 index 7 (16 byte(s))\"])"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// An async commit's outcome reaches the verifier through its callback: a
+    /// failure is recorded as a commit error, a success records nothing.
+    #[tokio::test]
+    async fn async_commit_callback_records_a_failed_commit() {
+        let verifier = Arc::new(ConservationVerifier::new());
+        let callback = ChaosCommitCallback { consumer: "consumer-rust-1".into(), verifier: verifier.clone() };
+        callback.on_complete(&HashMap::new(), None).await;
+        assert_eq!(verifier.verdict(0).commit_errors, 0);
+        callback
+            .on_complete(&HashMap::new(), Some(&Error::timeout("commit timed out")))
+            .await;
+        let verdict = verifier.verdict(0);
+        assert_eq!(verdict.commit_errors, 1, "{verdict}");
+        assert!(verdict.is_pass(), "commit errors are not scored: {verdict}");
+        assert!(
+            verdict.error_breakdown.iter().any(|(text, n)| *n == 1
+                && text.starts_with("consumer commit: ")
+                && text.ends_with("commit timed out")),
+            "{verdict}"
+        );
+    }
+
+    /// A `close()` error is recorded and reported, not a panic, and the
+    /// consumer is still marked closed so the release check runs.
+    #[test]
+    fn close_errors_are_recorded_and_the_consumer_still_closes() {
+        let verifier = ConservationVerifier::new();
+        verifier.record(WorkloadEvent::Rebalance {
+            consumer: "consumer-rust-1".into(),
+            callback: RebalanceCallback::Assigned,
+            partitions: vec![("t".to_string(), 0)],
+        });
+        record_close(&verifier, "consumer-rust-1", Err(Error::timeout("close timed out")));
+        let verdict = verifier.verdict(0);
+        assert_eq!(verdict.close_errors, 1, "{verdict}");
+        assert_eq!(
+            verdict.rebalance_violations,
+            vec![
+                "consumer-rust-1: closed while still owning [\"t-0\"] (no on_partitions_revoked / \
+                 on_partitions_lost before close)"
+                    .to_string()
+            ]
+        );
+        let text = verdict.to_string();
+        assert!(text.contains("  consumer close errors     : 1"), "{text}");
+        assert!(
+            text.contains(
+                "  NOTE: 1 consumer close() call(s) returned an error (not scored: every close step still ran, and \
+                 the rebalance callbacks are checked above)"
+            ),
+            "{text}"
+        );
+
+        let clean = ConservationVerifier::new();
+        record_close(&clean, "consumer-rust-1", Ok(()));
+        let verdict = clean.verdict(0);
+        assert_eq!(verdict.close_errors, 0);
+        assert!(verdict.is_pass(), "{verdict}");
     }
 
     /// Backend factory over the crate's `MockProducer` (auto-complete: every

@@ -26,13 +26,14 @@ use std::time::{Duration, SystemTime};
 use anyhow::{bail, Context as _};
 
 use super::{
-    format_duration, is_harness_broker_name, load_results, now_utc, parse_matrix, plan_runs, split_list, Options,
-    RunResult,
+    docker_output, format_duration, is_harness_broker_name, load_results, now_utc, parse_matrix, parse_size_label,
+    plan_runs, read_plan, scenario_of, split_list, Options, RunResult, PLAN_FILE,
 };
 
 const MATRIX_ROOT: &str = "target/chaos-matrix";
 /// The file, in the output directory, holding the pid of the runner working
-/// on it.
+/// on it (first line) and, while a run is executing, `child <pgid>`: the
+/// process group of that run.
 pub const PID_FILE: &str = "runner.pid";
 
 /// Entry point for `cargo xtask chaos-matrix-status`.
@@ -97,15 +98,18 @@ fn modified(path: &Path) -> SystemTime {
     fs::metadata(path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// The planned run ids, in execution order: `plan.txt` when the runner wrote
-/// one, else rebuilt from the copied matrix and the recorded dimensions.
-fn planned_run_ids(out: &Path) -> anyhow::Result<(Vec<String>, BTreeMap<String, String>)> {
+/// The planned runs in execution order, each with the chaos flags it runs
+/// with when the runner recorded them: `plan.txt` when the runner wrote one,
+/// else rebuilt from the copied matrix and the recorded dimensions.
+type Plan = Vec<(String, Option<String>)>;
+
+fn planned_runs(out: &Path) -> anyhow::Result<(Plan, BTreeMap<String, String>)> {
     let text = fs::read_to_string(out.join("matrix.txt")).context("reading matrix.txt")?;
     let scenarios = parse_matrix(&text)?;
     let descriptions: BTreeMap<String, String> =
         scenarios.iter().map(|s| (s.id.clone(), s.description.clone())).collect();
-    if let Ok(plan) = fs::read_to_string(out.join("plan.txt")) {
-        return Ok((plan.lines().map(str::to_string).collect(), descriptions));
+    if out.join(PLAN_FILE).is_file() {
+        return Ok((read_plan(out), descriptions));
     }
     let environment = fs::read_to_string(out.join("environment.txt")).unwrap_or_default();
     let latest = environment.split("---\n").filter(|b| !b.trim().is_empty()).last().unwrap_or("");
@@ -138,16 +142,8 @@ fn planned_run_ids(out: &Path) -> anyhow::Result<(Vec<String>, BTreeMap<String, 
         stall_timeout: Duration::ZERO,
         known_defect_attempts: 1,
     };
-    let ids = plan_runs(&scenarios, &options)?.iter().map(|p| p.run_id()).collect();
-    Ok((ids, descriptions))
-}
-
-/// Inverse of `size_label`: `100B` -> 100, `1MiB` -> 1048576.
-fn parse_size_label(label: &str) -> Option<usize> {
-    if let Some(mib) = label.strip_suffix("MiB") {
-        return mib.parse::<usize>().ok().map(|n| n * 1024 * 1024);
-    }
-    label.strip_suffix('B')?.parse().ok()
+    let runs = plan_runs(&scenarios, &options)?.iter().map(|p| (p.run_id(), None)).collect();
+    Ok((runs, descriptions))
 }
 
 /// The run the runner last started and has not finished, from `matrix.log`.
@@ -168,9 +164,9 @@ fn current_run(log: &str) -> Option<String> {
     (!finished).then_some(id)
 }
 
-/// The line that ended the latest runner session (`matrix finished` or `stop
-/// requested`), if that session ended; a marker from an earlier session of a
-/// resumed matrix does not count.
+/// The line that ended the latest runner session (`matrix finished`, `stop
+/// requested`, or `interrupted by <signal>`), if that session ended; a marker
+/// from an earlier session of a resumed matrix does not count.
 fn session_end_marker(log: &str) -> Option<&str> {
     for line in log.lines().rev() {
         let message = line.split_once(' ').map_or(line, |x| x.1);
@@ -178,20 +174,33 @@ fn session_end_marker(log: &str) -> Option<&str> {
         if message.starts_with("matrix ") && message.contains(" scenario(s), ") {
             return None;
         }
-        if message.starts_with("matrix finished") || message.starts_with("stop requested") {
+        if message.starts_with("matrix finished")
+            || message.starts_with("stop requested;")
+            || message.starts_with("interrupted by ")
+        {
             return Some(line);
         }
     }
     None
 }
 
-/// The pid of the runner working on `out`, from the pid file it writes, if
-/// that process is still a chaos-matrix runner.
+/// The pid of the runner working on `out`, from the pid file it writes (its
+/// first line), if that process is still a chaos-matrix runner.
 fn runner_pid(out: &Path) -> Option<String> {
-    let pid = fs::read_to_string(out.join(PID_FILE)).ok()?.trim().to_string();
-    pid.parse::<u32>().ok()?;
-    let output = Command::new("ps").args(["-o", "args=", "-p", &pid]).output().ok()?;
-    is_runner_command(&String::from_utf8_lossy(&output.stdout)).then_some(pid)
+    let text = fs::read_to_string(out.join(PID_FILE)).ok()?;
+    let pid = text.lines().next()?.trim().to_string();
+    is_live_runner(&pid).then_some(pid)
+}
+
+/// Whether `pid` is a live chaos-matrix runner other than this process.
+pub(super) fn is_live_runner(pid: &str) -> bool {
+    if pid.parse::<u32>().map_or(true, |pid| pid == std::process::id()) {
+        return false;
+    }
+    Command::new("ps")
+        .args(["-o", "args=", "-p", pid])
+        .output()
+        .is_ok_and(|output| is_runner_command(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Whether a process command line is a `chaos-matrix` runner (and not, say,
@@ -200,24 +209,13 @@ fn is_runner_command(args: &str) -> bool {
     args.split_whitespace().any(|a| a == "chaos-matrix")
 }
 
-/// The scenario id of a run id `<scenario>-<protocol>-<size>`. Scenario ids
-/// may contain dashes; protocols and size labels never do.
-fn scenario_of(run_id: &str) -> &str {
-    run_id.rsplitn(3, '-').nth(2).unwrap_or("")
-}
-
 fn running_brokers() -> Vec<String> {
-    Command::new("docker")
-        .args(["ps", "--format", "{{.Names}}"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|n| is_harness_broker_name(n))
-                .map(|n| n.split('-').take(2).collect::<Vec<_>>().join("-"))
-                .collect()
-        })
+    docker_output(&["ps", "--format", "{{.Names}}"])
         .unwrap_or_default()
+        .lines()
+        .filter(|n| is_harness_broker_name(n))
+        .map(|n| n.split('-').take(2).collect::<Vec<_>>().join("-"))
+        .collect()
 }
 
 fn format_long(secs: u64) -> String {
@@ -228,11 +226,22 @@ fn format_long(secs: u64) -> String {
     }
 }
 
+/// The planned runs that have a result, with it. A result recorded with other
+/// chaos flags than the plan lists is of a run that no longer counts (the
+/// runner runs it again); when either side does not say, it counts.
+fn finished_runs<'a>(plan: &'a Plan, results: &'a BTreeMap<String, RunResult>) -> Vec<(&'a String, &'a RunResult)> {
+    plan.iter()
+        .filter_map(|(id, args)| results.get(id).map(|r| (id, args, r)))
+        .filter(|(_, args, r)| args.as_deref().is_none_or(|args| r.ran_with(args)))
+        .map(|(id, _, r)| (id, r))
+        .collect()
+}
+
 fn render(out: &Path) -> anyhow::Result<String> {
     let results = load_results(&out.join("results.tsv"))?;
-    let (plan, descriptions) = planned_run_ids(out)?;
+    let (plan, descriptions) = planned_runs(out)?;
     let log = fs::read_to_string(out.join("matrix.log")).unwrap_or_default();
-    let finished: Vec<(&String, &RunResult)> = plan.iter().filter_map(|id| results.get(id).map(|r| (id, r))).collect();
+    let finished = finished_runs(&plan, &results);
     let passed = finished.iter().filter(|(_, r)| r.outcome == "PASS").count();
     let remaining = plan.len() - finished.len();
     let pid = runner_pid(out);
@@ -259,7 +268,7 @@ fn render(out: &Path) -> anyhow::Result<String> {
     let current = if pid.is_none() { None } else { current_run(&log) };
     let mut current_elapsed = 0;
     if let Some(id) = &current {
-        let position = plan.iter().position(|p| p == id).map(|n| n + 1).unwrap_or(0);
+        let position = plan.iter().position(|(p, _)| p == id).map(|n| n + 1).unwrap_or(0);
         let scenario = scenario_of(id);
         s.push_str(&format!(
             "Current       [{position}/{}] {id} — {}\n",
@@ -373,17 +382,84 @@ mod tests {
     fn a_rerun_is_current_although_its_previous_attempt_is_recorded() {
         // Session 1 recorded a FAIL; session 2 (`--rerun-failed`) started it
         // again. Only the log tells the rerun is in progress.
-        let log = "t1 matrix m.txt — 1 scenario(s), up to 1 protocol(s), 1 size(s): 1 run(s); 0 already recorded\n\
-                   t1 [1/1] 1-plaintext-100B — a — starting\n\
-                   t1 [1/1] 1-plaintext-100B — FAIL in 5s (delivered 10, lost 1, 2 records/s)\n\
-                   t1 matrix finished: 0/1 passed, 0 known-defect; summary in s\n\
-                   t2 matrix m.txt — 1 scenario(s), up to 1 protocol(s), 1 size(s): 1 run(s); 1 already recorded\n\
-                   t2 [1/1] 1-plaintext-100B — a — starting\n";
+        let log = "t1 matrix m.txt — 2 scenario(s), up to 1 protocol(s), 1 size(s): 2 run(s) of 2 in the matrix; 0 already recorded\n\
+                   t1 [1/2] 1-plaintext-100B — a — starting\n\
+                   t1 [1/2] 1-plaintext-100B — FAIL in 5s (delivered 10, lost 1, 2 records/s)\n\
+                   t1 [2/2] 2-plaintext-100B — b — starting\n\
+                   t1 [2/2] 2-plaintext-100B — PASS in 5s (delivered 10, lost 0, 2 records/s)\n\
+                   t1 matrix finished: 1/2 passed, 0 known-defect; summary in s\n\
+                   t2 matrix m.txt — 2 scenario(s), up to 1 protocol(s), 1 size(s): 2 run(s) of 2 in the matrix; 2 already recorded\n\
+                   t2 [1/2] 1-plaintext-100B — a — starting\n";
         assert_eq!(current_run(log).as_deref(), Some("1-plaintext-100B"));
         // And session 1's end marker does not describe session 2.
         assert_eq!(session_end_marker(log), None);
-        let ended = format!("{log}t2 stop requested; 2-plaintext-100B and later runs not started — re-run to resume\n");
-        assert!(session_end_marker(&ended).is_some_and(|l| l.starts_with("t2 stop requested")));
+        // STOP is honoured between runs only: the rerun finishes, then the
+        // next run (here a `--rerun` of the passed one) is not started.
+        let stopped = format!(
+            "{log}t2 [1/2] 1-plaintext-100B — PASS in 6s (delivered 10, lost 0, 2 records/s)\n\
+             t2 stop requested; 2-plaintext-100B and later runs not started — re-run to resume\n"
+        );
+        assert_eq!(current_run(&stopped), None);
+        assert!(session_end_marker(&stopped).is_some_and(|l| l.starts_with("t2 stop requested;")));
+        // A STOP that came during the last run is consumed and reported, but
+        // the session still finished.
+        let finished = format!(
+            "{log}t2 [1/2] 1-plaintext-100B — PASS in 6s (delivered 10, lost 0, 2 records/s)\n\
+             t2 stop requested during the last run; nothing was left to stop\n\
+             t2 matrix finished: 2/2 passed, 0 known-defect; summary in s\n"
+        );
+        assert!(session_end_marker(&finished).is_some_and(|l| l.starts_with("t2 matrix finished")));
+        let interrupted = format!(
+            "{log}t2 interrupted by SIGINT: 1-plaintext-100B was stopped and is not recorded — re-run the same \
+             command to resume\n"
+        );
+        assert!(session_end_marker(&interrupted).is_some_and(|l| l.starts_with("t2 interrupted by SIGINT")));
+    }
+
+    #[test]
+    fn a_blank_plan_line_is_no_run_and_other_flags_are_no_result() {
+        let out = std::env::temp_dir().join(format!("chaos-matrix-status-plan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("matrix.txt"), "1 | a | --cycles 1\n2 | b | --cycles 2\n").unwrap();
+        // An empty plan once wrote "\n", which read back as one phantom run.
+        fs::write(out.join(PLAN_FILE), "\n").unwrap();
+        assert!(planned_runs(&out).unwrap().0.is_empty());
+        fs::write(
+            out.join(PLAN_FILE),
+            "1-plaintext-100B\t--cycles 1 --rps 1000\n\n2-plaintext-100B\t--cycles 2 --rps 1000\n",
+        )
+        .unwrap();
+        let (plan, _) = planned_runs(&out).unwrap();
+        assert_eq!(plan.len(), 2);
+        let row = |args: &str| {
+            let mut result = RunResult { outcome: "PASS".into(), ..RunResult::default() };
+            result.columns.insert("chaos_args".into(), args.into());
+            result
+        };
+        let results: BTreeMap<String, RunResult> = [
+            ("1-plaintext-100B".to_string(), row("--cycles 1 --rps 1000")),
+            // Recorded at another --rps: the runner runs it again.
+            ("2-plaintext-100B".to_string(), row("--cycles 2 --rps 50")),
+        ]
+        .into_iter()
+        .collect();
+        let finished: Vec<&String> = finished_runs(&plan, &results).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(finished, ["1-plaintext-100B"]);
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn the_runner_pid_is_the_first_line_of_the_pid_file() {
+        let out = std::env::temp_dir().join(format!("chaos-matrix-status-pid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        // This test process is no chaos-matrix runner, so it does not count,
+        // whatever the second line says.
+        fs::write(out.join(PID_FILE), format!("{}\nchild 1\n", std::process::id())).unwrap();
+        assert_eq!(runner_pid(&out), None);
+        assert!(!is_live_runner("not-a-pid"));
+        fs::remove_dir_all(&out).unwrap();
     }
 
     #[test]

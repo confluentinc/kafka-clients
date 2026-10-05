@@ -50,6 +50,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -301,11 +302,14 @@ using confluent::kafka::test::TopicPartitionInfoEntry;
 // their short names cannot collide with the RPC methods above (Committed).
 using confluent::kafka::test::ChaosWorkloadService;
 using confluent::kafka::test::COMMIT_MODE_SYNC;
+using confluent::kafka::test::CONSUMER_OP_CLOSE;
 using confluent::kafka::test::CONSUMER_OP_COMMIT;
 using confluent::kafka::test::CONSUMER_OP_POLL;
 using confluent::kafka::test::CONSUMER_OP_READ_COMMITTED;
 using confluent::kafka::test::CONSUMER_OP_REVOKE_COMMIT;
 using confluent::kafka::test::ConsumerOp;
+using confluent::kafka::test::MarkWorkloadRequest;
+using confluent::kafka::test::MarkWorkloadResponse;
 using confluent::kafka::test::REBALANCE_KIND_ASSIGNED;
 using confluent::kafka::test::REBALANCE_KIND_LOST;
 using confluent::kafka::test::REBALANCE_KIND_REVOKED;
@@ -5082,10 +5086,21 @@ WorkloadEvent chaos_consumed(uint64_t index, std::string topic, int32_t partitio
 // backend reports them.
 using ChaosPartitions = std::vector<std::pair<std::string, int32_t>>;
 
-WorkloadEvent chaos_rebalance(RebalanceKind kind, const ChaosPartitions& partitions) {
+// Nanoseconds since the Unix epoch on the wall clock: Rebalance's
+// observed_at_unix_nanos, comparable across consumers and servers.
+int64_t chaos_unix_nanos() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+// `observed_at` is taken by the caller when the listener callback starts.
+WorkloadEvent chaos_rebalance(RebalanceKind kind, const ChaosPartitions& partitions,
+                              int64_t observed_at) {
   WorkloadEvent event;
   auto* rebalance = event.mutable_rebalance();
   rebalance->set_kind(kind);
+  rebalance->set_observed_at_unix_nanos(observed_at);
   for (const auto& tp : partitions) {
     auto* ref = rebalance->add_partitions();
     ref->set_topic(tp.first);
@@ -5135,6 +5150,12 @@ WorkloadEvent chaos_failed(KafkaError error) {
   return event;
 }
 
+WorkloadEvent chaos_marker(uint64_t marker) {
+  WorkloadEvent event;
+  event.mutable_marker()->set_marker(marker);
+  return event;
+}
+
 bool chaos_is_terminal(const WorkloadEvent& event) {
   return event.event_case() == WorkloadEvent::kFinished ||
          event.event_case() == WorkloadEvent::kFailed;
@@ -5157,37 +5178,25 @@ uint64_t chaos_decode_index(const uint8_t* bytes) {
 
 // ── Producer ──
 
-struct ChaosProducerState;
-
-// user_data of one record's delivery callback.
-//
-// Stored as the value of ChaosProducerState::inflight, which is node-based, so
-// the address handed to the FFI stays valid while other records are inserted
-// and erased. `state` and `index` are written before the send and never again,
-// so the callback may read them before taking the state's mutex; `settled` is
-// only touched under it.
-struct ChaosSendCtx {
-  ChaosProducerState* state;
-  uint64_t index;
-  // The send call failed synchronously and that failure was reported; the
-  // entry is kept only because the callback may still fire (see
-  // chaos_settle_send_failure).
-  bool settled;
-};
-
-// Callback state of one producer workload: user_data of the delivery callbacks
-// (through ChaosSendCtx) and of the close callback. Retained for the session;
-// see the section comment.
+// Callback state of one producer workload: user_data of the close callback,
+// and -- through its slot in the producer-state table -- what every delivery
+// callback settles against. Retained for the session; see the section comment.
 struct ChaosProducerState {
   explicit ChaosProducerState(std::shared_ptr<ChaosEventQueue> queue)
       : events(std::move(queue)) {}
 
   std::shared_ptr<ChaosEventQueue> events;
 
+  // This state's index in the producer-state table (chaos_send_cookie).
+  uint64_t slot = 0;
+
   // Records handed to (or being handed to) the client and not yet settled by
-  // their delivery callback.
+  // their delivery callback, by index. The value is whether the send call
+  // failed synchronously and that failure was already reported: the entry is
+  // then kept only because the callback may still fire (see
+  // chaos_settle_send_failure).
   std::mutex mu;
-  std::unordered_map<uint64_t, ChaosSendCtx> inflight;
+  std::unordered_map<uint64_t, bool> inflight;
 
   // kafka_producer_Producer_close_async's completion.
   std::mutex close_mu;
@@ -5196,17 +5205,56 @@ struct ChaosProducerState {
   kafka_common_Error_t* close_error = nullptr;
 };
 
+// A delivery callback's user_data is not a pointer to per-record state, which
+// would have to be freed by the callback and then be read again -- after it was
+// freed -- if the client ever fired the same record's callback twice. It is a
+// cookie that encodes the record's index and its workload's slot in this
+// table, so a callback reads nothing it does not look up under a lock. Entries
+// point at retained states and are never removed, so every slot stays valid for
+// the session.
+constexpr int kChaosCookieIndexBits = 48;
+constexpr uint64_t kChaosCookieIndexMask = (uint64_t{1} << kChaosCookieIndexBits) - 1;
+constexpr uint64_t kChaosMaxProducerSlots = uint64_t{1} << (64 - kChaosCookieIndexBits);
+static_assert(sizeof(void*) >= sizeof(uint64_t), "a delivery cookie needs 64-bit pointers");
+
+std::mutex g_chaos_producer_states_mu;
+std::vector<ChaosProducerState*> g_chaos_producer_states;
+
+// Gives `state` its slot. False once the table is full (65536 producer
+// workloads in one server session).
+bool chaos_register_producer_state(ChaosProducerState* state) {
+  std::lock_guard<std::mutex> lock(g_chaos_producer_states_mu);
+  if (g_chaos_producer_states.size() >= kChaosMaxProducerSlots) return false;
+  state->slot = g_chaos_producer_states.size();
+  g_chaos_producer_states.push_back(state);
+  return true;
+}
+
+// `index` must be below 2^48 (the send loop stops before that).
+void* chaos_send_cookie(uint64_t slot, uint64_t index) {
+  return reinterpret_cast<void*>(
+      static_cast<uintptr_t>((slot << kChaosCookieIndexBits) | (index & kChaosCookieIndexMask)));
+}
+
 // The delivery callback, on the producer's dispatcher thread: settles the
 // record with Delivered or SendFailed (grpc_chaos.py `_outcome`).
 //
 // The callee owns every non-null handle, and both can be set at once: a record
 // the client rejected before or inside the accumulator comes with placeholder
 // metadata (partition / offset -1) next to the error. The error wins.
+//
+// A callback for a record that is no longer in flight -- the client fired its
+// callback a second time -- is reported as it is, so the verifier sees the
+// record settled twice instead of the server hiding it.
 extern "C" void chaos_on_delivery(kafka_producer_RecordMetadata_t* metadata,
                                   kafka_common_Error_t* error, void* user_data) {
-  auto* ctx = static_cast<ChaosSendCtx*>(user_data);
-  ChaosProducerState* state = ctx->state;
-  const uint64_t index = ctx->index;
+  const uint64_t cookie = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(user_data));
+  const uint64_t index = cookie & kChaosCookieIndexMask;
+  ChaosProducerState* state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_chaos_producer_states_mu);
+    state = g_chaos_producer_states[cookie >> kChaosCookieIndexBits];
+  }
 
   WorkloadEvent event;
   if (error != nullptr) {
@@ -5220,14 +5268,23 @@ extern "C" void chaos_on_delivery(kafka_producer_RecordMetadata_t* metadata,
   }
   if (metadata != nullptr) kafka_producer_RecordMetadata_destroy(metadata);
 
-  bool report = false;
+  bool report = true;
+  bool repeated = false;
   {
     std::lock_guard<std::mutex> lock(state->mu);
     auto it = state->inflight.find(index);
-    if (it != state->inflight.end()) {
-      report = !it->second.settled;
-      state->inflight.erase(it);  // frees *ctx; not touched below
+    if (it == state->inflight.end()) {
+      repeated = true;
+    } else {
+      // A record its synchronous send failure already settled is only
+      // forgotten now.
+      report = !it->second;
+      state->inflight.erase(it);
     }
+  }
+  if (repeated) {
+    std::cerr << "c server: chaos delivery callback fired again for already settled record "
+              << index << std::endl;
   }
   if (report) state->events->push(std::move(event));
 }
@@ -5241,11 +5298,12 @@ extern "C" void chaos_on_delivery(kafka_producer_RecordMetadata_t* metadata,
 // already in a batch whose completion still fires the callback later. The C API
 // cannot tell the two apart, so this reports the synchronous failure itself --
 // as grpc_chaos.py and tests/chaos/workload.rs do for a failed send -- and
-// leaves the entry in place marked `settled`: if the callback does fire later,
-// it still has valid user_data, finds the record settled, and only erases it.
-// Whichever of the two gets the mutex first reports, so each record is settled
-// exactly once. (A synchronous failure whose callback never fires leaves its
-// small entry behind in the retained state; these are rare.)
+// leaves the entry in place marked settled: if the callback does fire later,
+// it finds the record settled and only erases it. Whichever of the two gets the
+// mutex first reports, so the record is settled once by the pair (a further
+// callback is reported, see chaos_on_delivery). (A synchronous failure whose
+// callback never fires leaves its small entry behind in the retained state;
+// these are rare.)
 void chaos_settle_send_failure(ChaosProducerState* state, uint64_t index,
                                kafka_common_Error_t* send_err) {
   KafkaError error = chaos_error(send_err);
@@ -5253,8 +5311,8 @@ void chaos_settle_send_failure(ChaosProducerState* state, uint64_t index,
   {
     std::lock_guard<std::mutex> lock(state->mu);
     auto it = state->inflight.find(index);
-    if (it != state->inflight.end() && !it->second.settled) {
-      it->second.settled = true;
+    if (it != state->inflight.end() && !it->second) {
+      it->second = true;
       report = true;
     }
   }
@@ -5360,8 +5418,10 @@ void chaos_push_committed(ChaosEventQueue& events, kafka_consumer_OffsetMap_t* m
 
 extern "C" kafka_common_Error_t* chaos_partitions_assigned(
     kafka_common_TopicPartitionList_t* partitions, void* user_data) {
+  const int64_t observed_at = chaos_unix_nanos();
   auto* state = static_cast<ChaosListenerState*>(user_data);
-  state->events->push(chaos_rebalance(REBALANCE_KIND_ASSIGNED, chaos_take_partitions(partitions)));
+  state->events->push(
+      chaos_rebalance(REBALANCE_KIND_ASSIGNED, chaos_take_partitions(partitions), observed_at));
   return nullptr;
 }
 
@@ -5371,9 +5431,10 @@ extern "C" kafka_common_Error_t* chaos_partitions_assigned(
 // then reads the commit back unless closing.
 extern "C" kafka_common_Error_t* chaos_partitions_revoked(
     kafka_common_TopicPartitionList_t* partitions, void* user_data) {
+  const int64_t observed_at = chaos_unix_nanos();
   auto* state = static_cast<ChaosListenerState*>(user_data);
   const ChaosPartitions tps = chaos_take_partitions(partitions);
-  state->events->push(chaos_rebalance(REBALANCE_KIND_REVOKED, tps));
+  state->events->push(chaos_rebalance(REBALANCE_KIND_REVOKED, tps, observed_at));
 
   std::lock_guard<std::mutex> lock(state->handle_mu);
   if (state->handle == nullptr) {
@@ -5416,9 +5477,25 @@ extern "C" kafka_common_Error_t* chaos_partitions_revoked(
 // reported as lost -- and does not commit.
 extern "C" kafka_common_Error_t* chaos_partitions_lost(
     kafka_common_TopicPartitionList_t* partitions, void* user_data) {
+  const int64_t observed_at = chaos_unix_nanos();
   auto* state = static_cast<ChaosListenerState*>(user_data);
-  state->events->push(chaos_rebalance(REBALANCE_KIND_LOST, chaos_take_partitions(partitions)));
+  state->events->push(
+      chaos_rebalance(REBALANCE_KIND_LOST, chaos_take_partitions(partitions), observed_at));
   return nullptr;
+}
+
+// Completion of a poll-loop commit_async (COMMIT_MODE_ASYNC), on the consumer's
+// dispatcher thread: reports a failed commit, which the initiating call cannot
+// (it returns once the commit is started). Same user_data as the listener;
+// runs inside a later poll / commit / close, which waits for it, so it never
+// outlives the consumer. The callee owns both handles.
+extern "C" void chaos_on_commit_async(kafka_consumer_OffsetMap_t* offsets,
+                                      kafka_common_Error_t* error, void* user_data) {
+  auto* state = static_cast<ChaosListenerState*>(user_data);
+  if (offsets != nullptr) kafka_consumer_OffsetMap_destroy(offsets);
+  if (error != nullptr) {
+    state->events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_error(error)));
+  }
 }
 
 // committed() of the current assignment, as Committed events (grpc_chaos.py
@@ -5510,9 +5587,25 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = workloads_.find(req->workload_id());
-      if (it != workloads_.end()) stop = it->second;
+      if (it != workloads_.end()) stop = it->second.stop;
     }
     if (stop) stop->set();
+    return grpc::Status::OK;
+  }
+
+  // Queues a Marker behind every event the workload queued so far (the queue
+  // is one FIFO for the workload thread and the client's callbacks); see
+  // chaos_service.proto "Topic ids".
+  grpc::Status MarkWorkload(grpc::ServerContext*, const MarkWorkloadRequest* req,
+                            MarkWorkloadResponse* resp) override {
+    std::shared_ptr<ChaosEventQueue> events;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = workloads_.find(req->workload_id());
+      if (it != workloads_.end()) events = it->second.events;
+    }
+    if (events) events->push(chaos_marker(req->marker()));
+    resp->set_found(events != nullptr);
     return grpc::Status::OK;
   }
 
@@ -5525,10 +5618,11 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
   grpc::Status run(grpc::ServerContext* context, const std::string& workload_id,
                    grpc::ServerWriter<WorkloadEventBatch>* writer, const WorkloadBody& body) {
     auto stop = std::make_shared<ChaosStopSignal>();
+    auto events = std::make_shared<ChaosEventQueue>();
     bool added = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      added = workloads_.emplace(workload_id, stop).second;
+      added = workloads_.emplace(workload_id, RunningWorkload{stop, events}).second;
     }
     if (!added) {
       WorkloadEventBatch batch;
@@ -5539,7 +5633,11 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       return grpc::Status::OK;
     }
 
-    auto events = std::make_shared<ChaosEventQueue>();
+    // Headers now, not with the first event: the harness's call resolves on
+    // them, and a consumer that is never assigned anything may emit nothing for
+    // a long time (chaos_service.proto, lifecycle step 1).
+    writer->SendInitialMetadata();
+
     std::thread worker;
     try {
       worker = std::thread([&body, &workload_id, events, stop] {
@@ -5621,6 +5719,14 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
 
     auto state = std::make_shared<ChaosProducerState>(events);
     retain(state);
+    if (!chaos_register_producer_state(state.get())) {
+      kafka_common_Error_t* close_err = chaos_close_producer(producer, state.get());
+      if (close_err != nullptr) kafka_common_Error_destroy(close_err);
+      kafka_producer_Producer_destroy(producer);
+      events->push(chaos_failed(
+          make_synthetic_error("too many chaos producer workloads in one server session")));
+      return;
+    }
 
     const std::string& topic = req.topic();
     const uint32_t msg_size = req.msg_size();
@@ -5646,14 +5752,16 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     uint64_t index = 0;
     try {
       while (!stop.is_set()) {
+        if (index > kChaosCookieIndexMask) {
+          // 2^48 records: the delivery cookie has no room for more.
+          throw std::runtime_error("record index exceeds the delivery cookie's range");
+        }
         chaos_encode_index(index, key);
         std::memcpy(value.data(), key, sizeof(key));
 
-        ChaosSendCtx* ctx = nullptr;
         {
           std::lock_guard<std::mutex> lock(state->mu);
-          ctx = &state->inflight.emplace(index, ChaosSendCtx{state.get(), index, false})
-                     .first->second;
+          state->inflight.emplace(index, false);
         }
         // Open the record's in-flight window before handing it over, so its
         // Sent is queued ahead of anything its callback reports; the verifier
@@ -5671,7 +5779,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
         kafka_common_KafkaFuture_RecordMetadata_t* future = kafka_producer_Producer_send_with_callback(
             producer, topic.c_str(), /*partition=*/-1, /*timestamp=*/-1, key,
             static_cast<int32_t>(sizeof(key)), value.data(), static_cast<int32_t>(msg_size),
-            chaos_on_delivery, ctx, &send_err);
+            chaos_on_delivery, chaos_send_cookie(state->slot, index), &send_err);
         if (future != nullptr) {
           kafka_common_KafkaFuture_RecordMetadata_destroy(future);
         } else {
@@ -5791,8 +5899,13 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       kafka_consumer_ConsumerRecords_destroy(records);
       if (n == 0) continue;
 
-      kafka_common_Error_t* commit_err = sync_commit ? kafka_consumer_Consumer_commit_sync(consumer)
-                                                     : kafka_consumer_Consumer_commit_async(consumer);
+      // An async commit's own failure arrives later, through
+      // chaos_on_commit_async; this only reports a failure to start it.
+      kafka_common_Error_t* commit_err =
+          sync_commit ? kafka_consumer_Consumer_commit_sync(consumer)
+                      : kafka_consumer_Consumer_commit_async_with_callback(
+                            consumer, chaos_on_commit_async, state.get(),
+                            /*user_data_destroy=*/nullptr);
       if (commit_err != nullptr) {
         events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_error(commit_err)));
         continue;
@@ -5819,8 +5932,9 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     events->push(chaos_consumer_closing());
     kafka_common_Error_t* close_err = chaos_close_consumer(consumer, state.get());
     if (close_err != nullptr) {
-      events->push(chaos_failed(chaos_error(close_err)));
-      return;
+      // The consumer's error, not the workload's: it drained, and it is closed
+      // and destroyed either way.
+      events->push(chaos_consumer_error(CONSUMER_OP_CLOSE, chaos_error(close_err)));
     }
     events->push(chaos_consumer_closed());
     events->push(chaos_finished());
@@ -5838,10 +5952,16 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     workloads_.erase(workload_id);
   }
 
-  // workload_id -> stop signal of a running workload, shared by the Run* and
-  // StopWorkload RPCs.
+  // A running workload, as the StopWorkload and MarkWorkload RPCs reach it.
+  struct RunningWorkload {
+    std::shared_ptr<ChaosStopSignal> stop;
+    std::shared_ptr<ChaosEventQueue> events;
+  };
+
+  // workload_id -> running workload, shared by the Run*, StopWorkload and
+  // MarkWorkload RPCs.
   std::mutex mu_;
-  std::unordered_map<std::string, std::shared_ptr<ChaosStopSignal>> workloads_;
+  std::unordered_map<std::string, RunningWorkload> workloads_;
   // Session-lifetime callback states (never erased; see the section comment).
   std::mutex retained_mu_;
   std::vector<std::shared_ptr<void>> retained_;

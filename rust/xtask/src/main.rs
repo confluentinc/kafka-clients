@@ -20,6 +20,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{exit, Command};
 
+use anyhow::Context as _;
+
 mod chaos_matrix;
 
 fn main() -> anyhow::Result<()> {
@@ -621,157 +623,214 @@ fn producer_perf_test() -> anyhow::Result<()> {
 /// brokers, so it is slow, destructive, and excluded from the default sweep
 /// (`test = false` + `#[ignore]`). CLI flags are translated to `CHAOS_*`
 /// environment variables and forwarded to the `chaos_run` test (the same
-/// env-driven pattern the producer perf test uses).
+/// env-driven pattern the producer perf test uses); `CHAOS_*` variables of the
+/// invoking shell are not passed on, so only the given flags count.
 ///
-/// Flags (defaults mirror librdkafka's chaos.py where they overlap):
+/// The flags are listed in [`CHAOS_HELP`] (`cargo xtask chaos --help`).
 ///
-/// ```text
-///   --brokers N            broker count (3)
-///   --num-topics N         number of test topics (1). With >1, --topic is the
-///                          prefix and topics are named <topic>_0.._N-1; one
-///                          producer runs per topic (each at --rps, aggregate =
-///                          N*rps) and consumers subscribe to all topics
-///   --partitions N         partitions per topic (6)
-///   --replication-factor N replication factor per topic (default min(brokers,3);
-///                          FATAL if > brokers)
-///   --msg-size N           producer value payload size in bytes (100)
-///   --cycles N             chaos cycles (3)
-///   (broker rolling is the default fault; layer more faults on with the flags
-///    below, each taking an OPTIONAL cadence N = every N cycles, else every cycle)
-///   --no-broker-roll       disable the implicit broker roll (e.g. pure migration)
-///   --topic-recreate [N]      also delete/recreate the topic
-///   --reassign-partitions [N] also reassign partitions (data moves)
-///   --change-leader [N]       also do a preferred-leader change (no data move)
-///   --all-brokers-down [N]    also kill every broker at once (SIGKILL), keep the
-///                             cluster down for --outage-s, then restart it all
-///   --outage-s N           whole-cluster outage for --all-brokers-down (30)
-///   --allow-multi-topic-recreate  run --topic-recreate with --num-topics > 1
-///                          despite the known consumer defect; a failure with
-///                          exactly its signature is labelled KNOWN DEFECT
-///   --unclean              SIGKILL instead of SIGTERM for broker roll
-///   --workload role:backend  repeatable; role=producer|consumer,
-///                            backend=rust|python|python-async|c
-///                            (default: producer:rust,consumer:rust)
-///   --consumers N          shorthand for 1 rust producer + N rust consumers
-///                          (librdkafka's --consumers; not usable with --workload)
-///   --consumer-churn-min M      consumer churn: keep the live consumer count in
-///   --consumer-churn-max X      [M, X]; each cycle stop a random batch then start
-///                               a random batch (librdkafka chaos churn). Both
-///                               required together; owns the consumer set (not
-///                               usable with --consumers/--workload)
-///   --security-protocol P  broker listener the producer/consumer workloads
-///                          connect through: plaintext (default) | ssl |
-///                          sasl_plaintext | sasl_ssl. SSL trusts the cluster CA;
-///                          SASL is PLAIN as admin/admin-secret. Applies to
-///                          every backend (sasl_plaintext is unavailable to a
-///                          containerised gRPC server); the harness's own admin
-///                          stays on PLAINTEXT
-///   --rps N                producer target records/sec, 0 = max (1000)
-///   --stop-s N             seconds a broker stays down per roll (5)
-///   --drain-s N            drain window at the end (15)
-///   --dwell-s N            delete->recreate dwell for topic-recreate (0)
-///   --leave-broker-down N  keep broker N down for the whole run
-///   --random               chaos-monkey mode: each cycle the seeded RNG picks
-///                          whether/which fault fires (broker-roll, recreate,
-///                          reassign, change-leader — all candidates) AND its
-///                          parameters (broker, clean/unclean, down, dwell) and
-///                          the timing. Rejects the per-fault flags (--unclean,
-///                          --stop-s, --dwell-s, --no-broker-roll, the fault
-///                          cadences, --rebalance-mid-roll): it draws those itself
-///   --action-prob P        --random only: per-cycle probability a fault fires
-///                          (0.7, within 0..=1)
-///   --seed N               reproducibility seed (0 = auto-pick & print). Drives
-///                          the broker-roll order and, with --random, the ENTIRE
-///                          run; rerun with the printed seed to reproduce it
-///   --commit sync|async    consumer commit mode (sync)
-///   --topic NAME           topic name (chaos-run)
-///   --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
-///   --rebalance-remove-cycle N  remove that consumer at cycle N
-///   --rebalance-mid-roll        fire the add/remove INSIDE the broker-roll
-///                               down-window (rebalance overlaps leader
-///                               migration in time); needs a roll that cycle
-///   --reports              write target/chaos-runs/<id>/ (verdict, leader
-///                          changes, per-workload client logs, summary)
-///   --log-budget-mb N      per-workload client-log rotation budget (64)
-///   --repeat N             run up to N times, stop on first failure, append
-///                          target/chaos-runs/run-history.tsv (until-fail loop)
-/// ```
+/// The run fails unless libtest reports that exactly the one selected test
+/// ran and passed, so a filter that matches nothing cannot pass. Every
+/// iteration appends a line to `target/chaos-runs/run-history.tsv` under the
+/// package root: unix time, iteration, verdict (PASS, FAIL, ERROR for a build
+/// or configuration failure, INTERRUPTED), seconds, seed, reports directory.
 ///
-/// A bare `--scenario NAME` instead runs the named `#[ignore]` smoke test
-/// (e.g. `--scenario simple_flow_clean_broker_roll`).
+/// A Ctrl-C (or SIGTERM / SIGHUP) is forwarded to the test as SIGINT, so it
+/// tears its cluster down; a second one kills it.
 ///
 /// See design/current/chaos-fault-injection-harness.md and chaos-parity-gap.md.
 fn chaos() -> anyhow::Result<()> {
+    let mut raw: Vec<String> = env::args().skip(2).collect();
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    if raw[..xtask_end].iter().any(|a| a == "--help" || a == "-h") {
+        println!("{CHAOS_HELP}");
+        return Ok(());
+    }
+
     println!("🔥 Running chaos / fault-injection runner (Docker required)...");
     println!("   Slow and destructive to its own cluster; not part of `cargo test`.");
 
-    let raw: Vec<String> = env::args().skip(2).collect();
-
-    // `--scenario NAME`: run that named smoke test instead of the generic
-    // runner.
-    if raw.iter().any(|a| a == "--scenario") {
-        let args = scenario_test_args(&raw)?;
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        return run_command("cargo", &arg_refs);
-    }
-
     // `--repeat N` is an xtask-level loop control (the chaos_until_fail.sh
     // analog), not a CHAOS_* flag — pull it out before parsing the rest.
-    let mut raw = raw;
     let repeat = take_repeat(&mut raw)?;
 
-    // Otherwise parse the chaos flags into CHAOS_* env vars for `chaos_run`.
-    let env_vars = parse_chaos_flags(&raw)?;
-    for (k, v) in &env_vars {
-        // SAFETY: single-threaded xtask main before any threads are spawned.
-        unsafe { env::set_var(k, v) };
-    }
+    // `--scenario NAME`: run that named smoke test instead of the generic
+    // runner. Otherwise parse the chaos flags into CHAOS_* env vars for
+    // `chaos_run`.
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    let (args, env_vars, test) = if raw[..xtask_end].iter().any(|a| a == "--scenario") {
+        let (args, test) = scenario_test_args(&raw)?;
+        (args, Vec::new(), test)
+    } else {
+        let env_vars = parse_chaos_flags(&raw)?;
+        let feature = chaos_test_feature(&env_vars);
+        if feature == "multilanguage-tests" {
+            println!("   python/c workload requested → building with `--features multilanguage-tests`");
+        }
+        let args: Vec<String> = [
+            "test",
+            "--features",
+            feature,
+            "--test",
+            "chaos",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--exact",
+            CHAOS_RUN_TEST,
+        ]
+        .map(String::from)
+        .to_vec();
+        (args, env_vars, CHAOS_RUN_TEST.to_string())
+    };
 
-    let feature = chaos_test_feature(&env_vars);
-    if feature == "multilanguage-tests" {
-        println!("   python/c workload requested → building with `--features multilanguage-tests`");
-    }
-
-    let args: Vec<&str> = vec![
-        "test",
-        "--features",
-        feature,
-        "--test",
-        "chaos",
-        "--",
-        "--ignored",
-        "--nocapture",
-        "--exact",
-        "run_test::chaos_run",
-    ];
-
+    signals::install();
     // Run once, or loop until failure / `repeat` iterations (the
     // chaos_until_fail.sh analog), appending a TSV history line per iteration.
-    let history = "target/chaos-runs/run-history.tsv";
+    let history = chaos_matrix::package_root().join("target/chaos-runs/run-history.tsv");
     for iter in 1..=repeat {
         if repeat > 1 {
             println!("🔁 chaos iteration {iter}/{repeat}");
         }
         let start = std::time::Instant::now();
-        let result = run_command("cargo", &args);
+        let run = run_chaos_test(&args, &env_vars);
         let secs = start.elapsed().as_secs();
-        let verdict = if result.is_ok() { "PASS" } else { "FAIL" };
-        append_history(history, iter, verdict, secs);
-        if let Err(e) = result {
-            eprintln!("❌ chaos iteration {iter} FAILED after {secs}s — stopping loop (history: {history})");
-            return Err(e);
+        let (verdict, failure, scan) = match run {
+            Ok((exited_ok, scan)) => {
+                let (verdict, failure) = chaos_verdict(&scan, exited_ok, signals::count() > 0, &test);
+                (verdict, failure, scan)
+            },
+            Err(e) => ("ERROR", Some(format!("{e:#}")), ChaosTestScan::default()),
+        };
+        let reports = scan
+            .reports
+            .as_deref()
+            .map(|dir| chaos_matrix::package_root().join(dir).display().to_string());
+        append_history(
+            &history,
+            iter,
+            verdict,
+            secs,
+            scan.seed.as_deref().unwrap_or(""),
+            reports.as_deref().unwrap_or(""),
+        );
+        if let Some(failure) = failure {
+            eprintln!(
+                "❌ chaos iteration {iter} {verdict} after {secs}s — stopping (history: {})",
+                history.display()
+            );
+            anyhow::bail!("chaos {verdict}: {failure}");
         }
     }
     if repeat > 1 {
-        println!("✅ all {repeat} chaos iterations passed (history: {history})");
+        println!("✅ all {repeat} chaos iterations passed (history: {})", history.display());
     }
     Ok(())
 }
 
-/// The `cargo` arguments for `cargo xtask chaos --scenario NAME`. Arguments
-/// before a `--` (besides the `--scenario NAME` pair) go to `cargo test`; the
-/// ones after it go to libtest, after the flags selecting the named test.
-fn scenario_test_args(raw: &[String]) -> anyhow::Result<Vec<String>> {
+/// The libtest path of the flag-driven runner test.
+const CHAOS_RUN_TEST: &str = "run_test::chaos_run";
+
+/// The module holding the named smoke tests `--scenario NAME` runs.
+const CHAOS_SCENARIO_MODULE: &str = "simple_flow_test";
+
+/// The flags of `cargo xtask chaos` (defaults mirror librdkafka's chaos.py
+/// where they overlap). Printed by `cargo xtask chaos --help`; every flag the
+/// parser accepts must appear here (checked by a test).
+const CHAOS_HELP: &str = "\
+cargo xtask chaos [FLAGS]           run the flag-driven chaos runner
+cargo xtask chaos --scenario NAME   run a named #[ignore] smoke test instead
+                                    (e.g. simple_flow_clean_broker_roll, or a
+                                    full libtest path like module::name);
+                                    arguments after `--` go to libtest
+
+Values may be given as `--flag value` or `--flag=value`; a flag may be given
+only once (except --workload).
+
+  --brokers N            broker count (3)
+  --num-topics N         number of test topics (1). With >1, --topic is the
+                         prefix and topics are named <topic>_0.._N-1; one
+                         producer runs per topic (each at --rps, aggregate =
+                         N*rps) and consumers subscribe to all topics
+  --partitions N         partitions per topic (6)
+  --replication-factor N replication factor per topic (default min(brokers,3);
+                         FATAL if > brokers)
+  --msg-size N           producer value payload size in bytes (100)
+  --cycles N             chaos cycles (3)
+  (broker rolling is the default fault; layer more faults on with the flags
+   below, each taking an OPTIONAL cadence N = every N cycles, else every cycle)
+  --no-broker-roll       disable the implicit broker roll (e.g. pure migration)
+  --topic-recreate [N]      also delete/recreate the topic
+  --reassign-partitions [N] also reassign partitions (data moves)
+  --change-leader [N]       also do a preferred-leader change (no data move)
+  --all-brokers-down [N]    also kill every broker at once (SIGKILL), keep the
+                            cluster down for --outage-s, then restart it all
+  --outage-s N           whole-cluster outage for --all-brokers-down (30)
+  --allow-multi-topic-recreate  run --topic-recreate with --num-topics > 1
+                         despite the known consumer defect; a failure with
+                         exactly its signature is labelled KNOWN DEFECT
+  --unclean              SIGKILL instead of SIGTERM for broker roll
+  --workload role:backend  repeatable; role=producer|consumer,
+                           backend=rust|python|python-async|c
+                           (default: producer:rust,consumer:rust)
+  --consumers N          shorthand for 1 rust producer + N rust consumers
+                         (librdkafka's --consumers; not usable with --workload)
+  --consumer-churn-min M      consumer churn: keep the live consumer count in
+  --consumer-churn-max X      [M, X]; each cycle stop a random batch then start
+                              a random batch (librdkafka chaos churn). Both
+                              required together; owns the consumer set (not
+                              usable with --consumers/--workload)
+  --security-protocol P  broker listener the producer/consumer workloads
+                         connect through: plaintext (default) | ssl |
+                         sasl_plaintext | sasl_ssl. SSL trusts the cluster CA;
+                         SASL is PLAIN as admin/admin-secret. Applies to
+                         every backend (sasl_plaintext is unavailable to a
+                         containerised gRPC server); the harness's own admin
+                         stays on PLAINTEXT
+  --rps N                producer target records/sec, 0 = max (1000)
+  --stop-s N             seconds a broker stays down per roll (5)
+  --up-wait-s N          max seconds to wait for a restarted broker to become
+                         operational (60)
+  --warmup-s N           warm-up before the first fault (5)
+  --between-s N          cooldown between cycles (3)
+  --drain-s N            drain window at the end (15)
+  --idle-threshold-s N   end the drain once consumption has been quiet this
+                         long, 0 = wait the full --drain-s (3); no effect with
+                         the default verifier, whose drain ends once every
+                         acknowledged record was seen
+  --dwell-s N            delete->recreate dwell for topic-recreate (0)
+  --leave-broker-down N  keep broker N down for the whole run
+  --random               chaos-monkey mode: each cycle the seeded RNG picks
+                         whether/which fault fires (broker-roll, recreate,
+                         reassign, change-leader — all candidates) AND its
+                         parameters (broker, clean/unclean, down, dwell) and
+                         the timing. Rejects the per-fault flags (--unclean,
+                         --stop-s, --dwell-s, --no-broker-roll, the fault
+                         cadences, --rebalance-mid-roll): it draws those itself
+  --action-prob P        --random only: per-cycle probability a fault fires
+                         (0.7, within 0..=1)
+  --seed N               reproducibility seed (0 = auto-pick & print). Drives
+                         the broker-roll order and, with --random, the ENTIRE
+                         run; rerun with the printed seed to reproduce it
+  --commit sync|async    consumer commit mode (sync)
+  --topic NAME           topic name (chaos-run)
+  --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
+  --rebalance-remove-cycle N  remove that consumer at cycle N
+  --rebalance-mid-roll        fire the add/remove INSIDE the broker-roll
+                              down-window (rebalance overlaps leader
+                              migration in time); needs a roll that cycle
+  --reports              write target/chaos-runs/<id>/ (verdict, leader
+                         changes, per-workload client logs, summary)
+  --log-budget-mb N      per-workload client-log rotation budget (64)
+  --repeat N             run up to N times, stop on first failure, append
+                         target/chaos-runs/run-history.tsv (until-fail loop);
+                         also works with --scenario";
+
+/// The `cargo` arguments for `cargo xtask chaos --scenario NAME`, and the
+/// full libtest path of the test they select. Arguments before a `--`
+/// (besides the `--scenario NAME` pair) go to `cargo test`; the ones after it
+/// go to libtest, after the flags selecting the named test. `--exact` matches
+/// the whole path, so a bare name is looked up in [`CHAOS_SCENARIO_MODULE`].
+fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
     let (xtask_args, libtest_args) = match raw.iter().position(|a| a == "--") {
         Some(split) => (&raw[..split], &raw[split + 1..]),
         None => (raw, &raw[raw.len()..]),
@@ -784,6 +843,11 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<Vec<String>> {
         Some(name) if !name.is_empty() && !name.starts_with('-') => name.clone(),
         _ => anyhow::bail!("--scenario requires a test name"),
     };
+    let test = if name.contains("::") {
+        name
+    } else {
+        format!("{CHAOS_SCENARIO_MODULE}::{name}")
+    };
     let mut args: Vec<String> = ["test", "--features", "integration-tests", "--test", "chaos"]
         .map(String::from)
         .to_vec();
@@ -795,9 +859,9 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<Vec<String>> {
             .map(|(_, a)| a.clone()),
     );
     args.extend(["--", "--ignored", "--nocapture", "--exact"].map(String::from));
-    args.push(name);
+    args.push(test.clone());
     args.extend(libtest_args.iter().cloned());
-    Ok(args)
+    Ok((args, test))
 }
 
 /// The cargo feature the chaos test must be built with for a run with these
@@ -816,27 +880,207 @@ fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
     }
 }
 
-/// Extract `--repeat N` from the raw args, returning N (default 1). The flag
-/// and its value are removed so the remaining args parse as chaos flags.
+/// Extract `--repeat N` from the raw args before any `--`, returning N
+/// (default 1). The flag and its value are removed so the remaining args
+/// parse as chaos flags (or `--scenario` arguments).
 fn take_repeat(raw: &mut Vec<String>) -> anyhow::Result<u32> {
-    if let Some(pos) = raw.iter().position(|a| a == "--repeat") {
-        let val = raw.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--repeat requires a count"))?;
-        let n: u32 = val
-            .parse()
-            .map_err(|_| anyhow::anyhow!("--repeat must be a positive integer"))?;
-        anyhow::ensure!(n >= 1, "--repeat must be >= 1");
-        raw.drain(pos..=pos + 1);
-        Ok(n)
-    } else {
-        Ok(1)
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    let positions: Vec<usize> = (0..xtask_end).filter(|&i| raw[i] == "--repeat").collect();
+    let Some(&pos) = positions.first() else {
+        return Ok(1);
+    };
+    anyhow::ensure!(positions.len() == 1, "--repeat is given more than once");
+    let val = raw
+        .get(pos + 1)
+        .filter(|_| pos + 1 < xtask_end)
+        .ok_or_else(|| anyhow::anyhow!("--repeat requires a count"))?;
+    let n: u32 = val
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--repeat must be a positive integer"))?;
+    anyhow::ensure!(n >= 1, "--repeat must be >= 1");
+    raw.drain(pos..=pos + 1);
+    Ok(n)
+}
+
+/// What a chaos test run printed that the driver needs: whether exactly one
+/// test ran and passed, and the run's seed and reports directory.
+#[derive(Debug, Default, PartialEq)]
+struct ChaosTestScan {
+    /// libtest's `running N tests`; `None` when the test binary never ran
+    /// (a build failure).
+    tests_run: Option<usize>,
+    /// libtest's `test result: ok. 1 passed`.
+    passed_one: bool,
+    /// The harness force-exited a process that had passed; libtest's summary
+    /// never prints then.
+    forced_pass: bool,
+    /// The harness rejected the `CHAOS_*` configuration.
+    config_error: bool,
+    seed: Option<String>,
+    reports: Option<String>,
+}
+
+impl ChaosTestScan {
+    fn observe(&mut self, line: &str) {
+        let line = line.trim();
+        if self.tests_run.is_none() {
+            if let Some(rest) = line.strip_prefix("running ") {
+                let mut words = rest.split_whitespace();
+                if let (Some(n), Some("test" | "tests"), None) = (words.next(), words.next(), words.next()) {
+                    self.tests_run = n.parse().ok();
+                }
+            }
+        }
+        if line.starts_with("test result: ok. 1 passed;") {
+            self.passed_one = true;
+        }
+        if line.starts_with(chaos_matrix::FORCED_EXIT_AFTER_PASS) {
+            self.forced_pass = true;
+        }
+        if line.starts_with("invalid chaos configuration") {
+            self.config_error = true;
+        }
+        if let Some(header) = line.strip_prefix("chaos: ") {
+            if let Some(seed) = header.split_whitespace().find_map(|w| w.strip_prefix("seed=")) {
+                self.seed = Some(seed.to_string());
+            }
+            if let Some(dir) = header
+                .strip_prefix("reports -> ")
+                .or_else(|| header.strip_prefix("reports written to "))
+            {
+                self.reports = Some(dir.trim().to_string());
+            }
+        }
+    }
+
+    /// Combine the scans of the run's stdout and stderr.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            tests_run: self.tests_run.or(other.tests_run),
+            passed_one: self.passed_one || other.passed_one,
+            forced_pass: self.forced_pass || other.forced_pass,
+            config_error: self.config_error || other.config_error,
+            seed: self.seed.or(other.seed),
+            reports: self.reports.or(other.reports),
+        }
     }
 }
 
-/// Append one tab-separated line to the chaos run history (iso-time, iteration,
-/// verdict, seconds) — the run-history.tsv analog. Best-effort.
-fn append_history(path: &str, iter: u32, verdict: &str, secs: u64) {
+/// The verdict of one chaos test run, and why it is not a pass. A run passes
+/// only when libtest ran exactly the selected test and it passed, so a filter
+/// matching nothing (libtest exits 0 then) or several tests cannot pass.
+fn chaos_verdict(
+    scan: &ChaosTestScan,
+    exited_ok: bool,
+    interrupted: bool,
+    test: &str,
+) -> (&'static str, Option<String>) {
+    if interrupted {
+        return ("INTERRUPTED", Some("interrupted by a signal".to_string()));
+    }
+    if scan.config_error {
+        return ("ERROR", Some("the harness rejected the chaos configuration".to_string()));
+    }
+    match scan.tests_run {
+        None => (
+            "ERROR",
+            Some("the chaos test binary never ran (did it fail to build?)".to_string()),
+        ),
+        Some(n) if n != 1 => (
+            "ERROR",
+            Some(format!("expected exactly one test ({test}) to run, but libtest ran {n}")),
+        ),
+        Some(_) if exited_ok && (scan.passed_one || scan.forced_pass) => ("PASS", None),
+        Some(_) if exited_ok => ("ERROR", Some(format!("{test} exited without reporting a pass"))),
+        Some(_) => ("FAIL", Some(format!("{test} failed"))),
+    }
+}
+
+/// Run `cargo` with `args` and exactly the given `CHAOS_*` environment,
+/// echoing its output while scanning it. Returns whether it exited
+/// successfully, and the scan.
+///
+/// The child gets its own process group, and a signal to xtask is forwarded
+/// to that group: SIGINT first, so the harness tears its cluster down, then
+/// SIGKILL for any further one. xtask itself stays alive until the whole group
+/// has exited, so the pipes it echoes stay open while the harness reports.
+fn run_chaos_test(args: &[String], env_vars: &[(String, String)]) -> anyhow::Result<(bool, ChaosTestScan)> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    let mut command = Command::new("cargo");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    set_chaos_env(&mut command, env_vars);
+    let mut child = command.spawn().context("running cargo test")?;
+    let pgid = child.id();
+    let stdout = tee(child.stdout.take().context("cargo stdout")?, false);
+    let stderr = tee(child.stderr.take().context("cargo stderr")?, true);
+    let mut forwarded = 0;
+    while chaos_matrix::group_running(&mut child, pgid)? {
+        let seen = signals::count();
+        if seen > forwarded {
+            chaos_matrix::signal_group(pgid, if forwarded == 0 { "INT" } else { "KILL" });
+            forwarded = seen;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let exited_ok = child.wait()?.success();
+    let scan = stdout.join().unwrap_or_default().merge(stderr.join().unwrap_or_default());
+    Ok((exited_ok, scan))
+}
+
+/// Give `command` exactly the `CHAOS_*` variables in `env_vars`: none
+/// inherited from the invoking shell (a stale `CHAOS_CHECK_CONFIG` would skip
+/// the cluster and still pass) and none set on it before. Shared by
+/// `cargo xtask chaos` and every `chaos-matrix` run.
+fn set_chaos_env(command: &mut Command, env_vars: &[(String, String)]) {
+    let explicit: Vec<std::ffi::OsString> = command.get_envs().map(|(k, _)| k.to_owned()).collect();
+    for key in env::vars_os().map(|(k, _)| k).chain(explicit) {
+        if key.to_string_lossy().starts_with("CHAOS_") {
+            command.env_remove(key);
+        }
+    }
+    command.envs(env_vars.iter().map(|(k, v)| (k, v)));
+}
+
+/// Echo `source` line by line to xtask's stdout (or stderr) while scanning
+/// it. Write errors (a closed terminal) are ignored: the pipe must keep
+/// draining or the test would block on it.
+fn tee(source: impl std::io::Read + Send + 'static, to_stderr: bool) -> std::thread::JoinHandle<ChaosTestScan> {
+    use std::io::{BufRead as _, Write as _};
+    std::thread::spawn(move || {
+        let mut scan = ChaosTestScan::default();
+        let mut reader = std::io::BufReader::new(source);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {},
+            }
+            let _ = if to_stderr {
+                std::io::stderr().write_all(&line)
+            } else {
+                let mut out = std::io::stdout().lock();
+                out.write_all(&line).and_then(|()| out.flush())
+            };
+            scan.observe(&String::from_utf8_lossy(&line));
+        }
+        scan
+    })
+}
+
+/// Append one tab-separated line to the chaos run history (unix time,
+/// iteration, verdict, seconds, seed, reports directory) — the
+/// run-history.tsv analog. Best-effort.
+fn append_history(path: &std::path::Path, iter: u32, verdict: &str, secs: u64, seed: &str, reports: &str) {
     use std::io::Write as _;
-    if let Some(parent) = std::path::Path::new(path).parent() {
+    if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -844,107 +1088,131 @@ fn append_history(path: &str, iter: u32, verdict: &str, secs: u64) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(f, "{ts}\t{iter}\t{verdict}\t{secs}");
+        let _ = writeln!(f, "{ts}\t{iter}\t{verdict}\t{secs}\t{seed}\t{reports}");
     }
 }
 
-/// Translate `--flag value` / `--bool-flag` chaos flags into the `CHAOS_*`
-/// environment variables `ChaosConfig::from_env` reads. `--workload` is
-/// repeatable and accumulates into a comma-separated `CHAOS_WORKLOADS`.
+/// Fault flags with an OPTIONAL cadence argument (present = fire every cycle;
+/// `N` = every N cycles). Broker rolling is implicit/default-on and toggled
+/// off with `--no-broker-roll`, so it is not in this table.
+const CHAOS_FAULT_FLAGS: &[(&str, &str)] = &[
+    ("--topic-recreate", "CHAOS_TOPIC_RECREATE"),
+    ("--reassign-partitions", "CHAOS_REASSIGN_PARTITIONS"),
+    ("--change-leader", "CHAOS_CHANGE_LEADER"),
+    ("--all-brokers-down", "CHAOS_ALL_BROKERS_DOWN"),
+];
+
+/// Flags that take no value, each setting its variable to `1`.
+const CHAOS_BOOL_FLAGS: &[(&str, &str)] = &[
+    ("--unclean", "CHAOS_UNCLEAN"),
+    ("--reports", "CHAOS_REPORTS"),
+    ("--no-broker-roll", "CHAOS_NO_BROKER_ROLL"),
+    ("--rebalance-mid-roll", "CHAOS_REBALANCE_MID_ROLL"),
+    ("--random", "CHAOS_RANDOM"),
+    ("--allow-multi-topic-recreate", "CHAOS_ALLOW_MULTI_TOPIC_RECREATE"),
+];
+
+/// (flag, env-var) pairs that take a value.
+const CHAOS_VALUED_FLAGS: &[(&str, &str)] = &[
+    ("--brokers", "CHAOS_BROKERS"),
+    ("--num-topics", "CHAOS_NUM_TOPICS"),
+    ("--partitions", "CHAOS_PARTITIONS"),
+    ("--replication-factor", "CHAOS_REPLICATION_FACTOR"),
+    ("--msg-size", "CHAOS_MSG_SIZE"),
+    ("--cycles", "CHAOS_CYCLES"),
+    ("--rps", "CHAOS_RPS"),
+    ("--stop-s", "CHAOS_STOP_S"),
+    ("--up-wait-s", "CHAOS_UP_WAIT_S"),
+    ("--warmup-s", "CHAOS_WARMUP_S"),
+    ("--between-s", "CHAOS_BETWEEN_S"),
+    ("--drain-s", "CHAOS_DRAIN_S"),
+    ("--idle-threshold-s", "CHAOS_IDLE_THRESHOLD_S"),
+    ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
+    ("--seed", "CHAOS_SEED"),
+    ("--action-prob", "CHAOS_ACTION_PROB"),
+    ("--dwell-s", "CHAOS_DWELL_S"),
+    ("--outage-s", "CHAOS_OUTAGE_S"),
+    ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
+    ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
+    ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
+    ("--commit", "CHAOS_COMMIT"),
+    ("--topic", "CHAOS_TOPIC"),
+    ("--consumers", "CHAOS_CONSUMERS"),
+    ("--consumer-churn-min", "CHAOS_CONSUMER_CHURN_MIN"),
+    ("--consumer-churn-max", "CHAOS_CONSUMER_CHURN_MAX"),
+    ("--security-protocol", "CHAOS_SECURITY_PROTOCOL"),
+];
+
+/// Translate `--flag value` / `--flag=value` / `--bool-flag` chaos flags into
+/// the `CHAOS_*` environment variables `ChaosConfig::from_env` reads.
+/// `--workload` is repeatable and accumulates into a comma-separated
+/// `CHAOS_WORKLOADS`; every other flag may be given once. A value may not be
+/// empty or start with `--`, so a flag missing its value cannot swallow the
+/// next flag.
 fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let lookup = |table: &[(&str, &'static str)], flag: &str| table.iter().find(|(f, _)| *f == flag).map(|(_, e)| *e);
     let mut out: Vec<(String, String)> = Vec::new();
     let mut workloads: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     let mut i = 0;
-
-    // Fault flags with an OPTIONAL cadence argument (present = fire every cycle;
-    // `N` = every N cycles). Broker rolling is implicit/default-on and toggled
-    // off with `--no-broker-roll`, so it is not in this table.
-    let fault: &[(&str, &str)] = &[
-        ("--topic-recreate", "CHAOS_TOPIC_RECREATE"),
-        ("--reassign-partitions", "CHAOS_REASSIGN_PARTITIONS"),
-        ("--change-leader", "CHAOS_CHANGE_LEADER"),
-        ("--all-brokers-down", "CHAOS_ALL_BROKERS_DOWN"),
-    ];
-
-    // (flag, env-var) pairs that take a value.
-    let valued: &[(&str, &str)] = &[
-        ("--brokers", "CHAOS_BROKERS"),
-        ("--num-topics", "CHAOS_NUM_TOPICS"),
-        ("--partitions", "CHAOS_PARTITIONS"),
-        ("--replication-factor", "CHAOS_REPLICATION_FACTOR"),
-        ("--msg-size", "CHAOS_MSG_SIZE"),
-        ("--cycles", "CHAOS_CYCLES"),
-        ("--rps", "CHAOS_RPS"),
-        ("--stop-s", "CHAOS_STOP_S"),
-        ("--up-wait-s", "CHAOS_UP_WAIT_S"),
-        ("--warmup-s", "CHAOS_WARMUP_S"),
-        ("--between-s", "CHAOS_BETWEEN_S"),
-        ("--drain-s", "CHAOS_DRAIN_S"),
-        ("--idle-threshold-s", "CHAOS_IDLE_THRESHOLD_S"),
-        ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
-        ("--seed", "CHAOS_SEED"),
-        ("--action-prob", "CHAOS_ACTION_PROB"),
-        ("--dwell-s", "CHAOS_DWELL_S"),
-        ("--outage-s", "CHAOS_OUTAGE_S"),
-        ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
-        ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
-        ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
-        ("--commit", "CHAOS_COMMIT"),
-        ("--topic", "CHAOS_TOPIC"),
-        ("--consumers", "CHAOS_CONSUMERS"),
-        ("--consumer-churn-min", "CHAOS_CONSUMER_CHURN_MIN"),
-        ("--consumer-churn-max", "CHAOS_CONSUMER_CHURN_MAX"),
-        ("--security-protocol", "CHAOS_SECURITY_PROTOCOL"),
-    ];
-
     while i < raw.len() {
-        let arg = raw[i].as_str();
-        if arg == "--unclean" {
-            out.push(("CHAOS_UNCLEAN".to_string(), "1".to_string()));
-            i += 1;
-        } else if arg == "--reports" {
-            out.push(("CHAOS_REPORTS".to_string(), "1".to_string()));
-            i += 1;
-        } else if arg == "--workload" {
-            let v = raw
-                .get(i + 1)
-                .ok_or_else(|| anyhow::anyhow!("--workload requires role:backend"))?;
-            workloads.push(v.clone());
-            i += 2;
-        } else if arg == "--no-broker-roll" {
-            out.push(("CHAOS_NO_BROKER_ROLL".to_string(), "1".to_string()));
-            i += 1;
-        } else if arg == "--rebalance-mid-roll" {
-            out.push(("CHAOS_REBALANCE_MID_ROLL".to_string(), "1".to_string()));
-            i += 1;
-        } else if arg == "--random" {
-            out.push(("CHAOS_RANDOM".to_string(), "1".to_string()));
-            i += 1;
-        } else if arg == "--allow-multi-topic-recreate" {
-            out.push(("CHAOS_ALLOW_MULTI_TOPIC_RECREATE".to_string(), "1".to_string()));
-            i += 1;
-        } else if let Some((_, envk)) = fault.iter().find(|(f, _)| *f == arg) {
+        let token = raw[i].as_str();
+        i += 1;
+        let (flag, inline) = match token.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (token, None),
+        };
+        let bool_env = lookup(CHAOS_BOOL_FLAGS, flag);
+        let fault_env = lookup(CHAOS_FAULT_FLAGS, flag);
+        let valued_env = lookup(CHAOS_VALUED_FLAGS, flag);
+        if flag != "--workload" && bool_env.is_none() && fault_env.is_none() && valued_env.is_none() {
+            anyhow::bail!("unknown chaos flag: {token} (see `cargo xtask chaos --help`)");
+        }
+        if flag != "--workload" {
+            anyhow::ensure!(!seen.contains(&flag), "{flag} is given more than once");
+            seen.push(flag);
+        }
+        if let Some(envk) = bool_env {
+            anyhow::ensure!(inline.is_none(), "{flag} takes no value");
+            out.push((envk.to_string(), "1".to_string()));
+        } else if let Some(envk) = fault_env {
             // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
             // cycle) or `--topic-recreate 2` (every 2 cycles). The next token is
             // the cadence only if it is a bare number; otherwise the flag is
             // bare and the token belongs to the next flag.
-            let cadence = match raw.get(i + 1) {
-                Some(v) if v.parse::<u32>().is_ok() => {
-                    i += 2;
+            let cadence = match (inline, raw.get(i)) {
+                (Some(v), _) => {
+                    anyhow::ensure!(v.parse::<u32>().is_ok(), "{flag}: cadence '{v}' is not a number of cycles");
+                    v.to_string()
+                },
+                (None, Some(v)) if v.parse::<u32>().is_ok() => {
+                    i += 1;
                     v.clone()
                 },
-                _ => {
-                    i += 1;
-                    "1".to_string()
-                },
+                (None, _) => "1".to_string(),
             };
             out.push((envk.to_string(), cadence));
-        } else if let Some((_, envk)) = valued.iter().find(|(f, _)| *f == arg) {
-            let v = raw.get(i + 1).ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
-            out.push((envk.to_string(), v.clone()));
-            i += 2;
         } else {
-            anyhow::bail!("unknown chaos flag: {arg} (see `cargo xtask` help)");
+            let value = match inline {
+                Some(v) => v,
+                None => {
+                    let v = raw.get(i).ok_or_else(|| {
+                        if flag == "--workload" {
+                            anyhow::anyhow!("--workload requires role:backend")
+                        } else {
+                            anyhow::anyhow!("{flag} requires a value")
+                        }
+                    })?;
+                    i += 1;
+                    v.as_str()
+                },
+            };
+            anyhow::ensure!(!value.is_empty(), "{flag} requires a non-empty value");
+            anyhow::ensure!(!value.starts_with("--"), "{flag} requires a value, but got the flag {value}");
+            match valued_env {
+                Some(envk) => out.push((envk.to_string(), value.to_string())),
+                None => workloads.push(value.to_string()),
+            }
         }
     }
 
@@ -952,6 +1220,50 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         out.push(("CHAOS_WORKLOADS".to_string(), workloads.join(",")));
     }
     Ok(out)
+}
+
+/// SIGHUP, SIGINT and SIGTERM, recorded instead of ending the process, so the
+/// chaos tasks can stop the run they started — its Docker cluster included —
+/// before they exit. std has no signal API and xtask takes no `libc`
+/// dependency, so `signal(3)` is declared directly; the three numbers are the
+/// same on Linux and macOS. `exec` resets a caught signal to its default, so
+/// the processes a task spawns are unaffected.
+mod signals {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+    static LAST: AtomicI32 = AtomicI32::new(0);
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+
+    const HANDLED: [(i32, &str); 3] = [(1, "SIGHUP"), (2, "SIGINT"), (15, "SIGTERM")];
+
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    extern "C" fn record(signum: i32) {
+        LAST.store(signum, Ordering::SeqCst);
+        COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record SIGHUP, SIGINT and SIGTERM from now on.
+    pub fn install() {
+        for (signum, _) in HANDLED {
+            // SAFETY: `record` only stores to lock-free atomics, which is
+            // async-signal-safe, and `signal` is given a valid handler.
+            unsafe { signal(signum, record) };
+        }
+    }
+
+    /// How many of those signals arrived since `install`.
+    pub fn count() -> u32 {
+        COUNT.load(Ordering::SeqCst)
+    }
+
+    /// The name of the latest one, for messages.
+    pub fn last_name() -> &'static str {
+        let last = LAST.load(Ordering::SeqCst);
+        HANDLED.iter().find(|(n, _)| *n == last).map_or("a signal", |(_, name)| name)
+    }
 }
 
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
@@ -1551,6 +1863,7 @@ fn print_help() {
                              --workload producer:rust --workload consumer:rust
                     --scenario NAME runs a named #[ignore] smoke test instead;
                     arguments after `--` go to libtest (e.g. -- --test-threads 1)
+                    `cargo xtask chaos --help` lists every flag
   chaos-matrix    Run every scenario of a matrix file across security protocols and
                   message sizes, one after another, saving each run's logs and
                   reports and keeping a running summary (requires Docker)
@@ -1560,7 +1873,12 @@ fn print_help() {
                     --only ID,ID  --run-timeout-min N (default 240)  --rerun-failed
                     --rerun RUN,RUN (run again these run ids, e.g. 15-ssl-1MiB, whatever their outcome)
                     --check-only (validate every run's configuration, then stop)
-                    --stall-min N (default 20)  --known-defect-attempts N (default 3)
+                    --stall-min N (default 20; longer for runs with longer silent phases)
+                    --known-defect-attempts N (default 3)
+                    a run recorded with other flags (scenario line or --rps changed) runs again;
+                    --only / fewer --protocols or --msg-sizes select what runs, the summary
+                    and exit status cover the whole matrix; one runner per --out directory;
+                    Ctrl-C stops the current run (its cluster torn down) and leaves it unrecorded
                     exits non-zero when a recorded run did not pass (KNOWN-DEFECT excepted)
   chaos-matrix-status  Show a running (or finished) matrix's progress: current run and
                   cycle, pass/fail counts, recent results, failures, time estimate
@@ -1583,7 +1901,7 @@ Usage:
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
   cargo xtask package-check
-  cargo xtask chaos
+  cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]"
     );
@@ -1711,7 +2029,7 @@ version = "0.1.0"
 
     #[test]
     fn scenario_args_after_the_separator_go_to_libtest() {
-        let args = scenario_test_args(&strings(&[
+        let (args, test) = scenario_test_args(&strings(&[
             "--release",
             "--scenario",
             "simple_flow_clean_broker_roll",
@@ -1720,16 +2038,211 @@ version = "0.1.0"
             "1",
         ]))
         .unwrap();
+        // `--exact` matches the full path, so the bare name gets its module.
         assert_eq!(
             args.join(" "),
             "test --features integration-tests --test chaos --release -- --ignored --nocapture --exact \
-             simple_flow_clean_broker_roll --test-threads 1"
+             simple_flow_test::simple_flow_clean_broker_roll --test-threads 1"
         );
-        let bare = scenario_test_args(&strings(&["--scenario", "x"])).unwrap();
+        assert_eq!(test, "simple_flow_test::simple_flow_clean_broker_roll");
+        let (bare, _) = scenario_test_args(&strings(&["--scenario", "x"])).unwrap();
         assert_eq!(
             bare.join(" "),
-            "test --features integration-tests --test chaos -- --ignored --nocapture --exact x"
+            "test --features integration-tests --test chaos -- --ignored --nocapture --exact simple_flow_test::x"
         );
+        let (_, full) = scenario_test_args(&strings(&["--scenario", "run_test::chaos_run"])).unwrap();
+        assert_eq!(full, "run_test::chaos_run");
+    }
+
+    #[test]
+    fn every_scenario_test_lives_in_the_scenario_module() {
+        // A bare `--scenario NAME` resolves to `simple_flow_test::NAME`; a
+        // smoke test moved elsewhere would make that path match nothing.
+        let source = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/simple_flow_test.rs")).unwrap();
+        assert!(source.contains("async fn simple_flow_clean_broker_roll()"));
+        let main = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/main.rs")).unwrap();
+        assert!(main.contains(&format!("mod {CHAOS_SCENARIO_MODULE};")));
+        assert!(main.contains("mod run_test;"));
+        let run_test = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/run_test.rs")).unwrap();
+        assert!(run_test.contains("fn chaos_run()"), "{CHAOS_RUN_TEST} must exist");
+    }
+
+    #[test]
+    fn repeat_is_taken_from_before_the_separator_and_works_with_scenario() {
+        let mut raw = strings(&["--scenario", "x", "--repeat", "3", "--", "--test-threads", "1"]);
+        assert_eq!(take_repeat(&mut raw).unwrap(), 3);
+        assert_eq!(raw, strings(&["--scenario", "x", "--", "--test-threads", "1"]));
+        let mut none = strings(&["--cycles", "1"]);
+        assert_eq!(take_repeat(&mut none).unwrap(), 1);
+        let mut twice = strings(&["--repeat", "2", "--repeat", "3"]);
+        assert_eq!(
+            take_repeat(&mut twice).unwrap_err().to_string(),
+            "--repeat is given more than once"
+        );
+        let mut missing = strings(&["--repeat", "--", "2"]);
+        assert_eq!(take_repeat(&mut missing).unwrap_err().to_string(), "--repeat requires a count");
+        let mut zero = strings(&["--repeat", "0"]);
+        assert_eq!(take_repeat(&mut zero).unwrap_err().to_string(), "--repeat must be >= 1");
+    }
+
+    #[test]
+    fn a_valued_flag_never_swallows_the_next_flag() {
+        let err = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap_err().to_string();
+        assert_eq!(
+            err(&["--topic", "--unclean"]),
+            "--topic requires a value, but got the flag --unclean"
+        );
+        assert_eq!(err(&["--brokers", ""]), "--brokers requires a non-empty value");
+        assert_eq!(err(&["--brokers="]), "--brokers requires a non-empty value");
+        assert_eq!(err(&["--brokers"]), "--brokers requires a value");
+        assert_eq!(err(&["--workload"]), "--workload requires role:backend");
+        assert_eq!(err(&["--brokers", "3", "--brokers", "5"]), "--brokers is given more than once");
+        assert_eq!(err(&["--unclean", "--unclean"]), "--unclean is given more than once");
+        assert_eq!(err(&["--unclean=yes"]), "--unclean takes no value");
+        assert_eq!(
+            err(&["--topic-recreate=often"]),
+            "--topic-recreate: cadence 'often' is not a number of cycles"
+        );
+        assert_eq!(
+            err(&["--bogus", "1"]),
+            "unknown chaos flag: --bogus (see `cargo xtask chaos --help`)"
+        );
+    }
+
+    #[test]
+    fn flags_parse_in_both_value_forms() {
+        let env = parse_chaos_flags(&strings(&[
+            "--brokers=5",
+            "--topic",
+            "t",
+            "--topic-recreate",
+            "--change-leader=2",
+            "--reassign-partitions",
+            "3",
+            "--unclean",
+            "--workload",
+            "producer:rust",
+            "--workload=consumer:python",
+            "--seed",
+            "-1",
+        ]))
+        .unwrap();
+        let pairs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert_eq!(
+            pairs,
+            [
+                "CHAOS_BROKERS=5",
+                "CHAOS_TOPIC=t",
+                "CHAOS_TOPIC_RECREATE=1",
+                "CHAOS_CHANGE_LEADER=2",
+                "CHAOS_REASSIGN_PARTITIONS=3",
+                "CHAOS_UNCLEAN=1",
+                "CHAOS_SEED=-1",
+                "CHAOS_WORKLOADS=producer:rust,consumer:python",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_help_lists_every_flag_the_parser_accepts() {
+        for (flag, _) in CHAOS_BOOL_FLAGS.iter().chain(CHAOS_FAULT_FLAGS).chain(CHAOS_VALUED_FLAGS) {
+            assert!(
+                CHAOS_HELP.lines().any(|l| l.trim_start().starts_with(&format!("{flag} "))),
+                "{flag} is missing from CHAOS_HELP"
+            );
+        }
+        for extra in ["--workload ", "--repeat ", "--scenario NAME"] {
+            assert!(CHAOS_HELP.contains(extra), "{extra} is missing from CHAOS_HELP");
+        }
+    }
+
+    #[test]
+    fn only_exactly_one_passing_test_is_a_pass() {
+        let scan = |lines: &[&str]| {
+            let mut scan = ChaosTestScan::default();
+            for line in lines {
+                scan.observe(line);
+            }
+            scan
+        };
+        let test = "simple_flow_test::x";
+        let passed = scan(&["running 1 test", "test result: ok. 1 passed; 0 failed; 0 ignored"]);
+        assert_eq!(chaos_verdict(&passed, true, false, test), ("PASS", None));
+        // The documented `--exact NAME` mistake: libtest exits 0 having run nothing.
+        let nothing = scan(&["running 0 tests", "test result: ok. 0 passed; 0 failed; 0 ignored"]);
+        assert_eq!(
+            chaos_verdict(&nothing, true, false, test),
+            (
+                "ERROR",
+                Some("expected exactly one test (simple_flow_test::x) to run, but libtest ran 0".to_string())
+            )
+        );
+        let failed = scan(&["running 1 test", "test result: FAILED. 0 passed; 1 failed"]);
+        assert_eq!(
+            chaos_verdict(&failed, false, false, test),
+            ("FAIL", Some("simple_flow_test::x failed".to_string()))
+        );
+        assert_eq!(
+            chaos_verdict(&ChaosTestScan::default(), false, false, test),
+            (
+                "ERROR",
+                Some("the chaos test binary never ran (did it fail to build?)".to_string())
+            )
+        );
+        let rejected = scan(&["running 1 test", "invalid chaos configuration: --brokers must be >= 1"]);
+        assert_eq!(
+            chaos_verdict(&rejected, false, false, test),
+            ("ERROR", Some("the harness rejected the chaos configuration".to_string()))
+        );
+        let forced = scan(&["running 1 test", chaos_matrix::FORCED_EXIT_AFTER_PASS]);
+        assert_eq!(chaos_verdict(&forced, true, false, test).0, "PASS");
+        assert_eq!(
+            chaos_verdict(&passed, false, true, test),
+            ("INTERRUPTED", Some("interrupted by a signal".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_seed_and_reports_directory_are_read_from_the_run_output() {
+        let mut out = ChaosTestScan::default();
+        out.observe("running 1 test\n");
+        let mut err = ChaosTestScan::default();
+        err.observe("chaos: brokers=3 topics=1 partitions=6 replication=min(3,3) seed=12345 security=plaintext\n");
+        err.observe("chaos: reports -> target/chaos-runs/1-2\n");
+        let scan = out.merge(err);
+        assert_eq!(scan.tests_run, Some(1));
+        assert_eq!(scan.seed.as_deref(), Some("12345"));
+        assert_eq!(scan.reports.as_deref(), Some("target/chaos-runs/1-2"));
+    }
+
+    #[test]
+    fn inherited_chaos_variables_do_not_reach_the_run() {
+        // The run's environment is exactly the parsed flags: a stale
+        // `CHAOS_CHECK_CONFIG` would otherwise skip the cluster and still
+        // pass. Checked on a real child via `env`; the stale variable is set
+        // on the command rather than in this process, which the same loop
+        // strips along with the inherited ones.
+        let mut command = Command::new("sh");
+        command.args(["-c", "env | grep ^CHAOS_ | sort"]).env("CHAOS_CHECK_CONFIG", "1");
+        set_chaos_env(&mut command, &parse_chaos_flags(&strings(&["--cycles", "1"])).unwrap());
+        let output = command.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "CHAOS_CYCLES=1\n");
+    }
+
+    #[test]
+    fn a_caught_signal_is_recorded_not_fatal() {
+        signals::install();
+        let before = signals::count();
+        Command::new("kill")
+            .args(["-s", "HUP", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while signals::count() == before && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(signals::count() > before);
+        assert_eq!(signals::last_name(), "SIGHUP");
     }
 
     #[test]

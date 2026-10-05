@@ -30,7 +30,7 @@ use super::common::broker_control::BrokerControl;
 use super::common::cluster_config::kip848_3_broker;
 use super::common::kafka_cluster::KafkaCluster;
 use super::config::SecurityProtocol;
-use super::isolation::{ClusterTeardown, Heartbeat, WorkloadThreads};
+use super::isolation::{ClusterTeardown, Heartbeat, WorkloadThreads, signals};
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
 use super::workload::{CommitMode, Role, TopicIds, WorkloadContext, WorkloadSpec};
 use super::workload_config::{record_size_limit, security_props};
@@ -38,6 +38,25 @@ use super::workload_config::{record_size_limit, security_props};
 /// Producer value size when the caller does not choose one (`--msg-size`'s
 /// default).
 const DEFAULT_MSG_SIZE: usize = 100;
+
+/// First instance number of a consumer added mid-run, unless the run's own
+/// consumers already reach it (`--consumers` >= 1000): runtime ids start
+/// above every configured one, so two workloads never share a label (thread
+/// name, client id, log file, panic attribution).
+const FIRST_RUNTIME_CONSUMER_INSTANCE: u32 = 1000;
+
+/// How long the producers may take to finish once told to stop. The send loop
+/// can be blocked in `send` for up to `max.block.ms` (60 s) when the stop flag
+/// is set, and `close()` then waits for every buffered record's outcome,
+/// which `delivery.timeout.ms` (120 s) bounds (`workload_config.rs`). Beyond
+/// that plus a margin, a producer that has not finished is a client hang.
+pub const PRODUCER_STOP_DEADLINE: Duration = Duration::from_secs(60 + 120 + 30);
+
+/// How long the consumers may take to finish once told to stop: the poll in
+/// progress (500 ms), the final `commit_sync` and its read-back (each bounded
+/// by `default.api.timeout.ms`, 60 s), and `close()` (30 s by default), plus a
+/// margin. Beyond that, a consumer that has not finished is a client hang.
+pub const CONSUMER_STOP_DEADLINE: Duration = Duration::from_secs(60 + 60 + 30 + 30);
 
 /// Drain-settle signal shared between [`ChaosHarness::recreate_topic`] and the
 /// drain loop (`drain_wait`).
@@ -89,7 +108,8 @@ impl RecreateSettle {
 ///
 /// Holds its **own** [`KafkaCluster`] (never the pooled one — chaos
 /// stops/kills brokers, which would corrupt other tests and race pool
-/// eviction; see the design doc §2). Tear it down with [`Self::shutdown`].
+/// eviction; see the design doc §2). Tear it down with [`Self::teardown`] (or
+/// drop it).
 pub struct ChaosHarness {
     cluster: KafkaCluster,
     /// Broker listener / client `security.protocol` every client in the run
@@ -120,6 +140,9 @@ pub struct ChaosHarness {
     rps: std::sync::atomic::AtomicU32,
     /// Producer value payload size in bytes, captured at `build_workloads`.
     msg_size: std::sync::atomic::AtomicU32,
+    /// Highest instance number among the run's own consumer specs, captured at
+    /// `build_workloads`; consumers added mid-run are numbered above it.
+    max_consumer_instance: std::sync::atomic::AtomicU32,
     commit_mode: std::sync::Mutex<CommitMode>,
     /// The pluggable verifier every workload writes into (default:
     /// conservation). Swap this to check something else (e.g. share-consumer
@@ -131,6 +154,9 @@ pub struct ChaosHarness {
     /// Beaten by [`RunningWorkloads::drive`] while it runs; see
     /// [`super::isolation::start_heartbeat_watchdog`].
     heartbeat: Arc<Heartbeat>,
+    /// Set by the first [`Self::teardown`], so the runner can tear down
+    /// before its forced exit and `Drop` does not repeat it.
+    torn_down: AtomicBool,
 }
 
 impl ChaosHarness {
@@ -186,7 +212,13 @@ impl ChaosHarness {
             },
             None => (brokers.min(3)) as i16,
         };
-        let mut config = kip848_3_broker(partitions as u16);
+        let preset_partitions = u16::try_from(partitions).unwrap_or_else(|_| {
+            panic!(
+                "--partitions {partitions} is out of range: the cluster preset takes 1..={}",
+                u16::MAX
+            )
+        });
+        let mut config = kip848_3_broker(preset_partitions);
         config.brokers = brokers;
         // The 3-broker preset pins the offsets topic to RF 3. With fewer brokers
         // the coordinator can never auto-create `__consumer_offsets`
@@ -216,7 +248,18 @@ impl ChaosHarness {
                 .server_properties
                 .insert("KAFKA_MESSAGE_MAX_BYTES".to_string(), limit.to_string());
         }
-        let cluster = KafkaCluster::start_with_config(&config).await;
+        // A signal during the start cannot remove the cluster yet (its
+        // containers are not known until the start returns): it is acted on
+        // when the cluster is registered just below.
+        let cluster = {
+            let _starting = signals::ClusterStart::begin();
+            let cluster = KafkaCluster::start_with_config(&config).await;
+            signals::register_cluster(Self::teardown_of(&cluster));
+            cluster
+        };
+        // `cargo xtask chaos-matrix` reads this line to remove exactly this
+        // run's cluster if the run is killed before its own teardown.
+        eprintln!("chaos: cluster network {}", cluster.network_name());
 
         // The harness's own admin (create/delete topic, elect leaders,
         // reassign) stays on the PLAINTEXT listener regardless of
@@ -255,11 +298,13 @@ impl ChaosHarness {
             topic_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             recreate_settle: Arc::new(RecreateSettle::default()),
             rps: std::sync::atomic::AtomicU32::new(0),
-            msg_size: std::sync::atomic::AtomicU32::new(100),
+            msg_size: std::sync::atomic::AtomicU32::new(DEFAULT_MSG_SIZE as u32),
+            max_consumer_instance: std::sync::atomic::AtomicU32::new(0),
             commit_mode: std::sync::Mutex::new(CommitMode::Sync),
             verifier,
             workload_threads: Arc::new(WorkloadThreads::default()),
             heartbeat: Heartbeat::new(),
+            torn_down: AtomicBool::new(false),
         };
         for t in &harness.topics {
             harness.create_topic(t).await;
@@ -393,9 +438,7 @@ impl ChaosHarness {
     /// delete of the same name and reported the existing topic).
     async fn cache_created_topic_id(&self, topic: &str, result: &CreateTopicsResult) {
         match result.topic_id(topic).get().await {
-            Ok(id) if id != Uuid::zero() => {
-                self.topic_ids.lock().expect("topic_ids poisoned").insert(topic.to_string(), id);
-            },
+            Ok(id) if id != Uuid::zero() => self.set_topic_id(topic, id).await,
             other => {
                 eprintln!(
                     "chaos: create-topics response carried no usable id for {topic} ({other:?}); \
@@ -404,6 +447,19 @@ impl ChaosHarness {
                 self.resolve_topic_id(topic).await;
             },
         }
+    }
+
+    /// Make `id` the current id of `topic`. With gRPC workloads running, each
+    /// remote stream is switched at its own position (a marker queued behind
+    /// every event the client already produced; see
+    /// `remote_workload::switch_topic_id`), so an event is stamped with the
+    /// generation current when the client observed it, not when the harness
+    /// read it.
+    async fn set_topic_id(&self, topic: &str, id: Uuid) {
+        #[cfg(feature = "multilanguage-tests")]
+        super::remote_workload::switch_topic_id(&self.topic_ids, topic, id).await;
+        #[cfg(not(feature = "multilanguage-tests"))]
+        self.topic_ids.lock().expect("topic_ids poisoned").insert(topic.to_string(), id);
     }
 
     /// Resolve the current topic id (for the physical verification key) via
@@ -429,7 +485,7 @@ impl ChaosHarness {
             {
                 let id = desc.topic_id();
                 if id != Uuid::zero() {
-                    self.topic_ids.lock().expect("topic_ids poisoned").insert(topic.to_string(), id);
+                    self.set_topic_id(topic, id).await;
                     return;
                 }
             }
@@ -694,9 +750,13 @@ impl ChaosHarness {
     /// What removing this cluster takes, for a thread that must do it without
     /// the harness (the heartbeat watchdog). [`Drop`] uses the same.
     pub fn cluster_teardown(&self) -> ClusterTeardown {
+        Self::teardown_of(&self.cluster)
+    }
+
+    fn teardown_of(cluster: &KafkaCluster) -> ClusterTeardown {
         ClusterTeardown {
-            containers: self.cluster.container_ids().to_vec(),
-            network: self.cluster.network_name().to_string(),
+            containers: cluster.container_ids().to_vec(),
+            network: cluster.network_name().to_string(),
         }
     }
 
@@ -723,14 +783,19 @@ impl ChaosHarness {
     /// A [`WorkloadPool`] for adding/removing consumers mid-run. Capture it in
     /// the scenario; pass the same pool to [`RunningWorkloads::drive`]. Its
     /// context is bound to the primary topic, but pool-added consumers subscribe
-    /// to every topic (they are consumers).
+    /// to every topic (they are consumers). Obtain it after
+    /// [`Self::build_workloads`], which records the configured consumer ids the
+    /// pool's ids must stay above.
     pub fn workload_pool(&self) -> WorkloadPool<'_> {
         WorkloadPool {
             harness: self,
             ctx: self.workload_ctx(self.primary_topic()),
             inner: std::rc::Rc::new(WorkloadPoolInner {
                 added_consumer_stops: std::cell::RefCell::new(Vec::new()),
-                next_instance: std::cell::Cell::new(1000), // runtime ids start high
+                // Runtime ids start high, and above every configured consumer.
+                next_instance: std::cell::Cell::new(first_runtime_consumer_instance(
+                    self.max_consumer_instance.load(Ordering::Relaxed),
+                )),
             }),
         }
     }
@@ -744,8 +809,17 @@ impl ChaosHarness {
     ) -> RunningWorkloads {
         // Remember these so a runtime WorkloadPool builds matching consumers.
         self.rps.store(target_rps, Ordering::Relaxed);
-        self.msg_size.store(msg_size as u32, Ordering::Relaxed);
+        let msg_size_u32 = u32::try_from(msg_size)
+            .unwrap_or_else(|_| panic!("--msg-size {msg_size} is out of range: at most {} bytes", u32::MAX));
+        self.msg_size.store(msg_size_u32, Ordering::Relaxed);
         *self.commit_mode.lock().expect("commit_mode poisoned") = commit_mode;
+        let max_consumer = specs
+            .iter()
+            .filter(|s| s.role == Role::Consumer)
+            .map(|s| s.instance)
+            .max()
+            .unwrap_or(0);
+        self.max_consumer_instance.store(max_consumer, Ordering::Relaxed);
 
         // Every producer numbers its records from 0 per topic, and the verifier
         // identifies a record by `(topic, index)`: a second producer spec would
@@ -799,29 +873,43 @@ impl ChaosHarness {
             heartbeat: self.heartbeat.clone(),
             verifier: self.verifier.clone(),
             broker_network: self.cluster.network_name().to_string(),
+            producer_stop_deadline: PRODUCER_STOP_DEADLINE,
+            consumer_stop_deadline: CONSUMER_STOP_DEADLINE,
         }
     }
 
-    /// Tear down the cluster's containers. Call at the end of every scenario.
+    /// Tear down the cluster's containers and network now (best-effort, each
+    /// docker call bounded). Idempotent: only the first call does anything.
     ///
-    /// The teardown itself lives in [`Drop`], so it also runs when a scenario
+    /// The runner calls this explicitly (by reference: the scenario still
+    /// borrows the harness), before re-arming its forced exit, and [`Drop`]
+    /// calls it too, so the teardown also runs when a scenario
     /// **panics** (a broker that fails to recover, a failed verdict assertion,
-    /// a describe timeout, …). Without that, every panicking run leaked its whole
-    /// cluster, and the orphaned brokers starved the next run. Dropping `self`
-    /// here performs the teardown; kept as an explicit, readable end-of-scenario
-    /// call.
-    pub fn shutdown(self) {
-        drop(self);
+    /// a describe timeout, …). Without that, every panicking run leaked its
+    /// whole cluster, and the orphaned brokers starved the next run.
+    pub fn teardown(&self) {
+        if self.torn_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let teardown = self.cluster_teardown();
+        teardown.run();
+        signals::unregister_cluster(&teardown.network);
     }
 }
 
 impl Drop for ChaosHarness {
     /// Best-effort teardown of the dedicated cluster's containers and network.
-    /// Runs both on the success path (via [`ChaosHarness::shutdown`]) and on
+    /// A no-op after an explicit [`ChaosHarness::teardown`]; otherwise runs on
     /// panic unwind, so a failed run cannot leak its brokers into the next one.
     fn drop(&mut self) {
-        self.cluster_teardown().run();
+        self.teardown();
     }
+}
+
+/// The first instance number for consumers added mid-run, given the highest
+/// instance among the run's configured consumers.
+fn first_runtime_consumer_instance(max_configured: u32) -> u32 {
+    FIRST_RUNTIME_CONSUMER_INSTANCE.max(max_configured.saturating_add(1))
 }
 
 /// Shared inner state of a [`WorkloadPool`], held behind `Rc` so the scenario
@@ -895,6 +983,10 @@ pub struct RunningWorkloads {
     heartbeat: Arc<Heartbeat>,
     verifier: Arc<dyn Verifier>,
     broker_network: String,
+    /// [`PRODUCER_STOP_DEADLINE`] (a field so tests can shorten it).
+    producer_stop_deadline: Duration,
+    /// [`CONSUMER_STOP_DEADLINE`] (a field so tests can shorten it).
+    consumer_stop_deadline: Duration,
 }
 
 /// How often the drive loop wakes to beat the heartbeat and check the
@@ -917,8 +1009,14 @@ impl RunningWorkloads {
     /// cannot stop the scenario from restarting brokers. This task only waits
     /// for them. A workload that panics aborts the drive with its panic
     /// message, after every workload has been told to stop.
+    ///
+    /// The two close phases have their own deadlines
+    /// ([`PRODUCER_STOP_DEADLINE`], [`CONSUMER_STOP_DEADLINE`]). A workload
+    /// that has not finished by then aborts the drive with a panic naming it
+    /// as a client close hang. Before, the drive waited out the run's whole
+    /// remaining budget and the runner then blamed a wedged cluster.
     pub async fn drive<Fut>(
-        self,
+        mut self,
         drain: Duration,
         idle_threshold: Duration,
         verifier: Arc<dyn Verifier>,
@@ -927,29 +1025,41 @@ impl RunningWorkloads {
     ) where
         Fut: std::future::Future<Output = ()>,
     {
-        self.heartbeat.arm();
-        for (spec, ctx) in self.workloads {
-            self.threads
-                .spawn_workload(spec, ctx, self.verifier.clone(), self.broker_network.clone())
-                .await;
+        let heartbeat = self.heartbeat.clone();
+        heartbeat.arm();
+        // Building a gRPC workload can take up to a minute (its backend server
+        // starts); beat meanwhile, or the heartbeat watchdog ends a healthy
+        // run that has several to build.
+        heartbeat.set_phase("building workloads");
+        for (spec, ctx) in std::mem::take(&mut self.workloads) {
+            let spawn = self
+                .threads
+                .spawn_workload(spec, ctx, self.verifier.clone(), self.broker_network.clone());
+            beating(&heartbeat, spawn).await;
         }
 
         let threads = self.threads.clone();
+        let (producer_deadline, consumer_deadline) = (self.producer_stop_deadline, self.consumer_stop_deadline);
+        let phase = heartbeat.clone();
         let control = async move {
+            phase.set_phase("scenario");
             scenario.await;
             // (1) Stop producers, then wait for them to FINISH (not just be
             // signalled): a producer still flushes its backlog after the stop
             // flag is set (largest right after a recreate), and draining first
             // would deliver its tail with no live consumer — the flaky tail loss.
+            phase.set_phase("producers closing");
             threads.stop_role(Role::Producer);
-            while !threads.all_finished(Some(Role::Producer)) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            wait_finished(&threads, Some(Role::Producer), producer_deadline, "producer").await;
             // (2) Drain until all delivered observed (or `drain` elapses); (3)
             // stop every consumer, including those added at runtime (consumer
-            // churn / --rebalance-add-cycle): the registry holds them all.
+            // churn / --rebalance-add-cycle): the registry holds them all, and
+            // wait for every workload to finish.
+            phase.set_phase("draining");
             drain_wait(drain, idle_threshold, verifier.as_ref(), settle.as_ref()).await;
+            phase.set_phase("consumers closing");
             threads.stop_role(Role::Consumer);
+            wait_finished(&threads, None, consumer_deadline, "consumer").await;
         };
         let mut control = std::pin::pin!(control);
         let mut control_done = false;
@@ -963,17 +1073,64 @@ impl RunningWorkloads {
                 _ = &mut control, if !control_done => { control_done = true; }
                 _ = tick.tick() => {}
             }
-            self.heartbeat.beat();
-            if let Some((label, message)) = self.threads.first_panic() {
-                self.threads.stop_all();
-                self.heartbeat.disarm();
-                std::panic::panic_any(format!("workload {label} panicked: {message}"));
-            }
-            if control_done && self.threads.all_finished(None) {
+            heartbeat.beat();
+            // Read the completion state BEFORE looking for a panic. A thread
+            // records its panic and only then marks itself finished, so every
+            // panic of a thread seen finished here is visible to the check
+            // below. Checked the other way round, a workload could panic and
+            // finish between the two reads and the drive end as a PASS.
+            let done = control_done && self.threads.all_finished(None);
+            self.raise_first_panic();
+            if done {
                 break;
             }
         }
-        self.heartbeat.disarm();
+        heartbeat.disarm();
+        heartbeat.set_phase("finished");
+    }
+
+    /// Abort the drive with the first workload panic, if any, after telling
+    /// every workload to stop.
+    fn raise_first_panic(&self) {
+        if let Some((label, message)) = self.threads.first_panic() {
+            self.threads.stop_all();
+            self.heartbeat.disarm();
+            std::panic::panic_any(format!("workload {label} panicked: {message}"));
+        }
+    }
+}
+
+/// Drive `fut` to completion, beating `heartbeat` every [`DRIVE_TICK`] while
+/// it is pending. `fut` is polled in place, never dropped early.
+async fn beating<F: std::future::Future>(heartbeat: &Heartbeat, fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut tick = tokio::time::interval(DRIVE_TICK);
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut fut => return out,
+            _ = tick.tick() => heartbeat.beat(),
+        }
+    }
+}
+
+/// Wait until every workload of `role` (every workload, for `None`) has
+/// finished, panicking with the unfinished workloads' labels after
+/// `deadline`. A workload panic is not waited for here: the drive loop
+/// raises it within a tick.
+async fn wait_finished(threads: &WorkloadThreads, role: Option<Role>, deadline: Duration, what: &str) {
+    let until = std::time::Instant::now() + deadline;
+    while !threads.all_finished(role) {
+        if std::time::Instant::now() >= until && threads.first_panic().is_none() {
+            let stuck = threads.unfinished(role);
+            panic!(
+                "client close hang: {} workload(s) did not finish within {deadline:?} of the {what} stop: {} \
+                 (the client's flush/commit/close did not return; this is a client failure, not a wedged cluster)",
+                stuck.len(),
+                stuck.join(", ")
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1050,5 +1207,142 @@ async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Veri
             // spinning this branch every tick.
             idle_since = std::time::Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::isolation::panic_message;
+    use crate::verifier::ConservationVerifier;
+    use futures_util::FutureExt as _;
+
+    /// Workloads already running on `threads`, driven with no scenario and
+    /// short close deadlines.
+    fn running(threads: Arc<WorkloadThreads>, consumer_stop_deadline: Duration) -> RunningWorkloads {
+        RunningWorkloads {
+            workloads: Vec::new(),
+            threads,
+            heartbeat: Heartbeat::new(),
+            verifier: Arc::new(ConservationVerifier::new()),
+            broker_network: String::new(),
+            producer_stop_deadline: Duration::from_secs(10),
+            consumer_stop_deadline,
+        }
+    }
+
+    /// Run `workloads.drive` with an empty scenario; `Err` carries the panic
+    /// message.
+    async fn drive(workloads: RunningWorkloads) -> Result<(), String> {
+        let verifier: Arc<dyn Verifier> = Arc::new(ConservationVerifier::new());
+        std::panic::AssertUnwindSafe(workloads.drive(
+            Duration::from_secs(1),
+            Duration::ZERO,
+            verifier,
+            Arc::new(RecreateSettle::default()),
+            async {},
+        ))
+        .catch_unwind()
+        .await
+        .map_err(|payload| panic_message(payload.as_ref()))
+    }
+
+    /// Runs until stopped.
+    async fn until_stopped(stop: Arc<AtomicBool>, built: tokio::sync::oneshot::Sender<Result<(), String>>) {
+        let _ = built.send(Ok(()));
+        while !stop.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_drive_whose_workloads_close_in_time_finishes() {
+        let threads = Arc::new(WorkloadThreads::default());
+        threads
+            .spawn_with(Role::Producer, "producer-drive-ok-test".into(), until_stopped)
+            .await;
+        threads
+            .spawn_with(Role::Consumer, "consumer-drive-ok-test".into(), until_stopped)
+            .await;
+        let heartbeat_phase = {
+            let workloads = running(threads.clone(), Duration::from_secs(10));
+            let heartbeat = workloads.heartbeat.clone();
+            assert_eq!(drive(workloads).await, Ok(()));
+            heartbeat.phase()
+        };
+        assert_eq!(heartbeat_phase, "finished");
+        assert!(threads.all_finished(None));
+    }
+
+    /// A workload that panicked and finished before the drive's last check
+    /// still fails the drive: the completion state is read before the panic
+    /// check, so no interleaving lets the drive end as if it had passed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workload_that_panicked_and_finished_fails_the_drive() {
+        let threads = Arc::new(WorkloadThreads::default());
+        threads
+            .spawn_with(Role::Consumer, "consumer-race-test".into(), |_stop, built| async move {
+                let _ = built.send(Ok(()));
+                panic!("chaos consumer close failed: boom");
+            })
+            .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !threads.all_finished(None) {
+            assert!(std::time::Instant::now() < deadline, "workload did not finish");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            drive(running(threads, Duration::from_secs(10))).await,
+            Err("workload consumer-race-test panicked: chaos consumer close failed: boom".to_string())
+        );
+    }
+
+    /// A consumer whose close never returns aborts the drive at the close
+    /// deadline, named, as a client failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_close_that_hangs_aborts_the_drive_naming_the_workload() {
+        let threads = Arc::new(WorkloadThreads::default());
+        let release = Arc::new(AtomicBool::new(false));
+        let hang_release = release.clone();
+        threads
+            .spawn_with(Role::Producer, "producer-close-ok-test".into(), until_stopped)
+            .await;
+        threads
+            .spawn_with(
+                Role::Consumer,
+                "consumer-close-hang-test".into(),
+                move |_stop, built| async move {
+                    let _ = built.send(Ok(()));
+                    // Ignores its stop flag, like a `close()` that never returns.
+                    while !hang_release.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                },
+            )
+            .await;
+        let started = std::time::Instant::now();
+        let err = drive(running(threads.clone(), Duration::from_millis(300)))
+            .await
+            .expect_err("the hang must abort the drive");
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+        assert_eq!(
+            err,
+            "client close hang: 1 workload(s) did not finish within 300ms of the consumer stop: \
+             consumer-close-hang-test (the client's flush/commit/close did not return; this is a client failure, \
+             not a wedged cluster)"
+        );
+        release.store(true, Ordering::Relaxed);
+        assert!(threads.stop_and_wait(Duration::from_secs(10)).await.is_empty());
+    }
+
+    /// Consumers added mid-run are numbered above every configured one.
+    #[test]
+    fn runtime_consumer_ids_start_above_the_configured_ones() {
+        assert_eq!(first_runtime_consumer_instance(0), 1000);
+        assert_eq!(first_runtime_consumer_instance(3), 1000);
+        assert_eq!(first_runtime_consumer_instance(999), 1000);
+        assert_eq!(first_runtime_consumer_instance(1000), 1001);
+        assert_eq!(first_runtime_consumer_instance(2500), 2501);
+        assert_eq!(first_runtime_consumer_instance(u32::MAX), u32::MAX);
     }
 }

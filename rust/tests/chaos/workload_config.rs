@@ -72,6 +72,17 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// and the produce-request framing.
 const RECORD_OVERHEAD_BYTES: usize = 16 * 1024;
 
+/// The broker's default `socket.request.max.bytes` (100 MiB), which the harness
+/// does not raise: the broker drops any request larger than this, so one
+/// produce request carrying a single record must fit in it.
+const BROKER_SOCKET_REQUEST_MAX_BYTES: usize = 100 * 1024 * 1024;
+
+/// The largest `--msg-size` a run supports: a single record's value plus
+/// [`RECORD_OVERHEAD_BYTES`] must fit the broker's
+/// [`BROKER_SOCKET_REQUEST_MAX_BYTES`]. `ChaosConfig::from_env` rejects
+/// anything larger before the cluster starts.
+pub const MAX_MSG_SIZE: usize = BROKER_SOCKET_REQUEST_MAX_BYTES - RECORD_OVERHEAD_BYTES;
+
 /// The request / batch size limit a run with `msg_size`-byte values needs, or
 /// `None` when the defaults already fit (every size below ~1 MB). A 1 MiB value
 /// plus its record and batch overhead is just over both the producer's
@@ -82,11 +93,22 @@ pub fn record_size_limit(msg_size: usize) -> Option<usize> {
     (needed > DEFAULT_MAX_REQUEST_BYTES).then_some(needed)
 }
 
+/// The producer's default `buffer.memory` (32 MiB).
+const DEFAULT_BUFFER_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+
+/// How many maximum-size records the producer may buffer when
+/// [`record_size_limit`] raises the batch size (see [`producer_props`]).
+const LARGE_RECORD_BUFFERED_RECORDS: usize = 4;
+
 /// Producer properties tuned for chaos: `acks=all`, idempotent, and a
 /// `delivery.timeout.ms` well above `linger.ms + request.timeout.ms` so a
 /// record in flight during a broker roll is retried to its true outcome
 /// rather than timing out mid-fault. `max.request.size` is raised when
-/// `msg_size` needs it (see [`record_size_limit`]). `security` (from
+/// `msg_size` needs it (see [`record_size_limit`]), and with it
+/// `buffer.memory` whenever the default 32 MiB would hold fewer than
+/// [`LARGE_RECORD_BUFFERED_RECORDS`] records: the producer rejects a record
+/// larger than `buffer.memory` outright, and one that only just fits would
+/// serialise every send behind the previous one. `security` (from
 /// [`security_props`]) is merged in last.
 pub fn producer_props(
     bootstrap: &str,
@@ -106,6 +128,10 @@ pub fn producer_props(
     ]);
     if let Some(limit) = record_size_limit(msg_size) {
         props.insert("max.request.size".to_string(), limit.to_string());
+        let buffer = limit * LARGE_RECORD_BUFFERED_RECORDS;
+        if buffer > DEFAULT_BUFFER_MEMORY_BYTES {
+            props.insert("buffer.memory".to_string(), buffer.to_string());
+        }
     }
     props.extend(security.iter().map(|(k, v)| (k.clone(), v.clone())));
     props
@@ -118,6 +144,9 @@ const LARGE_RECORD_BATCHES_PER_FETCH: usize = 8;
 /// The consumer's default `fetch.max.bytes` (50 MiB).
 const DEFAULT_FETCH_MAX_BYTES: usize = 50 * 1024 * 1024;
 
+/// The largest value an `int` client config accepts.
+const MAX_INT_CONFIG: usize = i32::MAX as usize;
+
 /// Consumer properties: KIP-848 group protocol, `earliest` reset, manual
 /// commit (the workload commits explicitly so the ledger reflects committed
 /// offsets). `security` (from [`security_props`]) is merged in last.
@@ -129,7 +158,9 @@ const DEFAULT_FETCH_MAX_BYTES: usize = 50 * 1024 * 1024;
 /// is far slower than the producer, and the drain window runs out (P2-1MiB, Sep
 /// 2026 matrix). Such runs let a partition return
 /// [`LARGE_RECORD_BATCHES_PER_FETCH`] batches per fetch. Smaller runs keep the
-/// defaults.
+/// defaults. Both fetch sizes are `int` configs, so they are capped at
+/// `i32::MAX` (only reachable above [`MAX_MSG_SIZE`], which `from_env`
+/// rejects; the cap keeps the property parseable regardless).
 pub fn consumer_props(
     bootstrap: &str,
     group_id: &str,
@@ -149,7 +180,7 @@ pub fn consumer_props(
         ("allow.auto.create.topics".to_string(), "false".to_string()),
     ]);
     if let Some(limit) = record_size_limit(msg_size) {
-        let per_partition = limit * LARGE_RECORD_BATCHES_PER_FETCH;
+        let per_partition = (limit * LARGE_RECORD_BATCHES_PER_FETCH).min(MAX_INT_CONFIG);
         props.insert("max.partition.fetch.bytes".to_string(), per_partition.to_string());
         // Keep `fetch.max.bytes` at least one partition's worth.
         props.insert(
@@ -190,6 +221,49 @@ mod tests {
         assert!(!small.contains_key("max.request.size"));
         let large = producer_props("b:1", "p", 1024 * 1024, &HashMap::new());
         assert_eq!(large["max.request.size"], (1024 * 1024 + 16 * 1024).to_string());
+    }
+
+    /// The producer rejects a record larger than `buffer.memory` (32 MiB by
+    /// default), so values that big raise it to hold several records; smaller
+    /// ones, even with a raised request size, keep the default.
+    #[test]
+    fn buffer_memory_is_raised_only_when_the_default_holds_too_few_records() {
+        let mib = 1024 * 1024;
+        assert!(!producer_props("b:1", "p", 100, &HashMap::new()).contains_key("buffer.memory"));
+        // 4 x (1 MiB + 16 KiB) still fits the 32 MiB default.
+        assert!(!producer_props("b:1", "p", mib, &HashMap::new()).contains_key("buffer.memory"));
+
+        let limit = record_size_limit(40 * mib).expect("40 MiB needs a raised limit");
+        let props = producer_props("b:1", "p", 40 * mib, &HashMap::new());
+        assert_eq!(props["buffer.memory"], (limit * 4).to_string());
+        assert_eq!(props["max.request.size"], limit.to_string());
+
+        // The largest supported value still fits the broker's 100 MiB socket
+        // request limit, and its producer settings fit an i64 config.
+        assert_eq!(MAX_MSG_SIZE + 16 * 1024, 100 * mib);
+        let max = producer_props("b:1", "p", MAX_MSG_SIZE, &HashMap::new());
+        assert_eq!(max["max.request.size"], (100 * mib).to_string());
+        assert_eq!(max["buffer.memory"], (400 * mib).to_string());
+    }
+
+    /// `max.partition.fetch.bytes` / `fetch.max.bytes` are `int` configs: they
+    /// stay parseable as `i32` up to the largest supported value and beyond.
+    #[test]
+    fn consumer_fetch_sizes_fit_an_int_config() {
+        for msg_size in [MAX_MSG_SIZE, 512 * 1024 * 1024] {
+            let props = consumer_props("b:1", "g", "c", msg_size, &HashMap::new());
+            for key in ["max.partition.fetch.bytes", "fetch.max.bytes"] {
+                assert!(
+                    props[key].parse::<i32>().is_ok(),
+                    "{key}={} for msg_size {msg_size}",
+                    props[key]
+                );
+            }
+        }
+        let max = consumer_props("b:1", "g", "c", MAX_MSG_SIZE, &HashMap::new());
+        assert_eq!(max["max.partition.fetch.bytes"], (800 * 1024 * 1024).to_string());
+        let over = consumer_props("b:1", "g", "c", 512 * 1024 * 1024, &HashMap::new());
+        assert_eq!(over["max.partition.fetch.bytes"], i32::MAX.to_string());
     }
 
     #[test]
