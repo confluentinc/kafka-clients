@@ -8,8 +8,8 @@ name: create-release-tag
 #
 # Target of the manual "Create release tag" promotion in semaphore.yml. Tags
 # the commit of this master build as v<RELEASE_VERSION> and pushes the tag,
-# which starts a release: semaphore.yml runs on the tag and, once every job
-# passes, publish-crates-io.yml publishes the version to crates.io. The tag is
+# which starts a release: semaphore.yml runs on the tag and, once every CI job
+# passes, its "Release:" blocks publish the version to crates.io. The tag is
 # created only if all of the following hold:
 #   - the build is of the master branch;
 #   - RELEASE_VERSION, entered when promoting, is a valid release version
@@ -18,9 +18,10 @@ name: create-release-tag
 #   - the tag does not yet exist, and the version is not yet on crates.io and
 #     is higher than every published version;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
-# publish-crates-io.yml repeats these checks on the tag build, so they also
-# apply to a tag pushed by other means. The checks here avoid creating a tag
-# that could never be published.
+# "Release: publish to crates.io" repeats the tag, version and crates.io
+# checks on the tag build, and runs only after every CI block of that build
+# has passed, so they also apply to a tag pushed by other means. The checks
+# here avoid creating a tag that could never be published.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -29,6 +30,14 @@ global_job_config:
   env_vars:
     - name: CRATE
       value: confluent-kafka
+    # The jobs of semaphore.yml that must pass before a commit is tagged, by
+    # their exact names, separated by ';'. The list must stay in sync with
+    # semaphore.yml: a job that reports a result but is not listed, or is
+    # listed but reports no result, blocks the release until the list is
+    # updated. The "Release:" blocks run only on tag builds, so they are not
+    # listed.
+    - name: REQUIRED_CI_JOBS
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64)"
 
 blocks:
   - name: "Create release tag"
@@ -60,11 +69,10 @@ blocks:
               if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
                 refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test master"
               fi
-            # Uses the same pattern as `release_tag_pattern` in
-            # publish-crates-io.yml and the auto_promote condition in
-            # semaphore.yml, without the leading `v`. /usr/bin/python3 is the
-            # image's system Python (3.12 on Ubuntu 24.04), which provides
-            # tomllib.
+            # Uses the same pattern as the `run` conditions of the "Release:"
+            # blocks in semaphore.yml, without the leading `v`. /usr/bin/python3
+            # is the image's system Python (3.12 on Ubuntu 24.04), which
+            # provides tomllib.
             - |
               if ! [[ "${RELEASE_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
                 refuse "RELEASE_VERSION '${RELEASE_VERSION:-}' is not a release version (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
@@ -86,7 +94,8 @@ blocks:
               if [ -n "${existing}" ]; then
                 refuse "tag ${tag} already exists on origin (${existing%%[[:space:]]*}); bump [package] version in rust/Cargo.toml for a new release"
               fi
-            # Applies the same version policy as publish-crates-io.yml: a
+            # Applies the same version policy as "Release: publish to
+            # crates.io" in semaphore.yml: a
             # version already on crates.io, whether yanked or not, cannot be
             # published again, and a new version must be higher than every
             # published version under Semantic Versioning precedence.
@@ -124,12 +133,13 @@ blocks:
               else
                 echo "TEST MODE: ${RELEASE_VERSION} is new on crates.io"
               fi
-            # Applies the same CI check as publish-crates-io.yml, using its
-            # REQUIRED_CI_JOBS list so that the list is maintained in one place.
-            # A tag on a failing commit would rerun CI and never be published.
+            # Each job in REQUIRED_CI_JOBS must have reported `passed` for
+            # exactly this commit, and every job that reported a result must be
+            # in the list, so a job added to semaphore.yml cannot be omitted
+            # unintentionally. The job-name mapping matches the global epilogue
+            # in semaphore.yml. A tag on a failing commit would rerun CI and
+            # never be published.
             - |
-              required_jobs=$(awk '/- name: REQUIRED_CI_JOBS/ { getline; sub(/^[[:space:]]*value: "/, ""); sub(/"[[:space:]]*$/, ""); print; exit }' .semaphore/publish-crates-io.yml)
-              [ -n "${required_jobs}" ] || refuse "could not read REQUIRED_CI_JOBS from .semaphore/publish-crates-io.yml"
               results_dir=$(mktemp -d) || refuse "could not create a temporary directory"
               artifact pull workflow ci-result --destination "${results_dir}/ci-result" --force >/dev/null \
                 || refuse "this build has no recorded CI results; wait for build-test-release to finish, then promote again"
@@ -137,8 +147,10 @@ blocks:
               while IFS= read -r job; do
                 [ -n "${job}" ] || continue
                 marker=$(printf '%s' "${job}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+                [ -z "${required[${marker}]+set}" ] \
+                  || refuse "two jobs in REQUIRED_CI_JOBS map to the same result name '${marker}'; rename one of them in semaphore.yml"
                 required[${marker}]=${job}
-              done <<< "$(printf '%s' "${required_jobs}" | tr ';' '\n')"
+              done <<< "$(printf '%s' "${REQUIRED_CI_JOBS}" | tr ';' '\n')"
               while IFS= read -r file; do
                 reported[$(basename "${file}")]=${file}
               done < <(find "${results_dir}" -type f)
@@ -158,7 +170,7 @@ blocks:
               done
               for marker in "${!reported[@]}"; do
                 [ -n "${required[${marker}]+set}" ] \
-                  || problems+="  - ${marker}: reported a result but is not in REQUIRED_CI_JOBS; add it to the list in publish-crates-io.yml\n"
+                  || problems+="  - ${marker}: reported a result but is not in REQUIRED_CI_JOBS; add it to REQUIRED_CI_JOBS in create-release-tag.yml\n"
               done
               if [ -n "${problems}" ]; then
                 printf 'Refusing to create the release tag: the CI build of this commit is not fully green:\n%bRerun the failed or missing jobs, then promote again.\n' "${problems}" >&2
