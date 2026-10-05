@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::Error;
-use crate::consumer::internals::AsyncConsumerMetrics;
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
 use super::{ApplicationEvent, ApplicationEventEnvelope};
 
@@ -231,8 +231,8 @@ mod tests {
     async fn add_records_queue_size_when_metrics_wired() {
         use crate::common::Metric;
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::AsyncConsumerMetrics;
         use crate::consumer::internals::ConsumerUtils;
+        use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::new());
@@ -264,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn add_rolls_back_queue_size_on_send_failure() {
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::AsyncConsumerMetrics;
+        use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);

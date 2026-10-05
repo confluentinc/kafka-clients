@@ -63,10 +63,10 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::common::Node;
 use crate::common::TopicPartition;
-use crate::common::memory::BufferSupplier;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::{self, FetchRequest, PartitionData};
+use crate::common::utils::BufferSupplier;
 use crate::consumer::internals::CompletedFetch;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::FetchBuffer;

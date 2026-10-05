@@ -1145,7 +1145,7 @@ References into that set are still live and now dangle. Re-verified
 |---|---|
 | `consumer-join-stall-rootcause.md` | `.claude/rules/consumer-threading.md:249`, `.claude/rules/producer-transactions.md:155`, `src/common/network/selectable.rs:94`, `src/common/network/selector.rs:1509`, `src/consumer/internals/consumer_network_thread.rs:573`, `src/consumer/internals/network_client_delegate.rs:648` |
 | `consumer-throughput-bottleneck.md` | `src/common/network/network_receive.rs:240`, `:375`, `src/common/network/selector.rs:800`, `:965` |
-| `consumer-latency-findings.md` | `src/consumer/async_kafka_consumer.rs:4145`, `:4221`, `src/consumer/internals/fetch_request_manager.rs:644` |
+| `consumer-latency-findings.md` | `src/consumer/internals/async_kafka_consumer.rs:4145`, `:4221`, `src/consumer/internals/fetch_request_manager.rs:644` |
 | `consumer-metrics-perf-analysis.md` | `src/common/metrics/sensor.rs:839` |
 | `consumer-perf-benchmark-analysis.md` | `consumer-perf/src/main.rs:17` |
 

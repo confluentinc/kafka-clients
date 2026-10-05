@@ -59,6 +59,7 @@ use crate::consumer::internals::SubscriptionState;
 /// record path writes it — an idiomatic-Rust, value-neutral swap for Java's
 /// plain `long` fields. All sensors/metrics are INFO level, matching Java's
 /// default (`metrics.sensor` / `metricName` without an explicit level).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.ConsumerRebalanceMetricsManager")]
 pub(crate) struct ConsumerRebalanceMetricsManager {
     // MetricName fields visible for testing (Java: `public final`).
     #[cfg(test)]
@@ -584,7 +585,7 @@ mod tests {
     /// without needing a broker (the live `AsyncKafkaConsumer::new` path).
     #[test]
     fn co_registration_with_callback_manager_does_not_conflict() {
-        use crate::consumer::internals::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 
         let (_time, metrics, _subs, rebalance) = setup();
         let callback = RebalanceCallbackMetricsManager::new(&metrics);

@@ -76,10 +76,10 @@ use crate::offset_fetch_request_data::{OffsetFetchRequestGroup, OffsetFetchReque
 use super::ConsumerMetadata;
 use super::CoordinatorRequestManager;
 use super::MemberStateListener;
-use super::OffsetCommitMetricsManager;
 use super::RequestManager;
 use super::SubscriptionState;
 use super::TimedRequestState;
+use super::metrics::OffsetCommitMetricsManager;
 use super::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
 use super::{PollResult, UnsentRequest};
 

@@ -34,6 +34,7 @@ use crate::consumer::internals::ConsumerUtils;
 /// an `Arc<AtomicI64>` (init -1) so the `last-heartbeat-seconds-ago` closure
 /// measurable can read it while `record_heartbeat_sent_ms` writes it — an
 /// idiomatic-Rust, value-neutral swap for Java's plain `long lastHeartbeatMs`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager")]
 pub(crate) struct HeartbeatMetricsManager {
     // MetricName fields visible for testing (Java: package-private `final`).
     #[cfg(test)]

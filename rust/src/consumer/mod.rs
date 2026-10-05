@@ -17,7 +17,6 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
-mod async_kafka_consumer;
 pub mod close_options;
 mod consumer_commit_failed_error;
 mod consumer_config;
@@ -41,8 +40,6 @@ mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
-pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -52,6 +49,7 @@ pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordO
 pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
+pub use internals::ConsumerHandle;
 pub use kafka_consumer::KafkaConsumer;
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;

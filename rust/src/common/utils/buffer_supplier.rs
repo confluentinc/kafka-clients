@@ -50,6 +50,7 @@ use std::sync::Mutex;
 ///
 /// Corresponds to `org.apache.kafka.common.utils.BufferSupplier`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.common.utils.BufferSupplier")]
 pub(crate) struct BufferSupplier {
     mode: Mode,
 }

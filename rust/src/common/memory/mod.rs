@@ -24,8 +24,6 @@
 
 #![expect(dead_code, unused_imports)]
 
-mod buffer_supplier;
 mod memory_pool;
 
-pub(crate) use buffer_supplier::BufferSupplier;
 pub use memory_pool::{MemoryPool, NoopMemoryPool};

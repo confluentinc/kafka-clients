@@ -33,6 +33,7 @@ use crate::common::metrics::{Metrics, Sensor};
 /// — never per-record (CLAUDE.md §13) — so the per-fetch / per-record hot path
 /// is untouched. `Sensor::record` short-circuits on `should_record()`
 /// internally.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics")]
 pub(crate) struct AsyncConsumerMetrics {
     metrics: Arc<Metrics>,
     time_between_network_thread_poll_sensor: Arc<Sensor>,

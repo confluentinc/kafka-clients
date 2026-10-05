@@ -76,8 +76,8 @@ use crate::common::utils::SystemTime;
 use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
-use crate::consumer::internals::RebalanceCallbackMetricsManager;
 use crate::consumer::internals::SubscriptionState;
+use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 
 /// Invokes the user-supplied
 /// [`crate::consumer::ConsumerRebalanceListener`] methods on the
@@ -532,7 +532,7 @@ mod tests {
         use crate::common::metrics::Metrics;
         use crate::common::utils::MockTime;
         use crate::common::utils::Time;
-        use crate::consumer::internals::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
         let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
@@ -571,7 +571,7 @@ mod tests {
         use crate::common::metrics::Metrics;
         use crate::common::utils::MockTime;
         use crate::common::utils::Time;
-        use crate::consumer::internals::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
         let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));

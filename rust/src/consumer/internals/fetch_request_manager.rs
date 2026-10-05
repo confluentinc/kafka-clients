@@ -33,10 +33,10 @@ use std::sync::{Arc, Mutex};
 use log::trace;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::common::memory::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::FetchResponse;
+use crate::common::utils::BufferSupplier;
 use crate::common::{Error, Node};
 use crate::consumer::internals::AbstractFetch;
 use crate::consumer::internals::ConsumerMetadata;
@@ -598,7 +598,7 @@ mod tests {
             subs,
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             Arc::new(crate::ApiVersions::new()),
@@ -1437,7 +1437,7 @@ mod round_trip {
                 subscriptions.clone(),
                 fetch_config.clone(),
                 fetch_buffer.clone(),
-                Arc::new(crate::common::memory::BufferSupplier::create()),
+                Arc::new(crate::common::utils::BufferSupplier::create()),
                 FetchRequestManager::always_available(),
                 FetchRequestManager::no_auth_failure(),
                 api_versions.clone(),
@@ -3155,7 +3155,7 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
@@ -3291,7 +3291,7 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
@@ -3646,7 +3646,7 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),

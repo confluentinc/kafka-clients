@@ -1093,7 +1093,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -1485,7 +1485,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -1959,7 +1959,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2487,7 +2487,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2637,7 +2637,7 @@ mod tests {
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
             CompletedFetch::with_full(
                 h.subs.clone(),
-                Arc::new(crate::common::memory::BufferSupplier::create()),
+                Arc::new(crate::common::utils::BufferSupplier::create()),
                 partition,
                 partition_data,
                 Arc::clone(&aggregator),

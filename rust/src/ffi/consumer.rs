@@ -58,7 +58,7 @@ use crate::common::header::{Header, RecordHeader};
 use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::BytesDeserializer;
 use crate::common::{Error, Node, PartitionInfo, TopicPartition};
-use crate::consumer::AsyncKafkaConsumer;
+use crate::consumer::internals::AsyncKafkaConsumer;
 // `crate::consumer::ConsumerHandle` is aliased because this module already has a
 // private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
 // is an unrelated concept.

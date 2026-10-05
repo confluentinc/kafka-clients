@@ -1686,7 +1686,7 @@ mod tests {
     /// the subscription has no fetchable partitions, which matches the
     /// Java tests' Mockito-stubbed `createFetchRequests` return.
     fn setup_processor_with_fetch(with_group_id: bool, with_fetch: bool) -> Fixture {
-        use crate::common::memory::BufferSupplier;
+        use crate::common::utils::BufferSupplier;
         use crate::consumer::internals::FetchBuffer;
         use crate::consumer::internals::FetchConfig;
         use crate::consumer::internals::FetchRequestManager;

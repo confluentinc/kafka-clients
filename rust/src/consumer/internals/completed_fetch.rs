@@ -103,7 +103,6 @@ use crate::common::TopicPartition;
 use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
 use crate::common::header::RecordHeaders;
-use crate::common::memory::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
@@ -112,6 +111,7 @@ use crate::common::record::internal::{
     RecordVersion,
 };
 use crate::common::serialization::Deserializer;
+use crate::common::utils::BufferSupplier;
 use crate::consumer::internals::FetchConfig;
 use crate::consumer::internals::FetchMetricsAggregator;
 use crate::consumer::internals::SubscriptionState;

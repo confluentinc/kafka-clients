@@ -24,6 +24,7 @@
 
 #![expect(dead_code)]
 
+mod buffer_supplier;
 mod byte_utils;
 mod exponential_backoff;
 mod log_context;
@@ -41,6 +42,7 @@ mod time;
 #[expect(clippy::module_inception)]
 mod utils;
 
+pub(crate) use buffer_supplier::BufferSupplier;
 pub(crate) use byte_utils::ByteUtils;
 pub(crate) use exponential_backoff::ExponentialBackoff;
 pub(crate) use log_context::LogContext;

@@ -35,9 +35,9 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::AsyncConsumerMetrics;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
 /// Result returned from [`super::RequestManager::poll`].
 ///

@@ -32,6 +32,7 @@ use crate::consumer::internals::ConsumerUtils;
 /// once per listener callback (per-rebalance, never per-record). Each metric is
 /// an `Avg` + `Max` on its own sensor, all INFO level (Java's default — no
 /// explicit recording level).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager")]
 pub(crate) struct RebalanceCallbackMetricsManager {
     // MetricName fields visible for testing (Java: package-private `final`).
     #[cfg(test)]
