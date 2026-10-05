@@ -624,6 +624,8 @@ fn producer_perf_test() -> anyhow::Result<()> {
 /// env-driven pattern the producer perf test uses).
 ///
 /// Flags (defaults mirror librdkafka's chaos.py where they overlap):
+///
+/// ```text
 ///   --brokers N            broker count (3)
 ///   --num-topics N         number of test topics (1). With >1, --topic is the
 ///                          prefix and topics are named <topic>_0.._N-1; one
@@ -693,6 +695,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --log-budget-mb N      per-workload client-log rotation budget (64)
 ///   --repeat N             run up to N times, stop on first failure, append
 ///                          target/chaos-runs/run-history.tsv (until-fail loop)
+/// ```
 ///
 /// A bare `--scenario NAME` instead runs the named `#[ignore]` smoke test
 /// (e.g. `--scenario simple_flow_clean_broker_roll`).
