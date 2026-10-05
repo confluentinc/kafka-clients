@@ -1,0 +1,187 @@
+version: v1.0
+name: create-release-tag
+# TEST MODE (temporary; revert before merging). Runs on a pull request build,
+# creates the temporary tag v<RELEASE_VERSION>-dev.<workflow number>, verifies
+# it on origin and deletes it. The crates.io check reports its result without
+# refusing. Because the -dev suffix never matches the release tag pattern, no
+# publish can start.
+#
+# Target of the manual "Create release tag" promotion in semaphore.yml. Tags
+# the commit of this master build as v<RELEASE_VERSION> and pushes the tag,
+# which starts a release: semaphore.yml runs on the tag and, once every job
+# passes, publish-crates-io.yml publishes the version to crates.io. The tag is
+# created only if all of the following hold:
+#   - the build is of the master branch;
+#   - RELEASE_VERSION, entered when promoting, is a valid release version
+#     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or
+#     -rc.N) and equals [package] version in rust/Cargo.toml at this commit;
+#   - the tag does not yet exist, and the version is not yet on crates.io and
+#     is higher than every published version;
+#   - every job in REQUIRED_CI_JOBS passed on this commit.
+# publish-crates-io.yml repeats these checks on the tag build, so they also
+# apply to a tag pushed by other means. The checks here avoid creating a tag
+# that could never be published.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+global_job_config:
+  env_vars:
+    - name: CRATE
+      value: confluent-kafka
+
+blocks:
+  - name: "Create release tag"
+    dependencies: []
+    execution_time_limit:
+      minutes: 10
+    task:
+      epilogue:
+        always:
+          commands:
+            # TEST MODE: deletes the temporary tag even if a step failed.
+            - '[ -z "${tag:-}" ] || ! git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null 2>&1 || git push origin --delete "refs/tags/${tag}" || echo "TEST MODE: could not delete ${tag}; delete it by hand"'
+      jobs:
+        - name: "Tag and push"
+          commands:
+            - checkout
+            - |
+              refuse() {
+                echo "Refusing to create the release tag: $*" >&2
+                exit 1
+              }
+            # A pull request build reports the target branch in
+            # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. A build
+            # whose jobs were redirected to another branch
+            # (SEMAPHORE_GIT_BRANCH_CHECKOUT, see semaphore.yml) did not test
+            # the commit checked out here.
+            - |
+              echo "TEST MODE: skipping the master-only check (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')"
+              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
+                refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test master"
+              fi
+            # Uses the same pattern as `release_tag_pattern` in
+            # publish-crates-io.yml and the auto_promote condition in
+            # semaphore.yml, without the leading `v`. /usr/bin/python3 is the
+            # image's system Python (3.12 on Ubuntu 24.04), which provides
+            # tomllib.
+            - |
+              if ! [[ "${RELEASE_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+                refuse "RELEASE_VERSION '${RELEASE_VERSION:-}' is not a release version (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
+              fi
+              manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open("rust/Cargo.toml", "rb"))["package"].get("version"); print(v) if isinstance(v, str) else sys.exit("[package] version must be a literal string")') \
+                || refuse "could not read [package] version from rust/Cargo.toml"
+              if [ "${RELEASE_VERSION}" != "${manifest_version}" ]; then
+                refuse "RELEASE_VERSION is '${RELEASE_VERSION}', but rust/Cargo.toml at this commit has '${manifest_version}'; merge the version bump to master first, then promote its build"
+              fi
+              tag="v${RELEASE_VERSION}-dev.${SEMAPHORE_WORKFLOW_NUMBER:-0}"
+              echo "TEST MODE: using the throwaway tag ${tag}"
+              head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
+            # Tags are never moved or reused, because a crates.io version cannot
+            # be replaced. A tag whose release was not published may be deleted
+            # manually before a retry.
+            - |
+              existing=$(git ls-remote --tags origin "refs/tags/${tag}") \
+                || refuse "could not read tags from origin"
+              if [ -n "${existing}" ]; then
+                refuse "tag ${tag} already exists on origin (${existing%%[[:space:]]*}); bump [package] version in rust/Cargo.toml for a new release"
+              fi
+            # Applies the same version policy as publish-crates-io.yml: a
+            # version already on crates.io, whether yanked or not, cannot be
+            # published again, and a new version must be higher than every
+            # published version under Semantic Versioning precedence.
+            - |
+              index_file=$(mktemp) || refuse "could not create a temporary file"
+              status=$(curl -sS --retry 3 --retry-delay 5 -o "${index_file}" -w '%{http_code}' \
+                "https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/${CRATE}") \
+                || refuse "could not read the crates.io index to confirm that ${CRATE} ${RELEASE_VERSION} is new"
+              case "${status}" in
+                200) ;;
+                404) : > "${index_file}" ;;
+                *) refuse "the crates.io index returned HTTP ${status} for ${CRATE}" ;;
+              esac
+              not_lower=$(/usr/bin/python3 - "${RELEASE_VERSION}" "${index_file}" <<'PYTHON'
+              import json, sys
+
+              def precedence(version):
+                  # Semantic Versioning 2.0.0 precedence. Build metadata is ignored.
+                  core, _, pre = version.split("+", 1)[0].partition("-")
+                  release = tuple(int(part) for part in core.split("."))
+                  if not pre:
+                      return (release, 1, ())
+                  identifiers = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+                  return (release, 0, identifiers)
+
+              candidate = precedence(sys.argv[1])
+              published = [json.loads(line)["vers"] for line in open(sys.argv[2]) if line.strip()]
+              not_lower = [v for v in published if precedence(v) >= candidate]
+              if not_lower:
+                  print(max(not_lower, key=precedence))
+              PYTHON
+              ) || refuse "could not compare ${RELEASE_VERSION} with the versions on crates.io"
+              if [ -n "${not_lower}" ]; then
+                echo "TEST MODE: would refuse: ${RELEASE_VERSION} is not higher than ${not_lower}, which is already on crates.io"
+              else
+                echo "TEST MODE: ${RELEASE_VERSION} is new on crates.io"
+              fi
+            # Applies the same CI check as publish-crates-io.yml, using its
+            # REQUIRED_CI_JOBS list so that the list is maintained in one place.
+            # A tag on a failing commit would rerun CI and never be published.
+            - |
+              required_jobs=$(awk '/- name: REQUIRED_CI_JOBS/ { getline; sub(/^[[:space:]]*value: "/, ""); sub(/"[[:space:]]*$/, ""); print; exit }' .semaphore/publish-crates-io.yml)
+              [ -n "${required_jobs}" ] || refuse "could not read REQUIRED_CI_JOBS from .semaphore/publish-crates-io.yml"
+              results_dir=$(mktemp -d) || refuse "could not create a temporary directory"
+              artifact pull workflow ci-result --destination "${results_dir}/ci-result" --force >/dev/null \
+                || refuse "this build has no recorded CI results; wait for build-test-release to finish, then promote again"
+              declare -A required=() reported=()
+              while IFS= read -r job; do
+                [ -n "${job}" ] || continue
+                marker=$(printf '%s' "${job}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+                required[${marker}]=${job}
+              done <<< "$(printf '%s' "${required_jobs}" | tr ';' '\n')"
+              while IFS= read -r file; do
+                reported[$(basename "${file}")]=${file}
+              done < <(find "${results_dir}" -type f)
+              problems=""
+              for marker in "${!required[@]}"; do
+                job=${required[${marker}]}
+                if [ -z "${reported[${marker}]+set}" ]; then
+                  problems+="  - ${job}: no result (still running, stopped, or the result upload failed)\n"
+                  continue
+                fi
+                read -r result sha _ < "${reported[${marker}]}"
+                if [ "${result}" != "passed" ]; then
+                  problems+="  - ${job}: ${result:-empty result}\n"
+                elif [ "${sha}" != "${head_sha}" ]; then
+                  problems+="  - ${job}: passed on ${sha}, not on ${head_sha}\n"
+                fi
+              done
+              for marker in "${!reported[@]}"; do
+                [ -n "${required[${marker}]+set}" ] \
+                  || problems+="  - ${marker}: reported a result but is not in REQUIRED_CI_JOBS; add it to the list in publish-crates-io.yml\n"
+              done
+              if [ -n "${problems}" ]; then
+                printf 'Refusing to create the release tag: the CI build of this commit is not fully green:\n%bRerun the failed or missing jobs, then promote again.\n' "${problems}" >&2
+                exit 1
+              fi
+              echo "All ${#required[@]} required CI jobs passed on ${head_sha}"
+            # Creates a lightweight tag, as the other Confluent clients do.
+            # Pushing it starts the tag build. Semaphore's pre-job setup
+            # configures `pushInsteadOf` so that `git push` to this repository
+            # uses the job's GitHub write token; a branch job receives one for
+            # its own repository without any change to service.yml (see "GitHub
+            # Token Authentication Guide for CI Jobs" in the TOOLS space of the
+            # Confluent wiki).
+            - git tag "${tag}" "${head_sha}" || refuse "could not create tag ${tag}"
+            - git push origin "refs/tags/${tag}" || refuse "could not push tag ${tag} to origin"
+            - echo "Pushed ${tag} at ${head_sha}. The tag build runs CI and, when every job passes, publishes ${CRATE} ${RELEASE_VERSION} to crates.io."
+            - |
+              remote=$(git ls-remote origin "refs/tags/${tag}") || refuse "could not read ${tag} back from origin"
+              [ "${remote%%[[:space:]]*}" = "${head_sha}" ] || refuse "TEST MODE: origin has '${remote}' for ${tag}, expected ${head_sha}"
+              echo "TEST MODE: origin has ${tag} at ${head_sha}"
+            - |
+              git push origin --delete "refs/tags/${tag}" || refuse "TEST MODE: could not delete ${tag} from origin"
+            - |
+              remote=$(git ls-remote origin "refs/tags/${tag}") || refuse "could not read tags from origin"
+              [ -z "${remote}" ] || refuse "TEST MODE: ${tag} is still on origin after the delete"
+              echo "TEST MODE: deleted ${tag}; origin no longer has it"

@@ -9,10 +9,10 @@ name: verify-crates-io-release
 #     the crate's minimum supported Rust version and the latest stable
 #     toolchain.
 #
-# This pipeline loads no token and has no tip-of-master check: the release has
-# already happened, and master may have advanced since. A failure means the
-# published version is defective for users. Release a fixed version, and yank
-# this one if it is unusable.
+# This pipeline loads no token and repeats none of the release checks: the
+# release has already happened. A failure means the published version is
+# defective for users. Release a fixed version, and yank this one if it is
+# unusable.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -34,8 +34,8 @@ blocks:
       jobs:
         - name: "checksum"
           commands:
-            # The checked-out commit is the one that was published, so the
-            # manifest holds the published version.
+            # The checked-out commit is the tagged one that was published, so
+            # the manifest holds the published version.
             - version=$(/usr/bin/python3 -c 'import tomllib; print(tomllib.load(open("rust/Cargo.toml", "rb"))["package"]["version"])')
             # Written by the publish job after a successful upload. If it is
             # absent, nothing was published from this workflow and the job
