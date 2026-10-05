@@ -23,8 +23,37 @@
 use std::time::Duration;
 
 use super::workload::{Backend, CommitMode, Role, WorkloadSpec};
+use super::workload_config::MAX_MSG_SIZE;
 
-/// The kind of fault a cycle injects, chosen by `--action`.
+/// Upper bound on `--partitions`.
+const MAX_PARTITIONS: i32 = 10_000;
+
+/// Upper bound on `--cycles`.
+const MAX_CYCLES: u32 = 100_000;
+
+/// Upper bound on every duration flag in seconds (one day).
+const MAX_SECONDS: u64 = 24 * 60 * 60;
+
+/// Lower bound on `--up-wait-s`.
+const MIN_UP_WAIT_S: u64 = 15;
+
+/// Lower bound on `--drain-s`.
+const MIN_DRAIN_S: u64 = 5;
+
+/// Upper bound on `--log-budget-mb` (64 GiB per file).
+const MAX_LOG_BUDGET_MB: u64 = 64 * 1024;
+
+/// The first instance number `WorkloadPool` (`harness.rs`) gives a consumer it
+/// adds mid-run; configured consumers must stay below it.
+const RUNTIME_CONSUMER_INSTANCE_BASE: u32 = 1000;
+
+/// Kafka's limit on a topic name's length (`Topic.MAX_NAME_LENGTH`).
+const MAX_TOPIC_NAME_LENGTH: usize = 249;
+
+/// The kind of fault a cycle injects: broker rolling (default-on, disabled by
+/// `--no-broker-roll`) plus whichever of `--change-leader`,
+/// `--reassign-partitions`, `--topic-recreate` and `--all-brokers-down` were
+/// given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
     /// Roll each broker (stop → down → start → wait) per cycle.
@@ -119,8 +148,11 @@ pub struct ChaosConfig {
     pub brokers: u16,
     pub partitions: i32,
     pub cycles: u32,
-    /// Faults to inject, each with its own cadence (`--action KIND[:everyN]`,
-    /// repeatable). All fire on their matching cycles, in listed order.
+    /// Faults to inject, each with its own cadence: broker rolling every cycle
+    /// unless `--no-broker-roll`, then `--change-leader [N]`,
+    /// `--reassign-partitions [N]`, `--topic-recreate [N]` and
+    /// `--all-brokers-down [N]` every N cycles. All fire on their matching
+    /// cycles, in that order.
     pub actions: Vec<ActionSpec>,
     /// SIGKILL instead of SIGTERM for broker roll (`--unclean`).
     pub unclean: bool,
@@ -146,6 +178,9 @@ pub struct ChaosConfig {
     /// Producer target records/sec (0 = max).
     pub rps: u32,
     /// One broker index kept permanently down before rolling (`--leave-broker-down`).
+    /// Only accepted where the controller quorum keeps a majority with it down
+    /// (and, with broker rolling, with one more broker down); see
+    /// `check_controller_quorum`.
     pub leave_broker_down: Option<u16>,
     /// Reproducibility seed (`--seed`). Drives the broker-roll order and, in
     /// `--random` mode, EVERY random decision (which action fires each cycle,
@@ -185,9 +220,9 @@ pub struct ChaosConfig {
     /// Fire the rebalance add/remove **inside the broker-roll down-window**
     /// rather than at the top of the cycle (`--rebalance-mid-roll`), so the
     /// group reassignment overlaps the leader migration in time. Requires a
-    /// `BrokerRoll` action to be firing on the same cycle (the default unless
-    /// `--no-broker-roll`); otherwise there is no down-window to inject into and
-    /// the add/remove falls back to the top of the cycle.
+    /// `BrokerRoll` action (the default unless `--no-broker-roll`) and an
+    /// add or remove cycle; `from_env` rejects it without either. The roll
+    /// fires every cycle, so the add/remove always lands in a down-window.
     pub rebalance_mid_roll: bool,
     /// Consumer-churn lower/upper bounds (`--consumer-churn-min`/`--consumer-churn-max`).
     /// When set (both together), every cycle stops a random batch of consumers and
@@ -218,7 +253,8 @@ pub struct ChaosConfig {
     pub allow_multi_topic_recreate: bool,
     /// Producer value payload size in bytes (`--msg-size`, default 100). The
     /// 8-byte big-endian logical index is written into the first bytes of the
-    /// value, padded to this size; the key stays the 8-byte index.
+    /// value, padded to this size; the key stays the 8-byte index, so 0 (an
+    /// empty value) is valid. At most `workload_config::MAX_MSG_SIZE`.
     pub msg_size: usize,
     /// Explicit replication factor override (`--replication-factor`). `None` =
     /// librdkafka's default of `min(brokers, 3)`. Always within
@@ -251,15 +287,38 @@ impl ChaosConfig {
         if partitions < 1 {
             return Err(format!("--partitions must be >= 1, got {partitions}"));
         }
+        // The harness narrows the count to `u16` for the cluster preset, and a
+        // few dockerised brokers cannot host much more than this anyway.
+        if partitions > MAX_PARTITIONS {
+            return Err(format!("--partitions {partitions} exceeds the limit of {MAX_PARTITIONS}"));
+        }
+        // `topics()` yields one topic for 0 as for 1, so 0 would run (and print)
+        // a configuration other than the one asked for.
         let num_topics: u16 = env_parse(var, "CHAOS_NUM_TOPICS", 1)?;
+        if num_topics == 0 {
+            return Err("--num-topics must be >= 1".to_string());
+        }
+        // Every topic is created after the cluster is up, where an illegal name
+        // would fail the run; check the names `topics()` will generate now.
+        let topic = env_str(var, "CHAOS_TOPIC", "chaos-run");
+        validate_topic_name(&topic, num_topics)?;
+        let cycles: u32 = env_parse(var, "CHAOS_CYCLES", 3)?;
+        if cycles == 0 {
+            return Err("--cycles must be >= 1".to_string());
+        }
+        // Bounds the watchdog's `cycles * per-cycle budget` arithmetic
+        // (`run_test.rs`), which would otherwise overflow for absurd values.
+        if cycles > MAX_CYCLES {
+            return Err(format!("--cycles {cycles} exceeds the limit of {MAX_CYCLES}"));
+        }
         let random = env_str(var, "CHAOS_RANDOM", "0") == "1";
         // Consumer churn (`--consumer-churn-min`/`--consumer-churn-max`): both
         // must be given together; `min >= 1` and `max >= min`. When set, churn
         // owns the consumer set (1 producer + `min` fixed consumers built up
         // front; churn adds/removes up to `max - min` more), so it is mutually
         // exclusive with --consumers and --workload.
-        let consumer_churn_min = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MIN")?;
-        let consumer_churn_max = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MAX")?;
+        let consumer_churn_min = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MIN", "a consumer count")?;
+        let consumer_churn_max = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MAX", "a consumer count")?;
         match (consumer_churn_min, consumer_churn_max) {
             (Some(_), None) | (None, Some(_)) => {
                 return Err("use both --consumer-churn-min and --consumer-churn-max together".to_string());
@@ -288,7 +347,7 @@ impl ChaosConfig {
         // `--consumers N`: 1 rust producer + N rust consumers (librdkafka's
         // --consumers). Mutually exclusive with --workload.
         let workloads = if let Some(lo) = consumer_churn_min {
-            if env_opt_u32(var, "CHAOS_CONSUMERS")?.is_some() {
+            if env_opt_u32(var, "CHAOS_CONSUMERS", "a consumer count")?.is_some() {
                 return Err("use either --consumer-churn-* or --consumers, not both".to_string());
             }
             if var("CHAOS_WORKLOADS").is_some() {
@@ -300,7 +359,7 @@ impl ChaosConfig {
             }
             parse_workloads(&spec)?
         } else {
-            match env_opt_u32(var, "CHAOS_CONSUMERS")? {
+            match env_opt_u32(var, "CHAOS_CONSUMERS", "a consumer count")? {
                 Some(n) => {
                     if var("CHAOS_WORKLOADS").is_some() {
                         return Err("use either --consumers or --workload, not both".to_string());
@@ -338,6 +397,21 @@ impl ChaosConfig {
                 producers.join(", ")
             ));
         }
+        // Consumers added mid-run (`--rebalance-add-cycle`, churn) are numbered
+        // from `RUNTIME_CONSUMER_INSTANCE_BASE` (`WorkloadPool` in `harness.rs`),
+        // so a configured consumer with that instance number would share its
+        // client id and log file with the first added one.
+        if let Some(spec) = workloads
+            .iter()
+            .find(|w| w.role == Role::Consumer && w.instance >= RUNTIME_CONSUMER_INSTANCE_BASE)
+        {
+            return Err(format!(
+                "at most {} consumer workloads per backend are supported, got '{}': consumers added mid-run are \
+                 numbered from {RUNTIME_CONSUMER_INSTANCE_BASE}, so their client ids would collide",
+                RUNTIME_CONSUMER_INSTANCE_BASE - 1,
+                spec.label()
+            ));
+        }
 
         // `--security-protocol`: which broker listener every client uses. A
         // gRPC (python / c) backend whose server runs in a sibling container
@@ -351,7 +425,7 @@ impl ChaosConfig {
                 format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
             })?;
             if let Some(spec) = workloads.iter().find(|w| w.backend.is_grpc())
-                && grpc_backends_use_containers(var)?
+                && grpc_backends_use_containers(lookup)?
                 && protocol == SecurityProtocol::SaslPlaintext
             {
                 return Err(format!(
@@ -384,12 +458,18 @@ impl ChaosConfig {
             ("CHAOS_TOPIC_RECREATE", "--topic-recreate", ActionKind::TopicRecreate),
             ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down", ActionKind::AllBrokersDown),
         ] {
-            if let Some(every) = env_opt_u32(var, env_key)? {
+            if let Some(every) = env_opt_u32(var, env_key, "a cycle cadence")? {
                 // `cycle % 0` never matches: a cadence of 0 would configure a
                 // fault that never fires, and the run would PASS having injected
-                // nothing.
+                // nothing. A cadence past the last cycle never fires either.
                 if every == 0 {
                     return Err(format!("{flag} cadence must be >= 1 (0 would never fire the fault)"));
+                }
+                if every > cycles {
+                    return Err(format!(
+                        "{flag} {every} would never fire: it fires every {every} cycles and the run has only \
+                         --cycles {cycles}"
+                    ));
                 }
                 actions.push(ActionSpec { kind, every });
             }
@@ -538,15 +618,39 @@ impl ChaosConfig {
             (rf, _) => rf,
         };
 
-        let cycles: u32 = env_parse(var, "CHAOS_CYCLES", 3)?;
-        if cycles == 0 {
-            return Err("--cycles must be >= 1".to_string());
+        // Every broker is also a KRaft controller voter, so stopping brokers can
+        // take the controller quorum down with them (see `check_controller_quorum`).
+        // `--random` draws broker rolls among its faults.
+        let rolls_brokers = random || actions.iter().any(|a| a.kind == ActionKind::BrokerRoll);
+        check_controller_quorum(brokers, leave_broker_down, rolls_brokers, random)?;
+
+        // A leader change or reassignment that has nothing to move would run
+        // every cycle and inject nothing. Change-leader moves leadership to
+        // another replica of the same partition, which a single replica does
+        // not have; reassignment moves a replica onto (or rotates leadership
+        // to) another live broker, which a single live broker does not have.
+        let effective_replication = replication_factor.unwrap_or(brokers.min(3) as i16);
+        let has_action = |kind: ActionKind| actions.iter().any(|a| a.kind == kind);
+        if has_action(ActionKind::ChangeLeader) && effective_replication < 2 {
+            return Err(format!(
+                "--change-leader has nothing to do at replication factor {effective_replication}: it moves each \
+                 partition's leadership to another of its replicas, and a single-replica partition has none; use \
+                 --replication-factor >= 2 (which needs --brokers >= 2) or drop --change-leader"
+            ));
         }
+        if has_action(ActionKind::ReassignPartitions) && live_brokers < 2 {
+            return Err(
+                "--reassign-partitions has nothing to do with a single live broker: it moves a replica onto, or \
+                 leadership to, another broker; use --brokers >= 2 or drop --reassign-partitions"
+                    .to_string(),
+            );
+        }
+
         // Rebalance add/remove are 1-based cycle numbers; a cycle past the end
         // never fires, and a remove needs something to remove (a consumer added
         // earlier in the run, or churn-added consumers).
-        let rebalance_add_cycle = env_opt_u32(var, "CHAOS_REBALANCE_ADD_CYCLE")?;
-        let rebalance_remove_cycle = env_opt_u32(var, "CHAOS_REBALANCE_REMOVE_CYCLE")?;
+        let rebalance_add_cycle = env_opt_u32(var, "CHAOS_REBALANCE_ADD_CYCLE", "a cycle number")?;
+        let rebalance_remove_cycle = env_opt_u32(var, "CHAOS_REBALANCE_REMOVE_CYCLE", "a cycle number")?;
         for (flag, value) in [
             ("--rebalance-add-cycle", rebalance_add_cycle),
             ("--rebalance-remove-cycle", rebalance_remove_cycle),
@@ -572,8 +676,90 @@ impl ChaosConfig {
             },
             _ => {},
         }
+        // Churn sizes its batches from the consumers already added, so the
+        // extra consumer of a churn cycle that had just filled the headroom
+        // would take the live count past --consumer-churn-max.
+        if let (Some(add), Some(hi)) = (rebalance_add_cycle, consumer_churn_max) {
+            return Err(format!(
+                "--rebalance-add-cycle {add} cannot be combined with consumer churn: churn already adds and \
+                 removes consumers every cycle, and the extra consumer would take the live count past \
+                 --consumer-churn-max {hi}; widen the churn range instead"
+            ));
+        }
 
-        let outage_s: u64 = env_parse(var, "CHAOS_OUTAGE_S", 30)?;
+        // The verdict needs both sides: a run without a producer acknowledges
+        // nothing (`delivered > 0` is asserted), and every record a run without
+        // a consumer acknowledges is unseen, i.e. lost. Either would fail only
+        // after the full run, so reject it now. A consumer added mid-run by
+        // --rebalance-add-cycle reads from the earliest offset and counts, as
+        // long as no --rebalance-remove-cycle takes it away again.
+        if !workloads.iter().any(|w| w.role == Role::Producer) {
+            return Err(
+                "no producer workload: the verdict checks the records a producer acknowledged, so a run without \
+                 one always fails; add --workload producer:<backend>"
+                    .to_string(),
+            );
+        }
+        if !workloads.iter().any(|w| w.role == Role::Consumer) {
+            match (rebalance_add_cycle, rebalance_remove_cycle) {
+                (None, _) => {
+                    return Err(
+                        "no consumer workload: every acknowledged record that is never consumed counts as lost, \
+                         so a producer-only run always fails; add --workload consumer:<backend> (or \
+                         --rebalance-add-cycle N to add one mid-run)"
+                            .to_string(),
+                    );
+                },
+                (Some(add), Some(remove)) => {
+                    return Err(format!(
+                        "--rebalance-remove-cycle {remove} removes the only consumer (added by \
+                         --rebalance-add-cycle {add}): no workload is a consumer, so every record acknowledged \
+                         after it is never consumed and counts as lost; add --workload consumer:<backend>"
+                    ));
+                },
+                (Some(_), None) => {},
+            }
+        }
+
+        // Fault parameters that nothing in this configuration reads. `--random`
+        // rejected these above; in fixed-cadence mode they are read only by the
+        // fault they parameterise.
+        if !random {
+            let rolls = has_action(ActionKind::BrokerRoll);
+            if var("CHAOS_UNCLEAN").is_some() && !rolls {
+                return Err(
+                    "--unclean only applies to broker rolls, which --no-broker-roll disables (--all-brokers-down \
+                     always kills with SIGKILL)"
+                        .to_string(),
+                );
+            }
+            if var("CHAOS_STOP_S").is_some() && !rolls {
+                return Err(
+                    "--stop-s only applies to broker rolls, which --no-broker-roll disables (--all-brokers-down \
+                     uses --outage-s)"
+                        .to_string(),
+                );
+            }
+            if var("CHAOS_DWELL_S").is_some() && !has_action(ActionKind::TopicRecreate) {
+                return Err("--dwell-s only applies with --topic-recreate".to_string());
+            }
+            if var("CHAOS_REBALANCE_MID_ROLL").is_some() {
+                if rebalance_add_cycle.is_none() && rebalance_remove_cycle.is_none() {
+                    return Err("--rebalance-mid-roll only applies with --rebalance-add-cycle or \
+                         --rebalance-remove-cycle: it moves that add/remove into a broker roll's down-window"
+                        .to_string());
+                }
+                if !rolls {
+                    return Err(
+                        "--rebalance-mid-roll fires the rebalance inside a broker roll's down-window, and \
+                         --no-broker-roll disables broker rolls"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        let outage_s = env_secs(var, "CHAOS_OUTAGE_S", "--outage-s", 30)?;
         if var("CHAOS_OUTAGE_S").is_some() && !actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown) {
             return Err("--outage-s only applies with --all-brokers-down".to_string());
         }
@@ -581,19 +767,70 @@ impl ChaosConfig {
             return Err("--outage-s must be >= 1".to_string());
         }
 
+        // Exclusive at 0: every cycle would be quiet, and the run would PASS
+        // having injected nothing.
         let action_prob: f64 = env_parse(var, "CHAOS_ACTION_PROB", 0.7_f64)?;
-        if !(0.0..=1.0).contains(&action_prob) {
-            return Err(format!("--action-prob must be within 0..=1, got {action_prob}"));
+        if !(action_prob > 0.0 && action_prob <= 1.0) {
+            return Err(format!(
+                "--action-prob must be within (0, 1] (0 would never fire a fault), got {action_prob}"
+            ));
         }
         if !random && var("CHAOS_ACTION_PROB").is_some() {
             return Err("--action-prob only applies with --random".to_string());
         }
 
         // A zero budget would rotate the client log on every line (each line
-        // creates a fresh file), producing nothing usable.
+        // creates a fresh file), producing nothing usable. The cap keeps the
+        // byte count (`* 1024 * 1024` in `run_test.rs`) far from overflow.
         let log_budget_mb: u64 = env_parse(var, "CHAOS_LOG_BUDGET_MB", 64)?;
         if log_budget_mb == 0 {
             return Err("--log-budget-mb must be >= 1".to_string());
+        }
+        if log_budget_mb > MAX_LOG_BUDGET_MB {
+            return Err(format!(
+                "--log-budget-mb {log_budget_mb} exceeds the limit of {MAX_LOG_BUDGET_MB}"
+            ));
+        }
+
+        // Durations. Each is capped at `MAX_SECONDS`, which keeps the deadline
+        // and watchdog arithmetic (`Instant + Duration`, the per-cycle budget in
+        // `run_test.rs`) from overflowing.
+        let stop_s = env_secs(var, "CHAOS_STOP_S", "--stop-s", 5)?;
+        let warmup_s = env_secs(var, "CHAOS_WARMUP_S", "--warmup-s", 5)?;
+        let between_s = env_secs(var, "CHAOS_BETWEEN_S", "--between-s", 3)?;
+        let idle_threshold_s = env_secs(var, "CHAOS_IDLE_THRESHOLD_S", "--idle-threshold-s", 3)?;
+        let dwell_s = env_secs(var, "CHAOS_DWELL_S", "--dwell-s", 0)?;
+        // A restarted broker takes several seconds to log `Kafka Server
+        // started` and register with the quorum, and a roll (or a whole-cluster
+        // restart) that does not see it within this wait panics the run.
+        let up_wait_s = env_secs(var, "CHAOS_UP_WAIT_S", "--up-wait-s", 60)?;
+        if up_wait_s < MIN_UP_WAIT_S {
+            return Err(format!(
+                "--up-wait-s {up_wait_s} is below the minimum of {MIN_UP_WAIT_S}: a restarted broker takes several \
+                 seconds to log `Kafka Server started` and register with the controller quorum, and a broker \
+                 that is not back within --up-wait-s fails the run"
+            ));
+        }
+        // The drain is the only time the consumers get, after the last fault,
+        // to read what is still in flight; without it those records are lost.
+        let drain_s = env_secs(var, "CHAOS_DRAIN_S", "--drain-s", 15)?;
+        if drain_s < MIN_DRAIN_S {
+            return Err(format!(
+                "--drain-s {drain_s} is below the minimum of {MIN_DRAIN_S}: the drain is how long the consumers \
+                 get, after the last fault, to read every acknowledged record, and records still in flight when \
+                 it ends count as lost"
+            ));
+        }
+
+        // An empty value is still a valid record: the key carries the index.
+        // The upper bound is what one produce request can carry to the broker.
+        let msg_size: usize = env_parse(var, "CHAOS_MSG_SIZE", 100)?;
+        if msg_size > MAX_MSG_SIZE {
+            return Err(format!(
+                "--msg-size {msg_size} exceeds the maximum of {MAX_MSG_SIZE} bytes: one record's value plus its key \
+                 and framing must fit in a single produce request, which the broker caps at its default \
+                 socket.request.max.bytes of 100 MiB"
+            ));
         }
 
         Ok(Self {
@@ -602,19 +839,19 @@ impl ChaosConfig {
             cycles,
             actions,
             unclean: env_str(var, "CHAOS_UNCLEAN", "0") == "1",
-            stop_s: env_parse(var, "CHAOS_STOP_S", 5)?,
-            up_wait_s: env_parse(var, "CHAOS_UP_WAIT_S", 60)?,
-            warmup_s: env_parse(var, "CHAOS_WARMUP_S", 5)?,
-            between_s: env_parse(var, "CHAOS_BETWEEN_S", 3)?,
-            drain_s: env_parse(var, "CHAOS_DRAIN_S", 15)?,
-            idle_threshold_s: env_parse(var, "CHAOS_IDLE_THRESHOLD_S", 3)?,
+            stop_s,
+            up_wait_s,
+            warmup_s,
+            between_s,
+            drain_s,
+            idle_threshold_s,
             rps: env_parse(var, "CHAOS_RPS", 1000)?,
             leave_broker_down,
             seed: env_parse(var, "CHAOS_SEED", 0)?,
             random,
             action_prob,
             outage_s,
-            dwell_s: env_parse(var, "CHAOS_DWELL_S", 0)?,
+            dwell_s,
             reports: env_str(var, "CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle,
             rebalance_remove_cycle,
@@ -624,10 +861,10 @@ impl ChaosConfig {
             log_budget_mb,
             workloads,
             commit_mode,
-            topic: env_str(var, "CHAOS_TOPIC", "chaos-run"),
+            topic,
             num_topics,
             allow_multi_topic_recreate,
-            msg_size: env_parse(var, "CHAOS_MSG_SIZE", 100)?,
+            msg_size,
             replication_factor,
             security_protocol,
         })
@@ -753,13 +990,130 @@ fn env_str(var: &dyn Fn(&str) -> Option<String>, key: &str, default: &str) -> St
 /// (unset: containers on Linux, host processes elsewhere). Read here rather
 /// than from `backend_pool`, which only exists with `multilanguage-tests`, so
 /// the check also runs in the config pre-validation pass.
-fn grpc_backends_use_containers(var: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
-    match var("MULTILANG_BACKEND_MODE").as_deref() {
+///
+/// `lookup` is the raw variable source, NOT the empty-as-unset view the rest of
+/// the configuration uses: `backend_pool` reads the variable directly and
+/// panics on an empty value, so an empty value is rejected here rather than
+/// treated as unset.
+fn grpc_backends_use_containers(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
+    match lookup("MULTILANG_BACKEND_MODE").as_deref() {
         Some("container") => Ok(true),
         Some("native") => Ok(false),
         Some(other) => Err(format!("MULTILANG_BACKEND_MODE must be container or native, got '{other}'")),
         None => Ok(cfg!(target_os = "linux")),
     }
+}
+
+/// Check that the KRaft controller quorum survives the configured faults.
+///
+/// Every broker is also a controller voter (`tests/common/kafka_cluster.rs`),
+/// so the cluster has an active controller only while a majority
+/// (`brokers / 2 + 1`) of brokers is up. Without one, nothing that needs the
+/// controller completes: no leader failover, no ISR shrink (so `acks=all`
+/// produce stalls), no broker registration, no topic create/delete, no
+/// reassignment. Two shapes lose it:
+///
+/// - `--leave-broker-down` keeps one voter down for the whole run, so the rest
+///   must still be a majority.
+/// - A broker roll (`rolls`) takes one more voter down for its down-window.
+///   When it is the only live broker the roll is a whole-cluster restart, like
+///   `--all-brokers-down`, which is fine: the restart brings the quorum back
+///   (the first check covers whether it can).
+///
+/// `--all-brokers-down` is a whole-cluster crash by design and needs only the
+/// first check. `random` only picks the remedy suggested in the message.
+fn check_controller_quorum(
+    brokers: u16,
+    leave_broker_down: Option<u16>,
+    rolls: bool,
+    random: bool,
+) -> Result<(), String> {
+    let voters = u32::from(brokers);
+    let majority = voters / 2 + 1;
+    let live = voters - u32::from(leave_broker_down.is_some());
+    if let Some(node) = leave_broker_down
+        && live < majority
+    {
+        return Err(format!(
+            "--leave-broker-down {node} with --brokers {brokers} leaves the KRaft controller quorum without a \
+             majority: every broker is also a controller voter, so only {live} of {voters} voters are up for the \
+             whole run, below the majority of {majority}, and nothing that needs the controller (leader \
+             failover, a broker rejoining, topic create/delete, reassignment) can complete; use --brokers 3 or \
+             more"
+        ));
+    }
+    if rolls && live > 1 && live - 1 < majority {
+        let remedy = if random {
+            "or drop --random (it draws broker rolls)"
+        } else {
+            "or --no-broker-roll with another fault"
+        };
+        return Err(match leave_broker_down {
+            Some(node) => format!(
+                "--leave-broker-down {node} with --brokers {brokers} and broker rolling leaves the KRaft controller \
+                 quorum without a majority during every roll: every broker is also a controller voter, so with \
+                 broker {node} kept down a roll leaves {} of {voters} voters up, below the majority of {majority}, \
+                 and the cluster has no active controller (no leader failover, no ISR shrink) for the whole \
+                 down-window; use --brokers 5 or more, {remedy}",
+                live - 1
+            ),
+            None => format!(
+                "--brokers {brokers} with broker rolling leaves the KRaft controller quorum without a majority \
+                 during every roll: every broker is also a controller voter, so a roll leaves {} of {voters} \
+                 voters up, below the majority of {majority}, and the cluster has no active controller (no leader \
+                 failover, no ISR shrink) for the whole down-window; use --brokers 1 (a roll is then a \
+                 whole-cluster restart) or 3 or more, {remedy}",
+                live - 1
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Check `topic` (with `num_topics > 1`, the prefix of `<topic>_<i>`) against
+/// Kafka's topic-name rules (`Topic.validate`): only ASCII letters, digits,
+/// `.`, `_` and `-`; at most 249 characters, counting the longest generated
+/// suffix; not `.` or `..`. A `__` prefix is also refused: it is the namespace
+/// of Kafka's internal topics (`__consumer_offsets`, ...), which the run would
+/// otherwise collide with or delete-and-recreate.
+fn validate_topic_name(topic: &str, num_topics: u16) -> Result<(), String> {
+    if let Some(c) = topic
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(format!(
+            "--topic '{topic}' contains '{c}', which Kafka does not allow in a topic name: use only ASCII \
+             letters, digits, '.', '_' and '-'"
+        ));
+    }
+    if num_topics <= 1 && (topic == "." || topic == "..") {
+        return Err(format!("--topic '{topic}' is not a legal Kafka topic name"));
+    }
+    if topic.starts_with("__") {
+        return Err(format!(
+            "--topic '{topic}' starts with '__', which is reserved for Kafka's internal topics"
+        ));
+    }
+    let longest = if num_topics <= 1 {
+        topic.to_string()
+    } else {
+        format!("{topic}_{}", num_topics - 1)
+    };
+    if longest.len() > MAX_TOPIC_NAME_LENGTH {
+        return Err(if num_topics <= 1 {
+            format!(
+                "--topic is {} characters long, above Kafka's limit of {MAX_TOPIC_NAME_LENGTH}",
+                longest.len()
+            )
+        } else {
+            format!(
+                "--topic is too long for --num-topics {num_topics}: the last topic, '{longest}', is {} characters \
+                 long, above Kafka's limit of {MAX_TOPIC_NAME_LENGTH}",
+                longest.len()
+            )
+        });
+    }
+    Ok(())
 }
 
 fn env_parse<T: std::str::FromStr>(var: &dyn Fn(&str) -> Option<String>, key: &str, default: T) -> Result<T, String> {
@@ -769,10 +1123,20 @@ fn env_parse<T: std::str::FromStr>(var: &dyn Fn(&str) -> Option<String>, key: &s
     }
 }
 
-/// Parse an optional u32 env var: unset/empty → `None`, else parsed.
-fn env_opt_u32(var: &dyn Fn(&str) -> Option<String>, key: &str) -> Result<Option<u32>, String> {
+/// Parse a duration flag in whole seconds, capped at [`MAX_SECONDS`].
+fn env_secs(var: &dyn Fn(&str) -> Option<String>, key: &str, flag: &str, default: u64) -> Result<u64, String> {
+    let secs: u64 = env_parse(var, key, default)?;
+    if secs > MAX_SECONDS {
+        return Err(format!("{flag} {secs} exceeds the limit of {MAX_SECONDS} s (one day)"));
+    }
+    Ok(secs)
+}
+
+/// Parse an optional u32 env var: unset/empty → `None`, else parsed. `what`
+/// names the expected value in the error (`"a cycle number"`, ...).
+fn env_opt_u32(var: &dyn Fn(&str) -> Option<String>, key: &str, what: &str) -> Result<Option<u32>, String> {
     match var(key) {
-        Some(v) => v.parse().map(Some).map_err(|_| format!("{key} must be a cycle number: '{v}'")),
+        Some(v) => v.parse().map(Some).map_err(|_| format!("{key} must be {what}: '{v}'")),
         None => Ok(None),
     }
 }
@@ -852,6 +1216,11 @@ mod tests {
         parse(vars).expect_err("configuration should be rejected")
     }
 
+    /// `--no-broker-roll`, to pair with another fault.
+    const NO_ROLL: (&str, &str) = ("CHAOS_NO_BROKER_ROLL", "1");
+    /// `--topic-recreate` every cycle.
+    const RECREATE: (&str, &str) = ("CHAOS_TOPIC_RECREATE", "1");
+
     /// Consumers added mid-run use the backend of the run's first consumer.
     #[test]
     fn added_consumers_use_the_first_consumer_backend() {
@@ -859,7 +1228,13 @@ mod tests {
         let python = parse(&[("CHAOS_WORKLOADS", "producer:python-async,consumer:python,consumer:python-async")])
             .expect("python workloads parse");
         assert_eq!(python.added_consumer_backend(), Backend::Python);
-        let producer_only = parse(&[("CHAOS_WORKLOADS", "producer:python")]).expect("producer-only parses");
+        // A producer-only run is valid only when --rebalance-add-cycle adds a
+        // consumer; that consumer is Rust.
+        let producer_only = parse(&[
+            ("CHAOS_WORKLOADS", "producer:python"),
+            ("CHAOS_REBALANCE_ADD_CYCLE", "1"),
+        ])
+        .expect("producer-only parses with a consumer added mid-run");
         assert_eq!(producer_only.added_consumer_backend(), Backend::Rust);
     }
 
@@ -954,7 +1329,10 @@ mod tests {
                 "--leave-broker-down with --brokers 1 leaves no broker to roll"
             );
         }
-        let cfg = parse(&[("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("broker 2 of 3 may be left down");
+        // With 3 brokers only a fault that stops no further broker keeps the
+        // controller majority (`rejects_configs_that_lose_the_controller_quorum`).
+        let cfg =
+            parse(&[NO_ROLL, RECREATE, ("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("broker 2 of 3 may be left down");
         assert_eq!(cfg.live_broker_ids(), vec![1, 3]);
     }
 
@@ -994,11 +1372,16 @@ mod tests {
             "--replication-factor 3 exceeds the 2 live broker(s): --brokers 3 with broker 2 kept down by \
              --leave-broker-down"
         );
-        let cfg = parse(&[("CHAOS_REPLICATION_FACTOR", "2"), ("CHAOS_LEAVE_BROKER_DOWN", "2")])
-            .expect("replication 2 fits 2 live brokers");
+        let cfg = parse(&[
+            NO_ROLL,
+            RECREATE,
+            ("CHAOS_REPLICATION_FACTOR", "2"),
+            ("CHAOS_LEAVE_BROKER_DOWN", "2"),
+        ])
+        .expect("replication 2 fits 2 live brokers");
         assert_eq!(cfg.replication_factor, Some(2));
         // With a broker left down, the default is sized from the live brokers.
-        let cfg = parse(&[("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("default replication fits");
+        let cfg = parse(&[NO_ROLL, RECREATE, ("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("default replication fits");
         assert_eq!(cfg.replication_factor, Some(2));
         let cfg = parse(&[("CHAOS_BROKERS", "5"), ("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("valid");
         assert_eq!(cfg.replication_factor, Some(3));
@@ -1063,6 +1446,420 @@ mod tests {
         ])
         .expect("the fixed-cadence combination runs with the flag");
         assert!(cfg.allow_multi_topic_recreate);
+    }
+
+    /// A cadence past the last cycle never fires, like a cadence of 0.
+    #[test]
+    fn rejects_a_fault_cadence_past_the_last_cycle() {
+        for (key, flag) in [
+            ("CHAOS_CHANGE_LEADER", "--change-leader"),
+            ("CHAOS_REASSIGN_PARTITIONS", "--reassign-partitions"),
+            ("CHAOS_TOPIC_RECREATE", "--topic-recreate"),
+            ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down"),
+        ] {
+            assert_eq!(
+                parse_err(&[NO_ROLL, (key, "4"), ("CHAOS_CYCLES", "3")]),
+                format!("{flag} 4 would never fire: it fires every 4 cycles and the run has only --cycles 3")
+            );
+        }
+        parse(&[NO_ROLL, ("CHAOS_TOPIC_RECREATE", "3"), ("CHAOS_CYCLES", "3")]).expect("fires on the last cycle");
+    }
+
+    /// Change-leader and reassignment that have nothing to move inject nothing.
+    #[test]
+    fn rejects_leader_moves_with_nothing_to_move() {
+        let change_leader = "--change-leader has nothing to do at replication factor 1: it moves each partition's \
+                             leadership to another of its replicas, and a single-replica partition has none; use \
+                             --replication-factor >= 2 (which needs --brokers >= 2) or drop --change-leader";
+        assert_eq!(
+            parse_err(&[NO_ROLL, ("CHAOS_CHANGE_LEADER", "1"), ("CHAOS_REPLICATION_FACTOR", "1")]),
+            change_leader
+        );
+        // A single broker has replication 1 by default; alongside another fault
+        // the flag would still do nothing.
+        assert_eq!(
+            parse_err(&[("CHAOS_BROKERS", "1"), ("CHAOS_CHANGE_LEADER", "1")]),
+            change_leader
+        );
+        parse(&[NO_ROLL, ("CHAOS_CHANGE_LEADER", "1")]).expect("default replication 3 has replicas to lead");
+
+        assert_eq!(
+            parse_err(&[("CHAOS_BROKERS", "1"), ("CHAOS_REASSIGN_PARTITIONS", "1")]),
+            "--reassign-partitions has nothing to do with a single live broker: it moves a replica onto, or \
+             leadership to, another broker; use --brokers >= 2 or drop --reassign-partitions"
+        );
+        // Replication 1 with another live broker moves the replica there, and
+        // replication == brokers still reorders the replicas.
+        parse(&[
+            NO_ROLL,
+            ("CHAOS_REASSIGN_PARTITIONS", "1"),
+            ("CHAOS_REPLICATION_FACTOR", "1"),
+        ])
+        .expect("a lone replica can move to another broker");
+        parse(&[NO_ROLL, ("CHAOS_REASSIGN_PARTITIONS", "1")]).expect("replication 3 of 3 brokers reorders");
+    }
+
+    #[test]
+    fn rejects_an_action_probability_that_never_fires() {
+        for prob in ["0", "0.0", "-0.1", "1.5", "NaN"] {
+            assert_eq!(
+                parse_err(&[("CHAOS_RANDOM", "1"), ("CHAOS_ACTION_PROB", prob)]),
+                format!(
+                    "--action-prob must be within (0, 1] (0 would never fire a fault), got {}",
+                    prob.parse::<f64>().unwrap()
+                )
+            );
+        }
+        assert_eq!(
+            parse(&[("CHAOS_RANDOM", "1"), ("CHAOS_ACTION_PROB", "1")]).unwrap().action_prob,
+            1.0
+        );
+        assert_eq!(
+            parse(&[("CHAOS_RANDOM", "1"), ("CHAOS_ACTION_PROB", "0.01")])
+                .unwrap()
+                .action_prob,
+            0.01
+        );
+    }
+
+    /// Every broker is a controller voter: a broker kept down, or rolled, must
+    /// still leave a majority up.
+    #[test]
+    fn rejects_configs_that_lose_the_controller_quorum() {
+        let two_roll = "--brokers 2 with broker rolling leaves the KRaft controller quorum without a majority during \
+                        every roll: every broker is also a controller voter, so a roll leaves 1 of 2 voters up, \
+                        below the majority of 2, and the cluster has no active controller (no leader failover, no \
+                        ISR shrink) for the whole down-window; use --brokers 1 (a roll is then a whole-cluster \
+                        restart) or 3 or more, ";
+        assert_eq!(
+            parse_err(&[("CHAOS_BROKERS", "2")]),
+            format!("{two_roll}or --no-broker-roll with another fault")
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_BROKERS", "2"), ("CHAOS_RANDOM", "1")]),
+            format!("{two_roll}or drop --random (it draws broker rolls)")
+        );
+
+        // Broker 2 of 2 kept down: no majority for the whole run, whatever the
+        // fault.
+        for fault in [RECREATE, ("CHAOS_ALL_BROKERS_DOWN", "1")] {
+            assert_eq!(
+                parse_err(&[("CHAOS_BROKERS", "2"), ("CHAOS_LEAVE_BROKER_DOWN", "2"), NO_ROLL, fault]),
+                "--leave-broker-down 2 with --brokers 2 leaves the KRaft controller quorum without a majority: \
+                 every broker is also a controller voter, so only 1 of 2 voters are up for the whole run, below \
+                 the majority of 2, and nothing that needs the controller (leader failover, a broker rejoining, \
+                 topic create/delete, reassignment) can complete; use --brokers 3 or more"
+            );
+        }
+
+        // A broker kept down plus a rolled one: 1 of 3 / 2 of 4 voters up.
+        for (brokers, up, majority) in [("3", 1, 2), ("4", 2, 3)] {
+            assert_eq!(
+                parse_err(&[("CHAOS_BROKERS", brokers), ("CHAOS_LEAVE_BROKER_DOWN", "1")]),
+                format!(
+                    "--leave-broker-down 1 with --brokers {brokers} and broker rolling leaves the KRaft controller \
+                     quorum without a majority during every roll: every broker is also a controller voter, so with \
+                     broker 1 kept down a roll leaves {up} of {brokers} voters up, below the majority of \
+                     {majority}, and the cluster has no active controller (no leader failover, no ISR shrink) for \
+                     the whole down-window; use --brokers 5 or more, or --no-broker-roll with another fault"
+                )
+            );
+        }
+
+        // Valid: a single broker's roll is a whole-cluster restart; 3 brokers
+        // keep 2 of 3 up during a roll; 5 brokers keep 3 of 5 up with one kept
+        // down; without rolls 2 of 3 stay up; a whole-cluster crash restarts
+        // into a majority.
+        parse(&[("CHAOS_BROKERS", "1")]).expect("single-broker roll");
+        parse(&[("CHAOS_BROKERS", "1"), ("CHAOS_RANDOM", "1")]).expect("single-broker random");
+        parse(&[]).expect("3-broker roll");
+        parse(&[("CHAOS_BROKERS", "4")]).expect("4-broker roll");
+        parse(&[("CHAOS_BROKERS", "5"), ("CHAOS_LEAVE_BROKER_DOWN", "5")]).expect("5 brokers, one down, rolling");
+        parse(&[("CHAOS_BROKERS", "2"), NO_ROLL, RECREATE]).expect("2 brokers without rolls");
+        parse(&[("CHAOS_BROKERS", "2"), NO_ROLL, ("CHAOS_ALL_BROKERS_DOWN", "1")]).expect("2-broker crash");
+        parse(&[
+            ("CHAOS_LEAVE_BROKER_DOWN", "3"),
+            NO_ROLL,
+            ("CHAOS_ALL_BROKERS_DOWN", "1"),
+            ("CHAOS_CHANGE_LEADER", "1"),
+        ])
+        .expect("3 brokers, one down, crash restarts 2 of 3");
+    }
+
+    #[test]
+    fn rejects_up_and_drain_waits_too_short_to_work() {
+        assert_eq!(
+            parse_err(&[("CHAOS_UP_WAIT_S", "0")]),
+            "--up-wait-s 0 is below the minimum of 15: a restarted broker takes several seconds to log `Kafka \
+             Server started` and register with the controller quorum, and a broker that is not back within \
+             --up-wait-s fails the run"
+        );
+        assert!(parse_err(&[("CHAOS_UP_WAIT_S", "14")]).starts_with("--up-wait-s 14 is below the minimum of 15"));
+        assert_eq!(parse(&[("CHAOS_UP_WAIT_S", "15")]).unwrap().up_wait_s, 15);
+        assert_eq!(
+            parse_err(&[("CHAOS_DRAIN_S", "0")]),
+            "--drain-s 0 is below the minimum of 5: the drain is how long the consumers get, after the last \
+             fault, to read every acknowledged record, and records still in flight when it ends count as lost"
+        );
+        assert_eq!(parse(&[("CHAOS_DRAIN_S", "5")]).unwrap().drain_s, 5);
+    }
+
+    /// Durations, cycles, partitions and the log budget are bounded so the
+    /// harness's deadline / byte arithmetic cannot overflow.
+    #[test]
+    fn rejects_values_past_their_upper_bound() {
+        for (key, flag) in [
+            ("CHAOS_STOP_S", "--stop-s"),
+            ("CHAOS_UP_WAIT_S", "--up-wait-s"),
+            ("CHAOS_WARMUP_S", "--warmup-s"),
+            ("CHAOS_BETWEEN_S", "--between-s"),
+            ("CHAOS_DRAIN_S", "--drain-s"),
+            ("CHAOS_IDLE_THRESHOLD_S", "--idle-threshold-s"),
+        ] {
+            assert_eq!(
+                parse_err(&[(key, "86401")]),
+                format!("{flag} 86401 exceeds the limit of 86400 s (one day)")
+            );
+            assert_eq!(
+                parse_err(&[(key, &u64::MAX.to_string())]),
+                format!("{flag} {} exceeds the limit of 86400 s (one day)", u64::MAX)
+            );
+        }
+        assert_eq!(
+            parse_err(&[NO_ROLL, ("CHAOS_ALL_BROKERS_DOWN", "1"), ("CHAOS_OUTAGE_S", "86401")]),
+            "--outage-s 86401 exceeds the limit of 86400 s (one day)"
+        );
+        assert_eq!(
+            parse_err(&[RECREATE, ("CHAOS_DWELL_S", "86401")]),
+            "--dwell-s 86401 exceeds the limit of 86400 s (one day)"
+        );
+        let cfg = parse(&[("CHAOS_STOP_S", "86400"), ("CHAOS_DRAIN_S", "86400")]).expect("one day is allowed");
+        assert_eq!((cfg.stop_s, cfg.drain_s), (86_400, 86_400));
+
+        assert_eq!(
+            parse_err(&[("CHAOS_CYCLES", "100001")]),
+            "--cycles 100001 exceeds the limit of 100000"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_PARTITIONS", "65536")]),
+            "--partitions 65536 exceeds the limit of 10000"
+        );
+        assert_eq!(parse(&[("CHAOS_PARTITIONS", "10000")]).unwrap().partitions, 10_000);
+        assert_eq!(
+            parse_err(&[("CHAOS_LOG_BUDGET_MB", "65537")]),
+            "--log-budget-mb 65537 exceeds the limit of 65536"
+        );
+        assert_eq!(parse(&[("CHAOS_LOG_BUDGET_MB", "65536")]).unwrap().log_budget_mb, 65_536);
+    }
+
+    /// One record must fit a single produce request; an empty value is still a
+    /// valid record (the key carries the index).
+    #[test]
+    fn msg_size_must_fit_one_produce_request() {
+        let max = 100 * 1024 * 1024 - 16 * 1024;
+        assert_eq!(parse(&[("CHAOS_MSG_SIZE", &max.to_string())]).unwrap().msg_size, max);
+        assert_eq!(
+            parse_err(&[("CHAOS_MSG_SIZE", &(max + 1).to_string())]),
+            format!(
+                "--msg-size {} exceeds the maximum of {max} bytes: one record's value plus its key and framing \
+                 must fit in a single produce request, which the broker caps at its default \
+                 socket.request.max.bytes of 100 MiB",
+                max + 1
+            )
+        );
+        assert_eq!(parse(&[("CHAOS_MSG_SIZE", "0")]).unwrap().msg_size, 0);
+    }
+
+    /// A run without a producer, or with no consumer ever reading, fails after
+    /// the full run; reject it up front.
+    #[test]
+    fn rejects_runs_without_a_producer_or_a_consumer() {
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "consumer:rust,consumer:python")]),
+            "no producer workload: the verdict checks the records a producer acknowledged, so a run without one \
+             always fails; add --workload producer:<backend>"
+        );
+        let producer_only = "no consumer workload: every acknowledged record that is never consumed counts as \
+                             lost, so a producer-only run always fails; add --workload consumer:<backend> (or \
+                             --rebalance-add-cycle N to add one mid-run)";
+        assert_eq!(parse_err(&[("CHAOS_WORKLOADS", "producer:rust")]), producer_only);
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "producer:rust"), ("CHAOS_COMMIT", "async")]),
+            producer_only
+        );
+        assert_eq!(
+            parse_err(&[
+                ("CHAOS_WORKLOADS", "producer:rust"),
+                ("CHAOS_REBALANCE_ADD_CYCLE", "1"),
+                ("CHAOS_REBALANCE_REMOVE_CYCLE", "2"),
+            ]),
+            "--rebalance-remove-cycle 2 removes the only consumer (added by --rebalance-add-cycle 1): no workload \
+             is a consumer, so every record acknowledged after it is never consumed and counts as lost; add \
+             --workload consumer:<backend>"
+        );
+        parse(&[
+            ("CHAOS_WORKLOADS", "producer:rust"),
+            ("CHAOS_REBALANCE_ADD_CYCLE", "1"),
+            ("CHAOS_COMMIT", "async"),
+        ])
+        .expect("a consumer added mid-run reads every record");
+    }
+
+    #[test]
+    fn rejects_topic_names_kafka_would_refuse() {
+        assert_eq!(
+            parse_err(&[("CHAOS_TOPIC", "bad@name")]),
+            "--topic 'bad@name' contains '@', which Kafka does not allow in a topic name: use only ASCII letters, \
+             digits, '.', '_' and '-'"
+        );
+        assert!(parse_err(&[("CHAOS_TOPIC", "has space")]).starts_with("--topic 'has space' contains ' '"));
+        for name in [".", ".."] {
+            assert_eq!(
+                parse_err(&[("CHAOS_TOPIC", name)]),
+                format!("--topic '{name}' is not a legal Kafka topic name")
+            );
+        }
+        assert_eq!(
+            parse_err(&[("CHAOS_TOPIC", "__consumer_offsets")]),
+            "--topic '__consumer_offsets' starts with '__', which is reserved for Kafka's internal topics"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_TOPIC", &"t".repeat(250))]),
+            "--topic is 250 characters long, above Kafka's limit of 249"
+        );
+        parse(&[("CHAOS_TOPIC", &"t".repeat(249))]).expect("249 characters is the limit");
+        // The generated `_<i>` suffix counts: the last of 12 topics is
+        // `<prefix>_11`, 249 characters for a 246-character prefix and 250 for a
+        // 247-character one.
+        parse(&[("CHAOS_TOPIC", &"t".repeat(246)), ("CHAOS_NUM_TOPICS", "12")]).expect("249 with the suffix");
+        let long = "t".repeat(247);
+        assert_eq!(
+            parse_err(&[("CHAOS_TOPIC", &long), ("CHAOS_NUM_TOPICS", "12")]),
+            format!(
+                "--topic is too long for --num-topics 12: the last topic, '{long}_11', is 250 characters long, \
+                 above Kafka's limit of 249"
+            )
+        );
+        parse(&[("CHAOS_TOPIC", "my.topic_name-1")]).expect("legal characters");
+        parse(&[("CHAOS_TOPIC", "."), ("CHAOS_NUM_TOPICS", "2")]).expect("'._0' and '._1' are legal");
+    }
+
+    /// Fault parameters nothing in the configuration would read are rejected,
+    /// like `--outage-s` without `--all-brokers-down`.
+    #[test]
+    fn rejects_fault_parameters_nothing_reads() {
+        assert_eq!(
+            parse_err(&[NO_ROLL, RECREATE, ("CHAOS_UNCLEAN", "1")]),
+            "--unclean only applies to broker rolls, which --no-broker-roll disables (--all-brokers-down always \
+             kills with SIGKILL)"
+        );
+        assert_eq!(
+            parse_err(&[NO_ROLL, ("CHAOS_ALL_BROKERS_DOWN", "1"), ("CHAOS_STOP_S", "8")]),
+            "--stop-s only applies to broker rolls, which --no-broker-roll disables (--all-brokers-down uses \
+             --outage-s)"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_DWELL_S", "3")]),
+            "--dwell-s only applies with --topic-recreate"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_REBALANCE_MID_ROLL", "1")]),
+            "--rebalance-mid-roll only applies with --rebalance-add-cycle or --rebalance-remove-cycle: it moves \
+             that add/remove into a broker roll's down-window"
+        );
+        assert_eq!(
+            parse_err(&[
+                NO_ROLL,
+                RECREATE,
+                ("CHAOS_REBALANCE_MID_ROLL", "1"),
+                ("CHAOS_REBALANCE_ADD_CYCLE", "2")
+            ]),
+            "--rebalance-mid-roll fires the rebalance inside a broker roll's down-window, and --no-broker-roll \
+             disables broker rolls"
+        );
+        let cfg = parse(&[
+            ("CHAOS_UNCLEAN", "1"),
+            ("CHAOS_STOP_S", "8"),
+            RECREATE,
+            ("CHAOS_DWELL_S", "3"),
+            ("CHAOS_REBALANCE_MID_ROLL", "1"),
+            ("CHAOS_REBALANCE_ADD_CYCLE", "2"),
+        ])
+        .expect("every parameter applies");
+        assert!(cfg.unclean && cfg.rebalance_mid_roll);
+        assert_eq!((cfg.stop_s, cfg.dwell_s), (8, 3));
+    }
+
+    /// `backend_pool` panics on an empty `MULTILANG_BACKEND_MODE`, so a gRPC
+    /// run rejects it instead of reading it as unset; a Rust-only run never
+    /// consults it.
+    #[test]
+    fn rejects_an_empty_backend_mode_for_grpc_workloads() {
+        assert_eq!(
+            parse_err(&[
+                ("CHAOS_WORKLOADS", "producer:python,consumer:c"),
+                ("MULTILANG_BACKEND_MODE", "")
+            ]),
+            "MULTILANG_BACKEND_MODE must be container or native, got ''"
+        );
+        parse(&[("MULTILANG_BACKEND_MODE", "")]).expect("rust workloads ignore the backend mode");
+    }
+
+    #[test]
+    fn rejects_inconsistent_topic_and_consumer_counts() {
+        assert_eq!(parse_err(&[("CHAOS_NUM_TOPICS", "0")]), "--num-topics must be >= 1");
+
+        assert_eq!(
+            parse_err(&[("CHAOS_CONSUMERS", "1000")]),
+            "at most 999 consumer workloads per backend are supported, got 'consumer-rust-1000': consumers added \
+             mid-run are numbered from 1000, so their client ids would collide"
+        );
+        assert!(
+            parse_err(&[
+                ("CHAOS_CONSUMER_CHURN_MIN", "1000"),
+                ("CHAOS_CONSUMER_CHURN_MAX", "1001")
+            ])
+            .starts_with("at most 999 consumer workloads per backend")
+        );
+        assert_eq!(parse(&[("CHAOS_CONSUMERS", "999")]).unwrap().workloads.len(), 1000);
+
+        assert_eq!(
+            parse_err(&[
+                ("CHAOS_CONSUMER_CHURN_MIN", "1"),
+                ("CHAOS_CONSUMER_CHURN_MAX", "3"),
+                ("CHAOS_REBALANCE_ADD_CYCLE", "2"),
+            ]),
+            "--rebalance-add-cycle 2 cannot be combined with consumer churn: churn already adds and removes \
+             consumers every cycle, and the extra consumer would take the live count past --consumer-churn-max 3; \
+             widen the churn range instead"
+        );
+        parse(&[
+            ("CHAOS_CONSUMER_CHURN_MIN", "1"),
+            ("CHAOS_CONSUMER_CHURN_MAX", "3"),
+            ("CHAOS_REBALANCE_REMOVE_CYCLE", "2"),
+        ])
+        .expect("a remove takes a churn-added consumer");
+    }
+
+    /// Parse errors name the kind of value each variable expects.
+    #[test]
+    fn parse_errors_name_the_expected_value() {
+        assert_eq!(
+            parse_err(&[("CHAOS_CONSUMERS", "x")]),
+            "CHAOS_CONSUMERS must be a consumer count: 'x'"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_CONSUMER_CHURN_MIN", "x"), ("CHAOS_CONSUMER_CHURN_MAX", "2")]),
+            "CHAOS_CONSUMER_CHURN_MIN must be a consumer count: 'x'"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_TOPIC_RECREATE", "x")]),
+            "CHAOS_TOPIC_RECREATE must be a cycle cadence: 'x'"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_REBALANCE_ADD_CYCLE", "x")]),
+            "CHAOS_REBALANCE_ADD_CYCLE must be a cycle number: 'x'"
+        );
     }
 
     #[test]

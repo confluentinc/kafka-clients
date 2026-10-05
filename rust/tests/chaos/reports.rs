@@ -34,7 +34,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Diagnostic signatures counted for `summary.txt`. Each is a label plus the
@@ -81,43 +81,76 @@ fn matched_signatures(lower: &str) -> impl Iterator<Item = usize> + '_ {
 /// A single rotating log file: writes append to `path`; when it exceeds
 /// `budget` bytes it rolls to `path.1` (dropping any previous `.1`) and starts
 /// fresh — the `--log-budget-bytes` analog, one backup kept.
+///
+/// Best-effort: a file that cannot be opened is reported once on stderr and
+/// its lines are dropped. Every write happens under the process-wide sink
+/// lock, and the `expect` this used to have poisoned that lock on the first
+/// failure, after which every later log line in the process panicked.
 struct RotatingFile {
     path: PathBuf,
     /// Buffered: the client logs thousands of lines a second under a fault,
     /// and every line is written while the process-wide sink lock is held, so
     /// one `write(2)` per line stalled every logging task behind the disk.
-    file: BufWriter<File>,
+    /// `None` once the file could not be opened.
+    file: Option<BufWriter<File>>,
     written: u64,
     budget: u64,
 }
 
 impl RotatingFile {
+    /// Open `path` for appending, so a client whose file was closed early
+    /// ([`close_client_log`], the open-file cap) continues it instead of
+    /// truncating it.
     fn create(path: PathBuf, budget: u64) -> Self {
-        let file = BufWriter::new(File::create(&path).expect("create rotating log file"));
-        Self { path, file, written: 0, budget }
+        let (file, written) = match Self::open(&path) {
+            Some((file, len)) => (Some(file), len),
+            None => (None, 0),
+        };
+        Self { path, file, written, budget }
+    }
+
+    fn open(path: &std::path::Path) -> Option<(BufWriter<File>, u64)> {
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => {
+                let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                Some((BufWriter::new(file), len))
+            },
+            Err(err) => {
+                eprintln!(
+                    "chaos: WARN cannot open client log {}: {err}; its lines are dropped",
+                    path.display()
+                );
+                None
+            },
+        }
     }
 
     fn write_line(&mut self, line: &str) {
         let bytes = line.as_bytes();
-        if self.written + bytes.len() as u64 > self.budget {
+        if self.file.is_some() && self.written + bytes.len() as u64 > self.budget {
             // Rotate: shift .1 -> .2 ... (dropping the oldest), current -> .1,
             // then a fresh file. More than one backup, so the lead-up to a
             // fault survives the log storm that follows it.
-            let _ = self.file.flush();
+            self.flush();
+            self.file = None;
             for n in (1..LOG_BACKUPS).rev() {
                 let _ = fs::rename(self.backup(n), self.backup(n + 1));
             }
             let _ = fs::rename(&self.path, self.backup(1));
-            self.file = BufWriter::new(File::create(&self.path).expect("recreate rotated log file"));
+            self.file = Self::open(&self.path).map(|(file, _)| file);
             self.written = 0;
         }
-        if self.file.write_all(bytes).is_ok() {
+        if let Some(file) = self.file.as_mut()
+            && file.write_all(bytes).is_ok()
+        {
             self.written += bytes.len() as u64;
         }
     }
 
     fn flush(&mut self) {
-        let _ = self.file.flush();
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.flush();
+        }
     }
 
     /// The path of rotated backup `n` (`client-x.log.<n>`, 1 = newest).
@@ -128,6 +161,12 @@ impl RotatingFile {
 
 /// Rotated backups kept per client log, besides the live file.
 const LOG_BACKUPS: usize = 4;
+
+/// Most per-client log files kept open at once. A finished workload's file is
+/// closed ([`close_client_log`]); this caps what is left (client ids that
+/// never belonged to a workload thread) so the descriptors cannot grow without
+/// bound. An evicted file is reopened for appending on its next line.
+const MAX_OPEN_CLIENT_LOGS: usize = 64;
 
 /// `HH:MM:SS.mmm` (UTC) of a Unix time in milliseconds, the prefix of every
 /// captured client-log line so it can be lined up with the broker logs and
@@ -170,7 +209,9 @@ impl LogSink {
     /// Route a line to its per-client file (or the fallback), creating the file
     /// on first use.
     fn route(&mut self, line: &str) {
-        let Some(dir) = self.dir.as_deref() else { return };
+        if self.dir.is_none() {
+            return;
+        }
         let budget = self.budget;
         match Self::client_id(line) {
             Some(id) => {
@@ -179,6 +220,12 @@ impl LogSink {
                 if let Some(file) = self.per_client.get_mut(id) {
                     file.write_line(line);
                 } else {
+                    if self.per_client.len() >= MAX_OPEN_CLIENT_LOGS
+                        && let Some(evict) = self.per_client.keys().next().cloned()
+                    {
+                        self.close_client(&evict);
+                    }
+                    let Some(dir) = self.dir.as_deref() else { return };
                     self.per_client
                         .entry(id.to_string())
                         .or_insert_with(|| RotatingFile::create(dir.join(format!("client-{id}.log")), budget))
@@ -186,10 +233,18 @@ impl LogSink {
                 }
             },
             None => {
+                let Some(dir) = self.dir.as_deref() else { return };
                 self.fallback
                     .get_or_insert_with(|| RotatingFile::create(dir.join("client.log"), budget))
                     .write_line(line);
             },
+        }
+    }
+
+    /// Flush and close client `id`'s file, if open.
+    fn close_client(&mut self, id: &str) {
+        if let Some(mut file) = self.per_client.remove(id) {
+            file.flush();
         }
     }
 
@@ -208,7 +263,10 @@ static SINK: OnceLock<Mutex<LogSink>> = OnceLock::new();
 static LOGGER_INSTALLED: Once = Once::new();
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 
-fn sink() -> &'static Mutex<LogSink> {
+/// The sink, locked. A panic while it was held (there should be none: nothing
+/// under the lock panics any more) must not make every later log line panic,
+/// so a poisoned lock is recovered: the sink is plain buffers and counters.
+fn sink() -> MutexGuard<'static, LogSink> {
     SINK.get_or_init(|| {
         Mutex::new(LogSink {
             dir: None,
@@ -219,6 +277,15 @@ fn sink() -> &'static Mutex<LogSink> {
             echo: false,
         })
     })
+    .lock()
+    .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Close client `client_id`'s log file. Called when the workload of that id
+/// finishes: churn mints a new client id per added consumer, and each kept its
+/// file open until the run ended. A late line reopens it for appending.
+pub fn close_client_log(client_id: &str) {
+    sink().close_client(client_id);
 }
 
 /// Default per-file rotation budget: 64 MiB.
@@ -250,7 +317,7 @@ impl log::Log for ChaosLogger {
         );
         let matched: Vec<usize> = matched_signatures(&line.to_lowercase()).collect();
         let echo = {
-            let mut s = sink().lock().expect("log sink poisoned");
+            let mut s = sink();
             for i in matched {
                 s.counts[i] += 1;
             }
@@ -263,18 +330,21 @@ impl log::Log for ChaosLogger {
     }
 
     fn flush(&self) {
-        if let Ok(mut s) = sink().lock() {
-            s.flush_all();
-        }
+        sink().flush_all();
     }
 }
 
 /// Report bundle for one chaos run. Owns the run directory and the client-log
 /// capture; call [`Self::write_verdict`] / [`Self::record_leader_change`] as
 /// the run proceeds, then [`Self::finish`] to flush `summary.txt`.
+///
+/// Best-effort throughout: a report file that cannot be written is reported on
+/// stderr, never a panic, so the reports cannot take down the run (or its
+/// teardown) they describe.
 pub struct RunReports {
     dir: PathBuf,
-    leader_log: Mutex<File>,
+    /// `None` when `leader-changes.txt` could not be created.
+    leader_log: Mutex<Option<File>>,
 }
 
 impl RunReports {
@@ -284,7 +354,9 @@ impl RunReports {
     /// client id go to `client.log`. `echo` also mirrors logs to stderr.
     pub fn new(run_id: &str, echo_client_logs: bool, budget_bytes: u64) -> Self {
         let dir = PathBuf::from("target/chaos-runs").join(run_id);
-        fs::create_dir_all(&dir).expect("create chaos run dir");
+        if let Err(err) = fs::create_dir_all(&dir) {
+            eprintln!("chaos: WARN cannot create the report directory {}: {err}", dir.display());
+        }
 
         // Install the global logger exactly once; arm it for this run.
         LOGGER_INSTALLED.call_once(|| {
@@ -295,7 +367,7 @@ impl RunReports {
         });
 
         {
-            let mut s = sink().lock().expect("log sink poisoned");
+            let mut s = sink();
             s.dir = Some(dir.clone());
             s.per_client.clear();
             s.fallback = None;
@@ -305,7 +377,9 @@ impl RunReports {
         }
         CAPTURING.store(true, Ordering::Relaxed);
 
-        let leader_log = File::create(dir.join("leader-changes.txt")).expect("create leader-changes.txt");
+        let leader_log = File::create(dir.join("leader-changes.txt"))
+            .map_err(|err| eprintln!("chaos: WARN cannot create leader-changes.txt: {err}"))
+            .ok();
         eprintln!("chaos: reports -> {}", dir.display());
         Self { dir, leader_log: Mutex::new(leader_log) }
     }
@@ -313,30 +387,35 @@ impl RunReports {
     /// Append a timestamped leader/replica-change line (the `leader_changes.txt`
     /// analog). Called by the actions with their before→after diffs.
     pub fn record_leader_change(&self, line: &str) {
-        let mut f = self.leader_log.lock().expect("leader log poisoned");
-        let _ = writeln!(f, "{} {line}", now_millis());
+        if let Some(f) = self.leader_log.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+            let _ = writeln!(f, "{} {line}", now_millis());
+        }
     }
 
     /// Persist the final verdict text to `verdict.txt`.
     pub fn write_verdict(&self, verdict: &str) {
-        let mut f = OpenOptions::new()
+        let written = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(self.dir.join("verdict.txt"))
-            .expect("create verdict.txt");
-        let _ = f.write_all(verdict.as_bytes());
+            .and_then(|mut f| f.write_all(verdict.as_bytes()));
+        if let Err(err) = written {
+            eprintln!("chaos: WARN cannot write verdict.txt: {err}");
+        }
     }
 
     /// Flush the signature summary to `summary.txt` and disarm capture. The
-    /// run directory path is returned for the caller to log.
-    pub fn finish(self) -> PathBuf {
+    /// run directory path is returned for the caller to log. By reference, so
+    /// the runner need not be the sole owner of the handle (the scenario may
+    /// still hold a clone after an abort).
+    pub fn finish(&self) -> PathBuf {
         CAPTURING.store(false, Ordering::Relaxed);
 
         // Flush the sink directly rather than through `log::logger()`: if another
         // logger won the global slot, ours is not the one `log::logger()` returns.
         let counts = {
-            let mut s = sink().lock().expect("log sink poisoned");
+            let mut s = sink();
             s.flush_all();
             s.counts.clone()
         };
@@ -344,18 +423,19 @@ impl RunReports {
         for ((label, _), count) in SIGNATURES.iter().zip(counts) {
             summary.push_str(&format!("  {label:<24}: {count}\n"));
         }
-        let mut f = File::create(self.dir.join("summary.txt")).expect("create summary.txt");
-        let _ = f.write_all(summary.as_bytes());
+        if let Err(err) = File::create(self.dir.join("summary.txt")).and_then(|mut f| f.write_all(summary.as_bytes())) {
+            eprintln!("chaos: WARN cannot write summary.txt: {err}");
+        }
         eprint!("{summary}");
 
         // Detach files so the next run's logger does not write here.
         {
-            let mut s = sink().lock().expect("log sink poisoned");
+            let mut s = sink();
             s.dir = None;
             s.per_client.clear();
             s.fallback = None;
         }
-        self.dir
+        self.dir.clone()
     }
 }
 
@@ -402,6 +482,84 @@ mod tests {
             assert_eq!(read(file.backup(n)), format!("{:03}\n", last - n), "backup {n}");
         }
         assert!(!file.backup(LOG_BACKUPS + 1).exists(), "only {LOG_BACKUPS} backups are kept");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("chaos-{name}-{}-{}", std::process::id(), now_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sink_in(dir: &std::path::Path) -> LogSink {
+        LogSink {
+            dir: Some(dir.to_path_buf()),
+            per_client: std::collections::HashMap::new(),
+            fallback: None,
+            budget: DEFAULT_LOG_BUDGET_BYTES,
+            counts: vec![0; SIGNATURES.len()],
+            echo: false,
+        }
+    }
+
+    /// A log file that cannot be created drops its lines instead of panicking
+    /// (which poisoned the process-wide sink lock for every later line).
+    #[test]
+    fn an_unopenable_log_file_drops_lines_instead_of_panicking() {
+        let missing = std::env::temp_dir().join(format!("chaos-missing-{}-{}", std::process::id(), now_millis()));
+        let mut file = RotatingFile::create(missing.join("client-x.log"), 4);
+        file.write_line("lost\n");
+        file.write_line("also lost, past the budget\n");
+        file.flush();
+        assert!(!missing.exists());
+    }
+
+    /// A closed client file is reopened for appending, not truncated, and the
+    /// open files are capped.
+    #[test]
+    fn closed_and_evicted_client_files_are_continued() {
+        let dir = temp_dir("client-files");
+        let mut sink = sink_in(&dir);
+        sink.route("[Producer clientId=producer-rust-1] first\n");
+        sink.close_client("producer-rust-1");
+        assert!(sink.per_client.is_empty(), "closed with its workload");
+        sink.route("[Producer clientId=producer-rust-1] late\n");
+        for i in 0..MAX_OPEN_CLIENT_LOGS + 5 {
+            sink.route(&format!("[Consumer clientId=consumer-rust-{}] line\n", 1000 + i));
+        }
+        assert!(sink.per_client.len() <= MAX_OPEN_CLIENT_LOGS, "{} open", sink.per_client.len());
+        sink.route("[Producer clientId=producer-rust-1] after eviction\n");
+        sink.flush_all();
+        assert_eq!(
+            fs::read_to_string(dir.join("client-producer-rust-1.log")).unwrap(),
+            "[Producer clientId=producer-rust-1] first\n[Producer clientId=producer-rust-1] late\n\
+             [Producer clientId=producer-rust-1] after eviction\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A panic while the global sink was locked does not make logging or
+    /// `finish` panic afterwards.
+    #[test]
+    fn a_poisoned_sink_is_still_usable() {
+        let _ = std::thread::spawn(|| {
+            let _guard = sink();
+            panic!("poison the log sink");
+        })
+        .join();
+        close_client_log("nobody");
+        log::Log::flush(&ChaosLogger);
+        log::Log::log(
+            &ChaosLogger,
+            &log::Record::builder().args(format_args!("still logging")).build(),
+        );
+        let dir = temp_dir("poisoned-finish");
+        let reports = RunReports { dir: dir.clone(), leader_log: Mutex::new(None) };
+        reports.record_leader_change("no file: dropped");
+        reports.write_verdict("PASS");
+        assert_eq!(reports.finish(), dir);
+        assert_eq!(fs::read_to_string(dir.join("verdict.txt")).unwrap(), "PASS");
+        assert!(dir.join("summary.txt").exists());
         let _ = fs::remove_dir_all(dir);
     }
 }
