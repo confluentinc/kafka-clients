@@ -1203,13 +1203,14 @@ def test_begin_transaction_does_not_wait_for_earlier_sends(transactional: bool) 
 
 def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
     # Java: throwIfInvalidGroupMetadata, throwIfNoTransactionManager,
-    # throwIfProducerClosed, then nothing to send for empty offsets.
+    # throwIfProducerClosed, then nothing to send for empty offsets. The core
+    # makes the transaction-manager check (it takes a KafkaConsumer's metadata).
     with KafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False}) as p:
         with pytest.raises(IllegalArgumentError) as err:
             p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
         assert str(err.value) == "Consumer group metadata could not be null"
         with pytest.raises(IllegalStateError) as err2:
-            p.send_offsets_to_transaction(offsets={}, group_metadata=_group_metadata())
+            p.send_offsets_to_transaction(offsets={}, group_metadata=_consumer_group_metadata())
         assert str(err2.value) == NO_TXN
         with pytest.raises(IllegalStateError) as err2:
             p.begin_transaction()
@@ -1266,21 +1267,11 @@ def _transactional_arguments(operation: str) -> dict[str, Any]:
     return {}
 
 
-def _unknown_member_group_metadata() -> ConsumerGroupMetadata:
-    return ConsumerGroupMetadata._of(group_id="group", generation_id=2, member_id="",
-                                     group_instance_id=None)
-
-
-UNKNOWN_MEMBER = ("Passed in group metadata GroupMetadata(groupId = group, generationId = 2, "
-                  "memberId = , groupInstanceId = ) has generationId > 0 but the member.id is "
-                  "unknown")
-
-
 @pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
 def test_the_transaction_manager_follows_java_idempotence_post_processing(
         extra: dict[str, Any], manager: bool) -> None:
-    # The binding reads it from the configs (for a closed producer, below); the
-    # core, asked directly, agrees, and the open producer reports the core's error.
+    # The core decides whether the producer has one; asked directly it
+    # reports NO_TXN iff it has none, and the open producer reports the same.
     p = KafkaProducer(configs={**UNREACHABLE, **extra})
     try:
         with pytest.raises(IllegalStateError) as core:
@@ -1293,64 +1284,35 @@ def test_the_transaction_manager_follows_java_idempotence_post_processing(
         p.close(timeout=0)
 
 
+# A producer with a transaction manager and one without.
+CLOSED_CASES: list[dict[str, Any]] = [{}, {"enable.idempotence": False}]
+
+
 @pytest.mark.parametrize("operation", TRANSACTIONAL_OPERATIONS)
-@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
-def test_a_closed_producer_checks_the_transaction_manager_first(
-        operation: str, extra: dict[str, Any], manager: bool) -> None:
-    # Critic 75 N3: KafkaProducer's transactional methods call
-    # throwIfNoTransactionManager() before throwIfProducerClosed()
-    # (KafkaProducer.java:661-662, 687-688, 746-747, 791-792, 825-826).
+@pytest.mark.parametrize("extra", CLOSED_CASES)
+def test_a_closed_producer_reports_the_closed_state(operation: str, extra: dict[str, Any]) -> None:
+    # Java's transactional methods call throwIfNoTransactionManager() before
+    # throwIfProducerClosed() (KafkaProducer.java:661-662, 687-688, 746-747,
+    # 791-792, 825-826); here the core makes that check, which a closed producer
+    # can no longer reach (CLAUDE.md, Implementation over the FFI, exception 3).
     p = KafkaProducer(configs={**UNREACHABLE, **extra})
     p.close(timeout=0)
     with pytest.raises(IllegalStateError) as err:
         getattr(p, operation)(**_transactional_arguments(operation))
-    assert str(err.value) == (CLOSED if manager else NO_TXN)
+    assert str(err.value) == CLOSED
 
 
 @pytest.mark.parametrize("operation", TRANSACTIONAL_OPERATIONS)
-@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
-async def test_a_closed_async_producer_checks_the_transaction_manager_first(
-        operation: str, extra: dict[str, Any], manager: bool) -> None:
+@pytest.mark.parametrize("extra", CLOSED_CASES)
+async def test_a_closed_async_producer_reports_the_closed_state(
+        operation: str, extra: dict[str, Any]) -> None:
     p = AsyncKafkaProducer(configs={**UNREACHABLE, **extra})
     await p.close(timeout=0)
     with pytest.raises(IllegalStateError) as err:
         result = getattr(p, operation)(**_transactional_arguments(operation))
         if inspect.isawaitable(result):
             await result
-    assert str(err.value) == (CLOSED if manager else NO_TXN)
-
-
-@pytest.mark.parametrize("closed", [False, True])
-@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
-def test_send_offsets_to_transaction_checks_the_member_id_first(
-        closed: bool, extra: dict[str, Any], manager: bool) -> None:
-    # Java's throwIfInvalidGroupMetadata comes before the transaction manager
-    # and closed checks (KafkaProducer.java:745-747), on a closed producer too.
-    p = KafkaProducer(configs={**UNREACHABLE, **extra})
-    try:
-        if closed:
-            p.close(timeout=0)
-        with pytest.raises(IllegalArgumentError) as err:
-            p.send_offsets_to_transaction(offsets={},
-                                          group_metadata=_unknown_member_group_metadata())
-        assert str(err.value) == UNKNOWN_MEMBER
-    finally:
-        p.close(timeout=0)
-
-
-@pytest.mark.parametrize("closed", [False, True])
-async def test_async_send_offsets_to_transaction_checks_the_member_id_first(
-        closed: bool) -> None:
-    p = AsyncKafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False})
-    try:
-        if closed:
-            await p.close(timeout=0)
-        with pytest.raises(IllegalArgumentError) as err:
-            await p.send_offsets_to_transaction(
-                offsets={}, group_metadata=_unknown_member_group_metadata())
-        assert str(err.value) == UNKNOWN_MEMBER
-    finally:
-        await p.close(timeout=0)
+    assert str(err.value) == CLOSED
 
 
 # ===========================================================================

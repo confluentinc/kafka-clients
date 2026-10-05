@@ -67,7 +67,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._config import duration_to_ms, log_unused, prepare
+from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error, to_ffi_id
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
 from confluent_kafka.common.kafka_error import KafkaError
@@ -208,12 +208,12 @@ def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[To
             for tp in partitions]
 
 
-def close_args(timeout: Duration | None, option: CloseOptions | None) -> tuple[int, int]:
+def close_args(option: CloseOptions | None) -> tuple[int, int]:
     """``(timeout_ms, group-membership-operation code)`` for
-    ``kafka_consumer_Consumer_close_with_option``: Java's ``close(Duration)`` is
-    ``close(CloseOptions.timeout(timeout))``, and ``close(CloseOptions)`` rejects
-    a negative timeout (``AsyncKafkaConsumer.close(CloseOptions)``). ``-1`` is
-    the FFI's "no timeout set", the default close timeout."""
+    ``kafka_consumer_Consumer_close_with_option``: ``close(CloseOptions)``
+    rejects a negative timeout (``AsyncKafkaConsumer.close(CloseOptions)``).
+    ``-1`` is the FFI's "no timeout set", the default close timeout."""
+    timeout: Duration | None = None
     if option is not None:
         timeout = option._timeout_getter()
         operation = option._group_membership_operation_getter()
@@ -357,8 +357,8 @@ class _ConsumerState:
         """Java's ``KafkaConsumer(configs, keyDeserializer, valueDeserializer)``:
         parse ``configs``, take the deserializers (an argument wins over the
         config key; neither means ``bytes_deserializer()``), build the core
-        consumer, then log the unused configs. A given deserializer argument
-        replaces its config key, which is then not parsed
+        consumer (which reports the keys it does not know). A given
+        deserializer argument replaces its config key, which is then not parsed
         (``ConsumerConfig.appendDeserializerToConfig``). A construction failure
         raises its typed error after closing the deserializers built so far."""
         given = [key for key, argument in ((_KEY_DESERIALIZER, key_deserializer),
@@ -391,7 +391,6 @@ class _ConsumerState:
         # onto the caller's thread (kafka_consumer_Consumer_set_pending_callback_notify).
         self._pending_notify_ref = self._on_pending_notify
         _lib.Consumer_set_pending_callback_notify(self._h, self._pending_notify_ref)
-        log_unused(originals, client="consumer")
 
     # ---- lifecycle ------------------------------------------------------
     def _use(self) -> _Use:

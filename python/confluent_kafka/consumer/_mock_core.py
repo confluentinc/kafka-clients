@@ -403,10 +403,10 @@ class MockConsumerCore(Generic[K, V]):
         return ConsumerGroupMetadata._of(group_id="dummy.group.id", generation_id=1,
                                          member_id="1", group_instance_id=None)
 
-    def _c_close(self, timeout: Duration | None, option: CloseOptions | None) -> None:
-        """Java's ``close()`` / ``close(Duration)`` / ``close(CloseOptions)``, all
-        of which only mark the mock closed; the callbacks it holds are released
-        (Threads and callbacks)."""
+    def _c_close(self, option: CloseOptions | None) -> None:
+        """Java's ``close()`` / ``close(CloseOptions)``, both of which only mark
+        the mock closed; the callbacks it holds are released (Threads and
+        callbacks)."""
         with self._lock:
             self._mock_closed = True
             self._subscriptions.release_rebalance_listener()
@@ -478,8 +478,8 @@ class MockConsumerCore(Generic[K, V]):
                              ) -> dict[TopicPartition, int]:
         return self._c_end_offsets(partitions)
 
-    async def _a_close(self, timeout: Duration | None, option: CloseOptions | None) -> None:
-        self._c_close(timeout, option)
+    async def _a_close(self, option: CloseOptions | None) -> None:
+        self._c_close(option)
 
     # ---- the Java mock's own methods ------------------------------------------
     def add_record(self, *, record: ConsumerRecord[K, V]) -> None:

@@ -104,12 +104,13 @@ other 81, each named, are not, with the reason:
 - configuration: ``testInvalidSocketSendBufferSize`` /
   ``testInvalidSocketReceiveBufferSize`` (the core does not validate the
   ``send.buffer.bytes`` / ``receive.buffer.bytes`` ranges, Rust-core gap 11);
-  ``testUnusedConfigs`` (``ssl.protocol`` is a key ``ConsumerConfig`` defines,
-  and the binding can only log keys the ``ConfigDef`` does not define);
+  ``testUnusedConfigs`` (only the core reports the keys it does not know, in its
+  own log);
   ``testInterceptorConstructorClose``,
   ``testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances``
-  and ``configurableObjectsShouldSeeGeneratedClientId`` (``interceptor.classes``
-  raises ``ConfigError``; the last also needs the generated ``client.id`` in a
+  and ``configurableObjectsShouldSeeGeneratedClientId`` (the client runs no
+  interceptors: ``interceptor.classes`` is a key the core does not know; the
+  last also needs the generated ``client.id`` in a
   config-route deserializer's ``configure``, which the binding does not have when
   it builds the deserializers, before the core consumer, in Java's order).
 
@@ -535,19 +536,20 @@ def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     with pytest.raises(IllegalArgumentError) as e:
         consumer.close(option=CloseOptions.timeout(-1))
     assert str(e.value) == "The timeout cannot be negative."
-    with pytest.warns(DeprecationWarning), pytest.raises(IllegalArgumentError):
-        consumer.close(timeout=timedelta(seconds=-1))
+    with pytest.raises(IllegalArgumentError):
+        consumer.close(option=CloseOptions.timeout(timedelta(seconds=-1)))
     assert consumer.subscription() == set()
     consumer.close(option=CloseOptions.timeout(0))
 
 
-def test_close_with_a_timeout_is_deprecated() -> None:
+def test_close_with_a_timeout_is_not_generated() -> None:
+    # Java's @Deprecated close(Duration) (CLAUDE.md, Python Binding Conventions,
+    # Class family); the consumer stays open.
     consumer = new_consumer()
-    with pytest.warns(DeprecationWarning) as caught:
-        consumer.close(timeout=0)
-    assert str(caught[0].message) == (
-        "close(timeout) is deprecated. This method has been deprecated since Kafka 4.1 and "
-        "should use close(option=...) instead.")
+    with pytest.raises(TypeError):
+        consumer.close(timeout=0)  # type: ignore[call-arg]
+    assert consumer.subscription() == set()
+    consumer.close(option=CloseOptions.timeout(0))
 
 
 def test_close_twice_is_harmless_and_calls_after_it_raise() -> None:

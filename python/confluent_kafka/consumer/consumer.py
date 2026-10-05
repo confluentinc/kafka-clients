@@ -24,9 +24,9 @@ interface's points to.
 
 Each overload set is one method (Signatures): ``subscribe(topics[, callback])``
 / ``subscribe(pattern[, callback])`` (the client-side ``java.util.regex.Pattern``
-overloads are dropped, Types), ``seek(partition, offset | offset_and_metadata)``,
-``commit_nowait()`` / ``(callback)`` / ``(offsets, callback)`` and ``close()`` /
-``(timeout)`` (``@Deprecated``) / ``(option)``, each checked by ``java_forms``.
+overloads are dropped, Types), ``seek(partition, offset | offset_and_metadata)``
+and ``commit_nowait()`` / ``(callback)`` / ``(offsets, callback)``, each checked
+by ``java_forms``, and ``close()`` / ``(option)``.
 ``commitSync`` / ``commitAsync`` are ``commit()`` / ``commit_nowait()``.
 
 Not generated, their FFI entry point being missing (``ffi-overload-gaps.md``):
@@ -34,14 +34,9 @@ the ``Duration`` overloads of ``commitSync``, ``committed``, ``position``,
 ``beginningOffsets``, ``endOffsets``, ``offsetsForTimes``, ``partitionsFor`` and
 ``listTopics``; ``clientInstanceId(Duration)``;
 ``registerMetricForSubscription`` / ``unregisterMetricFromSubscription``.
+Not generated, Java deprecating it (Class family): ``close(Duration)``.
 Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 ``AsyncKafkaConsumer`` body only logs that it is unsupported *(deviation)*.
-
-Java's ``close(Duration)`` is ``close(CloseOptions.timeout(timeout))``
-(``AsyncKafkaConsumer.close(Duration)``), so ``close(timeout=…)`` calls the
-``kafka_consumer_Consumer_close_with_option`` entry point: the core does not
-translate the deprecated overload, so the header has no
-``kafka_consumer_Consumer_close_with_timeout``.
 """
 
 from __future__ import annotations
@@ -82,14 +77,10 @@ V = TypeVar("V")
 
 _LOG = logging.getLogger("confluent_kafka.consumer")
 
-CLOSE_DEPRECATED = ("This method has been deprecated since Kafka 4.1 and should use "
-                    "close(option=...) instead.")
-
 SUBSCRIBE_FORMS = (Form("topics"), Form("topics", "callback"),
                    Form("pattern", "callback"), Form("pattern"))
 COMMIT_NOWAIT_FORMS = (Form(), Form("callback"), Form("offsets", "callback"))
 SEEK_FORMS = (Form("partition", "offset"), Form("partition", "offset_and_metadata"))
-CLOSE_FORMS = (Form(), Form("timeout", deprecated=CLOSE_DEPRECATED), Form("option"))
 
 
 class Consumer(Generic[K, V], _ConsumerState):
@@ -384,30 +375,20 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``InvalidGroupIdError`` if the consumer has no ``group.id``."""
         return self._c_group_metadata()
 
-    @overload
-    def close(self, *, timeout: Duration | None = None) -> None: ...
-    @overload
-    def close(self, *, option: CloseOptions) -> None: ...
-
-    @java_forms(*CLOSE_FORMS)
-    def close(self, *, timeout: Duration | None = None,
-              option: CloseOptions | None = None) -> None:
-        """Close the consumer, waiting up to the ``timeout`` (by default the
-        default close timeout, 30 seconds) for any needed cleanup; the
-        ``option`` also sets the group membership operation. If auto-commit is
-        enabled, this commits the current offsets if possible within the
+    def close(self, *, option: CloseOptions | None = None) -> None:
+        """Close the consumer, waiting up to the ``option``'s timeout (by
+        default the default close timeout, 30 seconds) for any needed cleanup;
+        the ``option`` also sets the group membership operation. If auto-commit
+        is enabled, this commits the current offsets if possible within the
         timeout. The listener's ``on_partitions_revoked`` and the pending commit
         callbacks run on this thread. ``close()`` twice is harmless; any other
         call after it raises ``IllegalStateError``. Note that ``wakeup()`` cannot
         be used to interrupt close.
 
-        Deprecated: ``close(timeout=…)``. This method has been deprecated since
-        Kafka 4.1 and should use ``close(option=…)`` instead.
-
         Raises ``IllegalArgumentError`` if the timeout is negative, and
         ``KafkaError`` for any other error during close.
         """
-        self._c_close(timeout, option)
+        self._c_close(option)
 
     def __enter__(self) -> Consumer[K, V]:
         return self
@@ -539,8 +520,8 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_end_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
         return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async, partitions)
 
-    def _c_close(self, timeout: Duration | None, option: CloseOptions | None) -> None:
-        timeout_ms, operation = close_args(timeout, option)
+    def _c_close(self, option: CloseOptions | None) -> None:
+        timeout_ms, operation = close_args(option)
         if not self._begin_close():
             return
         try:

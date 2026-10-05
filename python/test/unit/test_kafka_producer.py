@@ -18,7 +18,7 @@ broker, in Java order, asserting Java's messages.
 Where Java drives a ``MockClient`` only to make an operation fail, the test uses
 an unreachable bootstrap address and a short ``max.block.ms`` instead, and says
 so; ``test/integration/test_kafka_producer_broker.py`` covers what needs a
-broker. Of Java's 82 tests, 22 are translated here; the other 60, each named,
+broker. Of Java's 82 tests, 21 are translated here; the other 61, each named,
 are not, with the reason:
 
 - a ``MockClient``, a mocked ``ProducerMetadata`` or ``MockTime`` scripts the
@@ -69,8 +69,8 @@ are not, with the reason:
   ``testShouldOnlyCallMetricReporterMetricChangeOnceWithExistingProducerMetric``,
   ``testShouldNotCallMetricReporterMetricRemovalWithExistingProducerMetric``;
 - interceptors and custom partitioners, which the client does not run
-  (``interceptor.classes`` / ``partitioner.class`` raise ``ConfigError``):
-  ``testInterceptorConstructClose``,
+  (``interceptor.classes`` / ``partitioner.class`` are keys the core does not
+  know): ``testInterceptorConstructClose``,
   ``testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances``,
   ``testPartitionerClose``, ``testInterceptorPartitionSetOnTooLargeRecord``,
   ``configurableObjectsShouldSeeGeneratedClientId``,
@@ -79,8 +79,13 @@ are not, with the reason:
   partitioner and interceptor plugin);
 - ``testHeadersFailure``: Python headers are immutable, so there is no
   read-only state to check;
-- ``testUnusedConfigs``: the binding logs only keys the ``ConfigDef`` does not
-  define, as it cannot see which defined keys the core reads.
+- ``testUnusedConfigs``: only the core reports the keys it does not know, in its
+  own log (CLAUDE.md, Python Binding Conventions, Configuration);
+- ``testInvalidGenerationIdAndMemberIdCombinedInSendOffsets``: the generation /
+  member id check is the core's (``KafkaProducer.throwIfInvalidGroupMetadata``,
+  tested in ``rust/src/producer/kafka_producer.rs``), and the binding reaches
+  the core only with a ``KafkaConsumer``'s metadata, whose generation is above 0
+  only once it has joined a group.
 """
 
 from __future__ import annotations
@@ -316,17 +321,6 @@ def test_init_transaction_timeout() -> None:
 
 def test_null_group_metadata_in_send_offsets() -> None:
     _verify_invalid_group_metadata(None, "Consumer group metadata could not be null")
-
-
-def test_invalid_generation_id_and_member_id_combined_in_send_offsets() -> None:
-    # Java builds the metadata with its deprecated constructor, which is not
-    # offered; _of builds the same value.
-    group_metadata = ConsumerGroupMetadata._of(group_id="group", generation_id=2, member_id="",
-                                               group_instance_id=None)
-    _verify_invalid_group_metadata(
-        group_metadata,
-        "Passed in group metadata GroupMetadata(groupId = group, generationId = 2, memberId = , "
-        "groupInstanceId = ) has generationId > 0 but the member.id is unknown")
 
 
 def _verify_invalid_group_metadata(group_metadata: ConsumerGroupMetadata | None,

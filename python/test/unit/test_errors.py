@@ -509,43 +509,27 @@ def test_record_deserialization_constructors() -> None:
     assert bytes(e.value_buffer() or b"") == b"v"
     assert [(k, bytes(v or b"")) for k, v in e.headers()] == [("h", b"1")]
     assert e.__cause__ is cause
-    # The deprecated (partition, offset, message, cause) constructor warns and
-    # takes Java's defaults.
-    with pytest.warns(DeprecationWarning, match="is deprecated. Since 3.9."):
-        d = RecordDeserializationError(partition=_TP, offset=1, message="m", cause=cause)
-    assert d.origin() is None
-    assert d.timestamp() == -1
-    assert d.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
-    assert d.key_buffer() is None and d.value_buffer() is None
-    # Java's deprecated constructor assigns headers = null.
-    assert d.headers() is None
     # Java's null buffers and origin are values of the full constructor.
     n = RecordDeserializationError(
-        origin=None, partition=_TP, offset=2, timestamp=-1,
-        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
+        origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
+        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,  # type: ignore[arg-type]
         headers=(), message="m")
     assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
 
 
-def test_record_deserialization_accepts_exactly_java_s_constructors() -> None:
-    # The deprecated constructor assigns the fields itself and passes nothing
-    # to the full one, so none of the full one's parameters may be left out
-    # (CLAUDE.md, Python Binding Conventions, Signatures).
-    forms = ("RecordDeserializationError() takes one of (partition, offset, message, cause), "
-             "(origin, partition, offset, timestamp, timestamp_type, key_buffer, value_buffer, "
-             "headers, message, cause); got ")
+def test_record_deserialization_has_only_the_full_constructor() -> None:
+    # The @Deprecated (partition, offset, message, cause) constructor is not
+    # generated (CLAUDE.md, Python Binding Conventions, Class family), so the
+    # full constructor's parameters are required: leaving one out is Python's
+    # TypeError, the deprecated set included.
     origin = RecordDeserializationError.DeserializationExceptionOrigin.KEY
-    for kwargs, got in [
-        ({"origin": origin, "partition": _TP, "offset": 1, "message": "m"},
-         "(origin, partition, offset, message, cause)"),
-        ({"partition": _TP, "offset": 1, "message": "m", "key_buffer": b"x"},
-         "(partition, offset, key_buffer, message, cause)"),
-        ({"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m"},
-         "(origin, partition, offset, timestamp, message, cause)"),
+    for kwargs in [
+        {"partition": _TP, "offset": 1, "message": "m", "cause": None},
+        {"origin": origin, "partition": _TP, "offset": 1, "message": "m"},
+        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m"},
     ]:
-        with pytest.raises(IllegalArgumentError) as exc:
-            RecordDeserializationError(**kwargs)  # type: ignore[call-overload]
-        assert str(exc.value) == forms + got
+        with pytest.raises(TypeError):
+            RecordDeserializationError(**kwargs)  # type: ignore[arg-type]
 
 
 # Every generated error class with java_forms: each given set Java has no
@@ -605,7 +589,7 @@ def test_every_java_forms_error_class_has_a_rejection_case() -> None:
     # has its rejections tested above.
     decorated = {cls for cls in error_classes()
                  if getattr(cls.__init__, "__wrapped__", None) is not None}
-    covered = {cls for cls, _, _ in _REJECTED} | {RecordDeserializationError}
+    covered = {cls for cls, _, _ in _REJECTED}
     assert decorated == covered
 
 

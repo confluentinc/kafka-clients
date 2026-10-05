@@ -108,7 +108,6 @@ class Producer(Generic[K, V], _ProducerState):
         configured ``transactional.id`` is not authorized, and ``KafkaError`` if
         the producer has encountered a previous fatal error.
         """
-        self._check_transaction_manager()
         self._check_not_closed()
         self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
@@ -124,7 +123,6 @@ class Producer(Generic[K, V], _ProducerState):
         ``transactional.id`` is active, and ``KafkaError`` if the producer has
         encountered a previous fatal error.
         """
-        self._check_transaction_manager()
         self._check_not_closed()
         # No drain of the batching engine first, as Java's beginTransaction
         # does not wait, and producer-transactions.md §13 holds without one: a
@@ -165,7 +163,6 @@ class Producer(Generic[K, V], _ProducerState):
         abortable error.
         """
         check_group_metadata(group_metadata)
-        self._check_transaction_manager()
         self._check_not_closed()
         native = group_metadata_handle(group_metadata)
         self._drain_sync()
@@ -193,7 +190,6 @@ class Producer(Generic[K, V], _ProducerState):
         ``KafkaError`` if the producer has encountered a previous fatal or
         abortable error.
         """
-        self._check_transaction_manager()
         self._check_not_closed()
         sent = list(self._futures)
         # Sends from now on wait for their handover again (see _ProducerState).
@@ -218,7 +214,6 @@ class Producer(Generic[K, V], _ProducerState):
         no transaction has been started, ``ProducerFencedError``, and
         ``KafkaError`` if the producer has encountered a previous fatal error.
         """
-        self._check_transaction_manager()
         self._check_not_closed()
         # Sends from now on wait for their handover again (see _ProducerState).
         self._in_transaction = False

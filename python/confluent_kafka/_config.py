@@ -23,12 +23,8 @@ Conventions, Configuration):
   type as ``ConfigDef.parseType`` does (``"true"`` equals ``True``,
   ``"1000"`` equals ``1000``), and a bad value raises ``ConfigError`` with
   Java's message;
-- ``interceptor.classes`` naming an interceptor, and ``partitioner.class``
-  naming a class other than Java's built-in ``RoundRobinPartitioner``, raise
-  ``ConfigError``: the core runs no interceptors and no custom partitioner;
-- every other key is accepted, and the keys neither the ``ConfigDef`` defines
-  nor a serde's ``configure`` reads are logged once as unused
-  (``AbstractConfig.logUnused()``).
+- every other key is accepted and reaches the core, which reports the keys it
+  does not know (``interceptor.classes`` and ``partitioner.class`` among them).
 
 The keys and types are generated from Java's ``ProducerConfig`` /
 ``ConsumerConfig`` into ``_config_types``.
@@ -36,7 +32,6 @@ The keys and types are generated from Java's ``ProducerConfig`` /
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Collection, Mapping
 from datetime import timedelta
 from typing import Any, Literal
@@ -46,10 +41,7 @@ from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, 
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
-__all__ = ["RecordingConfigs", "coerce", "convert_to_string", "duration_to_ms", "log_unused",
-           "prepare"]
-
-_LOG = logging.getLogger("confluent_kafka.common.config")
+__all__ = ["RecordingConfigs", "coerce", "convert_to_string", "duration_to_ms", "prepare"]
 
 Client = Literal["producer", "consumer"]
 
@@ -61,9 +53,6 @@ _TYPES: dict[str, dict[str, str]] = {
 # The serde keys: resolved by the binding (``_supply``), never passed to the core.
 _SERDE_KEYS = frozenset({"key.serializer", "value.serializer",
                          "key.deserializer", "value.deserializer"})
-_INTERCEPTOR_CLASSES = "interceptor.classes"
-_PARTITIONER_CLASS = "partitioner.class"
-_ROUND_ROBIN_PARTITIONER = "org.apache.kafka.clients.producer.RoundRobinPartitioner"
 _INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
 _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
                "LONG": "a 64-bit integer (long)"}
@@ -71,8 +60,7 @@ _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
 
 class RecordingConfigs(dict[str, Any]):
     """The user's ``configs``, recording the keys a serde's ``configure``
-    reads, as Java's ``AbstractConfig.RecordingMap`` does, so they are not
-    logged as unused."""
+    reads, as Java's ``AbstractConfig.RecordingMap`` does."""
 
     def __init__(self, configs: Mapping[str, Any]) -> None:
         super().__init__(configs)
@@ -207,28 +195,11 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
             continue
         type_name = types.get(key)
         parsed = coerce(key, value, type_name) if type_name is not None else value
-        if key == _INTERCEPTOR_CLASSES and parsed:
-            raise ConfigError(name=key, value=value, message="The client runs no interceptors.")
-        if key == _PARTITIONER_CLASS and parsed is not None and parsed != _ROUND_ROBIN_PARTITIONER:
-            raise ConfigError(
-                name=key, value=value,
-                message=f"The client runs no custom partitioner; {_ROUND_ROBIN_PARTITIONER} "
-                "is the only partitioner class it has.")
         text = convert_to_string(parsed, type_name)
         if key in _SERDE_KEYS or text is None:
             continue
         native[key] = text
     return RecordingConfigs(configs), native
-
-
-def log_unused(originals: RecordingConfigs, *, client: Client) -> None:
-    """``AbstractConfig.logUnused()``: log once, at INFO, the supplied keys
-    that the client's ``ConfigDef`` does not define and no serde read."""
-    types = _TYPES[client]
-    unused = sorted(k for k in originals if k not in types and k not in originals.used)
-    if unused:
-        _LOG.info("These configurations '%s' were supplied but are not used yet.",
-                  java_str(unused))
 
 
 def duration_to_ms(timeout: float | timedelta | None, *, default_ms: int) -> int:

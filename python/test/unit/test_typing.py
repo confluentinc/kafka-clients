@@ -207,7 +207,6 @@ def _consumer_family_types(c: object = None) -> None:
         ConsumerGroupMetadata, ConsumerRecord, ConsumerRecords, KafkaConsumer, MockConsumer,
         OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
     )
-    from confluent_kafka.consumer.offset_reset_strategy import OffsetResetStrategy
 
     configs: dict[str, Any] = {"bootstrap.servers": "localhost:9092"}
     tp = TopicPartition(topic="t", partition=0)
@@ -253,7 +252,6 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
-    kc.close(timeout=1.0)
     kc.close(option=CloseOptions.timeout(1.0))
     assert_type(CloseOptions.timeout(1.0).timeout(), "float | None")
     base: Consumer[bytes, str] = kc
@@ -262,14 +260,12 @@ def _consumer_family_types(c: object = None) -> None:
     # Nothing binds MockConsumer's type parameters: the caller writes them, as
     # Java does (`new MockConsumer<String, String>("earliest")`).
     mc: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
-    _me: MockConsumer[str, str] = MockConsumer(offset_reset_strategy=OffsetResetStrategy.EARLIEST)
     mc.add_record(record=ConsumerRecord(topic="t", partition=0, offset=0, key="k", value="v"))
     assert_type(mc.poll(timeout=0), "ConsumerRecords[str, str]")
     assert_type(mc.last_poll_timeout(), "float | None")
     assert_type(mc.closed(), bool)
     mc.rebalance(new_assignment=[tp])
     mc.schedule_poll_task(task=lambda: None)
-    del _me
 
     async def _async() -> None:
         ac = AsyncKafkaConsumer(configs=configs, key_deserializer=string_deserializer())

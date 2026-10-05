@@ -14,20 +14,15 @@
 
 """``ConsumerRecords``: Java's ``org.apache.kafka.clients.consumer.ConsumerRecords``.
 
-Java's two constructors are one keyword-only constructor. The records-only form
-is ``@Deprecated`` (since 4.0) and warns; an instance built that way answers
-``next_offsets()`` as Java 4.3.1 does: a rate-limited error log and ``{}``
-(CLAUDE.md, Python Binding Conventions, Behaviour with no other home).
+Java's records-only constructor is ``@Deprecated`` (since 4.0), so it is not
+generated (CLAUDE.md, Python Binding Conventions, Class family): the
+constructor takes the records and their next offsets.
 ``records(partition)`` / ``records(topic)`` are one method matched by
 ``java_forms``.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
-import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Generic, TypeVar, overload
 
@@ -42,15 +37,6 @@ __all__ = ["ConsumerRecords"]
 K = TypeVar("K")
 V = TypeVar("V")
 
-log = logging.getLogger(__name__)
-
-# Visible for testing (Java: TAINT_LOG_INTERVAL_NS, TAINTED_NEXT_OFFSETS_LAST_LOG_NS).
-_TAINT_LOG_INTERVAL_S = 5 * 60.0
-_tainted_next_offsets_last_log_s = time.monotonic() - _TAINT_LOG_INTERVAL_S
-_taint_log_lock = threading.Lock()
-
-_DEPRECATED = "Since 4.0. Use ``ConsumerRecords(records, next_offsets)`` instead."
-
 
 class ConsumerRecords(Generic[K, V]):
     """A container that holds the list ``ConsumerRecord`` per partition for a
@@ -62,28 +48,16 @@ class ConsumerRecords(Generic[K, V]):
 
     EMPTY: ClassVar[ConsumerRecords[Any, Any]]
 
-    __slots__ = ("_records", "_next_offsets", "_tainted")
+    __slots__ = ("_records", "_next_offsets")
 
     def __init__(self, *,
                  records: Mapping[TopicPartition, Sequence[ConsumerRecord[K, V]]],
-                 next_offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None) -> None:
+                 next_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None:
         """The records by partition, and the next offsets and metadata of the
-        partitions whose position the poll advanced. Deprecated without
-        ``next_offsets``: since 4.0, use ``ConsumerRecords(records,
-        next_offsets)`` instead."""
-        if next_offsets is None:
-            warnings.warn(f"ConsumerRecords(records) is deprecated. {_DEPRECATED}",
-                          DeprecationWarning, stacklevel=2)
-        self._init(records, next_offsets)
-
-    def _init(self, records: Mapping[TopicPartition, Sequence[ConsumerRecord[K, V]]],
-              next_offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
+        partitions whose position the poll advanced."""
         self._records: dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]] = {
             tp: tuple(recs) for tp, recs in records.items()}
-        # Flag to detect if the legacy ConsumerRecords(Map) constructor is used.
-        self._tainted = next_offsets is None
-        self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = (
-            {} if next_offsets is None else dict(next_offsets))
+        self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = dict(next_offsets)
 
     @overload
     def records(self, *, partition: TopicPartition) -> list[ConsumerRecord[K, V]]: ...
@@ -116,22 +90,6 @@ class ConsumerRecords(Generic[K, V]):
         compacted tail, and present for a partition whose poll only advanced
         past them. The FFI does not expose the core's next offsets yet
         (``ffi-overload-gaps.md``)."""
-        global _tainted_next_offsets_last_log_s
-        if self._tainted:
-            now = time.monotonic()
-            with _taint_log_lock:
-                due = now - _tainted_next_offsets_last_log_s >= _TAINT_LOG_INTERVAL_S
-                if due:
-                    _tainted_next_offsets_last_log_s = now
-            if due:
-                log.error(
-                    "ConsumerRecords#nextOffsets() returned empty because this instance was "
-                    "built with the deprecated ConsumerRecords(Map) constructor (see KIP-1094), "
-                    "which does not supply next offsets. Downstream logic that relies on these "
-                    "offsets to advance the consumer's committed position (for example, Kafka "
-                    "Streams under exactly-once semantics) will be unable to commit, leading to "
-                    "reprocessing. Update the interceptor or wrapper that constructed it to use "
-                    "the ConsumerRecords(Map, Map) constructor that supplies next offsets.")
         return dict(self._next_offsets)
 
     def partitions(self) -> set[TopicPartition]:

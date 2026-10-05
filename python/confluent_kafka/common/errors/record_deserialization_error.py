@@ -26,12 +26,11 @@ from collections.abc import Iterable
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.timestamp_type import TimestampType
 
 if TYPE_CHECKING:
     from confluent_kafka.common.headers import Headers
+    from confluent_kafka.common.timestamp_type import TimestampType
     from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = ["RecordDeserializationError"]
@@ -43,12 +42,6 @@ class RecordDeserializationError(SerializationError):
     ``org.apache.kafka.common.serialization.Deserializer``.
 
     Java: ``org.apache.kafka.common.errors.RecordDeserializationException``.
-
-    Deprecated: the constructor form ``(partition, offset, message, cause)``.
-    Since 3.9. Use
-    ``RecordDeserializationException(DeserializationExceptionOrigin,
-    TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers,
-    String, Throwable)`` instead.
     """
 
     __module__ = "confluent_kafka.common.errors"
@@ -61,49 +54,33 @@ class RecordDeserializationError(SerializationError):
         KEY = "KEY"
         VALUE = "VALUE"
 
-    @java_forms(
-        Form("partition", "offset", "message", "cause", deprecated="Since 3.9. Use ``RecordDeserializationException(DeserializationExceptionOrigin, TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers, String, Throwable)`` instead."),
-        Form("origin", "partition", "offset", "timestamp", "timestamp_type", "key_buffer", "value_buffer", "headers", "message", "cause"),
-    )
     def __init__(
         self,
         *,
-        origin: RecordDeserializationError.DeserializationExceptionOrigin | None = UNSET,
+        origin: RecordDeserializationError.DeserializationExceptionOrigin,
         partition: TopicPartition,
         offset: int,
-        timestamp: int = UNSET,
-        timestamp_type: TimestampType = UNSET,
-        key_buffer: bytes | None = UNSET,
-        value_buffer: bytes | None = UNSET,
-        headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]] = UNSET,
+        timestamp: int,
+        timestamp_type: TimestampType,
+        key_buffer: bytes,
+        value_buffer: bytes,
+        headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
         message: str,
         cause: BaseException | None = None,
-        _java_form: int = -1,
     ) -> None:
         headers = _throwable.materialize(headers)
-        if _java_form == 0:
-            _throwable.init(self, message, cause)
-            self._origin = None
-            self._partition = partition
-            self._offset = offset
-            self._timestamp_type = TimestampType.NO_TIMESTAMP_TYPE
-            self._timestamp = -1
-            self._key_buffer = None
-            self._value_buffer = None
-            self._headers = None
-        else:
-            _throwable.init(self, message, cause)
-            self._origin = origin
-            self._partition = partition
-            self._offset = offset
-            self._timestamp_type = timestamp_type
-            self._timestamp = timestamp
-            self._key_buffer = _throwable.view(key_buffer)
-            self._value_buffer = _throwable.view(value_buffer)
-            self._headers = _throwable.headers(headers)
+        _throwable.init(self, message, cause)
+        self._origin = origin
+        self._partition = partition
+        self._offset = offset
+        self._timestamp_type = timestamp_type
+        self._timestamp = timestamp
+        self._key_buffer = _throwable.view(key_buffer)
+        self._value_buffer = _throwable.view(value_buffer)
+        self._headers = _throwable.headers(headers)
         self._java_kwargs = _throwable.kwargs(origin=origin, partition=partition, offset=offset, timestamp=timestamp, timestamp_type=timestamp_type, key_buffer=key_buffer, value_buffer=value_buffer, headers=headers, message=message, cause=cause)
 
-    def origin(self) -> RecordDeserializationError.DeserializationExceptionOrigin | None:
+    def origin(self) -> RecordDeserializationError.DeserializationExceptionOrigin:
         """Java's ``origin()``."""
         return self._origin
 
@@ -123,14 +100,14 @@ class RecordDeserializationError(SerializationError):
         """Java's ``timestamp()``."""
         return self._timestamp
 
-    def key_buffer(self) -> memoryview | None:
+    def key_buffer(self) -> memoryview:
         """Java's ``keyBuffer()``."""
         return self._key_buffer
 
-    def value_buffer(self) -> memoryview | None:
+    def value_buffer(self) -> memoryview:
         """Java's ``valueBuffer()``."""
         return self._value_buffer
 
-    def headers(self) -> Headers | None:
+    def headers(self) -> Headers:
         """Java's ``headers()``."""
         return self._headers

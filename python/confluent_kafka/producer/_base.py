@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._config import duration_to_ms, log_unused, prepare
+from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.metric_name import MetricName
@@ -67,22 +67,6 @@ NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be null"
 # FFI takes only the handle, so the binding cannot send it.
 NO_GROUP_METADATA_HANDLE_MESSAGE = ("Only a KafkaConsumer's group_metadata() can be sent to "
                                     "a KafkaProducer; this one comes from a mock consumer")
-
-# Java's KafkaProducer.throwIfNoTransactionManager() message.
-NO_TRANSACTION_MANAGER_MESSAGE = ("Cannot use transactional methods without enabling "
-                                  "transactions by setting the transactional.id configuration "
-                                  "property")
-
-# JoinGroupRequest.UNKNOWN_MEMBER_ID.
-_UNKNOWN_MEMBER_ID = ""
-
-# The ProducerConfig keys (and their Java defaults) that decide whether the
-# producer has a transaction manager (has_transaction_manager).
-_ENABLE_IDEMPOTENCE = "enable.idempotence"
-_RETRIES = "retries"
-_RETRIES_DEFAULT = str((1 << 31) - 1)  # Integer.MAX_VALUE
-_ACKS = "acks"
-_ACKS_DEFAULT = "all"
 
 # Java's ProducerConfig keys of a serializer given through the config route.
 _KEY_SERIALIZER = "key.serializer"
@@ -164,25 +148,6 @@ def group_metadata_handle(group_metadata: ConsumerGroupMetadata) -> object:
     if native is None:
         raise UnsupportedVersionError(message=NO_GROUP_METADATA_HANDLE_MESSAGE)
     return native
-
-
-def has_transaction_manager(native: Mapping[str, str]) -> bool:
-    """Whether a producer the core built from ``native`` (the configs it
-    parsed) has Java's ``TransactionManager``.
-
-    ``KafkaProducer.configureTransactionState`` creates one iff
-    ``enable.idempotence`` holds (KafkaProducer.java:604-608) once
-    ``ProducerConfig.postProcessAndValidateIdempotenceConfigs`` has run
-    (ProducerConfig.java:591-636): idempotence, on by default, is turned off
-    when the user did not set it and ``retries`` is 0 or ``acks`` is not
-    ``all`` / ``-1``. The construction succeeded, so none of that method's
-    errors applied. The binding reads it here because Java checks it before
-    the closed state, and the core's own answer goes with the native handle
-    ``close()`` frees."""
-    if _ENABLE_IDEMPOTENCE in native:
-        return native[_ENABLE_IDEMPOTENCE] == "true"
-    return (int(native.get(_RETRIES, _RETRIES_DEFAULT)) != 0
-            and native.get(_ACKS, _ACKS_DEFAULT) in ("all", "-1"))
 
 
 def close_timeout_ms(timeout: Duration | None) -> int | None:
@@ -342,9 +307,6 @@ class _ProducerState:
         # through the batching engine without that wait.
         self._transactional = False
         self._in_transaction = False
-        # Whether the core producer has Java's transaction manager (see
-        # has_transaction_manager): transactional or idempotent.
-        self._transaction_manager = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
@@ -382,8 +344,8 @@ class _ProducerState:
         """Java's ``KafkaProducer(configs, keySerializer, valueSerializer)``:
         parse ``configs``, take the serializers (an argument wins over the
         config key; neither means ``bytes_serializer()``), build the core
-        producer, then log the unused configs. A given serializer argument
-        replaces its config key, which is then not parsed
+        producer (which reports the keys it does not know). A given serializer
+        argument replaces its config key, which is then not parsed
         (``ProducerConfig.appendSerializerToConfig``). A construction failure
         raises its typed error (Java's ``KafkaException("Failed to construct
         kafka producer", cause)``) after closing the serializers built so far."""
@@ -412,16 +374,6 @@ class _ProducerState:
         self._value_serializer = value
         self._c_producer = handle
         self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
-        self._transaction_manager = has_transaction_manager(native)
-        log_unused(originals, client="producer")
-
-    def _check_transaction_manager(self) -> None:
-        """Java's ``throwIfNoTransactionManager()``, which the transactional
-        methods call before ``throwIfProducerClosed()``
-        (KafkaProducer.java:661-662, 687-688, 746-747, 791-792, 825-826), so a
-        closed producer without one reports this, not the closed state."""
-        if not self._transaction_manager:
-            raise IllegalStateError(message=NO_TRANSACTION_MANAGER_MESSAGE)
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""
@@ -484,14 +436,8 @@ class _ProducerState:
 
 
 def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
-    """Java's ``throwIfInvalidGroupMetadata`` (KafkaProducer.java:1491-1498),
-    which ``sendOffsetsToTransaction`` calls first: the null arm, which the core
-    cannot receive, and the generation / member id arm, which the core checks
-    too, but the binding reaches the core only once the transaction manager and
-    closed checks have passed."""
+    """The null arm of Java's ``throwIfInvalidGroupMetadata``
+    (KafkaProducer.java:1491-1498), which the core cannot receive; the
+    generation / member id arm is the core's."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)
-    if group_metadata.generation_id() > 0 and group_metadata.member_id() == _UNKNOWN_MEMBER_ID:
-        raise IllegalArgumentError(
-            message=f"Passed in group metadata {group_metadata} has generationId > 0 but the "
-                    "member.id is unknown")

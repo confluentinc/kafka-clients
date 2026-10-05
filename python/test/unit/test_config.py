@@ -26,7 +26,6 @@ themselves and are not.
 
 from __future__ import annotations
 
-import logging
 from datetime import timedelta
 
 import pytest
@@ -34,8 +33,6 @@ import pytest
 from confluent_kafka import IllegalArgumentError, _config, _config_types
 from confluent_kafka._java import java_str
 from confluent_kafka.common.config import ConfigError
-
-_LOGGER = "confluent_kafka.common.config"
 
 # --------------------------------------------------------------------------- #
 # ConfigDefTest.testBasicTypes
@@ -235,61 +232,20 @@ def test_key_must_be_a_string() -> None:
 
 
 @pytest.mark.parametrize("client", ["producer", "consumer"])
-def test_interceptor_classes_raise(client: _config.Client) -> None:
-    with pytest.raises(ConfigError) as exc:
-        _config.prepare({"interceptor.classes": "com.example.Interceptor"}, client=client)
-    assert str(exc.value) == (
-        "Invalid value com.example.Interceptor for configuration interceptor.classes: "
-        "The client runs no interceptors.")
-    # Java's default, the empty list, names no interceptor.
-    assert _config.prepare({"interceptor.classes": ""}, client=client)[1] == {
-        "interceptor.classes": ""}
+def test_interceptor_and_partitioner_keys_reach_the_core(client: _config.Client) -> None:
+    # Not core keys, so unknown keys, which only the core reports (CLAUDE.md,
+    # Python Binding Conventions, Configuration); the core's own
+    # partitioner.type is passed verbatim.
+    configs = {"interceptor.classes": "com.example.Interceptor",
+               "partitioner.class": "com.example.MyPartitioner",
+               "partitioner.type": "RoundRobinPartitioner"}
+    assert _config.prepare(configs, client=client)[1] == configs
 
 
-def test_partitioner_class_raises_but_for_java_round_robin() -> None:
-    with pytest.raises(ConfigError) as exc:
-        _config.prepare({"partitioner.class": "com.example.MyPartitioner"}, client="producer")
-    assert str(exc.value) == (
-        "Invalid value com.example.MyPartitioner for configuration partitioner.class: "
-        "The client runs no custom partitioner; "
-        "org.apache.kafka.clients.producer.RoundRobinPartitioner is the only partitioner class "
-        "it has.")
-    with pytest.raises(ConfigError):
-        _config.prepare({"partitioner.class": _Nested}, client="producer")
-    round_robin = "org.apache.kafka.clients.producer.RoundRobinPartitioner"
-    assert _config.prepare({"partitioner.class": round_robin}, client="producer")[1] == {
-        "partitioner.class": round_robin}
-
-
-def test_old_client_keys_are_accepted_and_logged_as_unused(
-        caplog: pytest.LogCaptureFixture) -> None:
+def test_old_client_keys_are_accepted() -> None:
     configs = {"error_cb": print, "on_delivery": print, "logger": "x", "bootstrap.servers": "b"}
-    originals, native = _config.prepare(configs, client="producer")
+    _, native = _config.prepare(configs, client="producer")
     assert set(native) == {"error_cb", "on_delivery", "logger", "bootstrap.servers"}
-    with caplog.at_level(logging.INFO, logger=_LOGGER):
-        _config.log_unused(originals, client="producer")
-    records = [r for r in caplog.records if r.name == _LOGGER]
-    assert len(records) == 1 and records[0].levelno == logging.INFO
-    assert records[0].getMessage() == (
-        "These configurations '[error_cb, logger, on_delivery]' were supplied but are not "
-        "used yet.")
-
-
-def test_keys_a_serde_reads_are_not_unused(caplog: pytest.LogCaptureFixture) -> None:
-    originals, _ = _config.prepare(
-        {"key.serializer.encoding": "UTF-16", "other.key": 1}, client="producer")
-    originals.get("key.serializer.encoding")
-    with caplog.at_level(logging.INFO, logger=_LOGGER):
-        _config.log_unused(originals, client="producer")
-    messages = [r.getMessage() for r in caplog.records if r.name == _LOGGER]
-    assert messages == ["These configurations '[other.key]' were supplied but are not used yet."]
-
-
-def test_nothing_unused_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
-    originals, _ = _config.prepare({"bootstrap.servers": "b", "group.id": "g"}, client="consumer")
-    with caplog.at_level(logging.INFO, logger=_LOGGER):
-        _config.log_unused(originals, client="consumer")
-    assert [r for r in caplog.records if r.name == _LOGGER] == []
 
 
 def test_generated_key_types_are_java_s() -> None:

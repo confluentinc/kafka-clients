@@ -33,9 +33,8 @@ from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, Node, PartitionInfo, TimestampType, TopicPartition
 from confluent_kafka.common.errors import UnsupportedVersionError, WakeupError
 from confluent_kafka.consumer import (
-    AsyncMockConsumer, ConsumerRebalanceListener, ConsumerRecord, MockConsumer,
-    NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError, OffsetResetStrategy,
-    SubscriptionPattern,
+    AsyncMockConsumer, CloseOptions, ConsumerRebalanceListener, ConsumerRecord, MockConsumer,
+    NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError, SubscriptionPattern,
 )
 
 WAIT = 5.0
@@ -234,17 +233,13 @@ def test_should_return_max_poll_records() -> None:
 # ---------------------------------------------------------------------------
 # The Java mock's other behaviours
 # ---------------------------------------------------------------------------
-def test_constructor_forms_and_deprecated_enum_form() -> None:
+def test_constructor_takes_the_strategy_name() -> None:
+    # Java's MockConsumer(String); the @Deprecated MockConsumer(OffsetResetStrategy)
+    # is not generated (CLAUDE.md, Python Binding Conventions, Class family).
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         MockConsumer(offset_reset_strategy="latest")
-    with pytest.warns(DeprecationWarning) as caught:
-        consumer: MockConsumer[bytes, bytes] = MockConsumer(
-            offset_reset_strategy=OffsetResetStrategy.EARLIEST)
-    assert str(caught[0].message) == (
-        "MockConsumer(offset_reset_strategy: OffsetResetStrategy) is deprecated. Since 4.0. "
-        "Use MockConsumer(offset_reset_strategy: str) instead.")
-    # The enum form is fromString(strategy.toString()): earliest.
+        consumer: MockConsumer[bytes, bytes] = MockConsumer(offset_reset_strategy="earliest")
     consumer.assign(partitions=[tp("t", 0)])
     consumer.update_beginning_offsets(new_offsets={tp("t", 0): 3})
     assert consumer.position(partition=tp("t", 0)) == 3
@@ -573,10 +568,9 @@ def test_close_marks_closed_and_later_calls_raise() -> None:
 
 
 def test_close_with_a_negative_timeout_closes_the_mock() -> None:
-    # Java's MockConsumer.close(Duration) never reads the timeout.
+    # Java's MockConsumer.close(CloseOptions) never reads the timeout.
     consumer = earliest()
-    with pytest.warns(DeprecationWarning):
-        consumer.close(timeout=-1)
+    consumer.close(option=CloseOptions.timeout(-1))
     assert consumer.closed()
 
 

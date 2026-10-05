@@ -222,7 +222,6 @@ SUBSCRIBE_MESSAGE = ("subscribe() takes one of (topics), (topics, callback), (pa
                      "(pattern); got ")
 SEEK_MESSAGE = "seek() takes one of (partition, offset), (partition, offset_and_metadata); got "
 COMMIT_NOWAIT_MESSAGE = "commit_nowait() takes one of (), (callback), (offsets, callback); got "
-CLOSE_MESSAGE = "close() takes one of (), (timeout), (option); got "
 
 
 @pytest.mark.parametrize("kwargs, given", [
@@ -256,10 +255,11 @@ def test_commit_nowait_rejects_offsets_without_a_callback() -> None:
     assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
 
 
-def test_close_rejects_timeout_and_option_together() -> None:
-    with pytest.raises(IllegalArgumentError) as e:
-        mock().close(timeout=1, option=CloseOptions.timeout(1))
-    assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
+def test_close_with_a_timeout_is_not_generated() -> None:
+    # Java's @Deprecated close(Duration) (CLAUDE.md, Class family): close()
+    # and close(option) are every combination, so close has no decorator.
+    with pytest.raises(TypeError):
+        mock().close(timeout=1)  # type: ignore[call-arg]
 
 
 def test_the_kafka_consumer_checks_the_same_forms() -> None:
@@ -273,9 +273,6 @@ def test_the_kafka_consumer_checks_the_same_forms() -> None:
         with pytest.raises(IllegalArgumentError) as e:
             c.commit_nowait(offsets={})
         assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
-        with pytest.raises(IllegalArgumentError) as e:
-            c.close(timeout=1, option=CloseOptions.timeout(1))
-        assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
 
 
 def test_the_async_classes_check_the_same_forms() -> None:
@@ -290,11 +287,8 @@ def test_the_async_classes_check_the_same_forms() -> None:
         with pytest.raises(IllegalArgumentError) as e:
             c.commit_nowait(offsets={})
         assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
-        with pytest.raises(IllegalArgumentError) as e:
-            await c.close(timeout=1, option=CloseOptions.timeout(1))
-        assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
-        with pytest.warns(DeprecationWarning):
-            await c.close(timeout=1)
+        with pytest.raises(TypeError):
+            await c.close(timeout=1)  # type: ignore[call-arg]
 
     asyncio.run(main())
 
@@ -320,11 +314,6 @@ def test_every_stub_form_works() -> None:
                     callback=lambda offsets, exception: None)
     c.close()
     c.close(option=CloseOptions.timeout(timedelta(seconds=1)))
-    with pytest.warns(DeprecationWarning) as caught:
-        c.close(timeout=1)
-    assert str(caught[0].message) == (
-        "close(timeout) is deprecated. This method has been deprecated since Kafka 4.1 and "
-        "should use close(option=...) instead.")
 
 
 async def test_cancelling_close_waits_for_its_teardown() -> None:

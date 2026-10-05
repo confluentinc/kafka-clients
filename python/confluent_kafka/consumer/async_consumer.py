@@ -54,7 +54,7 @@ from ._base import (
 )
 from ._conversions import offsets_to_spec, tp_to_spec
 from .close_options import CloseOptions
-from .consumer import CLOSE_FORMS, COMMIT_NOWAIT_FORMS, SEEK_FORMS, SUBSCRIBE_FORMS
+from .consumer import COMMIT_NOWAIT_FORMS, SEEK_FORMS, SUBSCRIBE_FORMS
 
 if TYPE_CHECKING:
     from confluent_kafka import Duration
@@ -251,20 +251,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``groupMetadata`` (``ffi-overload-gaps.md``)."""
         return self._c_group_metadata()
 
-    @overload
-    async def close(self, *, timeout: Duration | None = None) -> None: ...
-    @overload
-    async def close(self, *, option: CloseOptions) -> None: ...
-
-    @java_forms(*CLOSE_FORMS)
-    async def close(self, *, timeout: Duration | None = None,
-                    option: CloseOptions | None = None) -> None:
-        """See :meth:`Consumer.close`.
-
-        Deprecated: ``close(timeout=…)``. This method has been deprecated since
-        Kafka 4.1 and should use ``close(option=…)`` instead.
-        """
-        await self._a_close(timeout, option)
+    async def close(self, *, option: CloseOptions | None = None) -> None:
+        """See :meth:`Consumer.close`."""
+        await self._a_close(option)
 
     async def __aenter__(self) -> AsyncConsumer[K, V]:
         return self
@@ -396,8 +385,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async,
                                         partitions)
 
-    async def _a_close(self, timeout: Duration | None, option: CloseOptions | None) -> None:
-        timeout_ms, operation = close_args(timeout, option)
+    async def _a_close(self, option: CloseOptions | None) -> None:
+        timeout_ms, operation = close_args(option)
         # A commit_nowait() still awaiting its listener finishes first; its
         # failure is raised once the consumer is closed.
         deferred: Exception | None = None

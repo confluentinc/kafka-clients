@@ -16,9 +16,8 @@
 //! the Java sources.
 //!
 //! The Python clients coerce a `str`, `int`, `float` or `bool` config value to
-//! its key's `ConfigDef` type before the core sees it, and log the keys no
-//! `ConfigDef` defines as unused (CLAUDE.md, Python Binding Conventions,
-//! Configuration). The key sets and types are those of Java's `ProducerConfig`
+//! its key's `ConfigDef` type before the core sees it (CLAUDE.md, Python Binding
+//! Conventions, Configuration). The key sets and types are those of Java's `ProducerConfig`
 //! and `ConsumerConfig`: every `define(name, Type.X, …)` /
 //! `defineInternal(name, Type.X, …)` of the class, plus the ones
 //! `withClientSslSupport()` / `withClientSaslSupport()` add from `SslConfigs` /
@@ -352,7 +351,7 @@ fn render(producer: &BTreeMap<String, String>, consumer: &BTreeMap<String, Strin
          \n\
          Java's ``ProducerConfig`` / ``ConsumerConfig`` define these keys, with\n\
          ``withClientSslSupport()`` / ``withClientSaslSupport()``; ``_config`` coerces\n\
-         a value to its key's type and logs every other key as unused.\n\
+         a value to its key's type and passes every other key to the core as given.\n\
          \"\"\"\n\
          \n\
          from __future__ import annotations\n\

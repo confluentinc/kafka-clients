@@ -97,7 +97,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def init_transactions(self) -> None:
         """See :meth:`Producer.init_transactions`."""
-        self._check_transaction_manager()
         self._check_not_closed()
         await self._drain_async()
         await self._run_async(
@@ -108,7 +107,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         it is a plain ``def``; it does not wait for earlier sends either, so it
         never blocks the loop (see :meth:`Producer.begin_transaction` for why it
         needs no drain)."""
-        self._check_transaction_manager()
         self._check_not_closed()
         raise_if_error(self._call(_lib.Producer_begin_transaction))
         self._in_transaction = True
@@ -118,7 +116,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             group_metadata: ConsumerGroupMetadata) -> None:
         """See :meth:`Producer.send_offsets_to_transaction`."""
         check_group_metadata(group_metadata)
-        self._check_transaction_manager()
         self._check_not_closed()
         native = group_metadata_handle(group_metadata)
         await self._drain_async()
@@ -129,7 +126,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     async def commit_transaction(self) -> None:
         """See :meth:`Producer.commit_transaction`: when it returns, the
         callbacks of the transaction's records have run."""
-        self._check_transaction_manager()
         self._check_not_closed()
         sent = list(self._futures)
         # Sends from now on wait for their handover again (see _ProducerState).
@@ -142,7 +138,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def abort_transaction(self) -> None:
         """See :meth:`Producer.abort_transaction`."""
-        self._check_transaction_manager()
         self._check_not_closed()
         # Sends from now on wait for their handover again (see _ProducerState).
         self._in_transaction = False

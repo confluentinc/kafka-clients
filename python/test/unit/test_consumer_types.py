@@ -15,13 +15,15 @@
 """Tests of the ``confluent_kafka.consumer`` value types and records.
 
 Java's tests translated: ``OffsetAndMetadataTest``, ``CloseOptionsTest``,
-``ConsumerRecordTest`` and ``ConsumerRecordsTest`` (all).
+``ConsumerRecordTest`` and ``ConsumerRecordsTest`` (all but one).
 Skipped: ``OffsetAndMetadataTest``'s two deserialization-compatibility tests
 read checked-in Java-serialized files (no Python meaning); its round-trip test
 uses pickle for Java's serialization. ``ConsumerGroupMetadataTest`` tests only
-the two constructors Java deprecates for removal, which are not offered. No
-Java test exists for ``OffsetAndTimestamp``, ``SubscriptionPattern`` or
-``OffsetResetStrategy``.
+the two constructors Java deprecates for removal, which are not offered.
+``ConsumerRecordsTest.testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecatedConstructor``
+tests the records-only constructor Java deprecates, which is not generated
+(CLAUDE.md, Python Binding Conventions, Class family). No Java test exists for
+``OffsetAndTimestamp`` or ``SubscriptionPattern``.
 """
 
 from __future__ import annotations
@@ -33,7 +35,6 @@ from typing import Any
 
 import pytest
 
-import confluent_kafka.consumer.consumer_records as records_module
 from confluent_kafka import IllegalArgumentError, NullPointerError
 from confluent_kafka.common import TimestampType, TopicPartition
 from confluent_kafka.consumer import (
@@ -44,7 +45,6 @@ from confluent_kafka.consumer import (
     KafkaConsumer,
     OffsetAndMetadata,
     OffsetAndTimestamp,
-    OffsetResetStrategy,
     SubscriptionPattern,
 )
 
@@ -207,7 +207,7 @@ def test_close_options_builder_shape() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SubscriptionPattern, OffsetResetStrategy (no Java test)
+# SubscriptionPattern (no Java test)
 # --------------------------------------------------------------------------- #
 
 
@@ -219,9 +219,12 @@ def test_subscription_pattern() -> None:
         SubscriptionPattern("t.*")  # type: ignore[call-arg]
 
 
-def test_offset_reset_strategy() -> None:
-    assert [m.value for m in OffsetResetStrategy] == ["LATEST", "EARLIEST", "NONE"]
-    assert [str(m) for m in OffsetResetStrategy] == ["latest", "earliest", "none"]
+def test_offset_reset_strategy_is_not_generated() -> None:
+    # Java deprecates the enum (CLAUDE.md, Python Binding Conventions, Class
+    # family), and with it the MockConsumer constructor that takes it.
+    import confluent_kafka.consumer as consumer_module
+
+    assert not hasattr(consumer_module, "OffsetResetStrategy")
 
 
 # --------------------------------------------------------------------------- #
@@ -412,30 +415,12 @@ def test_records_are_immutable() -> None:
     assert len(records.next_offsets()) == partition_size
 
 
-def test_next_offsets_logs_error_periodically_with_the_deprecated_constructor(
-        caplog: pytest.LogCaptureFixture) -> None:
-    tp = TopicPartition(topic="topic", partition=0)
-    records = {tp: [ConsumerRecord(topic="topic", partition=0, offset=0, key=0, value="value")]}
-    previous = records_module._tainted_next_offsets_last_log_s
-    try:
-        records_module._tainted_next_offsets_last_log_s = -2 * records_module._TAINT_LOG_INTERVAL_S
-        with caplog.at_level("ERROR", logger=_LOGGER):
-            with pytest.warns(DeprecationWarning, match=r"ConsumerRecords\(records\) is deprecated"):
-                consumer_records: ConsumerRecords[int, str] = ConsumerRecords(records=records)
-            assert consumer_records.next_offsets() == {}
-            errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-            assert len(errors) == 1
-            assert "deprecated ConsumerRecords(Map) constructor" in errors[0]
-            assert consumer_records.next_offsets() == {}
-            with pytest.warns(DeprecationWarning):
-                assert ConsumerRecords(records=records).next_offsets() == {}
-            assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
-            records_module._tainted_next_offsets_last_log_s = (
-                -2 * records_module._TAINT_LOG_INTERVAL_S)
-            assert consumer_records.next_offsets() == {}
-            assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
-    finally:
-        records_module._tainted_next_offsets_last_log_s = previous
+def test_the_deprecated_records_only_constructor_is_not_generated() -> None:
+    # Java's @Deprecated ConsumerRecords(Map) (CLAUDE.md, Class family):
+    # next_offsets is required.
+    records: dict[TopicPartition, list[ConsumerRecord[int, str]]] = {}
+    with pytest.raises(TypeError):
+        ConsumerRecords(records=records)  # type: ignore[call-arg]
 
 
 def test_next_offsets_does_not_log_error_when_constructed_with_next_offsets(

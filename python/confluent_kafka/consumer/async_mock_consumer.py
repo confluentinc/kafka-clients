@@ -22,12 +22,11 @@ what its base class does not (Implementation over the FFI)."""
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ._mock_core import MockConsumerCore
 from .async_consumer import AsyncConsumer
 from .mock_consumer import reset_strategy_of
-from .offset_reset_strategy import OffsetResetStrategy
 
 if TYPE_CHECKING:
     from confluent_kafka.common.topic_partition import TopicPartition
@@ -45,17 +44,8 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
     Java: ``org.apache.kafka.clients.consumer.MockConsumer<K, V>``.
     """
 
-    @overload
-    def __init__(self, *, offset_reset_strategy: str) -> None: ...
-    @overload
-    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy) -> None: ...
-
-    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy) -> None:
-        """See :meth:`MockConsumer.__init__`.
-
-        Deprecated: the ``OffsetResetStrategy`` form. Since 4.0. Use the ``str``
-        form instead.
-        """
+    def __init__(self, *, offset_reset_strategy: str) -> None:
+        """See :meth:`MockConsumer.__init__`."""
         strategy = reset_strategy_of(offset_reset_strategy)
         AsyncConsumer.__init__(self)
         self._init_mock(strategy)

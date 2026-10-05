@@ -14,11 +14,10 @@
 
 """``MockConsumer``: Java's ``org.apache.kafka.clients.consumer.MockConsumer``.
 
-Java's two public constructors, ``(@Deprecated OffsetResetStrategy
-offsetResetStrategy)`` and ``(String offsetResetStrategy)``, share one name
-with two types, so one parameter typed as their union with one stub per type,
-the deprecated form last (Signatures); the deprecated one warns. The Java
-mock's own methods follow (Class family) in Java's order; ``shouldRebalance()``
+Java's public constructor ``(String offsetResetStrategy)``; the
+``@Deprecated`` ``(OffsetResetStrategy offsetResetStrategy)`` is not generated,
+nor is the deprecated enum it takes (Class family). The Java mock's own methods
+follow (Class family) in Java's order; ``shouldRebalance()``
 / ``resetShouldRebalance()`` read and clear state only the dropped
 ``enforceRebalance()`` sets, and ``setClientInstanceId`` /
 ``injectTimeoutException`` / ``disableTelemetry`` / ``addedMetrics`` serve only
@@ -36,14 +35,12 @@ A direct Python translation of Java's mock (``_mock_core``), not FFI-backed
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ._auto_offset_reset_strategy import AutoOffsetResetStrategy
 from ._mock_core import MockConsumerCore
 from .consumer import Consumer
-from .offset_reset_strategy import OffsetResetStrategy
 
 if TYPE_CHECKING:
     from confluent_kafka.common.topic_partition import TopicPartition
@@ -53,17 +50,10 @@ __all__ = ["MockConsumer"]
 K = TypeVar("K")
 V = TypeVar("V")
 
-DEPRECATED_CONSTRUCTOR = ("MockConsumer(offset_reset_strategy: OffsetResetStrategy) is "
-                          "deprecated. Since 4.0. Use MockConsumer(offset_reset_strategy: str) "
-                          "instead.")
 
-
-def reset_strategy_of(offset_reset_strategy: str | OffsetResetStrategy) -> AutoOffsetResetStrategy:
-    """Java's two constructors: the enum form (deprecated, warns) is
-    ``AutoOffsetResetStrategy.fromString(offsetResetStrategy.toString())``."""
-    if isinstance(offset_reset_strategy, OffsetResetStrategy):
-        warnings.warn(DEPRECATED_CONSTRUCTOR, DeprecationWarning, stacklevel=3)
-        return AutoOffsetResetStrategy.from_string(str(offset_reset_strategy))
+def reset_strategy_of(offset_reset_strategy: str) -> AutoOffsetResetStrategy:
+    """Java's ``MockConsumer(String)``:
+    ``AutoOffsetResetStrategy.fromString(offsetResetStrategy)``."""
     return AutoOffsetResetStrategy.from_string(offset_reset_strategy)
 
 
@@ -77,18 +67,10 @@ class MockConsumer(MockConsumerCore[K, V], Consumer[K, V], Generic[K, V]):
     Java: ``org.apache.kafka.clients.consumer.MockConsumer<K, V>``.
     """
 
-    @overload
-    def __init__(self, *, offset_reset_strategy: str) -> None: ...
-    @overload
-    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy) -> None: ...
-
-    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy) -> None:
+    def __init__(self, *, offset_reset_strategy: str) -> None:
         """A mock consumer is instantiated by providing the ``auto.offset.reset``
         value (``"earliest"``, ``"latest"``, ``"none"`` or
         ``"by_duration:<ISO-8601 duration>"``) as the input.
-
-        Deprecated: the ``OffsetResetStrategy`` form. Since 4.0. Use the ``str``
-        form instead.
         """
         strategy = reset_strategy_of(offset_reset_strategy)
         Consumer.__init__(self)

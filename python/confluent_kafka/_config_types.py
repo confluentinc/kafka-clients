@@ -19,7 +19,7 @@
 
 Java's ``ProducerConfig`` / ``ConsumerConfig`` define these keys, with
 ``withClientSslSupport()`` / ``withClientSaslSupport()``; ``_config`` coerces
-a value to its key's type and logs every other key as unused.
+a value to its key's type and passes every other key to the core as given.
 """
 
 from __future__ import annotations

@@ -14,9 +14,9 @@
 
 """``confluent_kafka.consumer``: Java's ``org.apache.kafka.clients.consumer``.
 
-The records and offset types, ``CloseOptions``, ``SubscriptionPattern``,
-``OffsetResetStrategy``, the client family (``Consumer``, ``KafkaConsumer``,
-``MockConsumer`` and their ``Async`` peers), ``ConsumerRebalanceListener``, the
+The records and offset types, ``CloseOptions``, ``SubscriptionPattern``, the
+client family (``Consumer``, ``KafkaConsumer``, ``MockConsumer`` and their
+``Async`` peers), ``ConsumerRebalanceListener``, the
 ``OffsetCommitCallback`` alias, and the errors Java declares in this package
 (``CommitFailedException``, ``OffsetOutOfRangeException``, …) (CLAUDE.md,
 Python Binding Conventions, Modules).
@@ -38,7 +38,6 @@ from .mock_consumer import MockConsumer as MockConsumer
 from .offset_and_metadata import OffsetAndMetadata as OffsetAndMetadata
 from .offset_and_timestamp import OffsetAndTimestamp as OffsetAndTimestamp
 from .offset_commit_callback import OffsetCommitCallback as OffsetCommitCallback
-from .offset_reset_strategy import OffsetResetStrategy as OffsetResetStrategy
 from .subscription_pattern import SubscriptionPattern as SubscriptionPattern
 
 __all__ = [
@@ -56,7 +55,6 @@ __all__ = [
     "OffsetAndMetadata",
     "OffsetAndTimestamp",
     "OffsetCommitCallback",
-    "OffsetResetStrategy",
     "SubscriptionPattern",
 ]
 

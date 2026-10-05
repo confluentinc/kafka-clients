@@ -1416,13 +1416,18 @@ struct PyModel {
     stubs: Vec<(Vec<String>, BTreeSet<String>)>,
 }
 
+/// The constructors the Python class offers: the public ones (the protected
+/// ones too, of an abstract base), except a `@Deprecated` one, which is not
+/// generated (CLAUDE.md, Python Binding Conventions, Class family: "A class,
+/// method or overload Java deprecates ... is not generated").
 fn surface_ctors(info: &ClassInfo) -> Vec<usize> {
     info.java
         .ctors
         .iter()
         .enumerate()
         .filter(|(_, c)| {
-            c.visibility == Visibility::Public || (info.is_abstract && c.visibility == Visibility::Protected)
+            (c.visibility == Visibility::Public || (info.is_abstract && c.visibility == Visibility::Protected))
+                && c.deprecated.is_none()
         })
         .map(|(i, _)| i)
         .collect()
@@ -3255,34 +3260,41 @@ mod tests {
         // Both given sets are Java constructors: no decorator, no stubs.
         assert!(!m.decorated);
         assert!(m.stubs.is_empty());
+    }
+
+    #[test]
+    fn deprecated_constructors_are_not_generated() {
+        let classes = build_graph(&repo_root()).unwrap();
+        // RecordDeserializationException's @Deprecated (partition, offset,
+        // message, cause) is not generated (CLAUDE.md, Class family): the full
+        // constructor is the only form, so every parameter is required and
+        // there is neither a decorator nor a stub.
+        let info = &classes["org.apache.kafka.common.errors.RecordDeserializationException"];
+        assert_eq!(info.java.ctors.iter().filter(|c| c.deprecated.is_some()).count(), 1);
         let m = model_of(&classes, "org.apache.kafka.common.errors.RecordDeserializationException");
-        let full = &m.forms[1];
-        // The deprecated constructor assigns the fields itself; it passes
-        // nothing to the full one, so no parameter of the full one may be left
-        // out (CLAUDE.md, Signatures: "Only such values are O's Java-given
-        // defaults").
-        assert!(full.defaults.is_empty());
-        assert_eq!(full.field_defaults.get("origin").map(String::as_str), Some("None"));
-        assert_eq!(full.field_defaults.get("timestamp").map(String::as_str), Some("-1"));
+        assert_eq!(m.forms.len(), 1);
         assert_eq!(
-            full.field_defaults.get("timestamp_type").map(String::as_str),
-            Some("TimestampType.NO_TIMESTAMP_TYPE")
+            m.forms[0].params,
+            vec![
+                "origin",
+                "partition",
+                "offset",
+                "timestamp",
+                "timestamp_type",
+                "key_buffer",
+                "value_buffer",
+                "headers",
+                "message",
+                "cause"
+            ]
         );
-        // A header parameter defaults to ().
-        assert_eq!(full.field_defaults.get("headers").map(String::as_str), Some("()"));
-        assert!(m.decorated);
-        for p in [
-            "origin",
-            "timestamp",
-            "timestamp_type",
-            "key_buffer",
-            "value_buffer",
-            "headers",
-        ] {
-            assert_eq!(param(&m, p).default, Dflt::Unset, "{p}");
+        assert!(m.forms[0].deprecated.is_none());
+        assert!(m.forms[0].defaults.is_empty() && m.forms[0].field_defaults.is_empty());
+        for p in m.params.iter().filter(|p| p.name != "cause") {
+            assert_eq!(p.default, Dflt::Required, "{}", p.name);
         }
-        assert!(param(&m, "key_buffer").field_nullable);
-        assert!(m.forms[0].deprecated.as_deref().unwrap().starts_with("Since 3.9."));
+        assert!(!m.decorated);
+        assert!(m.stubs.is_empty());
     }
 
     #[test]
