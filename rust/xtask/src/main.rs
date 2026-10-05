@@ -1461,7 +1461,7 @@ fn print_help() {
   chaos-matrix    Run every scenario of a matrix file across security protocols and
                   message sizes, one after another, saving each run's logs and
                   reports and keeping a running summary (requires Docker)
-                    e.g. cargo xtask chaos-matrix --matrix tests/chaos/matrix/rust-client.txt \
+                    e.g. cargo xtask chaos-matrix --matrix my-matrix.txt \
                              --protocols plaintext,ssl,sasl_ssl --msg-sizes 100,1048576 --rps 1000
                     --out DIR (default target/chaos-matrix/<matrix name>; re-running resumes)
                     --only ID,ID  --run-timeout-min N (default 240)  --rerun-failed
