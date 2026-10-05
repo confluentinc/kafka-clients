@@ -80,6 +80,11 @@ def test_producer_record_forms_and_headers() -> None:
     assert str(ProducerRecord(topic="t", partition=1, key="k", value="v")) == (
         "ProducerRecord(topic=t, partition=1, headers=RecordHeaders(headers = [], "
         "isReadOnly = false), key=k, value=v, timestamp=null)")
+    # partition and key default to UNSET, so an explicit None is given: Java's
+    # (topic, partition, key, value) with a null key, or a null partition.
+    null_key = ProducerRecord(topic="t", partition=0, key=None, value=b"v")
+    assert (null_key.partition(), null_key.key(), null_key.value()) == (0, None, b"v")
+    assert ProducerRecord(topic="t", partition=None, key=b"k", value=b"v").partition() is None
     with pytest.raises(NullPointerError) as npe:
         ProducerRecord(topic="t", value=1, headers=[(None, b"x")])  # type: ignore[list-item]
     assert str(npe.value) == "Null header keys are not permitted"

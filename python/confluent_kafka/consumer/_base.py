@@ -77,6 +77,7 @@ from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
+from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._conversions import (
     offsets_to_spec, timestamps_to_spec, to_long_map, to_metrics_map,
@@ -106,6 +107,23 @@ _LOG = logging.getLogger("confluent_kafka.consumer")
 # Java's AsyncKafkaConsumer.acquireAndEnsureOpen() / acquire() messages.
 CLOSED_MESSAGE = "This consumer has already been closed."
 CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
+
+# The null checks of AsyncKafkaConsumer on an argument the FFI takes as a list
+# or a map, so a None cannot cross it (CLAUDE.md, Python Binding Conventions,
+# Implementation over the FFI, exception 4): pause / resume
+# (Objects.requireNonNull), offsetsForTimes, the private
+# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, and
+# the private beginningOrEndOffset; with whether Java checks before acquire()
+# (only the private seek does). assign's is _assign_partitions.
+_NULL_ARGUMENT: dict[str, tuple[type[NullPointerError] | type[IllegalArgumentError], str, bool]] = {
+    "pause": (NullPointerError, "The partitions to pause must be nonnull", False),
+    "resume": (NullPointerError, "The partitions to resume must be nonnull", False),
+    "offsets_for_times": (NullPointerError, "Timestamps to search cannot be null", False),
+    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be null", True),
+    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be null", True),
+    "beginning_offsets": (NullPointerError, "Partitions cannot be null", False),
+    "end_offsets": (NullPointerError, "Partitions cannot be null", False),
+}
 
 # Java's AsyncKafkaConsumer.throwIfGroupIdNotDefined() message.
 GROUP_ID_NOT_DEFINED_MESSAGE = ("To use the group management or offset commit APIs, you must "
@@ -401,6 +419,19 @@ class _ConsumerState:
         """``fn(handle, *args)`` as one use of the handle."""
         with self._use() as h:
             return fn(h, *args)
+
+    def _is_closed(self) -> bool:
+        """Whether ``close()`` has run: a second ``close()`` returns before its
+        own argument checks (CLAUDE.md, Python Binding Conventions,
+        Implementation over the FFI, Order)."""
+        with self._lifecycle:
+            return self._state == _CLOSED or self._h == 0
+
+    def _check_open(self) -> None:
+        """The closed check alone, ahead of a check Java makes before
+        ``acquire()`` (Order); ``_use()`` then makes the concurrency check."""
+        if self._is_closed():
+            raise IllegalStateError(message=CLOSED_MESSAGE)
 
     def _begin_close(self) -> bool:
         """Enter the closing state; whether this call did (and so must close).
@@ -1045,6 +1076,20 @@ class _ConsumerState:
                 raise IllegalArgumentError(
                     message="Topic partitions collection to assign to cannot be null")
         return blank_null_topic_partitions(partitions)
+
+    def _check_not_null(self, op: str, value: object) -> None:
+        """Java's null check of ``op``'s argument (``_NULL_ARGUMENT``), after
+        the closed check (CLAUDE.md, Python Binding Conventions, Implementation
+        over the FFI, Order) and, where Java makes it after ``acquire()``, the
+        concurrency check."""
+        checked = _NULL_ARGUMENT.get(op)
+        if value is None and checked is not None:
+            error, message, before_acquire = checked
+            if before_acquire:
+                self._check_open()
+                raise error(message=message)
+            with self._use():
+                raise error(message=message)
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's

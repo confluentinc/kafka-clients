@@ -115,8 +115,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
             group_metadata: ConsumerGroupMetadata) -> None:
         """See :meth:`Producer.send_offsets_to_transaction`."""
-        check_group_metadata(group_metadata)
         self._check_not_closed()
+        check_group_metadata(group_metadata)
         native = group_metadata_handle(group_metadata)
         await self._drain_async()
         spec = offsets_to_spec(offsets)
@@ -266,9 +266,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
         """See :meth:`Producer.partitions_for`."""
+        self._check_not_closed()
         if topic is None:
             raise NullPointerError(message="topic cannot be null")
-        self._check_not_closed()
         list_handle, error = await self._await_payload(
             lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb), True)
         if error:
@@ -285,6 +285,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def close(self, *, timeout: Duration | None = None) -> None:
         """See :meth:`Producer.close`."""
+        if self._closed:
+            return
         timeout_ms = close_timeout_ms(timeout)
         # Check and set at once: exactly one close() tears the producer down.
         if not self._begin_close():

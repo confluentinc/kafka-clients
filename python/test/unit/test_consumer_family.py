@@ -255,6 +255,19 @@ def test_commit_nowait_rejects_offsets_without_a_callback() -> None:
     assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
 
 
+def test_commit_nowait_takes_offsets_with_a_null_callback() -> None:
+    # callback defaults to UNSET, so callback=None is given: Java's
+    # commitAsync(offsets, null) (CLAUDE.md, Python Binding Conventions,
+    # Signatures).
+    c = mock()
+    c.assign(partitions=[TP])
+    c.commit_nowait(offsets={TP: OffsetAndMetadata(offset=4)}, callback=None)
+    assert c.committed(partitions=[TP]) == {TP: OffsetAndMetadata(offset=4)}
+    with KafkaConsumer(configs=CONFIGS) as kc:
+        # Empty offsets complete at once, without a broker (Java's commit()).
+        kc.commit_nowait(offsets={}, callback=None)
+
+
 def test_close_with_a_timeout_is_not_generated() -> None:
     # Java's @Deprecated close(Duration) (CLAUDE.md, Class family): close()
     # and close(option) are every combination, so close has no decorator.

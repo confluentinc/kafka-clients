@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
@@ -79,7 +79,9 @@ _LOG = logging.getLogger("confluent_kafka.consumer")
 
 SUBSCRIBE_FORMS = (Form("topics"), Form("topics", "callback"),
                    Form("pattern", "callback"), Form("pattern"))
-COMMIT_NOWAIT_FORMS = (Form(), Form("callback"), Form("offsets", "callback"))
+# commitAsync() passes a null callback to commitAsync(callback).
+COMMIT_NOWAIT_FORMS = (Form(), Form("callback", defaults={"callback": None}),
+                       Form("offsets", "callback"))
 SEEK_FORMS = (Form("partition", "offset"), Form("partition", "offset_and_metadata"))
 
 
@@ -211,14 +213,15 @@ class Consumer(Generic[K, V], _ConsumerState):
     def commit_nowait(self, *, callback: OffsetCommitCallback | None = None) -> None: ...
     @overload
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                      callback: OffsetCommitCallback) -> None: ...
+                      callback: OffsetCommitCallback | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                      callback: OffsetCommitCallback | None = None) -> None:
+                      callback: OffsetCommitCallback | None = UNSET) -> None:
         """Commit the offsets returned on the last ``poll()`` for the subscribed
         topics and partitions, or the given ``offsets``, without waiting. Java's
-        ``commitAsync``.
+        ``commitAsync``. ``commit_nowait(offsets=…, callback=None)`` is Java's
+        ``commitAsync(offsets, null)``.
 
         This is an asynchronous call and will not block. Any errors encountered
         are either passed to the ``callback`` (if provided) or discarded.
@@ -424,6 +427,7 @@ class Consumer(Generic[K, V], _ConsumerState):
             raise
 
     def _tp_op(self, op: str, fn: Any, partitions: Iterable[TopicPartition]) -> None:
+        self._check_not_null(op, partitions)
         partition_list = list(partitions)
         if self._in_callback():
             self._reentrant_use(op, partition_list)
@@ -438,7 +442,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_async))
 
     def _c_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
-        result: Deserialized = self._run_sync(*self._poll_spec(poll_timeout_ms(timeout)))
+        # The closed check first, then Java's Timer check (Order).
+        self._check_open()
+        timeout_ms = poll_timeout_ms(timeout)
+        result: Deserialized = self._run_sync(*self._poll_spec(timeout_ms))
         for partition, offset in result.rewind:
             try:
                 self._run_sync(*self._seek_spec(partition, offset, None))
@@ -497,6 +504,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
+        self._check_not_null("offsets_for_times", timestamps_to_search)
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
@@ -506,6 +514,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition]
                       ) -> dict[TopicPartition, int]:
+        self._check_not_null(op, partitions)
         partition_list = list(partitions)
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
@@ -521,6 +530,8 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async, partitions)
 
     def _c_close(self, option: CloseOptions | None) -> None:
+        if self._is_closed():
+            return
         timeout_ms, operation = close_args(option)
         if not self._begin_close():
             return

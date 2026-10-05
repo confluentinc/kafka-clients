@@ -162,8 +162,8 @@ class Producer(Generic[K, V], _ProducerState):
         ``KafkaError`` if the producer has encountered a previous fatal or
         abortable error.
         """
-        check_group_metadata(group_metadata)
         self._check_not_closed()
+        check_group_metadata(group_metadata)
         native = group_metadata_handle(group_metadata)
         self._drain_sync()
         spec = offsets_to_spec(offsets)
@@ -381,9 +381,9 @@ class Producer(Generic[K, V], _ProducerState):
         finds the topic in it, or the configured ``max.block.ms`` expires
         (``TimeoutError``). Raises ``NullPointerError`` for a ``None`` topic.
         """
+        self._check_not_closed()
         if topic is None:
             raise NullPointerError(message="topic cannot be null")
-        self._check_not_closed()
         list_handle, error = await_payload(
             lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb), True)
         if error:
@@ -411,8 +411,11 @@ class Producer(Generic[K, V], _ProducerState):
 
         Closing twice is harmless; any other call after it raises
         ``IllegalStateError``. A negative ``timeout`` raises
-        ``IllegalArgumentError``.
+        ``IllegalArgumentError``, except that a second ``close()`` returns
+        before checking it *(deviation)*.
         """
+        if self._closed:
+            return
         timeout_ms = close_timeout_ms(timeout)
         # Check and set at once: exactly one close() tears the producer down.
         if not self._begin_close():

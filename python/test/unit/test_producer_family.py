@@ -1105,6 +1105,34 @@ def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     p.close(timeout=0)
 
 
+def test_closed_first_then_the_argument_checks() -> None:
+    # Java checks these arguments before the closed state (partitionsFor's
+    # requireNonNull, throwIfInvalidGroupMetadata, close(Duration)'s timeout);
+    # here the closed state comes first (CLAUDE.md, Python Binding Conventions,
+    # Implementation over the FFI, Order), so a second close() returns silently.
+    p = KafkaProducer(configs=UNREACHABLE)
+    p.close(timeout=0)
+    with pytest.raises(IllegalStateError) as err:
+        p.partitions_for(topic=None)  # type: ignore[arg-type]
+    assert str(err.value) == CLOSED
+    with pytest.raises(IllegalStateError) as err:
+        p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
+    assert str(err.value) == CLOSED
+    p.close(timeout=-1)
+
+
+async def test_async_closed_first_then_the_argument_checks() -> None:
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    await p.close(timeout=0)
+    with pytest.raises(IllegalStateError) as err:
+        await p.partitions_for(topic=None)  # type: ignore[arg-type]
+    assert str(err.value) == CLOSED
+    with pytest.raises(IllegalStateError) as err:
+        await p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
+    assert str(err.value) == CLOSED
+    await p.close(timeout=-1)
+
+
 def test_context_manager_flushes_then_closes() -> None:
     with KafkaProducer(configs=UNREACHABLE) as p:
         f = p.send(record=RECORD)

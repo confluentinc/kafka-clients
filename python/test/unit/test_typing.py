@@ -76,6 +76,7 @@ def _topic_id_partition_overloads() -> None:
     b = TopicIdPartition(topic_id=uid,
                          topic_partition=TopicPartition(topic="t", partition=0))
     assert_type(b, TopicIdPartition)
+    assert_type(TopicIdPartition(topic_id=uid, partition=0, topic=None), TopicIdPartition)
     assert_type(a.topic_id(), Uuid)
     assert_type(a.topic_partition(), TopicPartition)
 
@@ -249,6 +250,7 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit_nowait()
     kc.commit_nowait(callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=None)
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()

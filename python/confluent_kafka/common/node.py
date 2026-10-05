@@ -15,13 +15,17 @@
 """``Node``: Java's ``org.apache.kafka.common.Node``.
 
 Java's three constructors ``(id, host, port)``, ``(id, host, port, rack)`` and
-``(id, host, port, rack, isFenced)`` are one keyword-only constructor: the
-shorter ones pass ``null`` and ``false`` to the longest (CLAUDE.md, Python
-Binding Conventions, Signatures), so every combination is a Java form.
+``(id, host, port, rack, isFenced)`` are one keyword-only constructor matched by
+``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
+``(id, host, port)`` passes ``null`` and ``false`` to the longest, and
+``(id, host, port, rack)`` sets ``isFenced`` to ``false``. ``rack`` defaults to
+``UNSET``, so ``rack=None`` is given: ``Node(id=…, host=…, port=…, rack=None,
+is_fenced=True)`` is Java's five-argument constructor.
 """
 
 from __future__ import annotations
 
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
 
 __all__ = ["Node"]
@@ -35,8 +39,12 @@ class Node:
 
     __slots__ = ("_id", "_id_string", "_host", "_port", "_rack", "_is_fenced")
 
+    @java_forms(Form("id", "host", "port"),
+                Form("id", "host", "port", "rack"),
+                Form("id", "host", "port", "rack", "is_fenced",
+                     defaults={"rack": None, "is_fenced": False}))
     def __init__(self, *, id: int, host: str, port: int,  # noqa: A002 - Java's name
-                 rack: str | None = None, is_fenced: bool = False) -> None:
+                 rack: str | None = UNSET, is_fenced: bool = False) -> None:
         self._id = id
         self._id_string = str(id)
         self._host = host

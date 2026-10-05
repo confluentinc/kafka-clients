@@ -134,7 +134,9 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
+from confluent_kafka import (
+    ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
+)
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
@@ -253,6 +255,60 @@ def test_assign_on_null_topic_partition_after_close() -> None:
     with pytest.raises(IllegalStateError) as e:
         consumer.assign(partitions=None)  # type: ignore[arg-type]
     assert str(e.value) == CLOSED
+
+
+# AsyncKafkaConsumer's null checks of an argument the FFI cannot take as None
+# (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
+# exception 4): the method, its keyword, Java's error class and message.
+NULL_ARGUMENT_CASES: list[tuple[str, str, type[Exception], str]] = [
+    ("pause", "partitions", NullPointerError, "The partitions to pause must be nonnull"),
+    ("resume", "partitions", NullPointerError, "The partitions to resume must be nonnull"),
+    ("offsets_for_times", "timestamps_to_search", NullPointerError,
+     "Timestamps to search cannot be null"),
+    ("seek_to_beginning", "partitions", IllegalArgumentError,
+     "Partitions collection cannot be null"),
+    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be null"),
+    ("beginning_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
+    ("end_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
+]
+
+
+@pytest.mark.parametrize("method, keyword, error, message", NULL_ARGUMENT_CASES)
+def test_a_null_argument_raises_java_s_error(method: str, keyword: str,
+                                             error: type[Exception], message: str) -> None:
+    with new_consumer(None) as consumer, pytest.raises(error) as e:
+        getattr(consumer, method)(**{keyword: None})
+    assert type(e.value) is error
+    assert str(e.value) == message
+
+
+@pytest.mark.parametrize("method, keyword, error, message", NULL_ARGUMENT_CASES)
+def test_a_null_argument_after_close_reports_the_closed_consumer(
+        method: str, keyword: str, error: type[Exception], message: str) -> None:
+    # The closed check comes first (Order), seek_to_* included, whose Java
+    # null check precedes acquireAndEnsureOpen().
+    consumer = new_consumer(None)
+    consumer.close()
+    with pytest.raises(IllegalStateError) as e:
+        getattr(consumer, method)(**{keyword: None})
+    assert str(e.value) == CLOSED
+
+
+@pytest.mark.parametrize("method, keyword, error, message", NULL_ARGUMENT_CASES)
+def test_the_async_consumer_makes_the_same_null_checks(
+        method: str, keyword: str, error: type[Exception], message: str) -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs(None))
+        with pytest.raises(error) as e:
+            await getattr(consumer, method)(**{keyword: None})
+        assert type(e.value) is error
+        assert str(e.value) == message
+        await consumer.close(option=CloseOptions.timeout(0))
+        with pytest.raises(IllegalStateError) as e:
+            await getattr(consumer, method)(**{keyword: None})
+        assert str(e.value) == CLOSED
+
+    asyncio.run(main())
 
 
 def test_assign_on_null_topic_in_partition() -> None:
@@ -529,6 +585,29 @@ def test_poll_rejects_a_negative_timeout() -> None:
         with pytest.raises(IllegalArgumentError) as e:
             consumer.poll(timeout=timedelta(microseconds=-500))
         assert str(e.value) == "Invalid negative timeout -1"
+
+
+def test_closed_first_then_the_argument_checks() -> None:
+    # Java's poll checks the timeout (Timer) before acquireAndEnsureOpen(), and
+    # close(CloseOptions) its timeout before `closed`; here the closed state
+    # comes first (CLAUDE.md, Python Binding Conventions, Implementation over
+    # the FFI, Order), so a second close() returns silently.
+    consumer = new_consumer()
+    consumer.close()
+    with pytest.raises(IllegalStateError) as e:
+        consumer.poll(timeout=-1)
+    assert str(e.value) == CLOSED
+    consumer.close(option=CloseOptions.timeout(-1))
+
+    async def main() -> None:
+        async_consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await async_consumer.close()
+        with pytest.raises(IllegalStateError) as e:
+            await async_consumer.poll(timeout=-1)
+        assert str(e.value) == CLOSED
+        await async_consumer.close(option=CloseOptions.timeout(-1))
+
+    asyncio.run(main())
 
 
 def test_close_rejects_a_negative_timeout_and_stays_open() -> None:

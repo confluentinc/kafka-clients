@@ -199,11 +199,11 @@ _PARTITION1 = 1
 _TOPIC_PARTITION0 = TopicPartition(topic=_TOPIC_NAME0, partition=_PARTITION1)
 _TIDP0 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_TOPIC_PARTITION0)
 _TIDP1 = TopicIdPartition(topic_id=_TOPIC_ID0, partition=_PARTITION1, topic=_TOPIC_NAME0)
-# Java's `new TopicIdPartition(topicId0, partition1, null)`: `topic=None` reads as
-# not given (post-phase review item 5), so the null topic goes through the
-# TopicPartition form, which is what Java's constructor builds.
+# Java's `new TopicIdPartition(topicId0, partition1, null)`: `topic` defaults to
+# UNSET, so `topic=None` is given and selects that constructor (CLAUDE.md,
+# Python Binding Conventions, Signatures).
 _NULL_TOPIC = TopicPartition(topic=None, partition=_PARTITION1)  # type: ignore[arg-type]
-_TIDP_NULL0 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_NULL_TOPIC)
+_TIDP_NULL0 = TopicIdPartition(topic_id=_TOPIC_ID0, partition=_PARTITION1, topic=None)
 _TIDP_NULL1 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_NULL_TOPIC)
 _TOPIC_ID1 = Uuid(most_sig_bits=7759286116672424028, least_sig_bits=-5081215629859775948)
 _TIDP2 = TopicIdPartition(topic_id=_TOPIC_ID1, partition=_PARTITION1, topic="another_topic_name")
@@ -298,6 +298,11 @@ def test_node_constructors_and_accessors() -> None:
     assert r.has_rack() and r.rack() == "r1"
     # Every combination is a Java form: (id, host, port) passes (null, false).
     assert Node(id=5, host="h", port=9092, is_fenced=True).is_fenced()
+    # rack defaults to UNSET, so rack=None is given: the five-argument
+    # constructor with a null rack.
+    fenced = Node(id=5, host="h", port=9092, rack=None, is_fenced=True)
+    assert fenced.is_fenced() and fenced.rack() is None and not fenced.has_rack()
+    assert Node(id=5, host="h", port=9092, rack=None) == n
     assert str(r) == "h:9092 (id: 5 rack: r1 isFenced: false)"
     assert str(n) == "h:9092 (id: 5 rack: null isFenced: false)"
     assert n == Node(id=5, host="h", port=9092) and n != r

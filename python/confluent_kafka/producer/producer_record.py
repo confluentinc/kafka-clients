@@ -14,10 +14,12 @@
 
 """``ProducerRecord``: Java's ``org.apache.kafka.clients.producer.ProducerRecord``.
 
-Java's six constructors all delegate to the longest one, passing ``null`` for
-what they leave out, so every combination of ``topic``, ``value`` and the
-optional ``partition`` / ``timestamp`` / ``key`` / ``headers`` is a Java form
-(CLAUDE.md, Python Binding Conventions, Signatures). The record is covariant in
+Java's six constructors are one keyword-only constructor matched by
+``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the shorter
+ones delegate to the longest, passing ``null`` for what they leave out.
+``partition`` and ``key`` default to ``UNSET``, so an explicit ``None`` is
+given: ``ProducerRecord(topic=…, partition=0, key=None, value=…)`` is Java's
+``(topic, partition, key, value)`` with a null key. The record is covariant in
 ``K`` and ``V``; the stubs bind an omitted or ``None`` key or value to
 ``Never``, so ``ProducerRecord(topic="t", value="v")`` is a
 ``ProducerRecord[Never, str]`` and fits any producer with ``str`` values.
@@ -30,6 +32,7 @@ import sys
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common.headers import (
     Headers,
@@ -54,6 +57,18 @@ _K = TypeVar("_K")
 _V = TypeVar("_V")
 
 _WrittenHeaders = Iterable[tuple[str, "bytes | bytearray | memoryview | None"]]
+
+# Java's six constructors, in Java's order; the shorter ones pass null to the
+# first for what they leave out (a null header list is the empty ``()``).
+_FORMS = (
+    Form("topic", "partition", "timestamp", "key", "value", "headers",
+         defaults={"partition": None, "timestamp": None, "key": None, "headers": ()}),
+    Form("topic", "partition", "timestamp", "key", "value"),
+    Form("topic", "partition", "key", "value", "headers"),
+    Form("topic", "partition", "key", "value"),
+    Form("topic", "key", "value"),
+    Form("topic", "value"),
+)
 
 
 class ProducerRecord(Generic[K_co, V_co]):
@@ -98,8 +113,9 @@ class ProducerRecord(Generic[K_co, V_co]):
                  partition: int | None = None, timestamp: int | None = None,
                  key: _K, value: _V, headers: _WrittenHeaders = ()) -> None: ...
 
-    def __init__(self, *, topic: str, partition: int | None = None,
-                 timestamp: int | None = None, key: Any = None, value: Any,
+    @java_forms(*_FORMS)
+    def __init__(self, *, topic: str, partition: int | None = UNSET,
+                 timestamp: int | None = None, key: Any = UNSET, value: Any,
                  headers: _WrittenHeaders = ()) -> None:
         """Creates a record to be sent to a topic, and optionally to a
         partition, with a timestamp in milliseconds since epoch (if ``None``,

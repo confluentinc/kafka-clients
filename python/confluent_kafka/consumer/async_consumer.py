@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import java_forms
+from confluent_kafka._args import UNSET, java_forms
 from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
@@ -147,11 +147,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     def commit_nowait(self, *, callback: OffsetCommitCallback | None = None) -> None: ...
     @overload
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                      callback: OffsetCommitCallback) -> None: ...
+                      callback: OffsetCommitCallback | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                      callback: OffsetCommitCallback | None = None) -> None:
+                      callback: OffsetCommitCallback | None = UNSET) -> None:
         """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``, which
         does not wait: a plain ``def``). The callback runs on the event loop,
         inside a later call on this consumer.
@@ -288,6 +288,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             raise
 
     async def _tp_op(self, op: str, fn: Any, partitions: Iterable[TopicPartition]) -> None:
+        self._check_not_null(op, partitions)
         partition_list = list(partitions)
         if self._in_callback():
             self._reentrant_use(op, partition_list)
@@ -302,7 +303,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._run_async(*self._void_spec(_lib.Consumer_unsubscribe_async))
 
     async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
-        result: Deserialized = await self._run_async(*self._poll_spec(poll_timeout_ms(timeout)))
+        # The closed check first, then Java's Timer check (Order).
+        self._check_open()
+        timeout_ms = poll_timeout_ms(timeout)
+        result: Deserialized = await self._run_async(*self._poll_spec(timeout_ms))
         for partition, offset in result.rewind:
             try:
                 await self._run_async(*self._seek_spec(partition, offset, None))
@@ -360,6 +364,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
+        self._check_not_null("offsets_for_times", timestamps_to_search)
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
@@ -369,6 +374,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition]
                             ) -> dict[TopicPartition, int]:
+        self._check_not_null(op, partitions)
         partition_list = list(partitions)
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
@@ -386,6 +392,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                                         partitions)
 
     async def _a_close(self, option: CloseOptions | None) -> None:
+        if self._is_closed():
+            return
         timeout_ms, operation = close_args(option)
         # A commit_nowait() still awaiting its listener finishes first; its
         # failure is raised once the consumer is closed.

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -51,10 +51,10 @@ class TopicIdPartition:
 
     @java_forms(Form("topic_id", "topic_partition"), Form("topic_id", "partition", "topic"))
     def __init__(self, *, topic_id: Uuid, topic_partition: TopicPartition | None = None,
-                 partition: int | None = None, topic: str | None = None) -> None:
+                 partition: int | None = None, topic: str | None = UNSET) -> None:
         """Create an instance with the provided parameters: the topic id and
         either the topic partition, or the partition id and the topic name (or
-        null)."""
+        null: ``topic=None`` is given)."""
         if topic_id is None:
             raise NullPointerError(message="topicId can not be null")
         self._topic_id = topic_id
