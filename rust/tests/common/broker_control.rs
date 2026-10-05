@@ -63,9 +63,10 @@ impl<'a> BrokerControl<'a> {
         Self { cluster }
     }
 
-    /// Number of brokers in the cluster (max valid node id).
+    /// Number of brokers in the cluster (max valid node id): one container per
+    /// broker.
     pub fn broker_count(&self) -> u16 {
-        self.cluster.config().brokers
+        self.cluster.container_ids().len() as u16
     }
 
     /// The Docker container id for a 1-based `node_id`.

@@ -48,7 +48,7 @@ use confluent_kafka::common::Uuid;
 ///     resets to 0 after a recreate, so `topic_id` disambiguates the old and
 ///     new generations — the reason librdkafka keys on the base64 topic id).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Acked / DeliveryCount land with the share consumer.
+#[expect(dead_code)] // Acked / DeliveryCount land with the share consumer.
 pub enum WorkloadEvent {
     /// Producer `producer` is about to hand `index` to the client. This opens
     /// the record's in-flight window; the matching `Delivered` or `SendFailed`
