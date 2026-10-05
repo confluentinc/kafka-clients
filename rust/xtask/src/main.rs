@@ -40,7 +40,17 @@ fn main() -> anyhow::Result<()> {
         Some("producer-perf-test") => producer_perf_test()?,
         Some("package-check") => package_check()?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
-        _ => print_help(),
+        Some("help" | "--help" | "-h") => print_help(),
+        // A mistyped task must fail: CI steps, such as the release checks in
+        // .semaphore/semaphore.yml, rely on the exit status of these tasks.
+        Some(other) => {
+            print_help();
+            anyhow::bail!("unknown task {other:?}");
+        },
+        None => {
+            print_help();
+            anyhow::bail!("no task given");
+        },
     }
 
     Ok(())
@@ -659,7 +669,7 @@ const SMOKE_BROKER_STARTUP: std::time::Duration = std::time::Duration::from_secs
 /// visible in the crates.io index.
 const REGISTRY_VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Number of attempts `--with-broker` makes to pull [`SMOKE_KAFKA_IMAGE`], so
-/// that a transient registry error or rate limit does not fail the run.
+/// that a transient registry error does not fail the run.
 const SMOKE_IMAGE_PULL_ATTEMPTS: u32 = 3;
 /// Files the package must contain, including the license, which the Apache 2.0
 /// license requires to accompany the code, and the README displayed on crates.io.
@@ -721,7 +731,7 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
             "--msrv" => msrv = true,
             "--with-broker" => with_broker = true,
             "--release" => release = true,
-            other => anyhow::bail!("package-smoke-test: unknown argument {other:?} (see `cargo xtask` for usage)"),
+            other => anyhow::bail!("package-smoke-test: unknown argument {other:?} (see `cargo xtask help` for usage)"),
         }
     }
 
@@ -737,6 +747,13 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
         // Use the `rust-version` declared to users, which may differ from the
         // toolchain pinned in `rust-toolchain.toml`.
         let rust_version = package_rust_version()?;
+        // Cargo reads `rust-version = "1.95"` as 1.95.0, but rustup resolves the
+        // toolchain `1.95` to the latest 1.95.x release, so name the patch.
+        let rust_version = if rust_version.split('.').count() == 2 {
+            format!("{rust_version}.0")
+        } else {
+            rust_version
+        };
         println!("🦀 Installing Rust {rust_version}, the minimum supported Rust version of {PACKAGE_NAME}...");
         run_command("rustup", &["toolchain", "install", &rust_version, "--profile", "minimal"])?;
         toolchain = Some(rust_version);
@@ -773,6 +790,9 @@ fn package_smoke_test(args: &[String]) -> anyhow::Result<()> {
         None => env::var("KAFKA_BOOTSTRAP_SERVERS").ok(),
     };
     project.run(toolchain.as_deref(), release, bootstrap_servers.as_deref())?;
+    if msrv {
+        project.check_newest_dependencies(toolchain.as_deref(), release)?;
+    }
 
     let source = if from_registry {
         "crates.io"
@@ -791,7 +811,20 @@ fn package_and_unpack(work_dir: &str) -> anyhow::Result<(String, PathBuf)> {
     // `--no-verify`: the generated project builds the packaged crate itself.
     // `--allow-dirty`: package the working tree as is, so that the task can run
     // before changes are committed. CI always runs on a clean checkout.
-    run_command("cargo", &["package", "-p", PACKAGE_NAME, "--no-verify", "--allow-dirty"])?;
+    // `--locked`: fail on a Cargo.lock that does not match the manifests, as the
+    // release's `cargo package --locked` and `cargo publish --locked` do, rather
+    // than packaging an updated lock file.
+    run_command(
+        "cargo",
+        &[
+            "package",
+            "-p",
+            PACKAGE_NAME,
+            "--no-verify",
+            "--allow-dirty",
+            "--locked",
+        ],
+    )?;
 
     let version = package_version()?;
     let crate_file = PathBuf::from(format!("target/package/{PACKAGE_NAME}-{version}.crate"));
@@ -913,6 +946,9 @@ impl SmokeProject {
             ),
         )?;
         fs::write(dir.join("src/main.rs"), SMOKE_MAIN_RS)?;
+        // Absolute, so that CARGO_TARGET_DIR below does not depend on the
+        // directory cargo runs in.
+        let dir = fs::canonicalize(dir)?;
         Ok(Self { dir, local_path })
     }
 
@@ -990,6 +1026,38 @@ impl SmokeProject {
         Ok(())
     }
 
+    /// Builds the project again after resolving the newest dependency versions,
+    /// regardless of their `rust-version`. The first build resolves versions
+    /// that support the toolchain in use, as cargo does for an edition 2024
+    /// project, but cargo resolves the newest versions for a project with an
+    /// older edition, so a dependency that needs a newer Rust would break such
+    /// a project on the minimum supported version.
+    fn check_newest_dependencies(&self, toolchain: Option<&str>, release: bool) -> anyhow::Result<()> {
+        println!(
+            "📥 Building again with the newest dependency versions, as a project without MSRV-aware resolution gets..."
+        );
+        let status = self
+            .cargo(toolchain)
+            .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "allow")
+            .arg("generate-lockfile")
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("could not resolve the newest dependency versions of the smoke project");
+        }
+        let mut build = self.cargo(toolchain);
+        build.arg("build");
+        if release {
+            build.arg("--release");
+        }
+        if !build.status()?.success() {
+            anyhow::bail!(
+                "the smoke project does not build with the newest dependency versions on this toolchain; \
+                 a dependency of {PACKAGE_NAME} probably needs a newer Rust than its rust-version"
+            );
+        }
+        Ok(())
+    }
+
     fn run(&self, toolchain: Option<&str>, release: bool, bootstrap_servers: Option<&str>) -> anyhow::Result<()> {
         let mut command = self.cargo(toolchain);
         command.arg("run");
@@ -1046,6 +1114,11 @@ impl SmokeBroker {
             args.extend(["-e".to_string(), var]);
         }
         args.push(SMOKE_KAFKA_IMAGE.to_string());
+        // Created before `docker run`, so that dropping it removes the container
+        // in every case: `docker run` can fail after creating the container (for
+        // example when the port was taken since it was chosen), and startup can
+        // time out below.
+        let broker = Self { container, bootstrap_servers: format!("localhost:{port}") };
         let output = Command::new("docker").args(&args).output()?;
         if !output.status.success() {
             anyhow::bail!(
@@ -1053,9 +1126,6 @@ impl SmokeBroker {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        // The container now exists, so dropping `broker` removes it, including
-        // when startup times out below.
-        let broker = Self { container, bootstrap_servers: format!("localhost:{port}") };
 
         let deadline = std::time::Instant::now() + SMOKE_BROKER_STARTUP;
         loop {
@@ -1088,10 +1158,19 @@ impl SmokeBroker {
         }
     }
 
-    /// Pulls [`SMOKE_KAFKA_IMAGE`], making up to [`SMOKE_IMAGE_PULL_ATTEMPTS`]
-    /// attempts, because the image registry occasionally fails or rate-limits a
-    /// pull.
+    /// Pulls [`SMOKE_KAFKA_IMAGE`] unless it is already present, making up to
+    /// [`SMOKE_IMAGE_PULL_ATTEMPTS`] attempts, because the image registry
+    /// occasionally fails a pull. The tag names a fixed release, so a local copy
+    /// is the same image.
     fn pull_image() -> anyhow::Result<()> {
+        let present = Command::new("docker")
+            .args(["image", "inspect", SMOKE_KAFKA_IMAGE])
+            .output()?
+            .status
+            .success();
+        if present {
+            return Ok(());
+        }
         for attempt in 1..=SMOKE_IMAGE_PULL_ATTEMPTS {
             let output = Command::new("docker").args(["pull", "--quiet", SMOKE_KAFKA_IMAGE]).output()?;
             if output.status.success() {
