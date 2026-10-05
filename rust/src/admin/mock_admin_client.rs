@@ -774,6 +774,32 @@ impl MockAdminClient {
         Ok(())
     }
 
+    /// Hides a topic from the next `fetches_remaining_until_visible` fetches.
+    ///
+    /// Mirrors Java's `setFetchesRemainingUntilVisible(String, int)`
+    /// (`MockAdminClient.java:1575-1581`). Each `list_topics`, `describe_topics`
+    /// (by name or by id) and topic `describe_configs` that would return the
+    /// topic decrements the counter instead, until it reaches zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message,
+    /// `"No such topic as <name>"`, if the topic does not exist. Java throws a bare
+    /// `RuntimeException`, which has no closer counterpart in the crate.
+    pub fn set_fetches_remaining_until_visible(
+        &self,
+        topic_name: &str,
+        fetches_remaining_until_visible: i32,
+    ) -> Result<(), Error> {
+        let mut state = self.state.lock().unwrap();
+        let metadata = state
+            .all_topics
+            .get_mut(topic_name)
+            .ok_or_else(|| Error::local_illegal_argument(format!("No such topic as {topic_name}")))?;
+        metadata.fetches_remaining_until_visible = fetches_remaining_until_visible;
+        Ok(())
+    }
+
     /// Causes the next `number_of_requests` operations to fail with a timeout.
     pub fn timeout_next_request(&self, number_of_requests: i32) {
         self.state.lock().unwrap().timeout_next_requests = number_of_requests;
@@ -1222,8 +1248,23 @@ impl Admin for MockAdminClient {
                         result.insert(requested.clone(), handle.future());
                         continue;
                     }
-                    match state.all_topics.get(requested) {
+                    // Java's `handleDescribeTopicsByNames` (`MockAdminClient.java:489-500`):
+                    // a visible topic is described unless its fetch countdown is still
+                    // running, in which case the countdown is decremented and the topic
+                    // is reported as not found.
+                    let visible = match state.all_topics.get_mut(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
+                            if metadata.fetches_remaining_until_visible > 0 {
+                                metadata.fetches_remaining_until_visible -= 1;
+                                None
+                            } else {
+                                Some(&*metadata)
+                            }
+                        },
+                        _ => None,
+                    };
+                    match visible {
+                        Some(metadata) => {
                             handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 requested.clone(),
                                 metadata.is_internal,
@@ -1258,11 +1299,23 @@ impl Admin for MockAdminClient {
                         result.insert(*requested, handle.future());
                         continue;
                     }
-                    let found = state
-                        .topic_names
-                        .get(requested)
-                        .and_then(|name| state.all_topics.get(name).map(|m| (name.clone(), m)))
-                        .filter(|(_, m)| !m.marked_for_deletion);
+                    // Java's `handleDescribeTopicsUsingIds` (`MockAdminClient.java:528-542`),
+                    // with the same fetch countdown as the by-name path.
+                    let state = &mut *state;
+                    let found = match state.topic_names.get(requested) {
+                        Some(name) => match state.all_topics.get_mut(name) {
+                            Some(metadata) if !metadata.marked_for_deletion => {
+                                if metadata.fetches_remaining_until_visible > 0 {
+                                    metadata.fetches_remaining_until_visible -= 1;
+                                    None
+                                } else {
+                                    Some((name.clone(), &*metadata))
+                                }
+                            },
+                            _ => None,
+                        },
+                        None => None,
+                    };
                     match found {
                         Some((name, metadata)) => {
                             handle.complete(TopicDescription::with_authorized_operations_topic_id(
@@ -1278,7 +1331,8 @@ impl Admin for MockAdminClient {
                         None => {
                             handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicId,
-                                format!("Topic id {requested} not found."),
+                                // Java's text has no space after "id" (`MockAdminClient.java:545`).
+                                format!("Topic id{requested} not found."),
                             ));
                         },
                     }
@@ -3840,6 +3894,123 @@ mod tests {
         assert_eq!(error.message(), "Broker 7 does not exist.");
         let error = mock.set_broker_log_dirs(-1, vec!["/data".to_string()]).unwrap_err();
         assert_eq!(error.message(), "Broker -1 does not exist.");
+    }
+
+    // --- setFetchesRemainingUntilVisible (MockAdminClient.java:1575-1581) -------
+
+    fn admin_with_topic(name: &str) -> MockAdminClient {
+        let mock = admin();
+        let leader = seeded_broker(0);
+        mock.add_topic(
+            false,
+            name,
+            vec![partition_info(
+                0,
+                Some(leader),
+                vec![seeded_broker(0)],
+                vec![seeded_broker(0)],
+            )],
+            None,
+        )
+        .expect("the leader is a seeded broker");
+        mock
+    }
+
+    /// `handleDescribeTopicsByNames` (`MockAdminClient.java:490-500`): while the
+    /// counter is positive, each describe decrements it and reports
+    /// `UnknownTopicOrPartitionException("Topic <name> not found.")`.
+    #[tokio::test]
+    async fn describe_topics_by_name_hides_the_topic_until_visible() {
+        let mock = admin_with_topic("t");
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        for _ in 0..2 {
+            let result = mock.describe_topics_with_topics_options(
+                TopicCollection::of_topic_names(vec!["t".to_string()]),
+                DescribeTopicsOptions::new(),
+            );
+            let err = result.topic_name_values().unwrap()["t"]
+                .get()
+                .await
+                .expect_err("not visible yet");
+            assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "got {err:?}");
+            assert_eq!(err.message(), "Topic t not found.");
+        }
+        let result = mock.describe_topics_with_topics_options(
+            TopicCollection::of_topic_names(vec!["t".to_string()]),
+            DescribeTopicsOptions::new(),
+        );
+        let description = result.topic_name_values().unwrap()["t"].get().await.expect("now visible");
+        assert_eq!(description.name(), "t");
+    }
+
+    /// `handleDescribeTopicsUsingIds` (`MockAdminClient.java:532-542`): the same
+    /// countdown, reporting `UnknownTopicIdException("Topic id" + id +
+    /// " not found.")` -- Java's message has no space after "id".
+    #[tokio::test]
+    async fn describe_topics_by_id_hides_the_topic_until_visible() {
+        let mock = admin_with_topic("t");
+        let topic_id = mock.state.lock().unwrap().topic_ids["t"];
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        for _ in 0..2 {
+            let result = mock.describe_topics_with_topics_options(
+                TopicCollection::of_topic_ids(vec![topic_id]),
+                DescribeTopicsOptions::new(),
+            );
+            let err = result.topic_id_values().unwrap()[&topic_id]
+                .get()
+                .await
+                .expect_err("not visible yet");
+            assert!(matches!(err, Error::UnknownTopicId(_)), "got {err:?}");
+            assert_eq!(err.message(), format!("Topic id{topic_id} not found."));
+        }
+        let result = mock.describe_topics_with_topics_options(
+            TopicCollection::of_topic_ids(vec![topic_id]),
+            DescribeTopicsOptions::new(),
+        );
+        let description = result.topic_id_values().unwrap()[&topic_id].get().await.expect("now visible");
+        assert_eq!(description.name(), "t");
+    }
+
+    /// Java throws `RuntimeException("No such topic as " + topicName)` for a
+    /// topic the mock does not have.
+    #[test]
+    fn set_fetches_remaining_until_visible_rejects_an_unknown_topic() {
+        let mock = admin();
+        let err = mock
+            .set_fetches_remaining_until_visible("nope", 1)
+            .expect_err("nope does not exist");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "No such topic as nope");
+    }
+
+    /// `listTopics` (`MockAdminClient.java:449-454`) and the topic arm of
+    /// `getResourceDescription` (`:860-863`) count down the same counter.
+    #[tokio::test]
+    async fn list_topics_and_describe_configs_count_down_the_same_counter() {
+        let mock = admin_with_topic("t");
+        mock.set_fetches_remaining_until_visible("t", 2).expect("t exists");
+        let listed = mock
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "first fetch hides t: {listed:?}");
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
+        let err = mock
+            .describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
+            .values()[&resource]
+            .get()
+            .await
+            .expect_err("second fetch hides t");
+        assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "got {err:?}");
+        let listed = mock
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.contains("t"), "the counter reached zero: {listed:?}");
     }
 
     #[test]
