@@ -116,6 +116,10 @@ path = "tests/producer/main.rs"
 name = "consumer"
 path = "tests/consumer/main.rs"
 
+[[test]]
+name = "admin"
+path = "tests/admin/main.rs"
+
 # Performance integration tests. `test = false` keeps them out of a plain
 # `cargo test` / `cargo test --all-features` (so CI's functional gate never
 # runs a latency budget under full-suite load); run them explicitly with
