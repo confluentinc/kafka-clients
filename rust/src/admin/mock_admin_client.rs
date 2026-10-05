@@ -432,6 +432,24 @@ fn index_out_of_bounds(index: i32, length: usize) -> Error {
     Error::local_illegal_argument(format!("Index {index} out of bounds for length {length}"))
 }
 
+/// The check of Java's `controller(Node)` (`MockAdminClient.java:279-280`): the
+/// controller must be one of the brokers.
+fn check_controller(brokers: &[Node], controller: &Node) -> Result<(), Error> {
+    if !brokers.contains(controller) {
+        return Err(Error::local_illegal_argument(
+            "The controller node must be in the list of brokers",
+        ));
+    }
+    Ok(())
+}
+
+impl Default for MockAdminClient {
+    /// Same as [`MockAdminClient::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockAdminClient {
     /// The cluster id a [`Builder`] uses unless
     /// [`set_cluster_id`](Builder::set_cluster_id) overrides it.
@@ -452,6 +470,70 @@ impl MockAdminClient {
         Builder::new()
     }
 
+    /// Creates a mock with one broker, [`Node::no_node`], which is also the
+    /// controller.
+    ///
+    /// Mirrors Java's `public MockAdminClient()` (`MockAdminClient.java:223-225`),
+    /// `this(Collections.singletonList(Node.noNode()), Node.noNode())`. It cannot
+    /// fail: the controller is the only broker.
+    pub fn new() -> Self {
+        let node = Node::no_node().clone();
+        Self::with_brokers_controller(vec![node.clone()], node)
+            .expect("the only broker is the controller, so the controller check passes")
+    }
+
+    /// Creates a mock with the given brokers and controller.
+    ///
+    /// Mirrors Java's `public MockAdminClient(List<Node> brokers, Node controller)`
+    /// (`MockAdminClient.java:227-239`): [`DEFAULT_CLUSTER_ID`](Self::DEFAULT_CLUSTER_ID),
+    /// one default partition, a default replication factor of `brokers.len()`
+    /// (unlike [`Builder::build`]'s `min(brokers.len(), 3)`),
+    /// [`DEFAULT_LOG_DIRS`](Self::DEFAULT_LOG_DIRS) for every broker, no raft
+    /// controller and empty feature-level and default-group-config maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// controller node must be in the list of brokers", when `controller` is not
+    /// one of `brokers` (Java's constructor calls `controller(Node)`, which
+    /// throws `IllegalArgumentException`).
+    pub fn with_brokers_controller(brokers: Vec<Node>, controller: Node) -> Result<Self, Error> {
+        let broker_log_dirs = vec![Self::default_log_dirs(); brokers.len()];
+        // Java passes `brokers.size()` as the `int defaultReplicationFactor`; the
+        // mock stores it as a `short` like the Builder path does.
+        let default_replication_factor = brokers.len() as i16;
+        Self::with_state(
+            brokers,
+            controller,
+            Self::DEFAULT_CLUSTER_ID.to_string(),
+            1,
+            default_replication_factor,
+            broker_log_dirs,
+            false,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    /// Makes `controller` the controller node reported by `describe_cluster`.
+    ///
+    /// Mirrors Java's public setter `controller(Node)`
+    /// (`MockAdminClient.java:278-282`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// controller node must be in the list of brokers", when `controller` is not
+    /// one of the mock's brokers; the controller is then left unchanged.
+    pub fn set_controller(&self, controller: Node) -> Result<(), Error> {
+        let mut state = self.state.lock().unwrap();
+        check_controller(&state.brokers, &controller)?;
+        state.controller = controller;
+        Ok(())
+    }
+
     /// The log directories of one broker, as owned strings.
     fn default_log_dirs() -> Vec<String> {
         Self::DEFAULT_LOG_DIRS.iter().map(|dir| (*dir).to_string()).collect()
@@ -460,7 +542,8 @@ impl MockAdminClient {
     /// Translated from Java's private constructor
     /// `MockAdminClient(List<Node>, Node, String, int, int, List<List<String>>,
     /// boolean, Map, Map, Map, Map)` (`MockAdminClient.java:241-276`), which
-    /// [`Builder::build`] calls.
+    /// [`Builder::build`] and the public constructors [`new`](Self::new) /
+    /// [`with_brokers_controller`](Self::with_brokers_controller) call.
     ///
     /// # Errors
     ///
@@ -482,11 +565,7 @@ impl MockAdminClient {
         max_supported_feature_levels: HashMap<String, i16>,
         default_group_configs: HashMap<String, String>,
     ) -> Result<Self, Error> {
-        if !brokers.contains(&controller) {
-            return Err(Error::local_illegal_argument(
-                "The controller node must be in the list of brokers",
-            ));
-        }
+        check_controller(&brokers, &controller)?;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
         let broker_configs: Vec<BTreeMap<String, String>> = brokers
@@ -2403,6 +2482,99 @@ mod tests {
         assert_eq!(created.feature_levels, fresh.feature_levels);
         assert_eq!(created.min_supported_feature_levels, fresh.min_supported_feature_levels);
         assert_eq!(created.max_supported_feature_levels, fresh.max_supported_feature_levels);
+    }
+
+    // --- Public constructors (MockAdminClient.java:223-282) ---------------------
+
+    fn four_nodes() -> Vec<Node> {
+        (0..4).map(|id| Node::new(id, format!("h{id}"), 9092)).collect()
+    }
+
+    /// `new MockAdminClient(brokers, controller)` (`MockAdminClient.java:227-239`):
+    /// the given brokers and controller, `DEFAULT_CLUSTER_ID`, one default
+    /// partition, a default replication factor of `brokers.size()` (not the
+    /// Builder's `min(n, 3)`), `DEFAULT_LOG_DIRS` per broker, each broker's
+    /// `default.replication.factor` config seeded with that factor, no raft
+    /// controller and empty feature and group-config maps.
+    #[tokio::test]
+    async fn with_brokers_controller_matches_java_constructor() {
+        let nodes = four_nodes();
+        let mock = MockAdminClient::with_brokers_controller(nodes.clone(), nodes[2].clone())
+            .expect("the controller is one of the brokers");
+
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.nodes().get().await.unwrap(), nodes);
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
+        assert_eq!(result.cluster_id().get().await.unwrap(), MockAdminClient::DEFAULT_CLUSTER_ID);
+
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.default_partitions, 1);
+        assert_eq!(state.default_replication_factor, 4, "brokers.size(), not min(4, 3)");
+        assert_eq!(state.broker_log_dirs, vec![default_dirs(); 4]);
+        assert_eq!(
+            state.broker_configs,
+            vec![BTreeMap::from([("default.replication.factor".to_string(), "4".to_string())]); 4]
+        );
+        assert!(!state.using_raft_controller);
+        assert!(state.feature_levels.is_empty());
+        assert!(state.min_supported_feature_levels.is_empty());
+        assert!(state.max_supported_feature_levels.is_empty());
+        assert!(state.default_group_configs.is_empty());
+    }
+
+    /// `new MockAdminClient()` (`MockAdminClient.java:223-225`) is
+    /// `this(singletonList(Node.noNode()), Node.noNode())`: one broker with id -1,
+    /// which is also the controller.
+    #[tokio::test]
+    async fn new_has_one_no_node_broker_that_is_the_controller() {
+        let mock = MockAdminClient::new();
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        let nodes = result.nodes().get().await.unwrap();
+        assert_eq!(nodes, vec![Node::no_node().clone()]);
+        assert_eq!(nodes[0].id(), -1);
+        let controller = result.controller().get().await.unwrap().unwrap();
+        assert_eq!(&controller, Node::no_node());
+
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.default_replication_factor, 1);
+        assert_eq!(
+            state.broker_configs,
+            vec![BTreeMap::from([(
+                "default.replication.factor".to_string(),
+                "1".to_string()
+            )])]
+        );
+    }
+
+    /// The constructor calls `controller(Node)` (`MockAdminClient.java:255`),
+    /// which throws `IllegalArgumentException` for a node outside the broker list.
+    #[test]
+    fn with_brokers_controller_rejects_a_controller_outside_the_brokers() {
+        let err = MockAdminClient::with_brokers_controller(four_nodes(), Node::new(7, "h7".to_string(), 9092))
+            .expect_err("the controller is not a broker");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+    }
+
+    /// The public setter `controller(Node)` (`MockAdminClient.java:278-282`)
+    /// replaces the controller when the node is a broker and throws, leaving the
+    /// controller unchanged, when it is not.
+    #[tokio::test]
+    async fn set_controller_requires_a_broker() {
+        let nodes = four_nodes();
+        let mock = MockAdminClient::with_brokers_controller(nodes.clone(), nodes[2].clone()).unwrap();
+
+        mock.set_controller(nodes[3].clone()).expect("node 3 is a broker");
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 3);
+
+        let err = mock
+            .set_controller(Node::new(7, "h7".to_string(), 9092))
+            .expect_err("node 7 is not a broker");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), "The controller node must be in the list of brokers");
+        let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 3);
     }
 
     /// Growing appends `Node(id, "localhost", 1000 + id)` with the default log
