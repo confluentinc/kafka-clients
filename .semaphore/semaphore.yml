@@ -336,21 +336,21 @@ blocks:
   # every other build. The tag pattern in their `run` conditions must stay
   # identical in all of them and in create-release-tag.yml.
   #
-  # "Release: verify package" and "Release: smoke test package" build and test
-  # the crate alongside CI, on VMs that hold no secrets, and each records the
-  # SHA-256 of the .crate it tested. "Release: publish to crates.io" depends on
-  # every CI block and on both package blocks, so it starts only when all of
-  # them have passed. It runs on a separate VM and compiles nothing
-  # (`--no-verify`), so no build script or procedural macro executes while the
-  # token is loaded. It uploads a .crate only if it is byte-identical to the
+  # "Release: pre-publish package check" and "Release: pre-publish smoke
+  # test" build and test the crate alongside CI, on VMs that hold no secrets,
+  # and each records the SHA-256 of the .crate it tested. "Release: publish
+  # to crates.io" depends on every CI block and on both pre-publish blocks, so
+  # it starts only when all of them have passed. It runs on a separate VM and
+  # compiles nothing (`--no-verify`), so no build script or procedural macro
+  # executes while the token is loaded. It uploads a .crate only if it is byte-identical to the
   # tested ones, which is possible because `cargo package` output is
-  # reproducible for a given commit and toolchain. The remaining blocks then
-  # verify the crate as users receive it from crates.io.
+  # reproducible for a given commit and toolchain. The "post-publish" blocks
+  # then verify the crate as users receive it from crates.io.
   #
   # Semaphore runs the pipelines of one git ref one at a time, so two runs for
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
-  - name: "Release: verify package"
+  - name: "Release: pre-publish package check"
     dependencies: []
     run:
       when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
@@ -410,7 +410,7 @@ blocks:
             - cargo xtask package-check
             - record_tested_crate verify-package
 
-  - name: "Release: smoke test package"
+  - name: "Release: pre-publish smoke test"
     # Tests the packaged crate against a real broker before anything is
     # uploaded. Each job starts a temporary apache/kafka container (Docker is
     # available on the Ubuntu image) and runs xtask/smoke/main.rs in a new
@@ -481,8 +481,8 @@ blocks:
       - "Verify language bindings (macOS arm64)"
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
-      - "Release: verify package"
-      - "Release: smoke test package"
+      - "Release: pre-publish package check"
+      - "Release: pre-publish smoke test"
     run:
       when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -679,12 +679,11 @@ blocks:
                 exit 1
               fi
             # Records the checksum of the uploaded bytes, which "Release:
-            # crates.io serves the uploaded crate" compares with what crates.io
-            # serves.
+            # post-publish checksum" compares with what crates.io serves.
             - echo "${uploaded_sha}  ${CRATE}-${CRATE_VERSION}.crate" > /tmp/crate.sha256
             - artifact push workflow /tmp/crate.sha256 --destination "crates-io/${CRATE}-${CRATE_VERSION}.sha256" --force
 
-  - name: "Release: crates.io serves the uploaded crate"
+  - name: "Release: post-publish checksum"
     # Checks that crates.io lists the version as live, with the checksum of the
     # uploaded bytes, and serves exactly those bytes for download. This block
     # and the two below load no token and repeat none of the release checks:
@@ -698,7 +697,7 @@ blocks:
       minutes: 20
     task:
       jobs:
-        - name: "checksum"
+        - name: "crates.io index and download match the upload"
           commands:
             # The checked-out commit is the tagged one that was published, so
             # the manifest holds the published version.
@@ -748,7 +747,7 @@ blocks:
               fi
               echo "crates.io lists and serves exactly the uploaded ${CRATE} ${version}"
 
-  - name: "Release: from crates.io (Linux amd64)"
+  - name: "Release: post-publish smoke test (Linux amd64)"
     # Each job creates a new project that depends on the released version from
     # crates.io (pinned with `=`), starts a temporary apache/kafka broker, and
     # runs the smoke test's offline checks and broker round trip, with the
@@ -772,7 +771,7 @@ blocks:
             - rustup toolchain install stable --profile minimal
             - cargo xtask package-smoke-test --registry --with-broker --toolchain stable --release
 
-  - name: "Release: from crates.io (macOS arm64)"
+  - name: "Release: post-publish smoke test (macOS arm64)"
     # Build and offline smoke test only. The broker round trip is covered on
     # Linux, and skipping Colima keeps this job short.
     dependencies: ["Release: publish to crates.io"]
