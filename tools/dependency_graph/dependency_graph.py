@@ -516,6 +516,8 @@ def main():
     parser.add_argument("--mark-file", default=None, help="Text file with class names to mark (one per line)")
     parser.add_argument("--output-format", default="png", choices=["png", "svg", "pdf"], help="Output format for graph")
     parser.add_argument("--output", default="dependency_graph", help="Output filename (without extension)")
+    parser.add_argument("--remaining-file", default=None,
+                        help="Where to write the remaining classes (default: remaining_classes.txt next to --output)")
     parser.add_argument("--json", action="store_true", help="Generate JSON output (tree and flat formats)")
     parser.add_argument("--json-only", action="store_true", help="Generate only JSON output, skip graph generation")
 
@@ -578,7 +580,7 @@ def main():
 
     # Step 8: Write remaining classes (excluding marked) to file
     remaining = [fqcn for fqcn in sorted_classes if fqcn not in marked_fqcns]
-    remaining_file = os.path.join(os.path.dirname(args.output) or ".", "remaining_classes.txt")
+    remaining_file = args.remaining_file or os.path.join(os.path.dirname(args.output) or ".", "remaining_classes.txt")
     with open(remaining_file, "w") as f:
         for fqcn in remaining:
             f.write(f"{fqcn}\n")

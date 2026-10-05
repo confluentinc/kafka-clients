@@ -33,13 +33,13 @@ Run from the project root:
 python3 tools/dependency_graph/dependency_graph.py \
   --kafka-dir kafka/ \
   --root-class KafkaProducer \
-  --mark-file marked_classes.txt \
+  --mark-file design/current/marked_classes.txt \
   --output-format png \
   --output dependency_graph
 ```
 
 Repeat `--root-class` to analyse several roots at once. The graph is the union of their
-dependency closures, which is how `remaining_classes.txt` is produced for the whole client:
+dependency closures, which is how `design/current/remaining_classes.txt` is produced for the whole client:
 
 ```bash
 python3 tools/dependency_graph/dependency_graph.py \
@@ -47,7 +47,8 @@ python3 tools/dependency_graph/dependency_graph.py \
   --root-class org.apache.kafka.clients.producer.KafkaProducer \
   --root-class org.apache.kafka.clients.consumer.KafkaConsumer \
   --root-class org.apache.kafka.clients.admin.Admin \
-  --mark-file marked_classes.txt \
+  --mark-file design/current/marked_classes.txt \
+  --remaining-file design/current/remaining_classes.txt \
   --json-only
 ```
 
@@ -60,6 +61,7 @@ python3 tools/dependency_graph/dependency_graph.py \
 | `--mark-file`     | (none)               | Text file with FQCNs of completed classes (one per line) |
 | `--output-format` | `png`                | Output format: `png`, `svg`, or `pdf`                    |
 | `--output`        | `dependency_graph`   | Output filename (without extension)                      |
+| `--remaining-file`| next to `--output`   | Path of the `remaining_classes.txt` output               |
 | `--json-only`     | off                  | Write only the JSON and text outputs; skip Graphviz      |
 
 ### Mark file format
@@ -71,7 +73,7 @@ org.apache.kafka.common.Uuid
 org.apache.kafka.common.message.ProduceRequestData
 ```
 
-Marked classes appear green in the graph. Unmarked classes are written to `remaining_classes.txt`.
+Marked classes appear green in the graph. Unmarked classes are written to `remaining_classes.txt` (see `--remaining-file`).
 
 ## Output
 
