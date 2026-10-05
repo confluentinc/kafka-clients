@@ -5321,17 +5321,17 @@ struct ChaosListenerState {
 
 // Copies a listener callback's partitions out, sorted, and destroys the list
 // (the callee owns it).
-ChaosPartitions chaos_take_partitions(kafka_consumer_TopicPartitionList_t* list) {
+ChaosPartitions chaos_take_partitions(kafka_common_TopicPartitionList_t* list) {
   ChaosPartitions out;
   if (list == nullptr) return out;
-  const int32_t n = kafka_consumer_TopicPartitionList_count(list);
+  const int32_t n = kafka_common_TopicPartitionList_count(list);
   out.reserve(n);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_TopicPartitionList_get(list, i);
-    const char* topic = kafka_consumer_TopicPartition_topic(tp);
-    out.emplace_back(topic ? topic : "", kafka_consumer_TopicPartition_partition(tp));
+    const kafka_common_TopicPartition_t* tp = kafka_common_TopicPartitionList_get(list, i);
+    const char* topic = kafka_common_TopicPartition_topic(tp);
+    out.emplace_back(topic ? topic : "", kafka_common_TopicPartition_partition(tp));
   }
-  kafka_consumer_TopicPartitionList_destroy(list);
+  kafka_common_TopicPartitionList_destroy(list);
   std::sort(out.begin(), out.end());
   return out;
 }
@@ -5341,11 +5341,11 @@ void chaos_push_committed(ChaosEventQueue& events, kafka_consumer_OffsetMap_t* m
   if (map == nullptr) return;
   const int32_t n = kafka_consumer_OffsetMap_count(map);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(map, i);
+    const kafka_common_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(map, i);
     const kafka_consumer_OffsetAndMetadata_t* oam = kafka_consumer_OffsetMap_get_value(map, i);
     if (tp == nullptr || oam == nullptr) continue;
-    const char* topic = kafka_consumer_TopicPartition_topic(tp);
-    events.push(chaos_committed(topic ? topic : "", kafka_consumer_TopicPartition_partition(tp),
+    const char* topic = kafka_common_TopicPartition_topic(tp);
+    events.push(chaos_committed(topic ? topic : "", kafka_common_TopicPartition_partition(tp),
                                 kafka_consumer_OffsetAndMetadata_offset(oam)));
   }
   kafka_consumer_OffsetMap_destroy(map);
@@ -5359,7 +5359,7 @@ void chaos_push_committed(ChaosEventQueue& events, kafka_consumer_OffsetMap_t* m
 // and Python listeners, a failed commit is reported, not raised.
 
 extern "C" kafka_common_Error_t* chaos_partitions_assigned(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   auto* state = static_cast<ChaosListenerState*>(user_data);
   state->events->push(chaos_rebalance(REBALANCE_KIND_ASSIGNED, chaos_take_partitions(partitions)));
   return nullptr;
@@ -5370,7 +5370,7 @@ extern "C" kafka_common_Error_t* chaos_partitions_assigned(
 // into its consumer (the consumer itself is held by the poll that invoked us),
 // then reads the commit back unless closing.
 extern "C" kafka_common_Error_t* chaos_partitions_revoked(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   auto* state = static_cast<ChaosListenerState*>(user_data);
   const ChaosPartitions tps = chaos_take_partitions(partitions);
   state->events->push(chaos_rebalance(REBALANCE_KIND_REVOKED, tps));
@@ -5415,7 +5415,7 @@ extern "C" kafka_common_Error_t* chaos_partitions_revoked(
 // "delegate to onPartitionsRevoked" default), so a fenced member's callback is
 // reported as lost -- and does not commit.
 extern "C" kafka_common_Error_t* chaos_partitions_lost(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   auto* state = static_cast<ChaosListenerState*>(user_data);
   state->events->push(chaos_rebalance(REBALANCE_KIND_LOST, chaos_take_partitions(partitions)));
   return nullptr;
@@ -5425,7 +5425,7 @@ extern "C" kafka_common_Error_t* chaos_partitions_lost(
 // `read_back`). Callers invoke it only right after a successful sync commit
 // with no poll in between.
 void chaos_read_back(const kafka_consumer_Consumer_t* consumer, ChaosEventQueue& events) {
-  kafka_consumer_TopicPartitionList_t* assigned = kafka_consumer_Consumer_assignment(consumer);
+  kafka_common_TopicPartitionList_t* assigned = kafka_consumer_Consumer_assignment(consumer);
   if (assigned == nullptr) {
     // The single-owner guard rejected the call. The workload thread is the
     // consumer's only caller, so this should not happen.
@@ -5435,21 +5435,21 @@ void chaos_read_back(const kafka_consumer_Consumer_t* consumer, ChaosEventQueue&
   }
   // The topic pointers borrow from `assigned`, which stays alive until after
   // the synchronous committed() call has copied them.
-  const int32_t n = kafka_consumer_TopicPartitionList_count(assigned);
+  const int32_t n = kafka_common_TopicPartitionList_count(assigned);
   std::vector<const char*> topics;
   std::vector<int32_t> parts;
   topics.reserve(n);
   parts.reserve(n);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_TopicPartitionList_get(assigned, i);
-    const char* topic = kafka_consumer_TopicPartition_topic(tp);
+    const kafka_common_TopicPartition_t* tp = kafka_common_TopicPartitionList_get(assigned, i);
+    const char* topic = kafka_common_TopicPartition_topic(tp);
     topics.push_back(topic ? topic : "");
-    parts.push_back(kafka_consumer_TopicPartition_partition(tp));
+    parts.push_back(kafka_common_TopicPartition_partition(tp));
   }
   kafka_consumer_OffsetMap_t* map = nullptr;
   kafka_common_Error_t* err =
       kafka_consumer_Consumer_committed(consumer, topics.data(), parts.data(), n, &map);
-  kafka_consumer_TopicPartitionList_destroy(assigned);
+  kafka_common_TopicPartitionList_destroy(assigned);
   if (err != nullptr) {
     events.push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
     return;
@@ -5668,12 +5668,12 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
         // chaos_on_delivery -- which is what lets the client batch and pipeline
         // instead of carrying one record per round trip.
         kafka_common_Error_t* send_err = nullptr;
-        kafka_producer_FutureRecordMetadata_t* future = kafka_producer_Producer_send_with_callback(
+        kafka_common_KafkaFuture_RecordMetadata_t* future = kafka_producer_Producer_send_with_callback(
             producer, topic.c_str(), /*partition=*/-1, /*timestamp=*/-1, key,
             static_cast<int32_t>(sizeof(key)), value.data(), static_cast<int32_t>(msg_size),
             chaos_on_delivery, ctx, &send_err);
         if (future != nullptr) {
-          kafka_producer_FutureRecordMetadata_destroy(future);
+          kafka_common_KafkaFuture_RecordMetadata_destroy(future);
         } else {
           chaos_settle_send_failure(state.get(), index, send_err);
         }
