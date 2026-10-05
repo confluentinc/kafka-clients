@@ -13,6 +13,7 @@ semaphore:
   triggers:
   - branches
   - pull_requests
+  - tags
   branches:
   - master
   tasks:
