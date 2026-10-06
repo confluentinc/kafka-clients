@@ -281,14 +281,29 @@ admin + `wait_for_partition_leaders` before producing (shared helper per file).
 
 Stale-rationale skips (consumer metrics tests, compressed halves, rebalance
 pause via `ConsumerHandle`, static-member new-partition, 4.3.1 revocation
-shape); GroupAuthorizer consumer tests; ProducerSendWhileDeletion; expiration
-suites; broker image bump to 4.3.x (+ assignment-interval arms); broker
-stop/restart harness + fault-injection tests; stale doc/comment cleanup.
+shape); GroupAuthorizer consumer tests; broker image bump to 4.3.x
+(+ assignment-interval arms); interceptor / `ClusterResourceListener` /
+header-serializer API gaps; stale doc/comment cleanup.
+(ProducerSendWhileDeletion, the expiration suites, the broker stop/restart harness,
+fault-injection tests and failed-start container reaping were done in Phases 8, 9,
+15-18 and 20.)
+
 Binding gaps found: gRPC servers (python `grpc_translate.py`, C `server.cc`) return
 `serialized_key_size`/`serialized_value_size` = -1, and the Python server sends a
 null value as `b""` (Phase 2 / Critic 66).
-Harness: a failed cluster start attempt can leave broker containers in Docker `Created`
-state (seen once in Phase 17; removed manually) — reap them on the failure path.
+
+Flaky under load: `test_bump_transactional_epoch_with_tv2_disabled` (1/30 ProducerFenced).
+The max-poll-interval tests were stabilised in `c50b46c5`; their root cause is the
+stale-assignment divergence below.
+
+Harness follow-ups (reverted from `24aca2b5` in `e68e6757` after a CI-only hang):
+- dedicated clusters are not counted toward `cluster_pool::TARGET_LIVE_CLUSTERS`;
+- `BrokerProxy` releases and rebinds its advertised ports across stop/start, so an
+  ephemeral source port can take one and make `start_broker` panic;
+- root-cause the CI hang in `consumer_bounce_test::test_async_subscribe_when_topic_unavailable`
+  (passes locally in ~19 s; hit the 1 h Semaphore limit). Bound `BrokerProxy::stop` and the
+  bounce test with timeouts so a recurrence fails with logs, and check whether the client
+  hangs on a connection that is accepted and immediately closed.
 
 ## Production divergences found (not fixed — need a decision)
 
@@ -304,6 +319,15 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
   `AdminClientConfig` doesn't parse the recovery keys; Java reads it at
   `KafkaAdminClient.java:635` and rebootstraps at `:731`. Producer/consumer were fixed in
   891571d0. Blocks `ClientRebootstrapTest.testAdminRebootstrap{,Disabled}` (admin scope).
+
+- **Stale assignment applied after the member leaves (CI flake analysis, shared with Java):**
+  a `PartitionsAssignedEvent` queued by the background task before a poll-timeout leave is
+  still applied on the next app `poll()`, firing `onPartitionsAssigned` for a member that has
+  left, with no matching revoke/lost. Java has the same gap: `AsyncKafkaConsumer.process(
+  PartitionsAssignedEvent)` → `ConsumerMembershipManager.applyAssignment`
+  (`ConsumerMembershipManager.java:524-527`) has no epoch/state check, and
+  `maybeAbortReconciliation` (`AbstractMembershipManager.java:960`) only runs after the
+  callback. Candidate for an upstream report, or a documented Rust-side guard.
 
 ## Run log
 
