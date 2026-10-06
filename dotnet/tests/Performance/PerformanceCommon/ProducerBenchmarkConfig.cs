@@ -106,6 +106,21 @@ public sealed class ProducerBenchmarkConfig
     public bool Async { get; private set; }
 
     /// <summary>
+    /// Whether the async send loop waits for each record to be <b>accepted</b> by the client before it sends
+    /// the next one (<c>AWAIT_ACCEPTED</c>, default <b>true</b>; used only on the async path). A send has two
+    /// stages: accepted (Java's <c>send()</c> returning) and delivered. With <c>False</c> the loop hands both
+    /// stages to the recorder and sends the next record at once; a send whose acceptance fails is counted by
+    /// the recorder like one whose call throws. This binding's async <c>Send</c> has a first stage that can
+    /// stay pending once its bound on records not yet handed to the send-batch thread is reached, so with
+    /// <c>True</c> that bound throttles this loop. With <c>False</c> it no longer does: records accumulate
+    /// inside the client, and its memory grows if they are offered faster than the cluster drains them. For
+    /// PerfV2 (confluent-kafka-dotnet), whose first stage is always complete, <c>AWAIT_ACCEPTED</c> has no
+    /// effect. Parsed strictly (<c>True</c> or <c>False</c>): unlike the other flags it defaults to true, so a
+    /// misspelt value must not silently select the other mode.
+    /// </summary>
+    public bool AwaitAccepted { get; private set; } = true;
+
+    /// <summary>
     /// Whether the harness should (re)create the topic before producing (<c>CREATE_TOPIC</c>, default
     /// <b>true</b>, matching Python). Provisioning is per-exe (<c>PerfV3</c>/<c>PerfV2</c>'s own
     /// <c>TopicProvisioning.RecreateTopic</c>) rather than in this client-agnostic config type, since an
@@ -134,6 +149,14 @@ public sealed class ProducerBenchmarkConfig
             CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
             Partitions = PerfEnv.GetInt("PARTITIONS", -1),
             ClientVersion = PerfEnv.GetString("CLIENT_VERSION", "3"),
+        };
+
+        string? awaitAccepted = PerfEnv.GetStringOrNull("AWAIT_ACCEPTED");
+        config.AwaitAccepted = awaitAccepted switch
+        {
+            null or "" or "True" => true,
+            "False" => false,
+            _ => throw new ArgumentException($"AWAIT_ACCEPTED must be True or False, not '{awaitAccepted}'"),
         };
 
         string? limitRps = PerfEnv.GetStringOrNull("LIMIT_RPS");

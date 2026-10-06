@@ -51,7 +51,7 @@ public sealed class PerfEngineFixture : IDisposable
     // clears the whole set before applying a test's values, so one test can never inherit another's.
     private static readonly string[] s_managedVariables =
     {
-        "ASYNC", "BOOTSTRAP_SERVERS", "CLIENT_VERSION", "CONSUMER_BATCH_SIZE", "CREATE_TOPIC",
+        "ASYNC", "AWAIT_ACCEPTED", "BOOTSTRAP_SERVERS", "CLIENT_VERSION", "CONSUMER_BATCH_SIZE", "CREATE_TOPIC",
         "DO_VERIFY", "FETCH_MIN_BYTES", "GROUP_ID", "INTERVAL_SECONDS", "JOIN_TIMEOUT_SECONDS",
         "KAFKA_BIN", "KEY_SIZE", "LIMIT_RPS", "LIMIT_RPS_SLICE_MS", "MAX_PARTITION_FETCH_BYTES",
         "NUM_MESSAGES", "P99_LIMIT_MS", "PARTITIONS", "POLL_SINGLE", "POLL_TIMEOUT_MS", "READINESS_MIN_RECORDS",

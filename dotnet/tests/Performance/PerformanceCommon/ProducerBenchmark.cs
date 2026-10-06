@@ -252,6 +252,11 @@ public static class ProducerBenchmark
         long firstTicks = Stopwatch.GetTimestamp();
         long nextCheckTicks = firstTicks + RateLimitSliceTicks(config);
         metrics.SetMeasurementStart(beforeMs);
+        if (!config.AwaitAccepted)
+        {
+            Console.WriteLine("Not awaiting send acceptance (AWAIT_ACCEPTED=False)");
+        }
+
         Console.WriteLine($"Starting measured interval at {beforeMs} ms: {DateTime.UtcNow:o}");
 
         long messagesSent = 0;
@@ -264,9 +269,21 @@ public static class ProducerBenchmark
                 Task<PerfRecordMetadata> task;
                 try
                 {
-                    // Awaits ACCEPTANCE only (the first stage, where the client applies its backpressure,
-                    // as Java's send() blocks); the delivery is awaited by the recorder.
-                    task = await backend.Send(config.TopicName, message.Key, message.Value).ConfigureAwait(false);
+                    ValueTask<Task<PerfRecordMetadata>> send = backend.Send(config.TopicName, message.Key, message.Value);
+                    if (config.AwaitAccepted)
+                    {
+                        // Awaits ACCEPTANCE only (the first stage, where the client applies its
+                        // backpressure, as Java's send() blocks); the delivery is awaited by the recorder.
+                        task = await send.ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // AWAIT_ACCEPTED=False: do not wait for acceptance. An accepted send is unwrapped in
+                        // place; a pending or failed one becomes a single task that completes with the
+                        // delivery, or fails with the acceptance failure, which the recorder counts the same
+                        // way as a failure thrown by the call itself (the catch below).
+                        task = send.IsCompletedSuccessfully ? send.Result : send.AsTask().Unwrap();
+                    }
                 }
                 catch (Exception ex)
                 {
