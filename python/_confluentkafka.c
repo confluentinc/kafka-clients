@@ -3076,7 +3076,8 @@ static PyObject* py_OffsetMap_drain(PyObject* self, PyObject* args) {
         int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch);
         PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
                                       kafka_common_TopicPartition_partition(k));
-        PyObject* val = Py_BuildValue("(LsO)", kafka_consumer_OffsetAndMetadata_offset(v),
+        // "N" takes the epoch's new reference ("O" would leak one int per entry).
+        PyObject* val = Py_BuildValue("(LsN)", kafka_consumer_OffsetAndMetadata_offset(v),
                                       kafka_consumer_OffsetAndMetadata_metadata(v),
                                       has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
