@@ -3104,7 +3104,8 @@ static PyObject* py_OffsetAndTimestampMap_drain(PyObject* self, PyObject* args) 
         int has_epoch = kafka_consumer_OffsetAndTimestamp_leader_epoch(v, &epoch);
         PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
                                       kafka_common_TopicPartition_partition(k));
-        PyObject* val = Py_BuildValue("(LLO)", kafka_consumer_OffsetAndTimestamp_offset(v),
+        // "N" takes the epoch's new reference ("O" would leak one int per entry).
+        PyObject* val = Py_BuildValue("(LLN)", kafka_consumer_OffsetAndTimestamp_offset(v),
                                       kafka_consumer_OffsetAndTimestamp_timestamp(v),
                                       has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
