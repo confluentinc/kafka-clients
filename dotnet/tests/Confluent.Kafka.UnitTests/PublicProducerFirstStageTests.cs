@@ -370,6 +370,17 @@ public sealed class PublicProducerFirstStageTests
 
         // Observe all of it: the caller's own tasks must not be what the listener hears about.
         await SettleWithin(Task.WhenAll(stages), s_prompt, $"{teardown} left a first stage pending", observeFaults: true);
+
+        // That observation also hides a first stage that teardown FAULTED (or cancelled) from the
+        // listener, so require the outcome directly: a teardown-cancelled admission wait still
+        // completes its stage with the record's delivery Task (D3), and the live token never fired.
+        // A caller that drops its stage would otherwise meet each such fault only as an unobserved
+        // one (the M11/P3.5 S3 mutant that faulted the stage on a cancelled wait passed without this).
+        int unsuccessful = Array.FindAll(stages, stage => stage.Status != TaskStatus.RanToCompletion).Length;
+        Assert.True(
+            unsuccessful == 0,
+            $"{teardown}: {unsuccessful} first stage(s) did not complete successfully at teardown");
+
         await SettleWithin(Task.WhenAll(deliveries), s_prompt, $"{teardown} left a delivery pending", observeFaults: true);
         foreach (Task<RecordMetadata> delivery in deliveries)
         {

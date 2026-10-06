@@ -1611,14 +1611,32 @@ public sealed class SendAccumulatorTests
                 };
                 drainer.Start();
 
-                for (int i = 0; i < Burst; i++)
+                // Each first stage is awaited under a deadline. It is the throttle, so a permit that
+                // never comes back (a release-accounting regression) must FAIL this loop rather than
+                // park it forever while the drainer spins: unbounded, it hung the full suite under
+                // the M11/P3.5 S3 permit-leak mutants (ReleaseAdmission off by one; the drain's
+                // release skipped) instead of going red.
+                bool drainerExited = false;
+                try
                 {
-                    sends[i] = await harness.AppendAccepted(
-                        (byte)i, new OrderRecordingDeliveryCallback(observed, i), CancellationToken.None);
+                    for (int i = 0; i < Burst; i++)
+                    {
+                        int index = i;
+                        sends[i] = await TestTimeout.Run(
+                            () => harness.AppendAccepted(
+                                (byte)index, new OrderRecordingDeliveryCallback(observed, index), CancellationToken.None),
+                            s_deadline);
+                    }
+                }
+                finally
+                {
+                    // On every path, so a send that timed out above does not leave the drainer
+                    // spinning against a harness that is about to be disposed.
+                    sending.Cancel();
+                    drainerExited = drainer.Join(TimeSpan.FromSeconds(10));
                 }
 
-                sending.Cancel();
-                Assert.True(drainer.Join(TimeSpan.FromSeconds(10)), "the drainer thread did not exit");
+                Assert.True(drainerExited, "the drainer thread did not exit");
             }
 
             harness.DrainNow();
