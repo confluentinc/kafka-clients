@@ -115,8 +115,8 @@ public sealed class ProducerBenchmarkConfig
     /// <c>True</c> that bound throttles this loop. With <c>False</c> it no longer does: records accumulate
     /// inside the client, and its memory grows if they are offered faster than the cluster drains them. For
     /// PerfV2 (confluent-kafka-dotnet), whose first stage is always complete, <c>AWAIT_ACCEPTED</c> has no
-    /// effect. Parsed strictly (<c>True</c> or <c>False</c>): unlike the other flags it defaults to true, so a
-    /// misspelt value must not silently select the other mode.
+    /// effect. Parsed strictly (<c>True</c> or <c>False</c>; unset or empty means true, anything else throws),
+    /// so a misspelt value cannot silently select the non-default mode.
     /// </summary>
     public bool AwaitAccepted { get; private set; } = true;
 
