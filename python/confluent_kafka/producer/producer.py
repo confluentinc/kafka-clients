@@ -371,10 +371,10 @@ class Producer(Generic[K, V], _ProducerState):
         This method must not be called from within a ``send()`` callback: it
         raises ``KafkaError``, as it would cause a deadlock.
         """
+        self._check_not_closed()
         if in_callback(self):
             _LOG.error(FLUSH_IN_CALLBACK_MESSAGE)
             raise KafkaError(message=FLUSH_IN_CALLBACK_MESSAGE)
-        self._check_not_closed()
         sent = list(self._futures)
         self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_flush_async, cb))

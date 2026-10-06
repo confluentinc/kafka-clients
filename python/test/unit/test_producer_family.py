@@ -778,6 +778,27 @@ def test_flush_in_a_callback_raises_and_close_in_a_callback_does_not_deadlock(
         p.send(record=RECORD)
 
 
+def test_flush_in_a_callback_of_a_closed_producer_reports_the_closed_state() -> None:
+    # Order (CLAUDE.md, Python Binding Conventions, Implementation over the
+    # FFI): the closed check comes first on an FFI-backed class, then Java's
+    # in-callback check (KafkaProducer.java:1217-1219).
+    p = KafkaProducer(configs=UNREACHABLE)
+    out: dict[str, Any] = {}
+    done = threading.Event()
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        p.close()
+        try:
+            p.flush()
+        except Exception as error:  # noqa: BLE001 - the test reads which one
+            out["flush"] = error
+        done.set()
+
+    p.send(record=RECORD, callback=callback)
+    assert done.wait(30)
+    assert type(out["flush"]) is IllegalStateError and str(out["flush"]) == CLOSED
+
+
 # ===========================================================================
 # Close
 # ===========================================================================
