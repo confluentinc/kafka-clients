@@ -54,7 +54,7 @@ CONSUMER_METHODS = [
     "offsets_for_times", "beginning_offsets", "end_offsets", "current_lag", "group_metadata",
     "close", "__enter__", "__exit__", "wakeup",
 ]
-ASYNC_METHODS = [m for m in CONSUMER_METHODS if m != "current_lag"]
+ASYNC_METHODS = list(CONSUMER_METHODS)
 ASYNC_METHODS[ASYNC_METHODS.index("__enter__")] = "__aenter__"
 ASYNC_METHODS[ASYNC_METHODS.index("__exit__")] = "__aexit__"
 
@@ -69,7 +69,8 @@ MOCK_METHODS = [
     "schedule_nop_poll_task", "last_poll_timeout",
 ]
 
-# The methods Java waits in (addAndGet, the network, a listener it runs).
+# The methods whose entry point has an _async completion form in the FFI header
+# (Class family): not current_lag, although Java's waits (addAndGet).
 WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "seek", "seek_to_beginning",
            "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
            "resume", "offsets_for_times", "beginning_offsets", "end_offsets", "close",
@@ -126,12 +127,13 @@ def test_not_generated_or_dropped(name: str) -> None:
         assert not hasattr(cls, name), (cls.__name__, name)
 
 
-def test_the_async_classes_have_no_current_lag() -> None:
-    # AsyncKafkaConsumer.currentLag waits (addAndGet) and its _async entry
-    # point is missing; a mock does not generate what its base does not.
-    assert not hasattr(AsyncConsumer, "current_lag")
-    assert not hasattr(AsyncMockConsumer, "current_lag")
-    assert hasattr(MockConsumer, "current_lag")
+def test_current_lag_is_a_plain_def_on_every_class() -> None:
+    # Its entry point, kafka_consumer_Consumer_current_lag, has no _async
+    # form, so it is a plain def on both classes (Class family), the mocks
+    # included.
+    for cls in (Consumer, KafkaConsumer, MockConsumer, AsyncConsumer, AsyncKafkaConsumer,
+                AsyncMockConsumer):
+        assert not inspect.iscoroutinefunction(cls.current_lag), cls.__name__
 
 
 def test_module_exports() -> None:
@@ -197,8 +199,7 @@ def test_a_positional_call_on_kafka_consumer_is_a_type_error(name: str,
         getattr(consumer, name)(*args)
 
 
-@pytest.mark.parametrize("name, args", [(n, a) for n, a in POSITIONAL_CALLS
-                                        if n != "current_lag"])
+@pytest.mark.parametrize("name, args", POSITIONAL_CALLS)
 def test_a_positional_call_on_the_async_mock_is_a_type_error(name: str,
                                                               args: tuple[Any, ...]) -> None:
     async def main() -> None:

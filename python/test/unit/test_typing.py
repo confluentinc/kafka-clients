@@ -292,6 +292,7 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await ac.poll(timeout=1.0), "ConsumerRecords[str, bytes]")
         assert_type(await ac.position(partition=tp), int)
         assert_type(ac.assignment(), "set[TopicPartition]")
+        assert_type(ac.current_lag(topic_partition=tp), "int | None")
         ac.commit_nowait(callback=callback)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)

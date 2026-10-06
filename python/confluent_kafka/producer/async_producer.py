@@ -15,11 +15,11 @@
 """``AsyncProducer``: the asyncio peer of :class:`~confluent_kafka.producer.Producer`.
 
 By rule 3, the same methods as ``Producer`` (CLAUDE.md, Python Binding
-Conventions, Class family), each ``async def`` iff Java waits in it:
-``init_transactions``, ``send_offsets_to_transaction``, ``commit_transaction``,
-``abort_transaction``, ``send`` (Java blocks on metadata and buffer space),
-``flush``, ``partitions_for`` and ``close``. ``begin_transaction`` and
-``metrics`` do not wait, so they are plain ``def``. ``send`` returns an
+Conventions, Class family), each ``async def`` iff the entry point it calls has
+an ``_async`` completion form in the FFI header: ``init_transactions``,
+``begin_transaction``, ``send_offsets_to_transaction``, ``commit_transaction``,
+``abort_transaction``, ``send``, ``flush``, ``partitions_for`` and ``close``.
+``metrics`` has none, so it is a plain ``def``. ``send`` returns an
 ``asyncio.Future``, so a round trip is ``md = await (await p.send(record=r))``.
 
 Every waiting call awaits an ``asyncio.Future`` completed through
@@ -102,13 +102,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         await self._run_async(
             lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
 
-    def begin_transaction(self) -> None:
-        """See :meth:`Producer.begin_transaction`. Java does not wait in it, so
-        it is a plain ``def``; it does not wait for earlier sends either, so it
-        never blocks the loop (see :meth:`Producer.begin_transaction` for why it
+    async def begin_transaction(self) -> None:
+        """See :meth:`Producer.begin_transaction`. Its entry point has an
+        ``_async`` form, so it is an ``async def`` awaiting it; it does not wait
+        for earlier sends (see :meth:`Producer.begin_transaction` for why it
         needs no drain)."""
         self._check_not_closed()
-        raise_if_error(self._call(_lib.Producer_begin_transaction))
+        await self._run_async(
+            lambda cb: self._call(_lib.Producer_begin_transaction_async, cb))
         self._in_transaction = True
 
     async def send_offsets_to_transaction(
@@ -278,8 +279,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         return [to_partition_info(t) for t in _lib.PartitionInfoList_drain(list_handle)]
 
     def metrics(self) -> dict[MetricName, Metric]:
-        """See :meth:`Producer.metrics`. Java does not wait in it, so it is a
-        plain ``def``."""
+        """See :meth:`Producer.metrics`. Its entry point has no ``_async``
+        form, so it is a plain ``def``."""
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 

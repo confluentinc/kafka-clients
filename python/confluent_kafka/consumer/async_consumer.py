@@ -15,24 +15,22 @@
 """``AsyncConsumer``: the asyncio peer of :class:`Consumer` (CLAUDE.md, Python
 Binding Conventions, Class family).
 
-The same methods, in the same order. A method is ``async def`` iff Java waits
-in it — on the background thread (``addAndGet``), on the network or on a
-listener it runs: ``subscribe``, ``assign``, ``unsubscribe``, ``poll``,
-``commit``, ``seek``, ``seek_to_beginning`` / ``seek_to_end``, ``position``,
-``committed``, ``partitions_for``, ``list_topics``, ``pause`` / ``resume``,
+The same methods, in the same order. A method is ``async def`` iff the entry
+point it calls has an ``_async`` completion form in the FFI header:
+``subscribe``, ``assign``, ``unsubscribe``, ``poll``, ``commit``, ``seek``,
+``seek_to_beginning`` / ``seek_to_end``, ``position``, ``committed``,
+``partitions_for``, ``list_topics``, ``pause`` / ``resume``,
 ``offsets_for_times``, ``beginning_offsets`` / ``end_offsets`` and ``close``;
 every other method is a plain ``def`` (``assignment()``, ``subscription()``,
-``commit_nowait()``, ``metrics()``, ``paused()``, ``group_metadata()``,
-``wakeup()``). A waiting method awaits the entry point's ``_async`` form; the
-listener runs on the event loop and may be ``async def``. A coroutine listener
-method that ``commit_nowait()`` delivers is awaited in a task that holds the
-consumer until it ends: meanwhile ``metrics()`` / ``group_metadata()`` raise
-``ConcurrentModificationError`` (see ``commit_nowait``).
+``commit_nowait()``, ``metrics()``, ``paused()``, ``current_lag()``,
+``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
+``_async`` form; the listener runs on the event loop and may be ``async def``.
+A coroutine listener method that ``commit_nowait()`` delivers is awaited in a
+task that holds the consumer until it ends: meanwhile ``metrics()`` /
+``group_metadata()`` raise ``ConcurrentModificationError`` (see
+``commit_nowait``).
 
-Not generated, besides :class:`Consumer`'s omissions: ``current_lag()``, which
-waits in Java (``AsyncKafkaConsumer.currentLag`` uses ``addAndGet``) but whose
-``_async`` entry point, ``kafka_consumer_Consumer_current_lag_async``, is
-missing (``ffi-overload-gaps.md``).
+Not generated: :class:`Consumer`'s omissions.
 """
 
 from __future__ import annotations
@@ -204,7 +202,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         While a ``commit_nowait()`` still finishes in a task (a coroutine listener
         it delivered is being awaited), this raises ``ConcurrentModificationError``:
         that commit holds the consumer, and the core's ``ConsumerHandle`` has no
-        ``metrics`` (``ffi-overload-gaps.md``)."""
+        ``metrics``."""
         return self._c_metrics()
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
@@ -242,13 +240,19 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.end_offsets`."""
         return await self._a_end_offsets(partitions)
 
+    def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
+        """See :meth:`Consumer.current_lag`. Its entry point,
+        ``kafka_consumer_Consumer_current_lag``, has no ``_async`` form, so it
+        is a plain ``def``."""
+        return self._c_current_lag(topic_partition)
+
     def group_metadata(self) -> ConsumerGroupMetadata:
         """See :meth:`Consumer.group_metadata`.
 
         While a ``commit_nowait()`` still finishes in a task (a coroutine listener
         it delivered is being awaited), this raises ``ConcurrentModificationError``:
         that commit holds the consumer, and the core's ``ConsumerHandle`` has no
-        ``groupMetadata`` (``ffi-overload-gaps.md``)."""
+        ``groupMetadata``."""
         return self._c_group_metadata()
 
     async def close(self, *, option: CloseOptions | None = None) -> None:

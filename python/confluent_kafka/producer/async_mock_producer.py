@@ -99,7 +99,7 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     async def init_transactions(self) -> None:
         self._init_transactions()
 
-    def begin_transaction(self) -> None:
+    async def begin_transaction(self) -> None:
         self._begin_transaction()
 
     async def send_offsets_to_transaction(

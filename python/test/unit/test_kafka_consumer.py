@@ -96,7 +96,7 @@ other 81, each named, are not, with the reason:
 - not generated or dropped: ``testClientInstanceId``,
   ``testClientInstanceIdInvalidTimeout`` and
   ``testClientInstanceIdNoTelemetryReporterRegistered`` (``clientInstanceId`` is
-  not generated, ``ffi-overload-gaps.md``); ``testCurrentLag``
+  not generated, its entry point being missing); ``testCurrentLag``
   (``current_lag()`` always returns ``None``, Rust-core gap 3); and
   ``testSubscriptionOnNullPattern`` for the dropped ``java.util.regex.Pattern``
   overloads (``testSubscriptionOnEmptyPattern`` runs as its ``SubscriptionPattern``
@@ -372,7 +372,8 @@ def test_verify_poll_times_out_during_metadata_update() -> None:
 def test_committed_throws_timeout_error_for_no_response() -> None:
     # testCommittedThrowsTimeoutExceptionForNoResponse: Java's
     # committed(partitions, Duration.ofMillis(1000)); the Duration form is
-    # not generated (ffi-overload-gaps.md), so default.api.timeout.ms bounds it.
+    # not generated, its entry point being missing, so default.api.timeout.ms
+    # bounds it.
     with new_consumer(**{"default.api.timeout.ms": 1000}) as consumer:
         consumer.assign(partitions=[TP0])
         with pytest.raises(KafkaTimeoutError) as e:
@@ -1128,7 +1129,9 @@ def test_async_consumer_surface_without_a_broker() -> None:
             await consumer.seek(partition=TP0, offset=-1)
         assert str(e.value) == "seek offset must not be a negative number"
         await consumer.seek(partition=TP0, offset_and_metadata=OffsetAndMetadata(offset=3))
-        assert not hasattr(consumer, "current_lag")
+        # A plain def (its entry point has no _async form); nothing fetched,
+        # so the lag is not known.
+        assert consumer.current_lag(topic_partition=TP0) is None
         with pytest.raises(IllegalArgumentError):
             await consumer.poll(timeout=-1)
         with pytest.raises(IllegalArgumentError) as e:
@@ -1145,6 +1148,9 @@ def test_async_consumer_surface_without_a_broker() -> None:
         await consumer.close()
         with pytest.raises(IllegalStateError):
             consumer.assignment()
+        with pytest.raises(IllegalStateError) as e:
+            consumer.current_lag(topic_partition=TP0)
+        assert str(e.value) == CLOSED
 
     asyncio.run(main())
 

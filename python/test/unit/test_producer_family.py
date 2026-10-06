@@ -86,9 +86,11 @@ MOCK_OWN = ["set_init_transaction_exception", "set_begin_transaction_exception",
             "transaction_committed", "transaction_aborted", "flushed", "sent_offsets",
             "commit_count", "history", "uncommitted_records", "consumer_group_offsets_history",
             "uncommitted_offsets", "clear", "complete_next", "error_next"]
-# Java waits in these (KafkaProducer's implementation), so they are async def.
-WAITING = {"init_transactions", "send_offsets_to_transaction", "commit_transaction",
-           "abort_transaction", "send", "flush", "partitions_for", "close"}
+# The entry points of these have an _async completion form in the FFI header,
+# so they are async def (CLAUDE.md, Python Binding Conventions, Class family).
+WAITING = {"init_transactions", "begin_transaction", "send_offsets_to_transaction",
+           "commit_transaction", "abort_transaction", "send", "flush", "partitions_for",
+           "close"}
 
 MOCK_FORMS = ("MockProducer() takes one of (cluster, auto_complete, partitioner, "
               "key_serializer, value_serializer), (auto_complete, partitioner, key_serializer, "
@@ -1233,6 +1235,25 @@ def test_begin_transaction_does_not_wait_for_earlier_sends(transactional: bool) 
         p.close(timeout=0)
 
 
+def test_begin_transaction_waits_on_its_async_entry_point(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The entry point has an _async form, so the sync class waits on it, as
+    # for the other transaction ops (CLAUDE.md, Python Binding Conventions,
+    # Class family), and does not call the plain form.
+    calls: list[str] = []
+    for name in ("Producer_begin_transaction", "Producer_begin_transaction_async"):
+        def recording(*args: Any, _name: str = name, _real: Any = getattr(_lib, name)) -> Any:
+            calls.append(_name)
+            return _real(*args)
+
+        monkeypatch.setattr(_lib, name, recording)
+    with KafkaProducer(configs=UNREACHABLE) as p:
+        with pytest.raises(IllegalStateError) as err:
+            p.begin_transaction()
+        assert str(err.value) == NOT_TRANSACTIONAL
+    assert calls == ["Producer_begin_transaction_async"]
+
+
 def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
     # Java: throwIfInvalidGroupMetadata, throwIfNoTransactionManager,
     # throwIfProducerClosed, then nothing to send for empty offsets. The core
@@ -1453,14 +1474,17 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     assert str(err.value) == CLOSED
 
 
-async def test_async_begin_transaction_is_plain_and_does_not_block_the_loop() -> None:
-    # Critic 75 N1: a record still waiting for its topic's metadata (up to
-    # max.block.ms) does not hold begin_transaction() on the loop thread.
+async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
+    # Its entry point has an _async form, so begin_transaction() is a
+    # coroutine (Class family). Critic 75 N1: a record still waiting for its
+    # topic's metadata (up to max.block.ms) does not hold it.
     async with AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 3000}) as p:
         f = await p.send(record=RECORD)
         start = time.monotonic()
+        begin = p.begin_transaction()
+        assert inspect.iscoroutine(begin)
         with pytest.raises(IllegalStateError) as err:
-            p.begin_transaction()
+            await begin
         assert time.monotonic() - start < 1
         assert str(err.value) == NOT_TRANSACTIONAL
         with pytest.raises(IllegalStateError):
@@ -1626,7 +1650,7 @@ async def test_async_mock_family() -> None:
     md = await (await p.send(record=RECORD))
     assert md.offset() == 1
     await p.init_transactions()
-    p.begin_transaction()
+    await p.begin_transaction()
     assert p.transaction_in_flight()
     await p.commit_transaction()
     assert p.commit_count() == 1

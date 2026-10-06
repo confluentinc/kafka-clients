@@ -472,6 +472,23 @@ def test_current_lag() -> None:
     assert consumer.current_lag(topic_partition=partition) == 6
 
 
+def test_async_current_lag() -> None:
+    # testCurrentLag on the async mock, where current_lag() is a plain def:
+    # its entry point has no _async form (Class family).
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        partition = tp("t", 0)
+        await consumer.assign(partitions=[partition])
+        consumer.update_beginning_offsets(new_offsets={partition: 0})
+        # No end offset: the test models being caught up.
+        assert consumer.current_lag(topic_partition=partition) == 0
+        consumer.update_end_offsets(new_offsets={partition: 10})
+        await consumer.seek(partition=partition, offset=4)
+        assert consumer.current_lag(topic_partition=partition) == 6
+
+    asyncio.run(main())
+
+
 def test_group_metadata_and_metrics() -> None:
     consumer = earliest()
     metadata = consumer.group_metadata()
@@ -783,7 +800,7 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
             await consumer.poll(timeout=0)
         with pytest.raises(UnsupportedVersionError):
             await consumer.offsets_for_times(timestamps_to_search={partition: 0})
-        assert not hasattr(consumer, "current_lag")
+        assert consumer.current_lag(topic_partition=partition) == 0
         async with consumer:
             pass
         assert consumer.closed()

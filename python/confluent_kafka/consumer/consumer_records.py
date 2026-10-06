@@ -88,8 +88,7 @@ class ConsumerRecords(Generic[K, V]):
         record is absent. Java's is the fetch's next offset, the position after
         the poll: past trailing control records (transaction markers) and a
         compacted tail, and present for a partition whose poll only advanced
-        past them. The FFI does not expose the core's next offsets yet
-        (``ffi-overload-gaps.md``)."""
+        past them. The FFI does not expose the core's next offsets yet."""
         return dict(self._next_offsets)
 
     def partitions(self) -> set[TopicPartition]:

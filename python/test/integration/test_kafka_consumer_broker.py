@@ -731,7 +731,7 @@ def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any)
 # ConsumerRecords.next_offsets() past a transaction marker (Critic 76 F5):
 # Java's FetchCollector reports the fetch's next offset, the position after the
 # poll. The FFI's ConsumerRecords has no next-offsets accessor, so the binding
-# recomputes last offset + 1 (ffi-overload-gaps.md).
+# recomputes last offset + 1.
 # ---------------------------------------------------------------------------
 def _transactional_topic(broker: Any, values: list[str]) -> str:
     topic = f"py-consumer-txn-{uuid.uuid4().hex[:12]}"
@@ -752,7 +752,7 @@ def _transactional_topic(broker: Any, values: list[str]) -> str:
 
 
 @pytest.mark.skip(reason=(
-    "The FFI's ConsumerRecords has no next-offsets accessor (ffi-overload-gaps.md): "
+    "The FFI's ConsumerRecords has no next-offsets accessor: "
     "next_offsets() is the last offset + 1 (3), Java's is past the commit marker (4)"))
 def test_next_offsets_skip_the_transaction_marker(kafka_broker: Any) -> None:
     # Offsets 0-2 are the records, 3 the commit marker.

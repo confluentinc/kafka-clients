@@ -120,7 +120,7 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
                 raise AssertionError("send() did not raise")
             assert calls == []
 
-            producer.begin_transaction()
+            await producer.begin_transaction()
             future = await producer.send(
                 record=ProducerRecord(topic=topic, key="key", value="value"),
                 callback=lambda metadata, exception: calls.append(exception))
@@ -178,13 +178,13 @@ def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its
                                       value_serializer=string_serializer())
         try:
             await producer.init_transactions()
-            producer.begin_transaction()
+            await producer.begin_transaction()
             _lib.Producer_test_set_paused(producer._c_producer, True)  # noqa: SLF001
             future = await producer.send(
                 record=ProducerRecord(topic=topic, key="key", value="value"))
             start = time.monotonic()
             with pytest.raises(IllegalStateError) as err:
-                producer.begin_transaction()
+                await producer.begin_transaction()
             assert time.monotonic() - start < 1
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
             assert not future.done()

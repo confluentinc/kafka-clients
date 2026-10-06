@@ -1482,9 +1482,9 @@ static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args
     Py_RETURN_NONE;
 }
 
-// begin_transaction(producer) -> error_int: Java's beginTransaction() does not
-// wait, so the Python method (a plain def on both producer classes) uses this
-// plain FFI form rather than an _async one. The FFI first drains its own
+// begin_transaction(producer) -> error_int: the plain FFI form, with which the
+// tests ask the core directly; the Python methods wait on, or await,
+// Producer_begin_transaction_async (below). The FFI first drains its own
 // submission queue (producer-transactions.md §13), a single atomic load for the
 // Python client, which never queues there. Python does not drain the C
 // accumulation first (Producer.begin_transaction says why no send that
@@ -1994,15 +1994,17 @@ static Py_ssize_t offsets_to_arrays(PyObject* list, offset_arrays_t* out) {
 
 // ---- Producer transaction control ops (async) ------------------------------
 //
-// The waiting transaction ops (Java's initTransactions, sendOffsetsToTransaction,
-// commitTransaction and abortTransaction wait; beginTransaction does not, and
-// uses the plain form above), driving the kafka_producer_Producer_<op>_async FFI
-// variants. The Python wrapper waits on the completion via _run_sync
-// (threading.Event, GIL released -> the main thread stays responsive to
-// SIGTERM/KeyboardInterrupt) or _run_async (asyncio.Future, awaited/cancellable),
-// exactly as flush/close do, so a transaction op never parks the caller inside a
-// native block_on. Python first drains the C accumulation (Producer_drain), so a
-// send that returned belongs to the op (producer-transactions.md §13).
+// The five transaction ops, driving the kafka_producer_Producer_<op>_async FFI
+// variants: a method whose entry point has an _async form waits on it, or awaits
+// it (CLAUDE.md, Python Binding Conventions, Class family), so beginTransaction
+// does too, although Java's does not wait. The Python wrapper waits on the
+// completion via _run_sync (threading.Event, GIL released -> the main thread
+// stays responsive to SIGTERM/KeyboardInterrupt) or _run_async (asyncio.Future,
+// awaited/cancellable), exactly as flush/close do, so a transaction op never
+// parks the caller inside a native block_on. Python first drains the C
+// accumulation (Producer_drain) for every op but beginTransaction, so a send
+// that returned belongs to the op (producer-transactions.md §13;
+// py_Producer_begin_transaction says why beginTransaction needs no drain).
 //
 // The no-arg ops reuse producer_op_trampoline (the shared void-op trampoline
 // used by flush_async/close_async): it fires cb(error_int) exactly once on the
@@ -2020,6 +2022,17 @@ static PyObject* py_Producer_init_transactions_async(PyObject* self, PyObject* a
     Producer* producer = (Producer*)producer_ptr;
     Py_INCREF(cb);
     kafka_producer_Producer_init_transactions_async(
+        producer->producer, producer_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Producer_begin_transaction_async(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    Py_INCREF(cb);
+    kafka_producer_Producer_begin_transaction_async(
         producer->producer, producer_op_trampoline, cb);
     Py_RETURN_NONE;
 }
@@ -7395,6 +7408,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "beginTransaction (does not wait); returns error_int"},
     {"Producer_init_transactions_async", py_Producer_init_transactions_async, METH_VARARGS,
      "Async initTransactions; cb(error_int)"},
+    {"Producer_begin_transaction_async", py_Producer_begin_transaction_async, METH_VARARGS,
+     "Async beginTransaction; cb(error_int)"},
     {"Producer_commit_transaction_async", py_Producer_commit_transaction_async, METH_VARARGS,
      "Async commitTransaction; cb(error_int)"},
     {"Producer_abort_transaction_async", py_Producer_abort_transaction_async, METH_VARARGS,

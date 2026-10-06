@@ -81,7 +81,7 @@ def _build(grouped: dict[TopicPartition, list[ConsumerRecord[Any, Any]]]
     recomputed as each partition's last returned offset + 1 and that record's
     leader epoch. Java's ``FetchCollector`` uses the fetch's next offset, which
     also skips trailing control records; the FFI's ``ConsumerRecords`` has no
-    accessor for the core's value (``ffi-overload-gaps.md``), so a trailing
+    accessor for the core's value, so a trailing
     transaction marker is not skipped here (``ConsumerRecords.next_offsets``)."""
     if not grouped:
         return ConsumerRecords.empty()

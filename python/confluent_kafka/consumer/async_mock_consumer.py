@@ -15,9 +15,7 @@
 """``AsyncMockConsumer``: the asyncio peer of :class:`MockConsumer`, with the
 same constructor and the same mock methods (CLAUDE.md, Python Binding
 Conventions, Class family). ``rebalance`` is ``async def``: Java's waits on the
-listener it runs, which may be ``async def`` here and is awaited. As
-:class:`AsyncConsumer`, it has no ``current_lag()``: a mock does not generate
-what its base class does not (Implementation over the FFI)."""
+listener it runs, which may be ``async def`` here and is awaited."""
 
 from __future__ import annotations
 

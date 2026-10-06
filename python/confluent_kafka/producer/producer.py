@@ -20,7 +20,7 @@ only Java's constructors, ``MockProducer`` its constructors and the Java mock's
 methods. The methods here call the C FFI (Implementation over the FFI); the
 Javadoc of each is ``KafkaProducer``'s, which the interface's points to.
 
-Not generated, their FFI entry point being missing (``ffi-overload-gaps.md``):
+Not generated, their FFI entry point being missing:
 ``registerMetricForSubscription`` / ``unregisterMetricFromSubscription``
 (``kafka_producer_Producer_register_metric_for_subscription`` / ``..._unregister_...``)
 and ``clientInstanceId(Duration)`` (``kafka_producer_Producer_client_instance_id``).
@@ -131,8 +131,9 @@ class Producer(Generic[K, V], _ProducerState):
         # returned is still accumulated when a begin that can succeed runs; the
         # records of an open transaction stay in it whatever this call does, and
         # the commit / abort ending it drains them; and a producer without a
-        # transactional.id fails here whatever it has accumulated.
-        raise_if_error(self._call(_lib.Producer_begin_transaction))
+        # transactional.id fails here whatever it has accumulated. The entry
+        # point has an _async form, so this waits on it (Class family).
+        run_sync(lambda cb: self._call(_lib.Producer_begin_transaction_async, cb))
         self._in_transaction = True
 
     def send_offsets_to_transaction(

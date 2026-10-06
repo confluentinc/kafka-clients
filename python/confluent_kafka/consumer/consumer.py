@@ -29,11 +29,19 @@ and ``commit_nowait()`` / ``(callback)`` / ``(offsets, callback)``, each checked
 by ``java_forms``, and ``close()`` / ``(option)``.
 ``commitSync`` / ``commitAsync`` are ``commit()`` / ``commit_nowait()``.
 
-Not generated, their FFI entry point being missing (``ffi-overload-gaps.md``):
-the ``Duration`` overloads of ``commitSync``, ``committed``, ``position``,
-``beginningOffsets``, ``endOffsets``, ``offsetsForTimes``, ``partitionsFor`` and
-``listTopics``; ``clientInstanceId(Duration)``;
-``registerMetricForSubscription`` / ``unregisterMetricFromSubscription``.
+Not generated, their FFI entry point being missing (the name looked for, after
+the ``kafka_consumer_Consumer_`` prefix, in parentheses): the ``Duration``
+overloads of ``commitSync`` (``commit_sync_with_timeout``,
+``commit_sync_with_offsets_timeout``), ``committed``
+(``committed_with_timeout``), ``position`` (``position_with_timeout``),
+``beginningOffsets`` (``beginning_offsets_with_timeout``), ``endOffsets``
+(``end_offsets_with_timeout``), ``offsetsForTimes``
+(``offsets_for_times_with_timeout``), ``partitionsFor``
+(``partitions_for_with_timeout``) and ``listTopics``
+(``list_topics_with_timeout``); ``clientInstanceId(Duration)``
+(``client_instance_id``); ``registerMetricForSubscription`` /
+``unregisterMetricFromSubscription`` (``register_metric_for_subscription`` /
+``unregister_metric_from_subscription``).
 Not generated, Java deprecating it (Class family): ``close(Duration)``.
 Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 ``AsyncKafkaConsumer`` body only logs that it is unsupported *(deviation)*.

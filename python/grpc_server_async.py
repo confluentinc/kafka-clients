@@ -268,7 +268,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
                 code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
-            producer.begin_transaction()
+            await producer.begin_transaction()
         except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
