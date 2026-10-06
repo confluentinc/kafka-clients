@@ -32,7 +32,7 @@ layer.
 **One call, end to end** (mechanics → ffi-marshalling.md):
 
 ```
-producer.Send(record)  ──►  Task<RecordMetadata>
+producer.Send(record)  ──►  ValueTask<Task<RecordMetadata>>   (await → accepted · await again → delivered)
    validate args · pin key/value · make TaskCompletionSource
         │  P/Invoke: NativeMethods.Producer_send(handle, …, out err) → future handle
         │  completion pump blocks on get_all(), completes each TCS
@@ -167,11 +167,12 @@ public interface IDeliveryCallback {              // Java `Callback` (producer);
 
 public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable {   // Java `Producer<K,V>`
     // method names mirror Java — no `Async` suffix; the interface carries the async distinction
-    Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
+    // outer = admission (Java's send blocking, never parks a thread — M11/P3.5); inner = the Future
+    ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
     // Java's SECOND send signature — send(record, Callback) STILL returns the Future, so the callback
     // is an ADDITIONAL parameter, not an alternative (M11/P8 D-6 shape: declared identically on both
-    // producer interfaces, no shared base). Fires on the pump thread, before the Task completes (§4).
-    Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback,
+    // producer interfaces, no shared base). Fires on the pump thread, before the delivery Task completes (§4).
+    ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback,
         CancellationToken cancellationToken = default);
     Task Flush(CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);
@@ -478,6 +479,7 @@ its C# realization, and where the enforcing rule lives.
 | Java | C# idiom | Rule / detail |
 |---|---|---|
 | `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7 |
+| `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<Task<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (admission, completes on acceptance, no thread parked), the inner `Task` is the `Future`; sync `IProducer.Send` unchanged | M11/P3.5, ffi §A1 |
 | **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`pause`/`resume`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7. ⚠ `seek` also blocks in Java but ships **sync** (Python parity, M5/P7 §4 divergence — see **Stays sync**) |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
 | `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
@@ -486,7 +488,7 @@ its C# realization, and where the enforcing rule lives.
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, plus `ConsumerRebalanceListenerBase` carrying Java's `onPartitionsLost` default; registered by the `Subscribe(topics, listener)` overload (M9/P6 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback is a sync C fn pointer returning `KafkaError*`, the rebalance blocks on it, and it fires on the core's **dispatcher thread**. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)`; passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback returns `void` and fires on the core's **dispatcher thread**. See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
-| `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `RecordMetadata` / `Task<RecordMetadata>` (M14/P1 — **shipped**) | ⚠ **not the caller's task, and NOT an ABI callback at all** — it is **managed-only** (ffi §A6 **form C**: nothing crosses the C boundary, zero new `[DllImport]`, the pull-pump unchanged). Fires on the **pump thread** (async) or **inline on the caller's** (sync), **before** the awaiter is released, with **non-null** `-1` placeholder metadata on failure. See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
+| `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `RecordMetadata` / `ValueTask<Task<RecordMetadata>>` (M14/P1 — **shipped**) | ⚠ **not the caller's task, and NOT an ABI callback at all** — it is **managed-only** (ffi §A6 **form C**: nothing crosses the C boundary, zero new `[DllImport]`, the pull-pump unchanged). Fires on the **pump thread** (async) or **inline on the caller's** (sync), **before** the **delivery** awaiter is released (unordered relative to acceptance), with **non-null** `-1` placeholder metadata on failure. See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
@@ -694,7 +696,7 @@ pull-pump untouched). Seven parts, each decided against the Java source:
   (per-send instances need nothing). Recorded here because a user who trusts an
   unqualified "callbacks never run concurrently" will write an unsynchronized
   callback; the wording that invited that was corrected in the M14/P1 review round.
-- **Ordering.** It runs **before** the awaiter is released / before `Send` returns,
+- **Ordering.** It runs **before** the delivery awaiter is released / before `Send` returns,
   mirroring `ProducerBatch.java:303-323` (value set → callbacks → `done()`).
   **Stricter than Python**, which resolves its future first
   (`producer.py:322-327`), so a Python awaiter can be released before the callback
@@ -717,7 +719,7 @@ pull-pump untouched). Seven parts, each decided against the Java source:
   those through the record's future, not the synchronous out-param. That is a
   deviation forced by the ABI, not a choice.
 - **Exactly-once, per record.** Invoked unconditionally, never gated on
-  `TrySetResult`'s `bool`, so a send whose `Task` was already canceled still gets
+  `TrySetResult`'s `bool`, so a send whose delivery `Task` was already canceled still gets
   its notification (CLAUDE.md §9.5; Python states the same obligation,
   `producer.py:301-303`). **Recorded residuals** (the public guarantee is scoped to
   exactly these, ffi §A6 form C's at-most-once boundary): a send whose core

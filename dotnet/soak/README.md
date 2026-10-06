@@ -322,7 +322,8 @@ the high-water-mark accounting — a bad payload is not a gap.
   The sync `Send` blocks until the broker acks, which at 1000 msg/s would
   serialise the whole send path; the Python soak's `send()` likewise returns a
   future without blocking on the ack.
-* Delivery accounting runs in a continuation on each send's returned `Task`. That
+* Delivery accounting awaits each send's acceptance stage, then a continuation on its
+  delivery `Task<RecordMetadata>`. That
   continuation is also what **observes** the `Task`'s exception — a
   fire-and-forget `Task<RecordMetadata>` that faults unobserved raises
   `TaskScheduler.UnobservedTaskException` at GC, and at 1000 msg/s with a broker

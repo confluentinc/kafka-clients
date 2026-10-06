@@ -293,64 +293,28 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     (a caller's own successive sends), which is all Java's guarantee is about;
     concurrent callers are not ordered against each other, and the anchor does not
     order them either.
-    ⚠ **Added in M11/P3.2** — no rule stated this, which is a large part of why the
-    defect shipped: the accumulator introduced in M11/P3.1 took the backpressure
-    permit *before* appending and deferred the append when it could not get one, so a
-    later send that found a permit appended ahead of a parked one. The fix that
-    satisfies this rule is a routing count (the inline path is refused while anything
-    is queued ahead) plus a documented-FIFO submission queue drained by a **single**
-    appender.
-    ⚠ **That single submitter is NOT a third background thread**, so the "at most
-    two" cap above is unaffected: it is a task-based loop, started by whichever caller
-    queued the first submission, with **at most one** in flight per producer, and it
-    does not poll — it awaits a permit and appends. A *dedicated thread* for it would
-    breach the cap and is not the sanctioned shape.
-  - **A deferred submission path must be BOUNDED, and the bound must THROTTLE THE
-    CALLER.** A bound enforced by handing the record to a container — a queue, a
-    channel, a continuation parked on a semaphore — bounds the *container*, not the
-    number of records the client has accepted. Where `Send` returns the record's
-    delivery `Task` and the caller does not await admission (the shape this binding
-    ships — M11/P3.2 DV-1), an **asynchronous** admission wait **throttles nobody**:
-    the caller already has its receipt and has moved on. Measured twice, in the same
-    harness: M11/P6's `await _inflight.WaitAsync` gave 63.5k msg/s / 3.0 GB /
-    p50 10,001 ms; M11/P3.2's unbounded FIFO submission queue gave 583k msg/s /
-    2.04 GiB / p50 3,524 ms against 537k / 239 MB / 41 ms immediately before it. The
-    **synchronous, `max.block.ms`-bounded** wait is what throttles (M11/P7: 591.6k
-    msg/s / 127 MiB / p50 7 ms; M11/P3.3 on this branch: 578.6k msg/s / 219 MB /
-    p50 84 ms), and it is Java's own shape — `KafkaProducer.send()` blocks up to
-    `max.block.ms` once the accumulator is full.
+    Superseded by M11/P3.4: append-first fixes a record's place under `_gate` before
+    any wait, so ordering needs no queue or submitter; the M11/P3.2 machinery was
+    deleted.
+  - **The bound must throttle a caller that awaits admission — so admission must be
+    awaitable.** `IAsyncProducer.Send` returns `ValueTask<Task<RecordMetadata>>`: the
+    outer stage completes on admission (never parking a thread), the inner `Task` is
+    delivery. An async wait behind a *single-stage* `Task` throttles nobody (measured
+    twice: M11/P6 63.5k/3.0 GB; M11/P3.2 2.04 GiB). A caller that does not await the
+    outer stage — or whose own token ends it early (M11/P3.5 D2 (c); the record is
+    still sent) — is deliberately not throttled (Python parity, M11/P3.5 D6), and that
+    is documented on the public surface.
     ⚠ **Capping one container is NOT sufficient, and this was falsified rather than
     argued:** with M11/P3.2's submission queue bypassed entirely, the identical bloat
     reappeared in the node chain (p50 3,436 ms / 2.04 GiB — M11/P3.3 §2.3). The bound
     belongs on **admission**, covering every route into the accumulator.
-    ⚠ **On expiry, fault the `Task` — do NOT throw.** The timeout is Java's
-    buffer-exhaustion case, and Java does not throw from `send()` there:
-    `BufferExhaustedException` extends `TimeoutException` → `RetriableException` →
-    `ApiException`, and `KafkaProducer.doSend`'s `catch (ApiException)` fires the
-    callback with the `-1` placeholder and returns a **failed future**. So fire the
-    delivery callback and fault the returned `Task` with a **retriable** error; only
-    the *precondition* throws (disposed producer, already-cancelled token) stay
-    synchronous. Reuse the existing failure-placeholder machinery
-    (`DeliveryRegistration.Fire`) — it is the **single firing site** for both producer
-    flavors, where the placeholder (the record's explicit partition or `-1`, M14/P1
-    D2/D6), the exception coercion and the swallow-and-trace policy (D4) are defined
-    once, inside §A6 form C's one no-throw boundary. A hand-rolled second placeholder
-    re-derives that policy outside it and is exactly the "fixed in one flavor only"
-    divergence the single site exists to prevent. (The original M14/P1 trap — a
-    `TopicPartition` ctor that rejected the `-1` throwing *inside* the swallow boundary
-    and making the callback **silently absent** — no longer exists: since M15/P13.2 G3-4
-    that ctor stores a negative partition as Java's does. The rule does not depend on it.)
-    ⚠ **A blocking admission needs no fair primitive for ORDERING, and is NOT fair
-    against STARVATION.** `SemaphoreSlim`'s documented lack of waiter ordering cannot
-    invert one caller's own sends under a blocking admission (that caller has at most
-    one in flight), so no fairness mechanism is needed to make **ordering** hold, and
-    adding one to justify the gate is wrong. But Java's `BufferPool` keeps a genuinely
-    **FIFO-fair** waiter queue where `SemaphoreSlim` can **barge**, so a parked caller
-    can be starved into a spurious `max.block.ms` expiry under contention. That is an
-    accepted **documented deviation** (M11/P3.3 finding 72.3), not parity — after the
-    expiry rule above its worst outcome is a retriable failed future plus a delivery
-    callback, which is what Java produces on genuine exhaustion. Record it at the
-    admission site; never let a comment claim fairness parity.
+    Superseded by M11/P3.4: there is no admission timeout (append-first; the record is
+    accepted before any wait). Java's buffer-exhaustion outcome comes from the core
+    inside `send_batch` and faults the delivery `Task` + fires the callback through
+    `DeliveryRegistration.Fire`. The stage-1 wait never fails; only the caller's own
+    token can end the stage-1 awaitable early, with `OperationCanceledException`, and
+    the record is still sent (M11/P3.5 D2 (c)). Do not claim `SemaphoreSlim` fairness;
+    ordering rests on append order.
   - FFI is callable from any .NET thread; the core serializes via the producer's
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
@@ -399,14 +363,19 @@ pump deadlock-free (the Sender runs on other worker threads).
   - A deferred submission path with **no depth bound** — the container is not the
     bound, and a correctness-only suite cannot see this: every record is still
     delivered, in order, exactly once, so the tests pass while the client bloats.
-  - Treating an **async** admission wait as a throttle where the caller does not await
-    admission (it is not one — measured twice), or capping **one** container and
-    calling the population bounded (it relocates, measured).
-  - Throwing synchronously on the admission timeout instead of faulting the `Task` and
-    firing the delivery callback; or hand-rolling the `-1` placeholder instead of routing
-    the failure through `DeliveryRegistration.Fire`.
+  - Treating an **async** admission wait as a throttle where the caller has **no
+    admission stage to await** (a single-stage `Task`) (it is not one — measured
+    twice), or capping **one** container and calling the population bounded (it
+    relocates, measured).
   - A comment claiming the admission gate is **fair** — it is not; state the
     starvation deviation instead.
+  - Linking the caller's token into the admission `WaitAsync` (the permit drifts and
+    the bound erodes silently, because the ceiling is `int.MaxValue`) — the token may
+    end only the separate stage-1 awaitable (D2 (c)), never the wait, and that
+    awaitable's registration is disposed when the wait completes; a stage-1
+    continuation that can run on the batch or pump thread; a stage 1 that faults or
+    cancels at teardown; a `SendViaPump` / `SubmitAdmitted` that is `async` or can
+    throw after the append.
 
 **Tests required:**
 
@@ -444,9 +413,16 @@ pump deadlock-free (the Sender runs on other worker threads).
     M11/P3.2 saw a guard fail **5/5 isolated** while the full suite passed **5/5**, so
     a ratio without its regime is not evidence. Mutate fixture and production
     **separately**.
-  - **The admission timeout fires the delivery callback and faults the `Task`** —
-    non-null placeholder metadata, a **retriable** error, and the callback asserted on
-    the expiry path specifically (not merely that the `Task` faulted).
+  - M11/P3.5 T1, T3, T4, T7, T9, T16 and T17, by name:
+      - T1 `SendAccumulatorTests.Admission_SaturatedBound_ReturnsTheCallAtOnce_WithItsFirstStagePending`
+      - T3 `SendAccumulatorTests.Admission_CallersThatDoNotAwaitTheFirstStage_AreNotThrottled`
+      - T4 `SendAccumulatorFirstStageTests.Admission_PermitAccounting_ReturnsToExactlyTheBound_AfterAFullDrain_IncludingCallerTokenCancels`
+      - T7 `SendAccumulatorFirstStageTests.Admission_NonAwaitingBurstAcrossASaturatedBound_IsSentInCallOrder`
+      - T9 `PublicProducerFirstStageTests.Teardown_WithANonAwaitingFloodPastTheBound_SettlesBothStagesOfEverySendExactlyOnce`,
+        and its deterministic half (D3)
+        `SendAccumulatorFirstStageTests.Admission_CancelableFirstStage_IsCompletedSuccessfullyByStopsCancel_WhenTheBatchThreadCannotDrain`
+      - T16 `SendAccumulatorTests.Admission_CallerTokenFiresWhileWaiting_EndsTheFirstStageCanceled_AndTheRecordIsStillSent`
+      - T17 `PublicProducerFirstStageTests.Send_CallerTokenFiresWhileTheFirstStageWaits_CancelsBothStages_AndTheRecordIsStillSent`
 
 ---
 
@@ -655,7 +631,7 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
   - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; where
     `fixed` doesn't fit — the N buffers of `_send_batch`, all borrowed for the whole
     call — pin them explicitly and release in a `finally`. Unpin right after the call —
-    **never hold a pin across the returned `Task`** (per-message pinned objects
+    **never hold a pin across the returned delivery `Task`** (per-message pinned objects
     fragment the GC heap).
   - **The pinning primitive for key/value is `ReadOnlyMemory<byte>.Pin()` →
     `MemoryHandle`, NOT `GCHandle.Alloc(Pinned)`** (amended M11/P3.1). `GCHandle` pins
@@ -678,6 +654,8 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     hold; only *which* call moved. The **sync** path is unchanged and stays `fixed`.
     ⚠ **Consequence on the public surface:** a deferred send **borrows** the caller's
     buffers past `Send`'s return, so a mutation before the drain IS visible on the wire.
+    **Acceptance is not release:** the `ValueTask` stage completing does not end the
+    borrow — a buffer may be reused only after the delivery `Task` completes.
     Document that on the **async** surface only — the sync send has no such window, and
     telling sync users to defend against it states a constraint that does not exist.
   - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
@@ -877,7 +855,8 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
     I/O thread, `Callback.java:20-21`) and the *caller's* thread for the blocking
     sync surface, which has no pump. Both are legitimate; they are the same two
     threads that already free the completion's native handles.
-  - **Invoke it BEFORE the awaiter is released** — before `TrySetResult` /
+  - **Invoke it BEFORE the delivery awaiter is released** (it is unordered relative to
+    the admission stage) — before `TrySetResult` /
     `TrySetException`, and before the sync send returns or throws. Java's
     `ProducerBatch.completeFutureAndFireCallbacks` sets the future's value, fires
     the callbacks, and only then calls `produceFuture.done()`
@@ -1092,8 +1071,8 @@ push option: `Producer_send_async` exists, but adopting it is an *engine* change
 with its own measured cost, independent of this surface.
 
 **Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
-`Task<RecordMetadata>`, completed by **one** background pump. `Send` enqueues
-and returns instantly with a `TaskCompletionSource`-backed `Task`; the pump blocks
+`Task<RecordMetadata>`, completed by **one** background pump. `Send` appends
+and returns a `ValueTask<Task<RecordMetadata>>` whose inner `Task` is TCS-backed; the pump blocks
 on the batched `get_all` and completes each TCS. Mirrors the Python binding's
 `poll_futures_thread` (python-ffi.md §6).
 
@@ -1104,9 +1083,11 @@ Send():                          loop:
   pin key/value (call-scoped, §A4)      drain a batch of (future, tcs)
   Producer_send() → future handle       get_all(futures[])   ← BLOCKS
   new TaskCompletionSource (tcs)        tcs[i].SetResult / SetException
-  enqueue (future, tcs); return Task    destroy_all(futures)
+  append; return ValueTask<Task>        destroy_all(futures)
 Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pending, exit
 ```
+
+Note: the diagram predates the M11/P3.1 send-batch thread.
 
 **Rule (Option A):**
 
