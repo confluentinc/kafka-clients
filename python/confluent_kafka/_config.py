@@ -46,7 +46,7 @@ from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, 
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
-__all__ = ["RecordingConfigs", "coerce", "convert_to_string", "duration_to_ms", "prepare"]
+__all__ = ["coerce", "convert_to_string", "duration_to_ms", "prepare"]
 
 Client = Literal["producer", "consumer"]
 
@@ -66,23 +66,6 @@ _SERDE_KEYS: dict[str, frozenset[str]] = {
 _INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
 _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
                "LONG": "a 64-bit integer (long)"}
-
-
-class RecordingConfigs(dict[str, Any]):
-    """The user's ``configs``, recording the keys a serde's ``configure``
-    reads, as Java's ``AbstractConfig.RecordingMap`` does."""
-
-    def __init__(self, configs: Mapping[str, Any]) -> None:
-        super().__init__(configs)
-        self.used: set[str] = set()
-
-    def __getitem__(self, key: str) -> Any:
-        self.used.add(key)
-        return super().__getitem__(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        self.used.add(key)
-        return super().get(key, default)
 
 
 def _type_name(value: object) -> str:
@@ -183,11 +166,11 @@ def convert_to_string(value: object, type_name: str | None) -> str | None:
 
 
 def prepare(configs: Mapping[str, Any], *, client: Client,
-            given_serdes: Collection[str] = ()) -> tuple[RecordingConfigs, dict[str, str]]:
-    """Parse ``configs`` for a ``client``: the user's configs, recording what
-    the serdes read, and the string map the core parses (the client's own
-    serializer keys and ``None`` values left out; the other role's serde keys
-    reach the core like any other key).
+            given_serdes: Collection[str] = ()) -> tuple[dict[str, Any], dict[str, str]]:
+    """Parse ``configs`` for a ``client``: a copy of the user's configs, which
+    the serdes' ``configure`` reads, and the string map the core parses (the
+    client's own serializer keys and ``None`` values left out; the other role's
+    serde keys reach the core like any other key).
 
     ``given_serdes`` names the serde keys (``key.serializer``, …) whose
     constructor argument is given: the argument wins and the key is not
@@ -211,7 +194,7 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
         if key in serde_keys or text is None:
             continue
         native[key] = text
-    return RecordingConfigs(configs), native
+    return dict(configs), native
 
 
 def duration_to_ms(timeout: float | timedelta | None, *, default_ms: int) -> int:
