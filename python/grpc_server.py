@@ -55,7 +55,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ``producer.py`` / ``consumer.py``.
 from confluent_kafka.producer import KafkaProducer, MockProducer  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
-    CloseOptions,
     KafkaConsumer,
     MockConsumer,
     OffsetAndMetadata,
@@ -731,15 +730,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
-            # A timeout_ms is Java's close(CloseOptions.timeout(timeout)) (the
-            # deprecated close(Duration) delegates to it); an absent one is the
-            # no-argument close(). timeout_ms is milliseconds; Duration is
-            # seconds / timedelta.
-            if request.HasField("timeout_ms"):
-                consumer.close(option=CloseOptions.timeout(
-                    _dt.timedelta(milliseconds=request.timeout_ms)))
-            else:
-                consumer.close()
+            # Java's close(). Its deprecated close(Duration) is not translated
+            # (CLAUDE.md, Python Binding Conventions, Class family), so the
+            # request carries no timeout.
+            consumer.close()
         except KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
