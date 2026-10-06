@@ -15,15 +15,17 @@
 """``ProducerRecord``: Java's ``org.apache.kafka.clients.producer.ProducerRecord``.
 
 Java's six constructors are one keyword-only constructor matched by
-``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the shorter
-ones delegate to the longest, passing ``null`` for what they leave out.
-``partition`` and ``key`` default to ``UNSET``, so an explicit ``None`` is
-given: ``ProducerRecord(topic=…, partition=0, key=None, value=…)`` is Java's
-``(topic, partition, key, value)`` with a null key. The record is covariant in
-``K`` and ``V``; the stubs bind an omitted or ``None`` key or value to
-``Never``, so ``ProducerRecord(topic="t", value="v")`` is a
-``ProducerRecord[Never, str]`` and fits any producer with ``str`` values.
-Header values are viewed, not copied (CLAUDE.md §12).
+``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the given
+arguments must be one of them, and the shorter ones delegate to the longest,
+passing ``null`` for what they leave out. ``partition`` and ``key`` default to
+``UNSET``, so an explicit ``None`` is given: ``ProducerRecord(topic=…,
+partition=0, key=None, value=…)`` is Java's ``(topic, partition, key, value)``
+with a null key, and ``(topic, partition, value)`` without the key is rejected.
+The record is covariant in ``K`` and ``V``; one stub per constructor and
+key / value binding binds an omitted or ``None`` key or value to ``Never``, so
+``ProducerRecord(topic="t", value="v")`` is a ``ProducerRecord[Never, str]``
+and fits any producer with ``str`` values. Header values are viewed, not copied
+(CLAUDE.md §12).
 """
 
 from __future__ import annotations
@@ -97,21 +99,67 @@ class ProducerRecord(Generic[K_co, V_co]):
     __slots__ = ("_topic", "_partition", "_headers", "_key", "_value", "_timestamp")
 
     @overload
-    def __init__(self: ProducerRecord[Never, Never], *, topic: str,
-                 partition: int | None = None, timestamp: int | None = None,
-                 key: None = None, value: None, headers: _WrittenHeaders = ()) -> None: ...
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: None, value: None,
+                 headers: _WrittenHeaders) -> None: ...
     @overload
-    def __init__(self: ProducerRecord[_K, Never], *, topic: str,
-                 partition: int | None = None, timestamp: int | None = None,
-                 key: _K, value: None, headers: _WrittenHeaders = ()) -> None: ...
+    def __init__(self: ProducerRecord[_K, Never], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: _K, value: None, headers: _WrittenHeaders) -> None: ...
     @overload
-    def __init__(self: ProducerRecord[Never, _V], *, topic: str,
-                 partition: int | None = None, timestamp: int | None = None,
-                 key: None = None, value: _V, headers: _WrittenHeaders = ()) -> None: ...
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: None, value: _V, headers: _WrittenHeaders) -> None: ...
     @overload
-    def __init__(self: ProducerRecord[_K, _V], *, topic: str,
-                 partition: int | None = None, timestamp: int | None = None,
-                 key: _K, value: _V, headers: _WrittenHeaders = ()) -> None: ...
+    def __init__(self: ProducerRecord[_K, _V], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: _K, value: _V, headers: _WrittenHeaders) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: None, value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, Never], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: _K, value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: None, value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, _V], *, topic: str, partition: int | None,
+                 timestamp: int | None, key: _K, value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, partition: int | None,
+                 key: None, value: None, headers: _WrittenHeaders) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, Never], *, topic: str, partition: int | None, key: _K,
+                 value: None, headers: _WrittenHeaders) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, partition: int | None, key: None,
+                 value: _V, headers: _WrittenHeaders) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, _V], *, topic: str, partition: int | None, key: _K,
+                 value: _V, headers: _WrittenHeaders) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, partition: int | None,
+                 key: None, value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, Never], *, topic: str, partition: int | None, key: _K,
+                 value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, partition: int | None, key: None,
+                 value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, _V], *, topic: str, partition: int | None, key: _K,
+                 value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, key: None,
+                 value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, Never], *, topic: str, key: _K, value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, key: None, value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[_K, _V], *, topic: str, key: _K, value: _V) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, Never], *, topic: str, value: None) -> None: ...
+    @overload
+    def __init__(self: ProducerRecord[Never, _V], *, topic: str, value: _V) -> None: ...
 
     @java_forms(*_FORMS)
     def __init__(self, *, topic: str, partition: int | None = UNSET,

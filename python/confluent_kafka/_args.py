@@ -22,12 +22,15 @@ overload. ``java_forms`` is the one mechanism for that: it lists the method's
 Java overloads, unfolded, each with its parameters in Java declaration order and
 the Java-given defaults a shorter overload passes to it.
 
-A set of given names matches an overload ``O`` when every name it contains is
-one of ``O``'s parameters and every parameter of ``O`` it leaves out has a
-Java-given default for ``O``. When several overloads match, the one with the
-most parameters is used (the earliest-declared on a tie), and its Java-given
-defaults are filled in before the body runs. When none matches, the call raises
-``IllegalArgumentError`` naming every overload::
+A set of given names matches an overload only when it is exactly that
+overload's parameter set; nothing is filled in to make a match, except that a
+serializer / deserializer the overload names in ``serdes`` may be left out on
+its own (then ``None``). The parameters a matched set leaves out are filled
+with the values Java's shorter overload passes for them: the Java-given
+defaults of the overload with the most parameters (the earliest-declared on a
+tie) that the set reaches by leaving out only defaulted parameters. When no
+overload matches, the call raises ``IllegalArgumentError`` naming every
+overload::
 
     close() takes one of (), (timeout), (option); got (timeout, option)
 
@@ -35,7 +38,9 @@ defaults are filled in before the body runs. When none matches, the call raises
 implementation-signature default counts as not given. ``UNSET`` is that default
 for a parameter one form requires and another defaults, so a given value equal
 to the Java default (``acknowledge(type=AcknowledgeType.ACCEPT)``) still counts
-as given.
+as given, and for a nullable parameter whose omission leaves a set that is no
+Java overload, so a ``None`` for it counts as given
+(``ProducerRecord(topic=…, partition=0, key=None, value=…)``).
 
 The check is built once, when the decorated function is defined (at class
 definition), not on every call.
@@ -90,22 +95,26 @@ class Form:
     ``params`` are the overload's Python parameter names in Java declaration
     order. ``defaults`` maps a parameter of this overload to the value a
     shorter overload passes to it (a ``null``, a constant or an empty
-    collection); only those parameters may be left out when matching this
-    overload. ``deprecated`` is Java's ``@deprecated`` note when the overload is
+    collection): the fill of the shorter overload's exact set, never a
+    parameter left out to make a match. ``serdes`` names the serializer /
+    deserializer parameters of this overload, the one exception to exact
+    matching: each may be left out on its own, and is then ``None``.
+    ``deprecated`` is Java's ``@deprecated`` note when the overload is
     ``@Deprecated``: calling it emits a ``DeprecationWarning``.
     """
 
-    __slots__ = ("params", "defaults", "deprecated")
+    __slots__ = ("params", "defaults", "serdes", "deprecated")
 
     def __init__(self, *params: str, defaults: Mapping[str, object] | None = None,
-                 deprecated: str | None = None) -> None:
+                 serdes: tuple[str, ...] = (), deprecated: str | None = None) -> None:
         self.params: tuple[str, ...] = params
         self.defaults: dict[str, object] = dict(defaults or {})
+        self.serdes: frozenset[str] = frozenset(serdes)
         self.deprecated = deprecated
-        unknown = set(self.defaults) - set(params)
+        unknown = (set(self.defaults) | self.serdes) - set(params)
         if unknown:
             raise TypeError(
-                f"Form{params}: defaults name parameters it does not have: "
+                f"Form{params}: defaults or serdes name parameters it does not have: "
                 f"{sorted(unknown)}")
 
 
@@ -197,26 +206,36 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
             always &= m
         always = always if forms else 0
         for form in forms:
-            always &= ~mask_of(list(form.defaults))
-        # given mask -> (form index, fills, deprecation warning text)
+            always &= ~mask_of(list(form.defaults) + list(form.serdes))
+        # given mask -> (form index, fills, deprecation warning text). Exact
+        # matching: the given sets are the overloads' own parameter sets, with
+        # or without each of their serdes. A set's fill comes from the overload
+        # with the most parameters (the earliest-declared on a tie) that reaches
+        # it by leaving out only parameters it defaults, or serdes (then None):
+        # the values Java's shorter overload passes for what it lacks.
         table: dict[int, tuple[int, tuple[tuple[str, object], ...], str | None]] = {}
-        for index, form in enumerate(forms):
-            full = form_masks[index]
-            defaultable = [n for n in form.params if n in form.defaults]
-            # Every subset of the Java-defaulted parameters may be left out.
-            for subset in range(1 << len(defaultable)):
-                left_out = [defaultable[i] for i in range(len(defaultable))
-                            if subset & (1 << i)]
-                given = full & ~mask_of(left_out)
-                previous = table.get(given)
-                if previous is not None:
-                    prev = form_masks[previous[0]]
-                    # Most parameters wins; the earliest-declared on a tie.
-                    if size(full) < size(prev) or (
-                            size(full) == size(prev) and index > previous[0]):
+        for f_index, form in enumerate(forms):
+            serdes = [n for n in form.params if n in form.serdes]
+            for subset in range(1 << len(serdes)):
+                given = form_masks[f_index] & ~mask_of(
+                    [serdes[i] for i in range(len(serdes)) if subset & (1 << i)])
+                if given in table:
+                    continue
+                best: tuple[int, list[str]] | None = None
+                for index, candidate in enumerate(forms):
+                    if given & ~form_masks[index]:
                         continue
+                    left_out = [n for n in candidate.params if not given & bit[n]]
+                    if any(n not in candidate.defaults and n not in candidate.serdes
+                           for n in left_out):
+                        continue
+                    # Most parameters wins; the earliest-declared on a tie.
+                    if best is None or size(form_masks[index]) > size(form_masks[best[0]]):
+                        best = (index, left_out)
+                assert best is not None  # the form itself reaches its own set
+                index, left_out = best
                 table[given] = (
-                    index, tuple((n, form.defaults[n]) for n in left_out), None)
+                    index, tuple((n, forms[index].defaults.get(n)) for n in left_out), None)
         # A deprecated overload warns when it is the match, or when it is called
         # with exactly its own parameters.
         for given, (index, fills, _) in list(table.items()):

@@ -125,12 +125,14 @@ def test_a_value_equal_to_a_none_default_is_not_given() -> None:
 
 def test_a_constant_default_needs_the_same_type_to_read_as_not_given() -> None:
     class Node:
-        @java_forms(Form("id", "is_fenced", defaults={"is_fenced": False}),
+        @java_forms(Form("id"),
+                    Form("id", "is_fenced", defaults={"is_fenced": False}),
                     Form("id", "rack"))
         def __init__(self, *, id: int, is_fenced: bool = False,  # noqa: A002
                      rack: str | None = None) -> None:
             self.fenced = is_fenced
 
+    # is_fenced=False is left at its default: (id).
     assert Node(id=1, is_fenced=False).fenced is False
     # 0 == False, but 0 is not left at the bool default: it is given.
     assert Node(id=1, is_fenced=0).fenced == 0  # type: ignore[arg-type]
@@ -141,14 +143,61 @@ def test_a_constant_default_needs_the_same_type_to_read_as_not_given() -> None:
 def test_most_parameters_win_and_the_earliest_declared_on_a_tie() -> None:
     class Tie:
         @java_forms(Form("a", "b", defaults={"b": 1}),
-                    Form("a", "c", defaults={"c": 2}))
+                    Form("a", "c", defaults={"c": 2}),
+                    Form("a"))
         def f(self, *, a: int, b: int | None = None, c: int | None = None,
               _java_form: int = -1) -> Any:
             return _java_form, b, c
 
-    # {a} matches both two-parameter forms; the first declared is used.
+    # (a) reaches both two-parameter forms; the first declared fills it.
     assert Tie().f(a=0) == (0, 1, None)
     assert Tie().f(a=0, c=5) == (1, None, 5)
+
+
+def test_matching_is_exact() -> None:
+    # Java's Node: (id, host, port) passes (null, false) to the longest, but
+    # (id, host, port, is_fenced) is no overload, so it is rejected; nothing
+    # is filled in to make a match.
+    class Node:
+        @java_forms(Form("id", "host", "port"),
+                    Form("id", "host", "port", "rack"),
+                    Form("id", "host", "port", "rack", "is_fenced",
+                         defaults={"rack": None, "is_fenced": False}))
+        def __init__(self, *, id: int, host: str, port: int,  # noqa: A002
+                     rack: str | None = UNSET, is_fenced: bool = False) -> None:
+            self.values = (rack, is_fenced)
+
+    with pytest.raises(IllegalArgumentError) as exc:
+        Node(id=1, host="h", port=1, is_fenced=True)
+    assert str(exc.value) == (
+        "Node() takes one of (id, host, port), (id, host, port, rack), "
+        "(id, host, port, rack, is_fenced); got (id, host, port, is_fenced)")
+    # The matched (id, host, port) is filled with what it passes on.
+    assert Node(id=1, host="h", port=1).values == (None, False)
+    # rack is UNSET, so rack=None is given and selects the longest.
+    assert Node(id=1, host="h", port=1, rack=None, is_fenced=True).values == (None, True)
+
+
+def test_a_serde_may_be_left_out_on_its_own() -> None:
+    # KafkaProducer's (configs) and (configs, keySerializer, valueSerializer):
+    # a serializer may be left out, or given as None, which is the same; then
+    # None (Signatures: the one exception to exact matching).
+    class Producer:
+        @java_forms(Form("configs"),
+                    Form("configs", "key_serializer", "value_serializer",
+                         serdes=("key_serializer", "value_serializer")))
+        def __init__(self, *, configs: dict[str, Any], key_serializer: object | None = None,
+                     value_serializer: object | None = None) -> None:
+            self.serdes = (key_serializer, value_serializer)
+
+    serializer = object()
+    assert Producer(configs={}).serdes == (None, None)
+    assert Producer(configs={}, key_serializer=serializer).serdes == (serializer, None)
+    assert Producer(configs={}, value_serializer=serializer).serdes == (None, serializer)
+    assert Producer(configs={}, key_serializer=None, value_serializer=serializer).serdes == (
+        None, serializer)
+    with pytest.raises(TypeError, match="defaults or serdes name parameters"):
+        Form("configs", serdes=("key_serializer",))
 
 
 def test_positional_unknown_and_missing_arguments_are_type_errors() -> None:

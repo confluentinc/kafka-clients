@@ -57,38 +57,38 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     you can use for testing code that uses Kafka: see ``MockProducer``."""
 
     @overload
-    def __init__(self: AsyncMockProducer[bytes, bytes], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None) -> None: ...
+    def __init__(self: AsyncMockProducer[bytes, bytes], *, cluster: Cluster,
+                 auto_complete: bool, partitioner: Partitioner | None) -> None: ...
     @overload
-    def __init__(self: AsyncMockProducer[K, bytes], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None,
-                 key_serializer: Serializer[K]) -> None: ...
+    def __init__(self: AsyncMockProducer[K, bytes], *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, key_serializer: Serializer[K]) -> None: ...
     @overload
-    def __init__(self: AsyncMockProducer[bytes, V], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None,
-                 value_serializer: Serializer[V]) -> None: ...
+    def __init__(self: AsyncMockProducer[bytes, V], *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, value_serializer: Serializer[V]) -> None: ...
     @overload
-    def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = False,
-                 partitioner: Partitioner | None = None, key_serializer: Serializer[K],
+    def __init__(self, *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, key_serializer: Serializer[K],
                  value_serializer: Serializer[V]) -> None: ...
     @overload
     def __init__(self: AsyncMockProducer[bytes, bytes], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: None,
-                 value_serializer: None) -> None: ...
+                 partitioner: Partitioner | None) -> None: ...
     @overload
     def __init__(self: AsyncMockProducer[K, bytes], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: Serializer[K],
-                 value_serializer: None) -> None: ...
+                 partitioner: Partitioner | None, key_serializer: Serializer[K]) -> None: ...
     @overload
     def __init__(self: AsyncMockProducer[bytes, V], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: None,
-                 value_serializer: Serializer[V]) -> None: ...
+                 partitioner: Partitioner | None, value_serializer: Serializer[V]) -> None: ...
+    @overload
+    def __init__(self, *, auto_complete: bool, partitioner: Partitioner | None,
+                 key_serializer: Serializer[K], value_serializer: Serializer[V]) -> None: ...
+    @overload
+    def __init__(self: AsyncMockProducer[bytes, bytes]) -> None: ...
 
     @java_forms(*_FORMS)
     def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = UNSET,
                  partitioner: Partitioner | None = UNSET,
-                 key_serializer: Serializer[Any] | None = UNSET,
-                 value_serializer: Serializer[Any] | None = UNSET) -> None:
+                 key_serializer: Serializer[Any] | None = None,
+                 value_serializer: Serializer[Any] | None = None) -> None:
         """See ``MockProducer``."""
         AsyncProducer.__init__(self)
         if auto_complete is UNSET:

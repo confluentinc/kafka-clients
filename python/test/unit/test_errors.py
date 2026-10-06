@@ -510,10 +510,11 @@ def test_record_deserialization_constructors() -> None:
     assert [(k, bytes(v or b"")) for k, v in e.headers()] == [("h", b"1")]
     assert e.__cause__ is cause
     # Java's null buffers and origin are values of the full constructor.
+    # Every Java constructor takes the cause, so a null one is cause=None.
     n = RecordDeserializationError(
         origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
         timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,  # type: ignore[arg-type]
-        headers=(), message="m")
+        headers=(), message="m", cause=None)
     assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
 
 

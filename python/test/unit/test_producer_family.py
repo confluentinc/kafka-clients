@@ -275,18 +275,20 @@ async def test_positional_calls_are_type_errors_on_the_async_classes() -> None:
 @pytest.mark.parametrize("cls", [MockProducer, AsyncMockProducer])
 def test_mock_constructor_accepts_exactly_javas_overloads(cls: type) -> None:
     values = {"cluster": _Cluster([]), "auto_complete": True, "partitioner": None,
-              "key_serializer": None, "value_serializer": None}
+              "key_serializer": bytes_serializer(), "value_serializer": bytes_serializer()}
     rest = ["auto_complete", "partitioner", "key_serializer", "value_serializer"]
+    serdes = {"key_serializer", "value_serializer"}
     prefix = MOCK_FORMS.replace("MockProducer()", f"{cls.__name__}()")
     for with_cluster in (False, True):
         for n in range(len(rest) + 1):
             for subset in itertools.combinations(rest, n):
                 given = (["cluster"] if with_cluster else []) + list(subset)
                 kwargs = {k: values[k] for k in given}
-                # (cluster, …) takes any subset: ``()`` passes (false, null,
-                # null, null) to it; without a cluster only () and the
-                # four-argument overload exist.
-                if with_cluster or n in (0, len(rest)):
+                # Exactly one of Java's three constructors, a serializer of the
+                # first two excepted, which may be left out (Signatures).
+                others = [k for k in given if k not in serdes]
+                if not given or others in (["cluster", "auto_complete", "partitioner"],
+                                           ["auto_complete", "partitioner"]):
                     cls(**kwargs)
                 else:
                     with pytest.raises(IllegalArgumentError) as err:
@@ -399,7 +401,7 @@ def _native(record: ProducerRecord[Any, Any], **kwargs: Any) -> Any:
 
 
 def test_headers_reach_the_ffi_struct() -> None:
-    native = _native(ProducerRecord(topic=TOPIC, key=b"k", value=b"v",
+    native = _native(ProducerRecord(topic=TOPIC, partition=None, key=b"k", value=b"v",
                                     headers=[("trace-id", b"abc"), ("null-header", None)]))
     assert native.headers == [("trace-id", b"abc"), ("null-header", None)]
     assert _native(ProducerRecord(topic=TOPIC, key=b"k", value=b"v")).headers == []
@@ -433,7 +435,7 @@ def test_the_send_path_copies_no_topic_key_value_or_header_bytes() -> None:
     topic = "".join(["top", "ic-", "zero-copy"])  # a str not interned elsewhere
     key, value = b"the-key", b"the-value"
     header_values = [b"v1", b"v2"]
-    record = ProducerRecord(topic=topic, key=key, value=value,
+    record = ProducerRecord(topic=topic, partition=None, key=key, value=value,
                             headers=[("h-one", header_values[0]), ("h-two", header_values[1]),
                                      ("h-null", None)])
     native = _native(record)
@@ -483,7 +485,8 @@ def test_serializer_is_called_on_a_null_value_with_the_headers() -> None:
         calls.append((topic, value, headers))
         return b"<null>" if value is None else value.encode()
 
-    record = ProducerRecord(topic=TOPIC, value=None, headers=[("h", b"1")])
+    record = ProducerRecord(topic=TOPIC, partition=None, key=None, value=None,
+                            headers=[("h", b"1")])
     native = _native(record, key_serializer=serializer, value_serializer=serializer)
     assert native.value == b"<null>" and native.key == b"<null>"
     assert calls == [(TOPIC, None, record.headers()), (TOPIC, None, record.headers())]
@@ -510,7 +513,8 @@ def test_send_failure_metadata_callback_and_future() -> None:
         done.set()
 
     with KafkaProducer(configs=UNREACHABLE) as p:
-        holder["f"] = f = p.send(record=ProducerRecord(topic=TOPIC, partition=3, value=b"v"),
+        holder["f"] = f = p.send(record=ProducerRecord(topic=TOPIC, partition=3, key=None,
+                                                       value=b"v"),
                                  callback=callback)
         assert not f.cancel()
         assert done.wait(30)
@@ -1561,7 +1565,7 @@ def test_mock_close_ignores_its_timeout() -> None:
 
 def test_mock_metrics_and_partitions_for_use_what_it_is_given() -> None:
     cluster = _Cluster([_partition_info(0), _partition_info(1)])
-    p = MockProducer(cluster=cluster)
+    p = MockProducer(cluster=cluster, auto_complete=False, partitioner=None)
     assert [i.partition() for i in p.partitions_for(topic=TOPIC)] == [0, 1]
     assert p.metrics() == {}
     name = MetricName(name="n", group="g", description="d", tags={})
@@ -1585,12 +1589,12 @@ def test_mock_partitions_with_the_cluster_and_the_partitioner() -> None:
     assert f.result().partition() == 2
     assert calls == [(TOPIC, "k", b"k", "v", b"v", cluster)]
     # Without a partitioner the first partition; a given partition must exist.
-    p2 = MockProducer(cluster=cluster, auto_complete=True)
+    p2 = MockProducer(cluster=cluster, auto_complete=True, partitioner=None)
     assert p2.send(record=RECORD).result().partition() == 0
-    assert p2.send(record=ProducerRecord(topic=TOPIC, partition=1, value=b"v")).result(
+    assert p2.send(record=ProducerRecord(topic=TOPIC, partition=1, key=None, value=b"v")).result(
     ).partition() == 1
     with pytest.raises(IllegalArgumentError) as err:
-        p2.send(record=ProducerRecord(topic=TOPIC, partition=3, value=b"v"))
+        p2.send(record=ProducerRecord(topic=TOPIC, partition=3, key=None, value=b"v"))
     assert str(err.value) == "Invalid partition given with record: 3 is not in the range [0...3]."
 
 

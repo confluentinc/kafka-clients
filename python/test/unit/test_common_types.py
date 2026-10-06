@@ -296,8 +296,13 @@ def test_node_constructors_and_accessors() -> None:
     assert n.rack() is None and not n.has_rack() and not n.is_fenced()
     r = Node(id=5, host="h", port=9092, rack="r1")
     assert r.has_rack() and r.rack() == "r1"
-    # Every combination is a Java form: (id, host, port) passes (null, false).
-    assert Node(id=5, host="h", port=9092, is_fenced=True).is_fenced()
+    # Only Java's three constructors are accepted: (id, host, port, is_fenced)
+    # is none of them, although (id, host, port) passes (null, false).
+    with pytest.raises(IllegalArgumentError) as exc:
+        Node(id=5, host="h", port=9092, is_fenced=True)  # type: ignore[call-overload]
+    assert str(exc.value) == (
+        "Node() takes one of (id, host, port), (id, host, port, rack), "
+        "(id, host, port, rack, is_fenced); got (id, host, port, is_fenced)")
     # rack defaults to UNSET, so rack=None is given: the five-argument
     # constructor with a null rack.
     fenced = Node(id=5, host="h", port=9092, rack=None, is_fenced=True)

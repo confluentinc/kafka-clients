@@ -19,10 +19,13 @@ Java's three constructors ``(offset, leaderEpoch, metadata)``,
 by ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
 ``(offset, metadata)`` passes ``Optional.empty()`` as the leader epoch, and
 ``(offset)`` passes ``""`` as the metadata of ``(offset, metadata)``. So
-``(offset, leader_epoch)`` without ``metadata`` is rejected, as in Java.
+``(offset, leader_epoch)`` without ``metadata`` is rejected, as in Java, and
+the stubs are ``(offset, leader_epoch, metadata)`` and ``(offset, metadata="")``.
 """
 
 from __future__ import annotations
+
+from typing import overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
@@ -41,6 +44,11 @@ class OffsetAndMetadata:
     """
 
     __slots__ = ("_offset", "_metadata", "_leader_epoch")
+
+    @overload
+    def __init__(self, *, offset: int, leader_epoch: int | None, metadata: str) -> None: ...
+    @overload
+    def __init__(self, *, offset: int, metadata: str = "") -> None: ...
 
     @java_forms(
         Form("offset", "leader_epoch", "metadata", defaults={"leader_epoch": None}),

@@ -26,9 +26,10 @@ cluster)``.
 Java's three constructors, ``(Cluster, boolean autoComplete, Partitioner,
 Serializer, Serializer)``, ``(boolean autoComplete, Partitioner, Serializer,
 Serializer)`` and ``()``, are one keyword-only ``__init__`` checked by
-``java_forms`` (Signatures): ``()`` passes ``(Cluster.empty(), false, null,
-null, null)`` to the first, so a cluster alone is accepted, but
-``auto_complete`` alone matches none of them.
+``java_forms`` (Signatures): the given arguments must be one of them, a
+serializer excepted, which may be left out (then ``bytes_serializer()``), so a
+cluster alone or ``auto_complete`` alone matches none of them. ``()`` passes
+``(Cluster.empty(), false, null, null, null)`` to the first.
 """
 
 from __future__ import annotations
@@ -59,11 +60,12 @@ __all__ = ["MockProducer"]
 K = TypeVar("K")
 V = TypeVar("V")
 
+_SERDES = ("key_serializer", "value_serializer")
 _FORMS = (
     Form("cluster", "auto_complete", "partitioner", "key_serializer", "value_serializer",
          defaults={"auto_complete": False, "partitioner": None, "key_serializer": None,
-                   "value_serializer": None}),
-    Form("auto_complete", "partitioner", "key_serializer", "value_serializer"),
+                   "value_serializer": None}, serdes=_SERDES),
+    Form("auto_complete", "partitioner", "key_serializer", "value_serializer", serdes=_SERDES),
     Form(),
 )
 
@@ -81,38 +83,38 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     """
 
     @overload
-    def __init__(self: MockProducer[bytes, bytes], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None) -> None: ...
+    def __init__(self: MockProducer[bytes, bytes], *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None) -> None: ...
     @overload
-    def __init__(self: MockProducer[K, bytes], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None,
-                 key_serializer: Serializer[K]) -> None: ...
+    def __init__(self: MockProducer[K, bytes], *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, key_serializer: Serializer[K]) -> None: ...
     @overload
-    def __init__(self: MockProducer[bytes, V], *, cluster: Cluster | None = None,
-                 auto_complete: bool = False, partitioner: Partitioner | None = None,
-                 value_serializer: Serializer[V]) -> None: ...
+    def __init__(self: MockProducer[bytes, V], *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, value_serializer: Serializer[V]) -> None: ...
     @overload
-    def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = False,
-                 partitioner: Partitioner | None = None, key_serializer: Serializer[K],
+    def __init__(self, *, cluster: Cluster, auto_complete: bool,
+                 partitioner: Partitioner | None, key_serializer: Serializer[K],
                  value_serializer: Serializer[V]) -> None: ...
     @overload
     def __init__(self: MockProducer[bytes, bytes], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: None,
-                 value_serializer: None) -> None: ...
+                 partitioner: Partitioner | None) -> None: ...
     @overload
     def __init__(self: MockProducer[K, bytes], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: Serializer[K],
-                 value_serializer: None) -> None: ...
+                 partitioner: Partitioner | None, key_serializer: Serializer[K]) -> None: ...
     @overload
     def __init__(self: MockProducer[bytes, V], *, auto_complete: bool,
-                 partitioner: Partitioner | None, key_serializer: None,
-                 value_serializer: Serializer[V]) -> None: ...
+                 partitioner: Partitioner | None, value_serializer: Serializer[V]) -> None: ...
+    @overload
+    def __init__(self, *, auto_complete: bool, partitioner: Partitioner | None,
+                 key_serializer: Serializer[K], value_serializer: Serializer[V]) -> None: ...
+    @overload
+    def __init__(self: MockProducer[bytes, bytes]) -> None: ...
 
     @java_forms(*_FORMS)
     def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = UNSET,
                  partitioner: Partitioner | None = UNSET,
-                 key_serializer: Serializer[Any] | None = UNSET,
-                 value_serializer: Serializer[Any] | None = UNSET) -> None:
+                 key_serializer: Serializer[Any] | None = None,
+                 value_serializer: Serializer[Any] | None = None) -> None:
         """Create a mock producer: ``cluster`` holds the metadata for this
         producer (none by default); with ``auto_complete``, all requests
         complete successfully and run the callback at once, otherwise the user

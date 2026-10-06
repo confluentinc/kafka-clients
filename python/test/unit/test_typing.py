@@ -33,7 +33,7 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import assert_type
 
-from confluent_kafka.common import TimestampType, TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common import Node, TimestampType, TopicIdPartition, TopicPartition, Uuid
 from confluent_kafka.common.serialization import (
     Deserializer,
     Serializer,
@@ -81,6 +81,17 @@ def _topic_id_partition_overloads() -> None:
     assert_type(a.topic_partition(), TopicPartition)
 
 
+def _node_and_offset_and_metadata_overloads() -> None:
+    # One stub per Java constructor of Node; OffsetAndMetadata's (offset) and
+    # (offset, metadata) share one.
+    assert_type(Node(id=1, host="h", port=9092), Node)
+    assert_type(Node(id=1, host="h", port=9092, rack=None), Node)
+    assert_type(Node(id=1, host="h", port=9092, rack="r", is_fenced=True), Node)
+    assert_type(OffsetAndMetadata(offset=1), OffsetAndMetadata)
+    assert_type(OffsetAndMetadata(offset=1, metadata="m"), OffsetAndMetadata)
+    assert_type(OffsetAndMetadata(offset=1, leader_epoch=None, metadata=""), OffsetAndMetadata)
+
+
 def _consumer_records_overloads() -> None:
     cr: ConsumerRecords[int, str] = ConsumerRecords.empty()
     by_partition = cr.records(partition=TopicPartition(topic="t", partition=0))
@@ -109,6 +120,13 @@ def _record_never_binding() -> None:
     assert_type(ProducerRecord(topic="t", key=None, value=1), "ProducerRecord[Never, int]")
     assert_type(ProducerRecord(topic="t", partition=0, timestamp=5, key="k", value=1.0,
                                headers=[("h", b"v")]), "ProducerRecord[str, float]")
+    # One stub per Java constructor and binding: a None key is Java's null key.
+    assert_type(ProducerRecord(topic="t", partition=0, key=None, value=1),
+                "ProducerRecord[Never, int]")
+    assert_type(ProducerRecord(topic="t", partition=None, key="k", value=None, headers=()),
+                "ProducerRecord[str, Never]")
+    assert_type(ProducerRecord(topic="t", partition=0, timestamp=None, key=b"k", value=b"v"),
+                "ProducerRecord[bytes, bytes]")
     assert_type(ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None),
                 "ConsumerRecord[Never, Never]")
     assert_type(ConsumerRecord(topic="t", partition=0, offset=0, key=1, value=None),
@@ -320,27 +338,28 @@ def _producer_family_types(p: object = None) -> None:
                                    value_serializer=float_serializer()),
                 "AsyncKafkaProducer[str, float]")
 
-    # MockProducer's forms: (cluster, auto_complete, partitioner, …) with
-    # everything optional, and (auto_complete, partitioner, key_serializer,
-    # value_serializer) with everything required, where a None serializer binds
-    # bytes.
+    # MockProducer's forms: (cluster, auto_complete, partitioner, key_serializer,
+    # value_serializer), (auto_complete, partitioner, key_serializer,
+    # value_serializer) and (); a serializer left out binds bytes.
     assert_type(MockProducer(), "MockProducer[bytes, bytes]")
-    assert_type(MockProducer(cluster=object(), auto_complete=True), "MockProducer[bytes, bytes]")
-    assert_type(MockProducer(cluster=object(), key_serializer=string_serializer()),
-                "MockProducer[str, bytes]")
-    assert_type(MockProducer(cluster=object(), value_serializer=string_serializer()),
-                "MockProducer[bytes, str]")
+    assert_type(MockProducer(cluster=object(), auto_complete=True, partitioner=None),
+                "MockProducer[bytes, bytes]")
+    assert_type(MockProducer(cluster=object(), auto_complete=True, partitioner=None,
+                             key_serializer=string_serializer()), "MockProducer[str, bytes]")
+    assert_type(MockProducer(cluster=object(), auto_complete=True, partitioner=None,
+                             value_serializer=string_serializer()), "MockProducer[bytes, str]")
+    assert_type(MockProducer(cluster=object(), auto_complete=True, partitioner=None,
+                             key_serializer=string_serializer(),
+                             value_serializer=int_serializer()), "MockProducer[str, int]")
     assert_type(MockProducer(auto_complete=True, partitioner=None,
                              key_serializer=string_serializer(),
                              value_serializer=int_serializer()), "MockProducer[str, int]")
-    assert_type(MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
-                             value_serializer=None), "MockProducer[bytes, bytes]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None), "MockProducer[bytes, bytes]")
     assert_type(MockProducer(auto_complete=True, partitioner=None,
-                             key_serializer=string_serializer(), value_serializer=None),
-                "MockProducer[str, bytes]")
-    assert_type(MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                             key_serializer=string_serializer()), "MockProducer[str, bytes]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None,
                              value_serializer=string_serializer()), "MockProducer[bytes, str]")
-    assert_type(AsyncMockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+    assert_type(AsyncMockProducer(auto_complete=True, partitioner=None,
                                   value_serializer=string_serializer()),
                 "AsyncMockProducer[bytes, str]")
 
@@ -374,6 +393,7 @@ def test_typing_module_imports() -> None:
     """Runtime smoke check that the typing module imports cleanly. The real
     assertions above are enforced statically by mypy --strict."""
     _topic_id_partition_overloads()
+    _node_and_offset_and_metadata_overloads()
     _consumer_records_overloads()
     _record_generics_inference()
     _sentinel_return_types()

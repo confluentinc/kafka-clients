@@ -78,7 +78,7 @@ def _topic(broker: Any, values: list[str]) -> str:
         key_serializer=string_serializer(), value_serializer=string_serializer())
     try:
         for value in values:
-            producer.send(record=ProducerRecord(topic=topic, partition=0, value=value))
+            producer.send(record=ProducerRecord(topic=topic, partition=0, key=None, value=value))
         producer.flush()
     finally:
         producer.close()
@@ -383,7 +383,7 @@ class _Producing:
         sent = 0
         while not self._stop.is_set():
             self._producer.send(record=ProducerRecord(topic=topic, partition=sent % partitions,
-                                                      value=b"x" * 10))
+                                                      key=None, value=b"x" * 10))
             sent += 1
             if sent % 50 == 0:
                 self._producer.flush()
@@ -744,7 +744,7 @@ def _transactional_topic(broker: Any, values: list[str]) -> str:
         producer.init_transactions()
         producer.begin_transaction()
         for value in values:
-            producer.send(record=ProducerRecord(topic=topic, partition=0, value=value))
+            producer.send(record=ProducerRecord(topic=topic, partition=0, key=None, value=value))
         producer.commit_transaction()
     finally:
         producer.close()
@@ -788,7 +788,8 @@ def _produce(broker: Any, topic: str, partition: int, values: list[str]) -> None
         key_serializer=string_serializer(), value_serializer=string_serializer())
     try:
         for value in values:
-            producer.send(record=ProducerRecord(topic=topic, partition=partition, value=value))
+            producer.send(record=ProducerRecord(topic=topic, partition=partition, key=None,
+                                                value=value))
         producer.flush()
     finally:
         producer.close()

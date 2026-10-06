@@ -270,7 +270,7 @@ def test_headers_success() -> None:
     producer = KafkaProducer(configs=configs, key_serializer=recording,
                              value_serializer=recording)
     topic = "topic"
-    record = ProducerRecord(topic=topic, key="key", value="value",
+    record = ProducerRecord(topic=topic, partition=None, key="key", value="value",
                             headers=[("test", b"header2")])
     producer.send(record=record)
     assert calls == [(topic, "key", record.headers()), (topic, "value", record.headers())]
