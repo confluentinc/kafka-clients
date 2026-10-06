@@ -31,8 +31,8 @@ namespace Confluent.Kafka.GrpcServer;
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET analog of
 /// <c>python</c> vs <c>python_async</c>. Selected at process start by <c>CONSUMER_FLAVOR=async</c>
 /// (Program.cs). Each RPC resolves a server-local <c>producer_id</c>, <b>awaits</b> the matching
-/// <see cref="Task"/>-returning binding method on the gRPC handler task, and maps the result into
-/// the proto response, translating any operational <see cref="KafkaException"/> via
+/// asynchronous binding method on the gRPC handler task (both stages of the two-stage <c>Send</c>),
+/// and maps the result into the proto response, translating any operational <see cref="KafkaException"/> via
 /// <see cref="Translate"/> (reused verbatim from the sync backend). Bridging through
 /// <c>&lt;byte[], byte[]&gt;</c> + <see cref="Serdes.ByteArray"/> exercises the shipped generic
 /// serialize path end-to-end over the wire.

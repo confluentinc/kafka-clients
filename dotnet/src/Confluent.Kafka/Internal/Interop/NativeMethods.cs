@@ -2267,10 +2267,11 @@ internal static partial class NativeMethods
     //   * ASYNC path (IAsyncProducer / AsyncKafkaProducer / AsyncMockProducer) — Option A
     //     (Python-style pull; the anchor is python/_confluentkafka.c's send path,
     //     Producer_send_thread at :523). Send pins the record's buffers, appends to a
-    //     binding-side accumulator and returns its Task; a dedicated batch thread drains N
-    //     records into a blittable ProducerRecord_t[] and calls the already-exported
-    //     kafka_producer_Producer_send_batch. The pin is DEFERRED — held from Send until
-    //     send_batch RETURNS, never across the returned Task, because send_batch copies
+    //     binding-side accumulator and yields the record's delivery Task from its ValueTask
+    //     first stage; a dedicated batch thread drains N records into a blittable
+    //     ProducerRecord_t[] and calls the already-exported kafka_producer_Producer_send_batch.
+    //     The pin is DEFERRED — held from Send until send_batch RETURNS, never across the
+    //     record's delivery Task, because send_batch copies
     //     synchronously too (verified rust/src/ffi/producer.rs:1557 — producer_send(&guard, record)
     //     inside send_batch_inner; the topic is copied at :1515 via
     //     to_string_lossy().into_owned()). That is ffi §A4's own deferred-send carve-out
@@ -2369,8 +2370,9 @@ internal static partial class NativeMethods
     /// takes the producer mutex once and then runs <c>producer_send</c> (which is
     /// <c>rt.block_on(producer.send(record, None))</c>) per record — and copies the topic with
     /// <c>to_string_lossy().into_owned()</c>. So the pins the caller holds over the topic / key /
-    /// value end when this returns; nothing is held across the returned <see cref="System.Threading.Tasks.Task"/>
-    /// (M11/P3.1 §3.9). That is ffi §A4's own deferred-send carve-out applied to <c>send_batch</c>.
+    /// value end when this returns; nothing is held across the record's delivery
+    /// <see cref="System.Threading.Tasks.Task"/> (M11/P3.1 §3.9). That is ffi §A4's own deferred-send
+    /// carve-out applied to <c>send_batch</c>.
     /// </para>
     /// <para>
     /// The three array parameters are raw pointers rather than managed arrays so the caller controls

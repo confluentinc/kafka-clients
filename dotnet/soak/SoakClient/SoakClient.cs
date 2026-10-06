@@ -906,7 +906,7 @@ internal sealed class SoakClient : IDisposable
                 // throws a retriable error. Note this is rarer here than in Python: the
                 // async Send throws synchronously only for preconditions and serialization
                 // failures, and surfaces operational failures — including the
-                // max.block.ms admission timeout — through the returned Task instead
+                // max.block.ms admission timeout — through the delivery Task instead
                 // (ffi-marshalling.md §A1). The loop is kept because the contract it
                 // encodes ("a retriable throw is one attempt, not a lost record") still
                 // holds for whatever does throw.
@@ -927,7 +927,7 @@ internal sealed class SoakClient : IDisposable
                 continue;
             }
 
-            // ⚠ EVERY returned Task MUST have its exception observed (PLAN D3). A
+            // ⚠ EVERY delivery Task MUST have its exception observed (PLAN D3). A
             // fire-and-forget Task<RecordMetadata> that faults and is never observed
             // raises TaskScheduler.UnobservedTaskException at GC; at 1000 msg/s with a
             // broker roll in progress that is a continuous stream of unobserved faults.
