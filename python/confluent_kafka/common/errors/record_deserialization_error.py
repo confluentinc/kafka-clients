@@ -66,7 +66,7 @@ class RecordDeserializationError(SerializationError):
         value_buffer: bytes,
         headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
         message: str,
-        cause: BaseException | None = None,
+        cause: BaseException | None,
     ) -> None:
         headers = _throwable.materialize(headers)
         _throwable.init(self, message, cause)

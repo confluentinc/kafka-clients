@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
 __all__ = ["RetriableCommitFailedError"]
@@ -45,8 +45,8 @@ class RetriableCommitFailedError(RetriableError):
     def __init__(
         self,
         *,
-        message: str | None = None,
-        cause: BaseException | None = None,
+        message: str | None = UNSET,
+        cause: BaseException | None = UNSET,
         _java_form: int = -1,
     ) -> None:
         if _java_form == 0:

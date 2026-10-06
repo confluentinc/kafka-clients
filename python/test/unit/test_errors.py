@@ -422,7 +422,7 @@ def test_constructors_with_a_literal_message() -> None:
         "the latest consumed offsets.")
     assert e.__cause__ is cause
     with pytest.raises(IllegalArgumentError) as exc:
-        RetriableCommitFailedError()
+        RetriableCommitFailedError()  # type: ignore[call-overload]
     assert str(exc.value) == (
         "RetriableCommitFailedError() takes one of (cause), (message), "
         "(message, cause); got ()")

@@ -47,7 +47,7 @@ class TopicAuthorizationError(AuthorizationError):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = UNSET,
         unauthorized_topics: Iterable[str] = UNSET,
         _java_form: int = -1,
     ) -> None:

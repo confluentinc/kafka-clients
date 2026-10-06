@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.TransactionAbortedError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.api_error import ApiError
 
@@ -22,4 +22,7 @@ __all__ = ["TransactionAbortedError"]
 
 class TransactionAbortedError(ApiError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
