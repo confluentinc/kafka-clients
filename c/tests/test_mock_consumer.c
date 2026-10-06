@@ -172,6 +172,41 @@ static void test_mock_consumer_null_key_value(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Next offsets: Java's ConsumerRecords.nextOffsets(), a map the caller owns
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_records_next_offsets(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NULL(assign_one(c, "t", 0));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "t", 0, 0,
+                                                            NULL, -1, NULL, -1));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "t", 0, 1,
+                                                            NULL, -1, NULL, -1));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "t", 0, 0));
+
+    kafka_common_Error_t *poll_err = NULL;
+    kafka_consumer_ConsumerRecords_t *records =
+        kafka_consumer_Consumer_poll(c, 100, &poll_err);
+    TEST_ASSERT_NULL(poll_err);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_ConsumerRecords_count(records));
+
+    // The map holds copies, so it outlives the records handle.
+    kafka_consumer_OffsetMap_t *next = kafka_consumer_ConsumerRecords_next_offsets(records);
+    kafka_consumer_ConsumerRecords_destroy(records);
+    TEST_ASSERT_NOT_NULL(next);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_OffsetMap_count(next));
+    const kafka_common_TopicPartition_t *tp = kafka_consumer_OffsetMap_get_key(next, 0);
+    TEST_ASSERT_EQUAL_STRING("t", kafka_common_TopicPartition_topic(tp));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(tp));
+    const kafka_consumer_OffsetAndMetadata_t *oam = kafka_consumer_OffsetMap_get_value(next, 0);
+    TEST_ASSERT_EQUAL_INT64(2, kafka_consumer_OffsetAndMetadata_offset(oam));
+    TEST_ASSERT_EQUAL_STRING("", kafka_consumer_OffsetAndMetadata_metadata(oam));
+    kafka_consumer_OffsetMap_destroy(next);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
 // Async poll: callback fires on the dispatcher thread
 // ---------------------------------------------------------------------------
 
@@ -906,6 +941,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
     RUN_TEST(test_mock_consumer_null_key_value);
+    RUN_TEST(test_mock_consumer_records_next_offsets);
     RUN_TEST(test_mock_consumer_async_poll);
     RUN_TEST(test_mock_consumer_concurrency_guard);
     RUN_TEST(test_mock_consumer_wakeup_bypasses_guard);

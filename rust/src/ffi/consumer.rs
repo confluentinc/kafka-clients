@@ -839,6 +839,27 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_get(
     }
 }
 
+/// Returns the next offsets and metadata for all topic-partitions whose
+/// position advanced in the poll that returned the batch (Java's
+/// `ConsumerRecords.nextOffsets()`): the offset the consumer consumes next,
+/// past trailing control records such as transaction markers, with its leader
+/// epoch. A partition whose poll only advanced past such records is present
+/// with no record in the batch.
+///
+/// The map is a new handle owned by the caller, freed with
+/// [`kafka_consumer_OffsetMap_destroy`]. Its entries are copies, so it stays
+/// valid after the records handle is destroyed.
+///
+/// # Safety
+///
+/// `records` must be a valid records handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
+    records: *const kafka_consumer_ConsumerRecords_t,
+) -> *mut kafka_consumer_OffsetMap_t {
+    box_offset_map(unsafe { records_ref(records) }.records.next_offsets().clone())
+}
+
 /// Destroys a records handle, freeing the owned batch. Safe with null (no-op).
 ///
 /// # Safety
@@ -5895,6 +5916,64 @@ mod tests {
         assert!(Arc::ptr_eq(unsafe { group_metadata_ref(meta) }, &shared));
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
         assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    /// `kafka_consumer_ConsumerRecords_next_offsets` hands out the batch's own
+    /// next offsets, not the last record's offset + 1: here the records end at
+    /// offset 2 and the next offset is 4, past a transaction marker at 3. A
+    /// partition whose position only advanced is present with no record. The
+    /// map is a copy, so it outlives the records handle.
+    #[test]
+    fn consumer_records_next_offsets_are_the_batch_s_own() {
+        let tp = TopicPartition::new("t", 0);
+        let advanced = TopicPartition::new("t", 1);
+        let mut by_partition = indexmap::IndexMap::new();
+        by_partition.insert(
+            tp.clone(),
+            (0..3)
+                .map(|offset| ConsumerRecord::new("t", 0, offset, None::<Bytes>, None::<Bytes>))
+                .collect(),
+        );
+        let next = HashMap::from([
+            (
+                tp.clone(),
+                OffsetAndMetadata::with_leader_epoch_metadata(4, Some(7), "").unwrap(),
+            ),
+            (
+                advanced.clone(),
+                OffsetAndMetadata::with_leader_epoch_metadata(9, None, "").unwrap(),
+            ),
+        ]);
+        let records = box_records(ConsumerRecords::with_next_offsets(by_partition, next));
+        let map = unsafe { kafka_consumer_ConsumerRecords_next_offsets(records) };
+        unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
+        assert!(!map.is_null());
+        assert_eq!(unsafe { kafka_consumer_OffsetMap_count(map) }, 2);
+        let mut entries = Vec::new();
+        for i in 0..2 {
+            let key = unsafe { kafka_consumer_OffsetMap_get_key(map, i) };
+            let value = unsafe { kafka_consumer_OffsetMap_get_value(map, i) };
+            let topic = unsafe { CStr::from_ptr(kafka_common_TopicPartition_topic(key)) };
+            let mut epoch = -1;
+            let has_epoch = unsafe { kafka_consumer_OffsetAndMetadata_leader_epoch(value, &mut epoch) };
+            let metadata = unsafe { CStr::from_ptr(kafka_consumer_OffsetAndMetadata_metadata(value)) };
+            entries.push((
+                topic.to_str().unwrap().to_string(),
+                unsafe { kafka_common_TopicPartition_partition(key) },
+                unsafe { kafka_consumer_OffsetAndMetadata_offset(value) },
+                has_epoch.then_some(epoch),
+                metadata.to_str().unwrap().to_string(),
+            ));
+        }
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                ("t".to_string(), 0, 4, Some(7), String::new()),
+                ("t".to_string(), 1, 9, None, String::new())
+            ]
+        );
+        unsafe { kafka_consumer_OffsetMap_destroy(map) };
     }
 
     /// Every `MetricValue` variant round-trips through `box_metric_map` to the

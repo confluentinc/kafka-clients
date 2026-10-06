@@ -33,6 +33,7 @@ it, and otherwise the next poll fetches and fails on it again.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable, NamedTuple, cast
 
 from confluent_kafka.common.errors.record_deserialization_error import RecordDeserializationError
@@ -75,21 +76,29 @@ def _deserialization_error(
     )
 
 
-def _build(grouped: dict[TopicPartition, list[ConsumerRecord[Any, Any]]]
-           ) -> ConsumerRecords[Any, Any]:
-    """The ``ConsumerRecords`` of the returned records, with next offsets
-    recomputed as each partition's last returned offset + 1 and that record's
-    leader epoch. Java's ``FetchCollector`` uses the fetch's next offset, which
-    also skips trailing control records; the FFI's ``ConsumerRecords`` has no
-    accessor for the core's value, so a trailing
-    transaction marker is not skipped here (``ConsumerRecords.next_offsets``)."""
-    if not grouped:
+def _build(native_records: Any, grouped: dict[TopicPartition, list[ConsumerRecord[Any, Any]]],
+           rewind: Mapping[TopicPartition, int]) -> ConsumerRecords[Any, Any]:
+    """The ``ConsumerRecords`` of the returned records, with the core's next
+    offsets (``kafka_consumer_ConsumerRecords_next_offsets``): Java's
+    ``FetchCollector`` reports the fetch's next offset, past trailing control
+    records, also for a partition whose poll only advanced past them. A
+    partition in ``rewind`` was cut short by a failing deserializer: there, as
+    Java's ``CompletedFetch.fetchRecords`` leaves ``nextFetchOffset``, the next
+    offset is the last returned record's offset + 1 with its leader epoch, and
+    a partition with no returned record has none."""
+    next_offsets: dict[TopicPartition, OffsetAndMetadata] = {}
+    for (topic, partition), (offset, metadata, epoch) in native_records.next_offsets().items():
+        tp = TopicPartition(topic=topic, partition=partition)
+        if tp not in rewind:
+            next_offsets[tp] = OffsetAndMetadata(offset=offset, leader_epoch=epoch,
+                                                 metadata=metadata)
+    for tp in rewind:
+        recs = grouped.get(tp)
+        if recs:
+            next_offsets[tp] = OffsetAndMetadata(offset=recs[-1].offset() + 1,
+                                                 leader_epoch=recs[-1].leader_epoch(), metadata="")
+    if not grouped and not next_offsets:
         return ConsumerRecords.empty()
-    next_offsets = {
-        tp: OffsetAndMetadata(offset=recs[-1].offset() + 1, leader_epoch=recs[-1].leader_epoch(),
-                              metadata="")
-        for tp, recs in grouped.items()
-    }
     return ConsumerRecords(records=grouped, next_offsets=next_offsets)
 
 
@@ -135,7 +144,8 @@ def deserialize_batch(
                 later = native_records.get(j)
                 later_tp = TopicPartition(topic=later.topic, partition=later.partition)
                 rewind.setdefault(later_tp, later.offset)
-            return Deserialized(_build(grouped), error, list(rewind.items()))
+            return Deserialized(_build(native_records, grouped, rewind), error,
+                                list(rewind.items()))
 
         record: ConsumerRecord[Any, Any] = ConsumerRecord(
             topic=topic,
@@ -152,4 +162,4 @@ def deserialize_batch(
         )
         grouped.setdefault(tp, []).append(record)
 
-    return Deserialized(_build(grouped), None, [])
+    return Deserialized(_build(native_records, grouped, {}), None, [])

@@ -83,12 +83,12 @@ class ConsumerRecords(Generic[K, V]):
         call.
 
         On the records a ``KafkaConsumer`` / ``AsyncKafkaConsumer`` ``poll()``
-        returns, a partition's next offset is its last returned record's offset
-        + 1 (with that record's leader epoch), and a partition that returned no
-        record is absent. Java's is the fetch's next offset, the position after
-        the poll: past trailing control records (transaction markers) and a
-        compacted tail, and present for a partition whose poll only advanced
-        past them. The FFI does not expose the core's next offsets yet."""
+        returns they are the core's, as Java's: the fetch's next offset, the
+        position after the poll, past trailing control records (transaction
+        markers) and a compacted tail, and present for a partition whose poll
+        only advanced past them. Where a failing deserializer cut the batch
+        short, a partition's next offset is its last returned record's offset
+        + 1, as Java's ``CompletedFetch`` leaves it."""
         return dict(self._next_offsets)
 
     def partitions(self) -> set[TopicPartition]:

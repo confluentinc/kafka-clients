@@ -1854,11 +1854,21 @@ static PyObject* ConsumerRecords_is_empty(ConsumerRecordsObject* self, PyObject*
     return PyBool_FromLong(kafka_consumer_ConsumerRecords_is_empty(self->records) ? 1 : 0);
 }
 
+static PyObject* offset_map_owned_to_py(kafka_consumer_OffsetMap_t* m);
+
+// ConsumerRecords.next_offsets() -> {(topic, partition): (offset, metadata, epoch|None)}:
+// Java's ConsumerRecords.nextOffsets(), the core's own (past trailing control
+// records such as transaction markers), drained from a fresh OffsetMap handle.
+static PyObject* ConsumerRecords_next_offsets(ConsumerRecordsObject* self, PyObject* args) {
+    return offset_map_owned_to_py(kafka_consumer_ConsumerRecords_next_offsets(self->records));
+}
 
 static PyMethodDef ConsumerRecords_methods[] = {
     {"count", (PyCFunction)ConsumerRecords_count, METH_NOARGS, "Number of records"},
     {"is_empty", (PyCFunction)ConsumerRecords_is_empty, METH_NOARGS, "Whether the batch is empty"},
     {"get", (PyCFunction)ConsumerRecords_get, METH_VARARGS, "Record at index, or None"},
+    {"next_offsets", (PyCFunction)ConsumerRecords_next_offsets, METH_NOARGS,
+     "Next offsets dict {(topic, partition): (offset, metadata, epoch|None)}"},
     {NULL}
 };
 
@@ -3143,6 +3153,9 @@ static PyObject* py_LongOffsetMap_drain(PyObject* self, PyObject* args) {
 
 // Convert an OWNED `kafka_consumer_OffsetMap_t` into
 // `dict[(topic,int), (offset,metadata,epoch|None)]`, destroying the handle.
+// The epoch goes in with "N", which takes its new reference: ConsumerRecords
+// drains a map here on every poll (its next offsets), where "O" would leak one
+// int per partition per poll.
 static PyObject* offset_map_owned_to_py(kafka_consumer_OffsetMap_t* m) {
     if (m == NULL) Py_RETURN_NONE;
     int32_t n = kafka_consumer_OffsetMap_count(m);
@@ -3155,7 +3168,7 @@ static PyObject* offset_map_owned_to_py(kafka_consumer_OffsetMap_t* m) {
         int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch);
         PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
                                       kafka_common_TopicPartition_partition(k));
-        PyObject* val = Py_BuildValue("(LsO)", kafka_consumer_OffsetAndMetadata_offset(v),
+        PyObject* val = Py_BuildValue("(LsN)", kafka_consumer_OffsetAndMetadata_offset(v),
                                       kafka_consumer_OffsetAndMetadata_metadata(v),
                                       has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {

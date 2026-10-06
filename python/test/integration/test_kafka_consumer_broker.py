@@ -344,9 +344,15 @@ def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: 
         while error is None:
             assert time.monotonic() < deadline, "no deserialization error"
             try:
-                values.extend(r.value() for r in consumer.poll(timeout=0.5))
+                records = consumer.poll(timeout=0.5)
             except RecordDeserializationError as e:
                 error = e
+            else:
+                values.extend(r.value() for r in records)
+                if not records.is_empty():
+                    # Whether or not the failing record cut this batch short,
+                    # the next offset is the one after "a", as Java's.
+                    assert {p: o.offset() for p, o in records.next_offsets().items()} == {tp: 1}
         # The records before the failing one were returned first.
         assert values == ["a"]
         assert error.topic_partition() == tp and error.offset() == 1
@@ -730,8 +736,7 @@ def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any)
 # ---------------------------------------------------------------------------
 # ConsumerRecords.next_offsets() past a transaction marker (Critic 76 F5):
 # Java's FetchCollector reports the fetch's next offset, the position after the
-# poll. The FFI's ConsumerRecords has no next-offsets accessor, so the binding
-# recomputes last offset + 1.
+# poll; the binding reads the core's (kafka_consumer_ConsumerRecords_next_offsets).
 # ---------------------------------------------------------------------------
 def _transactional_topic(broker: Any, values: list[str]) -> str:
     topic = f"py-consumer-txn-{uuid.uuid4().hex[:12]}"
@@ -751,9 +756,6 @@ def _transactional_topic(broker: Any, values: list[str]) -> str:
     return topic
 
 
-@pytest.mark.skip(reason=(
-    "The FFI's ConsumerRecords has no next-offsets accessor: "
-    "next_offsets() is the last offset + 1 (3), Java's is past the commit marker (4)"))
 def test_next_offsets_skip_the_transaction_marker(kafka_broker: Any) -> None:
     # Offsets 0-2 are the records, 3 the commit marker.
     topic = _transactional_topic(kafka_broker, ["a", "b", "c"])
