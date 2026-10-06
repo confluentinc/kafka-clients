@@ -98,7 +98,8 @@ namespace Confluent.Kafka;
 /// <c>Send</c> throws <see cref="OperationCanceledException"/> synchronously and nothing is appended. A token that
 /// fires while the first stage is pending ends that stage with <see cref="OperationCanceledException"/> carrying the
 /// token — but the record was appended before the wait began, so it is <b>still sent</b>, its delivery callback still
-/// fires, and its delivery task is cancelled (as in the Python binding's async <c>send</c>). Consequences:
+/// fires, and its delivery task is cancelled (as in the Python binding's async <c>send</c>). Its buffers stay borrowed
+/// too; see <see cref="Send(ProducerRecord{TKey,TValue}, CancellationToken)"/>'s remarks. Consequences:
 /// <list type="bullet">
 /// <item><description>A canceled or timed-out send may still be delivered. Use the delivery callback
 /// (<see cref="Send(ProducerRecord{TKey,TValue}, IDeliveryCallback, CancellationToken)"/>) to learn the
@@ -134,12 +135,27 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <b>before</b> the send is enqueued.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes.</b> The first
-    /// stage completing does <b>not</b> end the borrow: an accepted record may not have reached the
-    /// core yet. The send is deferred — the binding <b>borrows</b> the serialized bytes, it does not
-    /// copy them, until a background batch thread hands the record to the core — so a mutation in
-    /// that window <b>is</b> visible on the wire. If you need to reuse a buffer, either await the
-    /// delivery task first or hand each send its own array.
+    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes without being
+    /// canceled.</b> The first stage completing does <b>not</b> end the borrow: an accepted record may
+    /// not have reached the core yet. The send is deferred — the binding <b>borrows</b> the serialized
+    /// bytes, it does not copy them, until a background batch thread hands the record to the core —
+    /// so a mutation in that window <b>is</b> visible on the wire. If you need to reuse a buffer,
+    /// either await the delivery task first and see it complete without being canceled, or hand each
+    /// send its own array.
+    /// <para>
+    /// ⚠ <b>A cancellation does not end the borrow either.</b> After a cancellation — an
+    /// <see cref="OperationCanceledException"/> from either stage, or a delivery task that completes
+    /// canceled — the record may still be inside the binding, not yet handed to the core, and it is
+    /// still sent (see the type's remarks on cancellation). Its buffers stay borrowed until its
+    /// delivery callback fires (the
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/>
+    /// overload) or a later <see cref="Flush"/> completes successfully.
+    /// <see cref="Close(CancellationToken)"/>, <see cref="IDisposable.Dispose"/> or
+    /// <see cref="IAsyncDisposable.DisposeAsync"/> returning is <b>not</b> that guarantee: teardown's
+    /// wait for the send-batch thread is bounded, and past that bound it returns while the thread may
+    /// still be handing records to the core. (An already-canceled token throws before anything is
+    /// appended, so it leaves nothing borrowed.)
+    /// </para>
     /// <para>
     /// This is inherent to a zero-copy send path: the alternative is a per-record copy of every
     /// value, which is exactly the allocation this binding exists to avoid. It matches the Python
@@ -202,10 +218,15 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// the swallow-and-trace policy for a throwing callback.
     /// </para>
     /// <para>
-    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes</b> — the first
-    /// stage completing does <b>not</b> end the borrow (an accepted record may not have reached the
-    /// core yet); the same borrow window as
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, described in full there.
+    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes without being
+    /// canceled</b> — the first stage completing does <b>not</b> end the borrow (an accepted record
+    /// may not have reached the core yet), and neither does a cancellation: after an
+    /// <see cref="OperationCanceledException"/> from either stage, or a canceled delivery task, the
+    /// record may still be inside the binding, and its buffers stay borrowed until
+    /// <paramref name="callback"/> fires or a later <see cref="Flush"/> completes successfully.
+    /// <see cref="Close(CancellationToken)"/> or disposal returning is <b>not</b> that guarantee. The
+    /// same borrow window as <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>,
+    /// described in full there.
     /// </para>
     /// <para>
     /// ⚠ <b>And its first stage waits under sustained saturation</b>, exactly as
