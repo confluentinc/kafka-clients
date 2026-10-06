@@ -267,10 +267,13 @@ internal sealed class SendAccumulator
     /// <para>
     /// ⚠ <b>Under append-first it counts a record from the moment it is appended</b>, which is
     /// <em>before</em> its send has taken an admission permit — so a sampled peak includes the sends
-    /// whose first stage is still pending, and the quantity it is bounded by is
-    /// <c>MaxAdmittedRecords + (pending first stages)</c> rather than <c>MaxAdmittedRecords</c> (the
-    /// arithmetic is at <see cref="_admission"/>). At rest — every first stage complete, nothing
-    /// drained — it equals the number of accepted-but-unforwarded records exactly.
+    /// whose admission wait is still pending, and the quantity it is bounded by is
+    /// <c>MaxAdmittedRecords + W</c> rather than <c>MaxAdmittedRecords</c>, where W is the number of
+    /// pending <em>admission waits</em> (defined, with the arithmetic, at <see cref="_admission"/>).
+    /// W is not the number of pending first stages: a first stage the caller's own token ended is
+    /// complete, but its admission wait is still pending and still counts in W. At rest — every
+    /// admission wait complete, nothing drained — it equals the number of accepted-but-unforwarded
+    /// records exactly.
     /// <see cref="AvailableAdmissions"/> is the gate's own count and moves the other way; the two
     /// witnesses are complementary rather than interchangeable.
     /// </para>
@@ -1142,9 +1145,11 @@ internal sealed class SendAccumulator
             // every record taken but not yet passed to a send_batch call. A chain holds at most the
             // appends possible between two takes, which the bound itself limits, so
             //
-            //     peak accepted-but-unsent <= 2 * (MaxAdmittedRecords + pending first stages)
+            //     peak accepted-but-unsent <= 2 * (MaxAdmittedRecords + W)
             //
-            // — one term for the chain being filled, one for the chain in flight. That is the same
+            // — one term for the chain being filled, one for the chain in flight. W is the pending
+            // ADMISSION WAITS defined at _admission, not the pending first stages: a first stage the
+            // caller's token ended is complete while its wait still counts in W. That is the same
             // shape as before append-first (there it was MaxAdmitted + min(MaxAdmitted,
             // MaxAccumulated)); what changed is that the second term is now the same bound rather
             // than a second one, and that it carries the waiting-send slack the anchor also has.

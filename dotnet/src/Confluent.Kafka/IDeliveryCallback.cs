@@ -99,11 +99,11 @@ namespace Confluent.Kafka;
 /// (<c>ProducerBatch.java:303-323</c> — <c>produceFuture.done()</c> is last). This binding
 /// reproduces that exactly: the callback is invoked immediately before the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> is completed (async) and before <c>Send</c>
-/// returns or throws (sync). ⚠ On the async surface the callback and the delivery task are
-/// <b>unordered relative to <c>Send</c>'s first stage</b> (M11/P3.5): a saturated send's first
-/// stage can complete after its record was already delivered. Note this is <b>stricter</b> than the Python sibling, which resolves
+/// returns or throws (sync). Note this is <b>stricter</b> than the Python sibling, which resolves
 /// its future first and then invokes <c>on_delivery</c> (<c>producer.py:322-327</c>), so a Python
-/// awaiter can be released before the callback has run.
+/// awaiter can be released before the callback has run. ⚠ On the async surface the callback and
+/// the delivery task are <b>unordered relative to <c>Send</c>'s first stage</b> (M11/P3.5): a
+/// saturated send's first stage can complete after its record was already delivered.
 /// </para>
 /// <para>
 /// <b>The <c>metadata</c> argument is never <see langword="null"/> — not even on failure

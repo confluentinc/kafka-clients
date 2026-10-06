@@ -371,10 +371,18 @@ public sealed class SendAccumulatorFirstStageTests
         // both sides of the decision rather than always the same one; each repetition is a fresh
         // accumulator.
         //
-        // What it catches: a Set* where a TrySet* belongs. On the token side that throws out of the
-        // caller's own Cancel() (captured and asserted); on the wait side it faults the stage's
-        // continuation, which nothing observes — so the test also listens for an unobserved task
-        // fault raised from the stage's code, after forcing the collection that surfaces it.
+        // What it grades: a Set* where a TrySet* belongs, on the WAIT side. Whenever the token won,
+        // a wait-side Set* faults the stage's continuation, which nothing observes — so the test
+        // listens for an unobserved task fault raised from the stage's code, after forcing the
+        // collection that surfaces it.
+        //
+        // What it does NOT grade: the same mistake on the TOKEN side. A token-side Set* can throw
+        // only in the instant between the wait continuation's TrySetResult and its Dispose of the
+        // registration — a Cancel() before the TrySetResult wins, and one after the Dispose finds no
+        // callback to run — and this test's staggers do not aim at that instant, so it does not grade
+        // it. What keeps the caller's Cancel() from throwing there is the token side's own
+        // TrySetCanceled, plus that Dispose following the TrySetResult directly. The Cancel()
+        // no-throw assertion below is a sanity check, not that half's grader.
         const int Repetitions = 8;
 
         List<string> unobserved = new List<string>();
@@ -560,9 +568,24 @@ public sealed class SendAccumulatorFirstStageTests
     // plain; the fast path itself is 128 B on both — the record's bytes, its completion source and
     // that source's task) plus 32 B, which is less than one more Task<T> (72 B). So a new
     // Task-sized allocation on either saturated path turns them red; the 8 B TFM difference does not.
+    //
+    // ⚠ The cancelable figure is for a caller token whose source ALREADY HAS A RECYCLED
+    // REGISTRATION NODE. On .NET Core a CancellationTokenSource keeps the node a disposed
+    // registration leaves behind and hands it to its next Register. The shared source's first
+    // attempt allocates the nodes; its stage continuations dispose them when the drain completes
+    // the waits; attempts 1-3 pop them again. So the best-of-N minimum never keeps attempt 0, and
+    // the registration costs 0 B in this figure — by construction, not by chance. The fresh-node
+    // case, which every caller with a new source per send pays, is guarded separately below.
     private const long CancelableStageMarginalCeilingBytes = 720;
 
     private const long PlainWaitMarginalCeilingBytes = 576;
+
+    // The same regression ceiling for the cancelable path when the caller's source has NO free
+    // registration node (a new CancellationTokenSource per send — a per-request timeout, say), so
+    // every Register allocates one. Measured +760 B on net8.0 and +768 B on net10.0: the recycled
+    // figures above plus the 80 B node. The ceiling is the larger plus 32 B, again less than one
+    // more Task<T> (72 B), so a new Task-sized allocation on this path turns it red too.
+    private const long FreshNodeCancelableStageMarginalCeilingBytes = 800;
 
     [Fact]
     public async Task Admission_SaturatedFirstStage_PerSendAllocation_IsMeasured_AndStaysUnderItsCeiling()
@@ -575,6 +598,13 @@ public sealed class SendAccumulatorFirstStageTests
         // own cost: the admission wait, its continuation, and (for a cancelable token) the stage, its
         // completion source and the token registration. The token is warmed once per accumulator
         // outside the measured window, so the source's one-time registration table is not charged.
+        //
+        // ⚠ The cancelable figure is for a caller token whose source already has a RECYCLED
+        // registration node: one source is shared by every attempt, attempt 0 allocates the nodes
+        // and its drained stages dispose them back to the source, and attempts 1-3 reuse them — so
+        // best-of-4 skips attempt 0 and the registration's node costs nothing here. The warm call
+        // keeps only the source's one-time table out of the window, not the per-registration node.
+        // A source with no free node is measured by the fresh-node test below.
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
         long fast = long.MaxValue;
@@ -600,6 +630,43 @@ public sealed class SendAccumulatorFirstStageTests
         Assert.True(
             plainMarginal <= PlainWaitMarginalCeilingBytes,
             $"the plain saturated wait's own cost exceeded its ceiling {PlainWaitMarginalCeilingBytes} B — {figures}");
+    }
+
+    [Fact]
+    public async Task Admission_SaturatedFirstStage_WithAFreshTokenSource_PerSendAllocation_IsMeasured_AndStaysUnderItsCeiling()
+    {
+        // M11/P3.5 T21 (i), fresh-node half — the D2 (c) path's cost for a caller token whose source
+        // has NO free registration node. DEFINITION: as in the test above (caller-thread bytes per
+        // SubmitAdmitted call over 64 calls, best of 4 fresh accumulators, minus the fast path), but
+        // with a NEW CancellationTokenSource for every measurement. Its warm call still keeps the
+        // source's one-time table out of the window; the 64 measured stages are all still pending
+        // (the bound is saturated and nothing drains inside the window), so none of their
+        // registrations has been disposed and every measured Register allocates its own node. This
+        // is the cost of a caller that creates a source per send — a per-request timeout — and of
+        // the first registrations on any token.
+        long fast = long.MaxValue;
+        long fresh = long.MaxValue;
+        for (int attempt = 0; attempt < AllocationAttempts; attempt++)
+        {
+            using (CancellationTokenSource fastSource = new CancellationTokenSource())
+            {
+                fast = Math.Min(fast, await MeasurePerSend(maxAdmitted: 4096, fastSource.Token));
+            }
+
+            using (CancellationTokenSource freshSource = new CancellationTokenSource())
+            {
+                fresh = Math.Min(fresh, await MeasurePerSend(maxAdmitted: 1, freshSource.Token));
+            }
+        }
+
+        long freshMarginal = fresh - fast;
+        string figures =
+            $"per send: fast path {fast} B, saturated + cancelable token on a fresh source {fresh} B (+{freshMarginal} B)";
+        _output.WriteLine(figures);
+
+        Assert.True(
+            freshMarginal <= FreshNodeCancelableStageMarginalCeilingBytes,
+            $"the cancelable first stage's own cost on a fresh source exceeded its ceiling {FreshNodeCancelableStageMarginalCeilingBytes} B — {figures}");
     }
 
     private static async Task<long> MeasurePerSend(int maxAdmitted, CancellationToken token)
