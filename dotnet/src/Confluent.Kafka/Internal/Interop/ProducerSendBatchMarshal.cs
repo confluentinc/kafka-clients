@@ -37,7 +37,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// caller, in a <c>finally</c>, <b>after</b> the native call returns and <b>before</b> the future
 /// reaches the completion pump. That split is the whole point of the deferred design: the pin has
 /// to span <c>Send</c> → …accumulator… → <c>send_batch</c> returns, which no <c>fixed</c> block
-/// inside this type could express. It still never spans the returned
+/// inside this type could express. It still never spans the record's delivery
 /// <see cref="System.Threading.Tasks.Task"/> — the core copies every buffer synchronously inside
 /// <c>send_batch</c> (verified: <c>send_batch_inner</c> runs <c>producer_send</c>, i.e.
 /// <c>rt.block_on(producer.send(record, None))</c>, per record, and copies the topic with

@@ -136,6 +136,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base — the producer has no
     /// <c>IProducerCommon</c> and the two signatures differ anyway (the async one takes a
     /// <see cref="System.Threading.CancellationToken"/> and returns a
+    /// <see cref="System.Threading.Tasks.ValueTask{TResult}"/> whose result is the delivery
     /// <see cref="System.Threading.Tasks.Task{TResult}"/>). Same precedent as
     /// <see cref="Metrics"/> (M11/P8 decision D-6).
     /// </para>
