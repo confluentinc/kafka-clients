@@ -841,7 +841,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     // Flatten repeated OffsetEntry into the parallel arrays
     // kafka_producer_Producer_send_offsets_to_transaction expects, marshaled
-    // exactly like kafka_consumer_Consumer_commit_sync_offsets via
+    // exactly like kafka_consumer_Consumer_commit_sync_with_offsets via
     // read_offset_map: an absent (or < 0) leader_epoch means "no epoch", and a
     // null metadata entry means the empty string. The const char* borrow into
     // `req`, which outlives this synchronous FFI call.
@@ -1289,7 +1289,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       err = kafka_consumer_Consumer_commit_sync(c);
     } else {
       OffsetArrays a = offset_arrays(req->offsets());
-      err = kafka_consumer_Consumer_commit_sync_offsets(
+      err = kafka_consumer_Consumer_commit_sync_with_offsets(
           c, a.topics.data(), a.partitions.data(), a.offsets.data(), a.leader_epochs.data(),
           a.metadata.data(), a.count());
     }
@@ -1380,7 +1380,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
     if (req->has_metadata() || req->has_leader_epoch()) {
-      err = kafka_consumer_Consumer_seek_with_metadata(
+      err = kafka_consumer_Consumer_seek_with_offset_and_metadata(
           c, req->partition().topic().c_str(), req->partition().partition(),
           req->offset(), req->has_leader_epoch() ? req->leader_epoch() : -1,
           req->has_metadata() ? req->metadata().c_str() : "");

@@ -344,12 +344,14 @@ pipeline over a single owned buffer — read them in that order.*
 ```
 rust/src/ffi/           # feature-gated: --features ffi
 ├── mod.rs
-├── common.rs           # kafka_common_Error_t & co. (57 exported symbols)
+├── common.rs           # kafka_common_Error_t & co. (58 exported symbols)
 │                       # + the callback dispatcher: CompletionJob,
 │                       # spawn_dispatcher, enqueue_or_run_inline
-├── producer.rs         # 62 exported symbols (12 of them *_async)
-├── consumer.rs         # 156 exported symbols (22 of them *_async)
-├── consumer_handle.rs  # 23 exported symbols (1 of them *_async)
+├── producer.rs         # 65 exported symbols (13 of them *_async)
+├── consumer.rs         # 180 exported symbols (30 of them *_async), incl.
+│                       # the caller-thread callback queue
+├── consumer_handle.rs  # 23 exported symbols (1 of them *_async): the reentrant
+│                       # ConsumerHandle a rebalance listener calls back through
 └── admin.rs            # 490 exported symbols (47 of them *_async)
 
 c/
@@ -360,17 +362,23 @@ c/
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
-├── producer.py, consumer.py, admin.py
+├── confluent_kafka/    # the Python client (producer + consumer), generated
+│   │                   # from CLAUDE.md's Python Binding Conventions
+│   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
+│   ├── common/                # value types, KafkaError, errors/,
+│   │                          # serialization/, config/, …
+│   └── *_error.py             # Java built-in exceptions at the root
+├── admin.py            # older admin binding, paused (not in the package)
 ├── _confluentkafka.c   # hand-written C extension
-├── _error_code.py      # generated from rust/src/ffi/common.rs by
-│                       # tools/generate_error_code.py
+├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py
-├── Dockerfile.grpc, Dockerfile.grpc.async
-├── test/{unit,static,performance}/, soak/, tools/
+├── Dockerfile.grpc, Dockerfile.grpc.async, requirements-grpc{,-tools}.txt
+├── examples/
+├── test/{unit,integration,static,performance}/, soak/, tools/
 └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
-Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-09-27).
+Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-10-05).
 
 Both bindings link the library cargo builds under `rust/target/<profile>/` and
 compile against `rust/target/include/confluent_kafka.h`: `c/CMakeLists.txt`

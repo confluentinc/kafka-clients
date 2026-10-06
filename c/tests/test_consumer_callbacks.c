@@ -294,6 +294,32 @@ static void test_commit_callback_runs_on_dispatcher_thread(void) {
 }
 
 // ---------------------------------------------------------------------------
+// With a pending-callback notify registered, the callback runs on the caller's
+// thread (Java runs onComplete on the thread inside poll()/commit*(); the mock
+// invokes it inside commitAsync itself)
+// ---------------------------------------------------------------------------
+
+static void noop_pending_notify(void *user_data) { (void)user_data; }
+
+static void test_commit_callback_runs_on_caller_thread_with_pending_notify(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    kafka_consumer_Consumer_set_pending_callback_notify(c, noop_pending_notify, NULL, NULL);
+
+    commit_result_t result;
+    commit_result_init(&result);
+
+    kafka_common_Error_t *err =
+        kafka_consumer_Consumer_commit_async_with_callback(c, on_commit, &result, NULL);
+    TEST_ASSERT_NULL(err);
+    /* It ran inside the call, on this thread, and nothing was queued. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_next_pending_callback(c));
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
 // user_data_destroy fires exactly once — on success and on marshaling failure
 // ---------------------------------------------------------------------------
 
@@ -1468,6 +1494,7 @@ int main(void) {
     RUN_TEST(test_commit_async_with_callback_fires_with_offsets_null_error);
     RUN_TEST(test_commit_async_offsets_with_callback_echoes_offsets);
     RUN_TEST(test_commit_callback_runs_on_dispatcher_thread);
+    RUN_TEST(test_commit_callback_runs_on_caller_thread_with_pending_notify);
     RUN_TEST(test_commit_callback_user_data_destroy_fires_exactly_once);
     RUN_TEST(test_commit_returns_only_after_callback_returns);
     RUN_TEST(test_consumer_handle_new_destroy);

@@ -22,7 +22,7 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
-.PHONY: init build test test-unit check-static test-soak test-integration test-performance \
+.PHONY: init build test test-unit typecheck check-static test-soak test-integration test-performance \
 	consumer-perf-test producer-perf-test grpc-image grpc-image-async grpc-native clean
 
 # Development dependencies, for a fresh clone (the root `init`).
@@ -34,9 +34,16 @@ build:
 	CFLAGS="$(CFLAGS_EXTRA)" \
 	pip install -e .
 
+# `typecheck` runs after the dev extras are installed: mypy is one of them, and
+# a fresh venv (CI) has it only from that step. `test/integration` holds the
+# broker-backed binding tests (a testcontainers KRaft broker; they skip without
+# Docker): what the Java tests drive through a MockClient the binding cannot
+# inject. They are not the gRPC multilanguage arm of `test-integration` below.
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
+	$(MAKE) typecheck
 	python -m pytest test/unit -v
+	python -m pytest test/integration -v
 	$(MAKE) check-static
 	$(MAKE) test-soak
 	$(MAKE) test-integration
@@ -47,14 +54,24 @@ test-unit: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	python -m pytest test/unit -v
 
+# Static type check of the `confluent_kafka` package (CLAUDE.md, Python Binding
+# Conventions, Tests and typing: `mypy --strict` over the package runs in
+# `make verify`). It catches stub/implementation drift.
+# `test/unit/test_typing.py` carries `typing.assert_type` assertions that
+# machine-verify the `@overload` stubs and the generics inference, so it is type
+# checked here too — a broken stub fails `make verify`. Like every target here it
+# runs in the venv the caller activated, where mypy and the built
+# `_confluentkafka` extension live.
+typecheck:
+	python -m mypy --strict confluent_kafka test/unit/test_typing.py
+
 # Static checks (test/static): the Py_BuildValue / PyArg_Parse* /
-# PyObject_CallFunction format-arity scan of _confluentkafka.c, and the
-# staleness check of the generated _error_code.py. A format one unit short of
-# its argument list compiles silently and reads a garbage pointer at run time,
-# and for every admin RPC that Java's MockAdminClient leaves unsupported the
-# affected drain's success path is unreachable from the test suite, so this
-# defect class must be caught statically. They read source files only, so they
-# need neither the Rust library nor the C extension built.
+# PyObject_CallFunction format-arity scan of _confluentkafka.c. A format one
+# unit short of its argument list compiles silently and reads a garbage pointer
+# at run time, and for every admin RPC that Java's MockAdminClient leaves
+# unsupported the affected drain's success path is unreachable from the test
+# suite, so this defect class must be caught statically. They read source files
+# only, so they need neither the Rust library nor the C extension built.
 check-static:
 	python -m pytest test/static -v
 
@@ -103,6 +120,11 @@ test-performance: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	python -m pytest test/performance -v
 
+# The librdkafka venv's interpreter (the root's `init-venv-librdkafka`): the PyPI
+# confluent-kafka client shares the top-level package `confluent_kafka` with this
+# client, so it cannot live in the active venv.
+LIBRDKAFKA_PYTHON ?= $(REPO_ROOT)/venv-librdkafka/bin/python
+
 # Env-driven consumer end-to-end latency benchmark (standalone). Mirrors
 # rust/consumer-perf/compare/benchmark_e2e_latency.c. Needs a reachable broker
 # via BOOTSTRAP_SERVERS; set KAFKA_BIN to a Kafka bin dir to self-spawn load
@@ -110,14 +132,19 @@ test-performance: build
 # backend with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka
 # baseline). Set ASYNC=True to drive the asyncio-native consumer of the
 # selected backend (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer)
-# instead of the sync one.
+# instead of the sync one. CLIENT_VERSION=2 runs in the librdkafka venv; the
+# Rust run uses it only for CREATE_TOPIC.
 consumer-perf-test: build
-	python test/performance/consumer_performance_test.py
+	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
+	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/consumer_performance_test.py)
 
 # Env-driven producer performance benchmark (standalone). Same env-var
-# contract as the Rust `producer-perf-test`.
+# contract as the Rust `producer-perf-test`; CLIENT_VERSION selects the backend
+# as for consumer-perf-test. CLIENT_VERSION=2 runs in the librdkafka venv; the
+# Rust run uses it only for CREATE_TOPIC / VERIFY_CONSUMED.
 producer-perf-test: build
-	python test/performance/producer_performance_test.py
+	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
+	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/producer_performance_test.py)
 
 # Python gRPC server image for the multilang test harness. Context is the repo
 # root; requires libconfluent_kafka.so already built in rust/target/release/.
