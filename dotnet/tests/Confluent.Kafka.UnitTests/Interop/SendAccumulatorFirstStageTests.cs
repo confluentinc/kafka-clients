@@ -574,18 +574,32 @@ public sealed class SendAccumulatorFirstStageTests
     // registration leaves behind and hands it to its next Register. The shared source's first
     // attempt allocates the nodes; its stage continuations dispose them when the drain completes
     // the waits; attempts 1-3 pop them again. So the best-of-N minimum never keeps attempt 0, and
-    // the registration costs 0 B in this figure — by construction, not by chance. The fresh-node
-    // case, which every caller with a new source per send pays, is guarded separately below.
+    // the registration costs 0 B in this figure — by construction, not by chance. Two other
+    // caller-token states pay more and are guarded separately below: a source with no free node,
+    // and a new source per send.
     private const long CancelableStageMarginalCeilingBytes = 720;
 
     private const long PlainWaitMarginalCeilingBytes = 576;
 
-    // The same regression ceiling for the cancelable path when the caller's source has NO free
-    // registration node (a new CancellationTokenSource per send — a per-request timeout, say), so
-    // every Register allocates one. Measured +760 B on net8.0 and +768 B on net10.0: the recycled
-    // figures above plus the 80 B node. The ceiling is the larger plus 32 B, again less than one
-    // more Task<T> (72 B), so a new Task-sized allocation on this path turns it red too.
+    // The same regression ceiling for the cancelable path when the caller's source has already
+    // registered once, so its one-time registration table exists, but has NO free registration
+    // node, so every Register allocates one. One long-lived token with more saturated sends
+    // pending on it than it has freed nodes is in that state. Measured +760 B on net8.0 and +768 B
+    // on net10.0: the recycled figures above plus the 80 B node. The ceiling is the larger plus
+    // 32 B, again less than one more Task<T> (72 B), so a new Task-sized allocation on this path
+    // turns it red too. ⚠ This is NOT the cost of a new CancellationTokenSource per send (a
+    // per-request timeout, say): that caller never reaches this state, because each of its sends
+    // is the first Register on its source. It is guarded by the next ceiling.
     private const long FreshNodeCancelableStageMarginalCeilingBytes = 800;
+
+    // The same regression ceiling for the cancelable path when every send brings a NEW
+    // CancellationTokenSource (a per-request timeout, say), so every Register is the first on its
+    // source. On .NET Core that first Register allocates the source's 64 B registration table as
+    // well as the 80 B node, so this caller pays the fresh-node figure above plus 64 B on every
+    // saturated send. Measured +824 B on net8.0 and +832 B on net10.0. The ceiling is the larger
+    // plus 32 B, again less than one more Task<T> (72 B), so a new Task-sized allocation on this
+    // path turns it red too.
+    private const long NewSourcePerSendCancelableStageMarginalCeilingBytes = 864;
 
     [Fact]
     public async Task Admission_SaturatedFirstStage_PerSendAllocation_IsMeasured_AndStaysUnderItsCeiling()
@@ -604,7 +618,8 @@ public sealed class SendAccumulatorFirstStageTests
         // and its drained stages dispose them back to the source, and attempts 1-3 reuse them — so
         // best-of-4 skips attempt 0 and the registration's node costs nothing here. The warm call
         // keeps only the source's one-time table out of the window, not the per-registration node.
-        // A source with no free node is measured by the fresh-node test below.
+        // A source with no free node is measured by the fresh-node test below, and a new source
+        // per send by the per-send-source test after it.
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
         long fast = long.MaxValue;
@@ -638,12 +653,16 @@ public sealed class SendAccumulatorFirstStageTests
         // M11/P3.5 T21 (i), fresh-node half — the D2 (c) path's cost for a caller token whose source
         // has NO free registration node. DEFINITION: as in the test above (caller-thread bytes per
         // SubmitAdmitted call over 64 calls, best of 4 fresh accumulators, minus the fast path), but
-        // with a NEW CancellationTokenSource for every measurement. Its warm call still keeps the
-        // source's one-time table out of the window; the 64 measured stages are all still pending
-        // (the bound is saturated and nothing drains inside the window), so none of their
-        // registrations has been disposed and every measured Register allocates its own node. This
-        // is the cost of a caller that creates a source per send — a per-request timeout — and of
-        // the first registrations on any token.
+        // with a NEW CancellationTokenSource for every measurement, shared by its warm call and its
+        // 64 measured sends. The warm call registers first, so the source's one-time table exists
+        // before the window and is not charged; the 64 measured stages are all still pending (the
+        // bound is saturated and nothing drains inside the window), so none of their registrations
+        // has been disposed and every measured Register allocates its own node. This is the cost on
+        // a source that has registered before and has no free node, such as one long-lived token
+        // with more saturated sends pending on it than it has freed nodes. ⚠ It is NOT the cost of
+        // a new source per send (a per-request timeout): each such send is the FIRST Register on
+        // its source and pays the table too, which this warm call excludes. The next test measures
+        // that caller.
         long fast = long.MaxValue;
         long fresh = long.MaxValue;
         for (int attempt = 0; attempt < AllocationAttempts; attempt++)
@@ -669,19 +688,82 @@ public sealed class SendAccumulatorFirstStageTests
             $"the cancelable first stage's own cost on a fresh source exceeded its ceiling {FreshNodeCancelableStageMarginalCeilingBytes} B — {figures}");
     }
 
-    private static async Task<long> MeasurePerSend(int maxAdmitted, CancellationToken token)
+    [Fact]
+    public async Task Admission_SaturatedFirstStage_WithANewTokenSourcePerSend_PerSendAllocation_IsMeasured_AndStaysUnderItsCeiling()
+    {
+        // M11/P3.5 T21 (i), per-send-source half — the D2 (c) path's cost for a caller that creates
+        // a NEW CancellationTokenSource for every send (a per-request timeout, say). DEFINITION: as
+        // in the two tests above (caller-thread bytes per SubmitAdmitted call over 64 calls, best of
+        // 4 fresh accumulators, minus the fast path measured the same way), but each of the 64
+        // measured sends uses its OWN new source, so every measured Register is the first on its
+        // source and pays the source's one-time registration table as well as its node. The warm
+        // call uses one more source of its own: it warms the path, but none of the measured
+        // sources. All 65 sources are created before the window, stay alive (referenced) through
+        // it, and are disposed only after every measured send has resolved, so neither their
+        // construction (the caller's own allocation, not the stage's) nor their disposal is
+        // charged.
+        long fast = long.MaxValue;
+        long perSend = long.MaxValue;
+        for (int attempt = 0; attempt < AllocationAttempts; attempt++)
+        {
+            fast = Math.Min(fast, await MeasurePerSendWithANewSourceEach(maxAdmitted: 4096));
+            perSend = Math.Min(perSend, await MeasurePerSendWithANewSourceEach(maxAdmitted: 1));
+        }
+
+        long perSendMarginal = perSend - fast;
+        string figures =
+            $"per send: fast path {fast} B, saturated + cancelable token on a new source per send {perSend} B (+{perSendMarginal} B)";
+        _output.WriteLine(figures);
+
+        Assert.True(
+            perSendMarginal <= NewSourcePerSendCancelableStageMarginalCeilingBytes,
+            $"the cancelable first stage's own cost with a new source per send exceeded its ceiling {NewSourcePerSendCancelableStageMarginalCeilingBytes} B — {figures}");
+    }
+
+    private static async Task<long> MeasurePerSendWithANewSourceEach(int maxAdmitted)
+    {
+        CancellationTokenSource warmSource = new CancellationTokenSource();
+        CancellationTokenSource[] sources = new CancellationTokenSource[AllocationSendCount];
+        CancellationToken[] tokens = new CancellationToken[AllocationSendCount];
+        for (int i = 0; i < sources.Length; i++)
+        {
+            sources[i] = new CancellationTokenSource();
+            tokens[i] = sources[i].Token;
+        }
+
+        try
+        {
+            return await MeasurePerSend(maxAdmitted, warmSource.Token, tokens);
+        }
+        finally
+        {
+            // After MeasurePerSend has awaited every measured send — outside the window.
+            warmSource.Dispose();
+            foreach (CancellationTokenSource source in sources)
+            {
+                source.Dispose();
+            }
+        }
+    }
+
+    private static Task<long> MeasurePerSend(int maxAdmitted, CancellationToken token) =>
+        MeasurePerSend(maxAdmitted, token, measuredTokens: null);
+
+    // `measuredTokens` null: the warm call and all 64 measured sends use `token`. Non-null: the
+    // i-th measured send uses measuredTokens[i], and `token` serves the warm call only.
+    private static async Task<long> MeasurePerSend(int maxAdmitted, CancellationToken token, CancellationToken[]? measuredTokens)
     {
         using Harness harness = new Harness(Settings(maxAdmitted));
 
         // Outside the window: the bound (filled when it is 1), the node grown past the window (it
         // starts at 16 slots and doubles, so 130 records leave it at 256 and the 1 + 64 below never
         // grow it — otherwise the window would be charged the amortized growth), and one call down the
-        // measured path to warm it and the token's registration table.
+        // measured path to warm it and the warm token's registration table.
         Task<RecordMetadata>[] filled = harness.Append(PrefilledRecords);
         Task<Task<RecordMetadata>> warm = harness.AppendStaged(0x81, callback: null, token, out _).AsTask();
         ValueTask<Task<RecordMetadata>>[] stages = new ValueTask<Task<RecordMetadata>>[AllocationSendCount];
 
-        long bytes = MeasureAppends(harness, token, stages);
+        long bytes = MeasureAppends(harness, token, measuredTokens, stages);
 
         harness.DrainNow();
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
@@ -695,7 +777,8 @@ public sealed class SendAccumulatorFirstStageTests
         return bytes / AllocationSendCount;
     }
 
-    private static long MeasureAppends(Harness harness, CancellationToken token, ValueTask<Task<RecordMetadata>>[] stages)
+    private static long MeasureAppends(
+        Harness harness, CancellationToken token, CancellationToken[]? measuredTokens, ValueTask<Task<RecordMetadata>>[] stages)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -704,7 +787,7 @@ public sealed class SendAccumulatorFirstStageTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < stages.Length; i++)
         {
-            stages[i] = harness.AppendStaged(0x82, callback: null, token, out _);
+            stages[i] = harness.AppendStaged(0x82, callback: null, measuredTokens is null ? token : measuredTokens[i], out _);
         }
 
         return GC.GetAllocatedBytesForCurrentThread() - before;
