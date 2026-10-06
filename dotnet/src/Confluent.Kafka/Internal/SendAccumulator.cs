@@ -51,7 +51,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>Pin ownership transfers on a successful <see cref="Append"/>.</b> Before it, the caller owns
 /// the pins and releases them if the append throws; after it, this type owns them and releases every
 /// one exactly once — in a <c>finally</c>, after <c>send_batch</c> returns and before the futures
-/// reach the pump (§4.4). Never in the pump, never across the returned <see cref="Task"/>.
+/// reach the pump (§4.4). Never in the pump, never across the record's delivery <see cref="Task"/>.
 /// </para>
 /// <para>
 /// <b>Submission order is call order</b> (M11/P3.2 §F1; M11/P3.4 now gets it the anchor's own way).

@@ -65,7 +65,7 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> The producer has no <c>wakeup()</c>, so
-/// a canceled token cancels the returned task's .NET-side wait but does not abort the in-flight
+/// a canceled token cancels the record's delivery task's .NET-side wait but does not abort the in-flight
 /// native op.
 /// </para>
 /// <para>

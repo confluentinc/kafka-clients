@@ -54,7 +54,8 @@ namespace Confluent.Kafka;
 /// synchronously as a <see cref="SerializationException"/>. .NET has only one future type
 /// (<see cref="System.Threading.Tasks.Task{TResult}"/>), which the async
 /// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>
-/// already returns; a <see cref="System.Threading.Tasks.Task"/>
+/// already yields from its first stage (a <see cref="System.Threading.Tasks.ValueTask{TResult}"/> that
+/// completes once the record is accepted); a <see cref="System.Threading.Tasks.Task"/>
 /// here would clone the async surface and erase the sync/async split. Callers who want pipelined,
 /// future-returning sends use <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from
 /// Python's sync producer (whose <c>send</c> returns a <c>concurrent.futures.Future</c>) — forced by .NET's

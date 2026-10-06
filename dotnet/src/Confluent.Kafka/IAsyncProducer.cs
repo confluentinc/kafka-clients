@@ -53,10 +53,10 @@ namespace Confluent.Kafka;
 /// <b>Both of Java's <c>send</c> signatures are present (M14/P1).</b>
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> mirrors
 /// Java's <c>send(ProducerRecord, Callback)</c> (<c>Producer.java:86</c>): the callback is an
-/// <b>additional</b> parameter — the overload still returns the
-/// record's delivery <see cref="Task{TResult}"/>. See <see cref="IDeliveryCallback"/> and the §4
-/// <b>delivery-callback divergence</b> for the thread, ordering, non-null-metadata and throw-policy
-/// contracts.
+/// <b>additional</b> parameter — the overload still yields the record's delivery
+/// <see cref="Task{TResult}"/> from the same <see cref="ValueTask{TResult}"/> first stage. See
+/// <see cref="IDeliveryCallback"/> and the §4 <b>delivery-callback divergence</b> for the thread,
+/// ordering, non-null-metadata and throw-policy contracts.
 /// </para>
 /// <para>
 /// ⚠ <b><c>Send</c> can BLOCK the calling thread under sustained saturation (M11/P3.3).</b> This
@@ -84,8 +84,8 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
-/// no <c>wakeup()</c>: a canceled <see cref="CancellationToken"/> cancels the returned
-/// <see cref="Task"/>'s .NET-side wait, but does not abort the in-flight native op — it
+/// no <c>wakeup()</c>: a canceled <see cref="CancellationToken"/> cancels the record's delivery
+/// <see cref="Task{TResult}"/>'s .NET-side wait, but does not abort the in-flight native op — it
 /// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). ⚠ A token that fires
 /// while <c>Send</c> is blocked waiting for capacity does <b>not</b> abort that wait (M11/P3.4):
 /// the record is already accepted by then, so the token only cancels the record's
