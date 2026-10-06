@@ -64,13 +64,16 @@ namespace Confluent.Kafka.Internal;
 /// append-first are gone with it.
 /// </para>
 /// <para>
-/// <b>Admission is BOUNDED, and exceeding it blocks the calling thread</b> (M11/P3.3,
-/// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> / <see cref="SubmitAdmitted"/>). Before
-/// the bound the client accepted an unbounded number of sends (measured: 2.05 M records in flight,
-/// p50 3,524 ms, RSS 2.04 GiB, against 41 ms / 239 MB immediately before). The bound is
-/// <b>synchronous</b>, because the caller never awaits admission — it is handed the record's
-/// delivery <see cref="Task"/> and moves on (deviation DV-1), so an asynchronous admission wait
-/// bounds a container and throttles nobody.
+/// <b>Admission is BOUNDED, and exceeding it holds the send's FIRST STAGE, not the calling
+/// thread</b> (M11/P3.3, <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> /
+/// <see cref="SubmitAdmitted"/>). Before the bound the client accepted an unbounded number of sends
+/// (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB, against 41 ms / 239 MB
+/// immediately before). Until the two-stage send this wait had to be <b>synchronous</b>: the caller
+/// was handed only the record's delivery <see cref="Task"/> (deviation DV-1), so an asynchronous
+/// admission wait throttled nobody. The two-stage send gives the caller an accepted stage to await,
+/// so the wait is now <b>asynchronous</b> — Python's async <c>send</c>, which appends and then
+/// <c>await</c>s space (<c>python/producer.py:689-704</c>). A caller that does not await the first
+/// stage is not throttled, as in Python.
 /// </para>
 /// <para>
 /// <b>Teardown is minimal-but-correct in this slice.</b> <see cref="Stop"/> closes the accumulator
@@ -105,14 +108,16 @@ internal sealed class SendAccumulator
     // the ONLY release site on the normal path (TakeChainLocked -> ReleaseAdmission), and
     // SubmitAdmitted is the only take site, so the accounting is single-sited in both directions.
     //
-    // Saturating it makes the CALLING THREAD block. That is the whole point and it is Java's shape
-    // (KafkaProducer.send() blocks once buffer.memory is full); an asynchronous admission wait does
-    // not throttle anyone, because the caller does not await admission — it is handed the record's
-    // delivery Task and moves on (deviation DV-1). Measured twice: M11/P6's
-    // `await _inflight.WaitAsync` gave 63.5k msg/s / 3.0 GB / p50 10,001 ms, and M11/P3.2's
-    // unbounded queue gave 583k / 2.04 GiB / p50 3,524 ms, against 537k / 239 MB / 41 ms
-    // immediately before it. The synchronous wait is what throttles (M11/P7: 591.6k / 127 MiB /
-    // p50 7 ms).
+    // Saturating it holds the send's FIRST STAGE (the accepted ValueTask) until a take returns
+    // permits; the calling thread returns at once. This used to block the calling thread instead,
+    // because the one-stage Send handed the caller only the delivery Task, so an asynchronous wait
+    // throttled nobody — measured twice: M11/P6's `await _inflight.WaitAsync` gave 63.5k msg/s /
+    // 3.0 GB / p50 10,001 ms, and M11/P3.2's unbounded queue gave 583k / 2.04 GiB / p50 3,524 ms,
+    // against 537k / 239 MB / 41 ms immediately before it. The two-stage send removes that premise:
+    // a caller that awaits the first stage IS throttled by an asynchronous wait, which is Python's
+    // async send (append, then `await space`, python/producer.py:689-704). A caller that does not
+    // await it is NOT throttled — Python parity again, chosen deliberately: each such send parks one
+    // WaitAsync node instead of a thread, and the population below grows with them.
     //
     // ⚠ THE CEILING IS int.MaxValue, NOT MaxAdmittedRecords, AND THAT IS FORCED BY APPEND-FIRST.
     // The permit for a record is released when the batch thread TAKES it, which under append-first
@@ -123,47 +128,51 @@ internal sealed class SendAccumulator
     // MaxAdmittedRecords and is what makes the gate block.
     //
     // ⚠ THE BOUND THE CEILING NO LONGER POLICES, STATED SO IT CAN BE TESTED INSTEAD. Let P be the
-    // records appended-but-not-taken (_chainRecords) and W the callers currently between their
-    // append and the return of their Wait. Every append increments _chainRecords exactly once and
-    // is released exactly once by the take that zeroes it, and every SubmitAdmitted that appended
-    // attempts exactly one Wait, so
+    // records appended-but-not-taken (_chainRecords) and W the sends whose admission wait is still
+    // pending — their first stage not yet complete, or ended early by the caller's own token, which
+    // releases the caller but NOT the wait (M11/P3.5 D2 (c)). Every append increments _chainRecords exactly
+    // once and is released exactly once by the take that zeroes it, and every SubmitAdmitted that
+    // appended takes exactly one permit — inline, or later through its WaitAsync — so
     //
-    //     available = MaxAdmittedRecords + (records taken) - (callers past their Wait)
+    //     available = MaxAdmittedRecords + (records taken) - (permits taken)
     //               = MaxAdmittedRecords - P + W  >= 0   =>   P <= MaxAdmittedRecords + W
     //
-    // i.e. the accepted-but-unforwarded population is bounded by the cap plus the number of
-    // concurrently parked caller threads. That is the anchor's own shape (py_Producer_send appends
-    // unconditionally, so C concurrent senders reach bound + C - 1) and is asserted by
-    // Admission_IsBounded_WhenTheFloodOutrunsTheDrain. The ONLY drift is at teardown: a cancelled
-    // gate makes Wait throw without taking (SemaphoreSlim checks the token before the permit), so
-    // each caller released that way leaves one permit behind — harmless, because the accumulator is
-    // closed and nothing can be admitted afterwards.
+    // i.e. the accepted-but-unforwarded population is bounded by the cap plus the number of pending
+    // admission waits. For callers that await the first stage W is at most one per caller, which is
+    // the anchor's own shape (py_Producer_send appends unconditionally, so C concurrent senders reach
+    // bound + C - 1) and is asserted by Admission_IsBounded_WhenTheFloodOutrunsTheDrain. For callers
+    // that do not await it — or whose token keeps ending it early — W, and so P, is unbounded, as in
+    // Python (a caller that wraps each send in asyncio.wait_for). The ONLY drift is at
+    // teardown: a cancelled gate ends a pending WaitAsync without taking a permit, so each send
+    // released that way leaves one permit behind — harmless, because the accumulator is closed and
+    // nothing can be admitted afterwards.
     //
     // ⚠ STARVATION — recorded, accepted, NOT claimed as parity. Java's BufferPool is fair by
     // contract: "It is fair. That is all memory is given to the longest waiting thread until it has
     // sufficient memory" (BufferPool.java:40), a Deque<Condition> with addLast / peekFirst().signal().
-    // SemaphoreSlim documents no waiter ordering and can barge, so under sustained saturation a
-    // caller can wait longer than one that arrived after it. Since M11/P3.4 the wait has no timeout,
-    // so barging can no longer turn into a spurious refusal — the starved caller is delayed, never
-    // failed. ORDERING does not depend on any of this: a record's position is fixed by its append,
-    // which happens before the wait.
+    // SemaphoreSlim documents no waiter ordering, so under sustained saturation a send's first stage
+    // can complete later than that of a send that arrived after it. The wait has no timeout, so this
+    // can only delay a first stage, never fail it on its own. ORDERING does not depend on any of this: a
+    // record's position is fixed by its append, which happens before the wait.
     private readonly SemaphoreSlim _admission;
 
-    // Cancelled by Stop() so a Send parked on the admission bound is released instead of pinning
-    // teardown behind it (§3.8 step 2, which must precede closing the accumulator), and —
-    // unconditionally — by AbandonOnThreadFailure, so the batch thread dying releases those waiters
-    // too rather than leaving them to permit arithmetic the failure may already have corrupted
-    // (M11/P3.2 slice S5). Never disposed: a CancellationTokenSource with no timer holds no
-    // unmanaged resource, and disposing one while a linked registration is being torn down is its
-    // own hazard — and a disposed CTS would make `.Token` throw ObjectDisposedException at the wait
-    // site instead of the OperationCanceledException that site is written to swallow.
+    // Cancelled by Stop() so a send whose first stage is waiting on the admission bound completes
+    // instead of staying pending behind teardown (§3.8 step 2, which must precede closing the
+    // accumulator), and — unconditionally — by AbandonOnThreadFailure, so the batch thread dying
+    // releases those waits too rather than leaving them to permit arithmetic the failure may already
+    // have corrupted (M11/P3.2 slice S5). Never disposed: a CancellationTokenSource with no timer
+    // holds no unmanaged resource, and disposing one while a linked registration is being torn down
+    // is its own hazard — and a disposed CTS would make `.Token` throw ObjectDisposedException at the
+    // wait site, after the record was appended.
     //
     // ⚠ IT IS THE ONLY THING THAT CAN END THE ADMISSION WAIT EARLY (M11/P3.4). The wait takes no
     // timeout and NOT the caller's token, because by then the record is already appended and may
-    // already have been sent: nothing may make SubmitAdmitted throw and strand an awaiter the
-    // caller has not been handed yet. Both Cancel() sites therefore double as the liveness
-    // guarantee for a parked caller, and the record it appended is settled by the chain machinery
-    // either way (the final drain, or SettleAbandonedChain).
+    // already have been sent: nothing inside the producer may fail the first stage of a send whose
+    // record is in the chain. (The caller's own token may END that first stage early — M11/P3.5
+    // D2 (c), see SubmitAdmitted — but it never reaches this wait, which runs on and takes its
+    // permit.) Both Cancel() sites therefore double as the liveness guarantee for a pending first
+    // stage — a cancelled wait completes it successfully — and the record it appended is settled by
+    // the chain machinery either way (the final drain, or SettleAbandonedChain).
     private readonly CancellationTokenSource _spaceGate = new CancellationTokenSource();
 
     // The chain the batch thread TOOK from the accumulator and has not finished sending yet.
@@ -257,11 +266,11 @@ internal sealed class SendAccumulator
     /// </para>
     /// <para>
     /// ⚠ <b>Under append-first it counts a record from the moment it is appended</b>, which is
-    /// <em>before</em> its caller has taken an admission permit — so a sampled peak includes the
-    /// callers currently parked, and the quantity it is bounded by is
-    /// <c>MaxAdmittedRecords + (parked callers)</c> rather than <c>MaxAdmittedRecords</c> (the
-    /// arithmetic is at <see cref="_admission"/>). At rest — every caller returned, nothing drained
-    /// — it equals the number of accepted-but-unforwarded records exactly.
+    /// <em>before</em> its send has taken an admission permit — so a sampled peak includes the sends
+    /// whose first stage is still pending, and the quantity it is bounded by is
+    /// <c>MaxAdmittedRecords + (pending first stages)</c> rather than <c>MaxAdmittedRecords</c> (the
+    /// arithmetic is at <see cref="_admission"/>). At rest — every first stage complete, nothing
+    /// drained — it equals the number of accepted-but-unforwarded records exactly.
     /// <see cref="AvailableAdmissions"/> is the gate's own count and moves the other way; the two
     /// witnesses are complementary rather than interchangeable.
     /// </para>
@@ -284,9 +293,10 @@ internal sealed class SendAccumulator
     /// <summary>
     /// <b>The production send path's single entry point:</b> <b>appends the record first</b> — under
     /// <see cref="_gate"/>, so its position in the chain is fixed by this call — and only then takes
-    /// an admission permit, <b>blocking the calling thread</b> while the bound is saturated. On a
-    /// normal return the record is in the chain; on a throw nothing has been appended, pinned, or
-    /// charged.
+    /// an admission permit. It <b>never blocks the calling thread</b>: with a permit free it returns
+    /// an already-completed first stage; with the bound saturated it returns a <b>pending</b> one,
+    /// completed when a take returns permits. On a normal return the record is in the chain; on a
+    /// throw nothing has been appended, pinned, or charged.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -296,86 +306,259 @@ internal sealed class SendAccumulator
     /// no send can overtake one that is waiting — the waiting one has already taken its place. That
     /// replaces M11/P3.2's routing count + FIFO submission queue + single submitter, which existed
     /// only to reproduce the property while the permit was taken <em>before</em> the append. Per-caller
-    /// ordering is all Java promises (<c>ProducerConfig.java:274</c>) and it now holds by construction:
-    /// a caller's next <c>Send</c> cannot start until this one has returned, and this one appended
-    /// before it parked.
+    /// ordering is all Java promises (<c>ProducerConfig.java:274</c>) and it holds by construction:
+    /// the append happens inside this call, so a caller's records are appended in the order its calls
+    /// were made, whether or not it awaits the first stage in between.
     /// </para>
     /// <para>
-    /// <b>The wait has NO TIMEOUT and does NOT honour <paramref name="cancellationToken"/>, deliberately.</b>
-    /// By the time it runs the record is already appended and may already have been sent, so nothing
-    /// may make this method throw and strand a <paramref name="completion"/> the caller has not been
-    /// handed yet. <paramref name="cancellationToken"/> is unchanged in every other respect — it still
-    /// marks the returned <see cref="Task"/> cancelled through <c>SendViaPump</c>'s own registration —
-    /// it simply has no say over this wait. The only thing that can end it early is
-    /// <see cref="_spaceGate"/> (teardown, or the batch thread dying), and even that does not throw:
-    /// the record is in the chain and is settled by the chain machinery either way.
+    /// <b>The wait is asynchronous, and the first stage is the throttle</b> — Python's async
+    /// <c>send</c>, which appends and then <c>await</c>s space (<c>python/producer.py:689-704</c>).
+    /// This used to be a blocking wait, because the one-stage <c>Send</c> handed the caller only the
+    /// delivery <see cref="Task"/>, so an asynchronous wait throttled nobody (measured twice, see
+    /// <see cref="_admission"/>). The two-stage send gives the caller an accepted stage to await, so
+    /// a caller that awaits it is throttled without parking a thread. A caller that does not await it
+    /// is <b>not</b> throttled — each such send leaves one pending wait, and the admitted population
+    /// grows with them — as with a Python caller that runs each <c>send</c> as its own task without
+    /// awaiting it.
     /// </para>
     /// <para>
-    /// <b>It stays synchronous, and that is the throttle.</b> An <c>async</c> admission wait cannot
-    /// throttle: the caller is handed the record's delivery <see cref="Task"/> and does not await
-    /// admission (deviation DV-1), so a parked continuation is just another unbounded container —
-    /// measured as such, twice (see <see cref="_admission"/>). A blocking
-    /// <see cref="SemaphoreSlim.Wait(CancellationToken)"/> is a genuine synchronous primitive, not an
-    /// asynchronous operation being blocked on, so it is <em>not</em> the sync-over-async footgun
-    /// ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4 draws for the consumer's sync
-    /// <c>Seek</c>. It is also what lets <c>SendViaPump</c> stay non-<c>async</c>, which its own
-    /// comment requires.
+    /// <b>The wait has NO TIMEOUT and is NOT linked to <paramref name="cancellationToken"/>, deliberately.</b>
+    /// By the time it starts the record is already appended and may already have been sent, so
+    /// nothing inside the producer may fail the first stage. The only thing that can end the
+    /// <em>wait</em> early is <see cref="_spaceGate"/> (teardown, or the batch thread dying), and
+    /// that completes the first stage <b>successfully</b> (decision D3): the record is in the chain
+    /// and is settled by the chain machinery either way.
+    /// </para>
+    /// <para>
+    /// <b>The caller's token ends the caller's first stage, not the wait (M11/P3.5 D2 (c)).</b>
+    /// User ruling: <em>"the token lets the caller stop waiting, but the record still goes out."</em>
+    /// When the bound is saturated and <paramref name="cancellationToken"/> can be canceled, the
+    /// first stage is a <see cref="CancellableFirstStage"/>: a token that fires while it is pending
+    /// ends it <see cref="TaskStatus.Canceled"/> with that token, while the wait underneath runs on,
+    /// takes its permit as usual (so the bound's accounting stays exact) and releases the
+    /// registration. The record is still sent and its delivery callback still fires; the delivery
+    /// <see cref="Task"/> is cancelled by <c>SendViaPump</c>'s own registration. This is Python's
+    /// async <c>send</c>, where a cancelled task raises <c>CancelledError</c> after the append and the
+    /// orphaned future is never returned. Linking the token into <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/>
+    /// instead was rejected (option (b)): a cancelled wait takes no permit, and under the
+    /// <see cref="int.MaxValue"/> ceiling that drift is silent. An <b>already</b>-canceled token never
+    /// reaches here — <c>SendViaPump</c> throws before the append (decision D4).
+    /// </para>
+    /// <para>
+    /// <b>The first stage never completes on the batch thread.</b> A pending wait is completed by
+    /// <see cref="ReleaseAdmission"/>, which runs on the batch thread; its continuation — the one
+    /// that completes the first stage, and with it the caller's <c>await</c> — is queued to
+    /// <see cref="TaskScheduler.Default"/> rather than run inline, so user code never runs on the
+    /// batch thread (the same rule as <c>RunContinuationsAsynchronously</c> on the delivery task).
     /// </para>
     /// <para>
     /// <b>Pins are taken with the append, and are owned by the accumulator before the wait begins.</b>
-    /// M11/P3.1 §4.4's invariant — <em>a blocked sender must not hold pins</em> — is satisfied a
-    /// different way than it was under permit-first: the parked caller holds none, because
+    /// M11/P3.1 §4.4's invariant — <em>a waiting sender must not hold pins</em> — holds because
     /// <see cref="Submit"/> transferred every one of them to the node it appended to, and that node's
     /// pins are released by the batch thread after its <c>send_batch</c> exactly as for any other
-    /// record. A parked caller adds no pin window at all.
+    /// record. A pending first stage adds no pin window at all.
     /// </para>
     /// <para>
-    /// <b>The steady-state path allocates nothing here</b> (DoD §10). Both statements are
-    /// allocation-free: <see cref="Submit"/>'s append reuses the node chain, and
-    /// <see cref="SemaphoreSlim.Wait(CancellationToken)"/> with a free permit takes no lock object and
-    /// builds no registration (the linked-token source the pre-M11/P3.4 slow path allocated is gone
-    /// with the timeout).
+    /// <b>The steady-state path allocates nothing here</b> (DoD §10). <see cref="Submit"/>'s append
+    /// reuses the node chain, <see cref="SemaphoreSlim.Wait(int)"/> with a zero timeout builds no
+    /// registration, and the completed first stage is a <see cref="ValueTask{TResult}"/> struct over
+    /// the delivery task. Only a saturated send allocates: its wait and the continuation that
+    /// completes the first stage — plus, when the caller passed a cancelable token, one
+    /// <see cref="CancellableFirstStage"/> with its stage task and token registration.
     /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to accept.</param>
     /// <param name="completion">The record's awaiter.</param>
     /// <param name="delivery">The record's delivery-callback carrier, or <see langword="null"/>.</param>
     /// <param name="cancellationToken">
-    /// The caller's token. It does <b>not</b> interrupt the admission wait (see the remarks); it is
-    /// accepted so the entry point's shape matches <c>SendViaPump</c>'s.
+    /// The caller's token. It never reaches the admission wait; while the first stage is pending it
+    /// can end that stage <see cref="TaskStatus.Canceled"/> (see the remarks). An already-canceled
+    /// token has been rejected by <c>SendViaPump</c> before this call.
     /// </param>
+    /// <returns>
+    /// The send's first stage: completed if a permit was free, otherwise pending until one is (or
+    /// until teardown, which also completes it successfully). Its result is the record's delivery
+    /// task, <paramref name="completion"/>'s <see cref="TaskCompletionSource{TResult}.Task"/>. It ends
+    /// <see cref="TaskStatus.Canceled"/> only when <paramref name="cancellationToken"/> fires while it
+    /// is pending — and then the record is still sent.
+    /// </returns>
     /// <exception cref="ObjectDisposedException">
     /// The producer is closing — nothing was appended.
     /// </exception>
-    internal void SubmitAdmitted(
+    internal ValueTask<Task<RecordMetadata>> SubmitAdmitted(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken)
     {
-        _ = cancellationToken;
-
         // APPEND FIRST. This throws ObjectDisposedException if teardown already closed the
         // accumulator, and that throw must propagate: nothing was appended, the caller has not been
         // handed `completion`, and SendViaPump turns it into the synchronous disposed-producer
         // outcome its preconditions already document.
         Submit(record, completion, delivery);
 
-        // BLOCK AFTER. The record is committed, so this wait is purely a throttle on the CALLER.
+        // WAIT AFTER — the record is committed, so from here on nothing may throw, and nothing
+        // inside the producer may fail the first stage. The fast path takes a free permit without
+        // waiting and allocates nothing: the ValueTask is a struct over the delivery task.
+        Task<RecordMetadata> deliveryTask = completion.Task;
+        if (_admission.Wait(0))
+        {
+            return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+        }
+
         try
         {
-            _admission.Wait(_spaceGate.Token);
+            // Saturated: wait asynchronously. Completed by a take's ReleaseAdmission, or cancelled
+            // by teardown (Stop, or AbandonOnThreadFailure). A cancelled wait takes no permit, so
+            // the take/release accounting ends one release ahead for this record — harmless, since
+            // the same events close the accumulator; see _admission. ⚠ NEVER link the caller's
+            // token in here (D2 option (b), rejected): a caller-cancelled wait would take no permit
+            // either, and that drift is silent under the int.MaxValue ceiling.
+            Task wait = _admission.WaitAsync(_spaceGate.Token);
+            if (wait.IsCompleted)
+            {
+                // A permit came back, or teardown had already cancelled the gate, between the two
+                // calls. Either way the record is accepted.
+                return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+            }
+
+            if (!cancellationToken.CanBeCanceled)
+            {
+                // No token to honour, so nothing beyond the wait's own continuation. Not
+                // ExecuteSynchronously: the continuation is queued to the thread pool, so neither it
+                // nor the caller's await ever runs on the batch thread that released the permit. It
+                // runs whatever the wait's outcome, and a cancelled wait is "accepted" too (above).
+                return new ValueTask<Task<RecordMetadata>>(wait.ContinueWith(
+                    static (_, state) => (Task<RecordMetadata>)state!,
+                    deliveryTask,
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default));
+            }
+
+            // Saturated AND cancelable: the token may end this caller's first stage (D2 (c)), the
+            // wait runs on regardless. See CancellableFirstStage.
+            return new ValueTask<Task<RecordMetadata>>(
+                CancellableFirstStage.Start(wait, deliveryTask, cancellationToken));
         }
-        catch (OperationCanceledException)
+        catch (Exception)
         {
-            // Teardown (Stop, or AbandonOnThreadFailure) cancelled the gate while parked here.
-            // Swallow — this must not throw: the record is already appended and is settled by the
-            // chain machinery, so all that is left to do is release the caller's thread.
+            // POST-APPEND NO-THROW (M11/P3.4 §4). The record is in the chain, so nothing here may
+            // turn into a throw (that would tell the caller nothing was sent, and IDeliveryCallback
+            // promises a throw out of Send fires nothing — this record's callback WILL fire). What
+            // can land here: an allocation failure, or CancellationToken.Register refusing a token
+            // whose source was disposed (.NET Framework throws ObjectDisposedException there). Report
+            // the record accepted without the throttle. ACCEPTED RESIDUAL: if the wait itself was
+            // never queued (an allocation failure inside WaitAsync) this leaves one permit of
+            // surplus — +1 drift on OOM only, the same drift as a teardown-cancelled wait. When the
+            // wait WAS queued it still takes its permit, so the other failures cost no drift.
+            return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+        }
+    }
+
+    /// <summary>
+    /// The pending first stage of a saturated send whose caller passed a cancelable token
+    /// (M11/P3.5 D2 (c)): the token can release the <b>caller</b> without touching the admission
+    /// wait. Host scaffolding with no Java counterpart (DoD §7) — Java's <c>send()</c> blocks the
+    /// calling thread instead, so it has no first stage to cancel; the shape is the Python binding's
+    /// async <c>send</c>, whose cancelled task raises <c>CancelledError</c> after the append.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Exactly one outcome</b>, whichever <c>TrySet*</c> runs first; the loser's is a no-op:
+    /// the caller's token fires → <see cref="TaskCompletionSource{TResult}.TrySetCanceled(CancellationToken)"/>
+    /// WITH that token (so <c>OperationCanceledException.CancellationToken</c> matches it); or the
+    /// wait completes — a permit, or the teardown gate, both "accepted" (decision D3) →
+    /// <c>TrySetResult</c> with the delivery task. Either way the record is sent: it was appended
+    /// before this object existed.
+    /// </para>
+    /// <para>
+    /// <b>The stage's task is built with <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/></b>
+    /// (decision D5): the token callback runs on whichever thread calls <c>Cancel()</c>, so without it
+    /// the caller's <c>await</c> would resume inline on the canceller. The wait continuation is
+    /// queued to the pool, so it never runs on the batch thread either.
+    /// </para>
+    /// <para>
+    /// <b>The wait continuation disposes the registration in every outcome</b> — a permit, the
+    /// teardown gate, or after the token already won — so registrations never accumulate on a
+    /// long-lived token (an application-shutdown token, say). One object and no closures: the
+    /// state, the stage, the token and the registration ride together, and both callbacks are
+    /// static.
+    /// </para>
+    /// </remarks>
+    private sealed class CancellableFirstStage
+    {
+        private readonly TaskCompletionSource<Task<RecordMetadata>> _stage =
+            new TaskCompletionSource<Task<RecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private readonly Task<RecordMetadata> _delivery;
+
+        private readonly CancellationToken _callerToken;
+
+        // Assigned by Start BEFORE the wait continuation is attached — see the ordering note there.
+        private CancellationTokenRegistration _registration;
+
+        private CancellableFirstStage(Task<RecordMetadata> delivery, CancellationToken callerToken)
+        {
+            _delivery = delivery;
+            _callerToken = callerToken;
+        }
+
+        /// <summary>
+        /// Builds the stage over a <paramref name="wait"/> that has not completed yet and returns
+        /// the caller's first-stage task.
+        /// </summary>
+        internal static Task<Task<RecordMetadata>> Start(
+            Task wait,
+            Task<RecordMetadata> delivery,
+            CancellationToken callerToken)
+        {
+            CancellableFirstStage stage = new CancellableFirstStage(delivery, callerToken);
+
+            // ⚠ ORDER: register, and STORE the registration, before attaching the wait continuation.
+            // That continuation may run at any moment once attached; attached first, it could find
+            // _registration still `default`, dispose nothing, and leave the real registration alive
+            // on a long-lived token. Register may invoke the callback INLINE if the token fired
+            // after SendViaPump's already-canceled check — then the stage ends Canceled here, the
+            // record is still sent, and the continuation below still disposes the registration.
             //
-            // Note the permit was NOT taken (SemaphoreSlim checks the token before the permit), so
-            // the take/release accounting ends one release ahead for this record. Harmless: the
-            // accumulator is closed by the same events that cancel the gate, so no later send can
-            // consume the surplus — see _admission.
+            // Register(Action<object?>, object?) rather than the overload that hands the callback the
+            // token: that one is .NET 5+ and the library floor is netstandard2.0, so the token is
+            // read back from the state object instead.
+            stage._registration = callerToken.Register(
+                static state =>
+                {
+                    CancellableFirstStage self = (CancellableFirstStage)state!;
+                    self._stage.TrySetCanceled(self._callerToken);
+                },
+                stage);
+
+            try
+            {
+                // Not ExecuteSynchronously: queued to the pool, never inline on the batch thread's
+                // ReleaseAdmission or on a teardown Cancel(). Settles the stage (a no-op if the token
+                // already won), then releases the registration — in every outcome of the wait.
+                wait.ContinueWith(
+                    static (_, state) =>
+                    {
+                        CancellableFirstStage self = (CancellableFirstStage)state!;
+                        self._stage.TrySetResult(self._delivery);
+                        self._registration.Dispose();
+                    },
+                    stage,
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            }
+            catch (Exception)
+            {
+                // Nothing would ever dispose the registration now, so release it before the caller
+                // (SubmitAdmitted's no-throw catch) reports the record accepted without a stage.
+                stage._registration.Dispose();
+                throw;
+            }
+
+            return stage._stage.Task;
         }
     }
 
@@ -385,8 +568,9 @@ internal sealed class SendAccumulator
     /// because <see cref="SemaphoreSlim.Release(int)"/> rejects a zero count.
     /// </summary>
     /// <remarks>
-    /// Never called with <see cref="_gate"/> held: a release can make a blocked caller runnable, and
-    /// that caller appends (so it would take <see cref="_gate"/>).
+    /// Never called with <see cref="_gate"/> held: a release completes pending admission waits, and
+    /// nothing those completions set off — the callers' next sends append, so they take
+    /// <see cref="_gate"/> — belongs under the lock.
     /// </remarks>
     private void ReleaseAdmission(int count)
     {
@@ -646,8 +830,8 @@ internal sealed class SendAccumulator
     /// (M11/P3.4). M11/P3.2 needed a second term because a record whose <c>Send</c> had already
     /// returned could still be sitting in the submission queue with the chain empty; now the append
     /// happens <em>before</em> the caller can return at all, so "the chain is empty" already implies
-    /// "nothing accepted is unforwarded". It is in fact stronger: a record whose caller is still
-    /// parked on the admission bound is in the chain too, so <c>Flush</c> includes it.
+    /// "nothing accepted is unforwarded". It is in fact stronger: a record whose first stage is still
+    /// waiting on the admission bound is in the chain too, so <c>Flush</c> includes it.
     /// </remarks>
     private bool IsEmptyAndIdleLocked() => _head is null && !_draining;
 
@@ -681,8 +865,8 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Teardown steps 2–3 of the §3.8 handshake: cancel the admission gate so a parked caller is
-    /// released, close the accumulator to new appends, wake the batch thread, and wait —
+    /// Teardown steps 2–3 of the §3.8 handshake: cancel the admission gate so a pending first stage
+    /// completes, close the accumulator to new appends, wake the batch thread, and wait —
     /// <b>bounded</b> — for it to finish its final drain and exit. Idempotent.
     /// </summary>
     /// <remarks>
@@ -693,14 +877,14 @@ internal sealed class SendAccumulator
     /// remarks for why that ordering is load-bearing.
     /// <list type="number">
     /// <item><b>Cancel the gate</b> (§3.8 step 2, which must precede closing the accumulator). A
-    /// caller parked in <see cref="SubmitAdmitted"/>'s admission wait has <em>already appended</em>
-    /// its record, so this does not decide that record's fate — it only releases the caller's
-    /// thread, which would otherwise wait for a permit that the batch thread may never hand back
+    /// send waiting in <see cref="SubmitAdmitted"/>'s admission wait has <em>already appended</em>
+    /// its record, so this does not decide that record's fate — it only completes the send's first
+    /// stage, which would otherwise wait for a permit that the batch thread may never hand back
     /// (it may be parked, or already gone). The record itself is taken by the final drain below and
     /// is <b>sent</b>, which is the anchor's outcome for a record that was already accumulated when
     /// its close arrived.</item>
-    /// <item><b><c>_closed = true</c> + pulse.</b> Strictly after the cancel, so the caller it wakes
-    /// is released rather than left holding teardown; and it is what tells the batch thread the
+    /// <item><b><c>_closed = true</c> + pulse.</b> Strictly after the cancel, so a waiting send is
+    /// released rather than left holding teardown; and it is what tells the batch thread the
     /// chain it takes next is its <em>final</em> one. <see cref="Append"/> reads <c>_closed</c> under
     /// the same lock, and the batch thread reads it in the same acquisition as its take, so every
     /// record appended before this line is in the final chain and every append after it is refused
@@ -745,15 +929,15 @@ internal sealed class SendAccumulator
     {
         long deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * timeout.TotalSeconds);
 
-        // Step 1. Release anyone parked in SubmitAdmitted's admission wait, BEFORE _closed, so they
-        // are not left waiting on a permit whose release depends on a batch thread that teardown is
+        // Step 1. Release every send waiting in SubmitAdmitted's admission wait, BEFORE _closed, so
+        // they are not left waiting on a permit whose release depends on a batch thread that teardown is
         // about to join (or that may already have died). Their records are already in the chain and
         // the final take below sends them.
         //
         // ⚠ There are TWO _spaceGate.Cancel() call sites: this one and the unconditional one in
         // AbandonOnThreadFailure (M11/P3.2 slice S5 / §F5 / decision D5). Both are safe to race each
-        // other: Cancel is idempotent, the wait site swallows the cancellation rather than acting on
-        // it, and neither site decides a record's fate — the chain machinery does.
+        // other: Cancel is idempotent, the wait site treats a cancelled wait as accepted rather than
+        // acting on it, and neither site decides a record's fate — the chain machinery does.
         _spaceGate.Cancel();
 
         // Step 2. Only now: the chain the batch thread takes next is its final one.
@@ -820,24 +1004,24 @@ internal sealed class SendAccumulator
         SettleAbandonedChain(inFlight, cause);
         SettleAbandonedChain(chain, cause);
 
-        // M11/P3.2 slice S5 (§F5 / decision D5). UNCONDITIONAL — and that is the point: a caller
-        // parked in SubmitAdmitted's admission wait is released by an EXPLICIT event, never by a
+        // M11/P3.2 slice S5 (§F5 / decision D5). UNCONDITIONAL — and that is the point: a send
+        // waiting in SubmitAdmitted's admission wait is released by an EXPLICIT event, never by a
         // coincidence of permit accounting.
         //
         // ⚠ WHY NOT THE PERMIT ARITHMETIC. Leaving it to the ReleaseAdmission below rests on an
-        // UNSTATED invariant — that a parked caller implies permits are exhausted, so a non-zero
+        // UNSTATED invariant — that a waiting send implies permits are exhausted, so a non-zero
         // release must wake it. The failure this handler exists for can BE an over-release
         // (SemaphoreFullException), i.e. precisely a case where that accounting is already known
         // broken, and SemaphoreSlim.Release validates the whole count BEFORE releasing anything, so
-        // the throwing call releases NOTHING and the caller is never woken. Resting a liveness
+        // the throwing call releases NOTHING and the waiting send never completes its first stage. Resting a liveness
         // property on arithmetic the handler's own trigger has already corrupted is the hang this
         // line removes.
         //
         // ⚠ IT DOES NOT DECIDE ANY RECORD'S FATE, which is what makes it safe to fire here. The
-        // released caller's record was appended before it parked, so it is in one of the two chains
+        // released send's record was appended before it waited, so it is in one of the two chains
         // settled just above — _closed was set and the chain taken in the ONE _gate acquisition
         // above, so an append can only be refused (ObjectDisposedException, nothing stored) or land
-        // in a node that same acquisition took. The caller itself just returns.
+        // in a node that same acquisition took. The send's first stage just completes.
         //
         // Ordered AFTER the settles, so a pathological throw out of Cancel cannot strand the chains
         // this handler exists to settle.
@@ -851,7 +1035,7 @@ internal sealed class SendAccumulator
         {
             // Last-resort handler: an over-release is exactly one of the failures that gets us here,
             // and the permit accounting is already unrecoverable at this point. Settling the records
-            // is what matters, and it has already happened above; liveness for a parked caller is
+            // is what matters, and it has already happened above; liveness for a waiting send is
             // the unconditional Cancel() above, not this call. So swallow rather than let this
             // escape and kill the thread with an unhandled exception.
         }
@@ -947,10 +1131,10 @@ internal sealed class SendAccumulator
                 }
             }
 
-            // THE ADMISSION BOUND'S ONLY RELEASE SITE ON THE NORMAL PATH — the one that unblocks
-            // callers parked in SubmitAdmitted. Released OUTSIDE the lock, as the anchor fires its
-            // space callbacks after unlocking (:581): releasing under the lock could make a blocked
-            // caller runnable and that caller appends, so it would take _gate.
+            // THE ADMISSION BOUND'S ONLY RELEASE SITE ON THE NORMAL PATH — the one that completes
+            // the first stages waiting in SubmitAdmitted. Released OUTSIDE the lock, as the anchor
+            // fires its space callbacks after unlocking (:581): what a release sets off — the
+            // callers' next sends append, so they take _gate — does not belong under the lock.
             //
             // ⚠ THE OVERSHOOT IS THE IN-FLIGHT CHAIN (Critic 72 finding 72.5). Permits are released
             // for the WHOLE taken chain, before send_batch has run for any of it, so the
@@ -958,12 +1142,12 @@ internal sealed class SendAccumulator
             // every record taken but not yet passed to a send_batch call. A chain holds at most the
             // appends possible between two takes, which the bound itself limits, so
             //
-            //     peak accepted-but-unsent <= 2 * (MaxAdmittedRecords + concurrently parked callers)
+            //     peak accepted-but-unsent <= 2 * (MaxAdmittedRecords + pending first stages)
             //
             // — one term for the chain being filled, one for the chain in flight. That is the same
             // shape as before append-first (there it was MaxAdmitted + min(MaxAdmitted,
             // MaxAccumulated)); what changed is that the second term is now the same bound rather
-            // than a second one, and that it carries the parked-caller slack the anchor also has.
+            // than a second one, and that it carries the waiting-send slack the anchor also has.
             ReleaseAdmission(admitted);
 
             if (chain is not null)

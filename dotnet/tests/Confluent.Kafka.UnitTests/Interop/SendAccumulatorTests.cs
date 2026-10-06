@@ -721,14 +721,14 @@ public sealed class SendAccumulatorTests
     // ------------------- the admission bound, append-first (M11/P3.3 / M11/P3.4 §8.1) -----------
 
     [Fact]
-    public async Task Admission_SaturatedBound_ParksTheCaller_AfterAppendingIt_AndTheDrainReleasesIt()
+    public async Task Admission_SaturatedBound_HoldsTheFirstStage_AfterAppendingIt_AndTheDrainReleasesIt()
     {
-        // The blocking contract itself, written to the BLOCKING shape: the parked send is issued
-        // from its OWN task and the assertion is on that task, never `parked.IsCompleted == false`
-        // over an inline call — which is what hung about half the cap tests on a sibling branch.
+        // The throttle itself: on a saturated bound the first stage stays pending. The send is
+        // issued from its OWN task and the assertion is on that task, so a regression to a blocking
+        // call fails here instead of hanging the xUnit thread.
         //
         // A 60 s window means only an explicit drain can free capacity, and the wait has no timeout
-        // at all since M11/P3.4 — so "parked" and "released" are both properties of the gate.
+        // at all since M11/P3.4 — so "waiting" and "released" are both properties of the gate.
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
             batchWindowMs: 60_000,
@@ -740,8 +740,8 @@ public sealed class SendAccumulatorTests
         Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
         Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
 
-        // The fifth send PARKS. A settle window, not a poll: the assertion is that something must
-        // NOT have happened, so it needs time in which to have happened.
+        // The fifth send's first stage WAITS. A settle window, not a poll: the assertion is that
+        // something must NOT have happened, so it needs time in which to have happened.
         Task<Task<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0xF1, CancellationToken.None);
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -750,8 +750,8 @@ public sealed class SendAccumulatorTests
             "the fifth send returned although the producer already held its whole bound");
 
         // ⚠ FIVE, NOT FOUR — this is the assertion that discriminates append-first from the
-        // permit-first shape it replaces. The parked caller's record is ALREADY IN THE CHAIN; only
-        // its caller is waiting. Both witnesses are asserted because neither alone is enough: the
+        // permit-first shape it replaces. The waiting send's record is ALREADY IN THE CHAIN; only
+        // its first stage is waiting. Both witnesses are asserted because neither alone is enough: the
         // counter could be bumped without an append, and the node's slot count could be reached by
         // an append that never charged the bound.
         Assert.Equal(5, harness.Accumulator.AdmittedRecordCount);
@@ -762,6 +762,7 @@ public sealed class SendAccumulatorTests
         harness.DrainNow();
 
         await TestTimeout.Run(() => admission, s_deadline);
+        Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         Task<RecordMetadata> parked = await admission;
 
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
@@ -769,10 +770,129 @@ public sealed class SendAccumulatorTests
         Assert.Equal(5, harness.Accumulator.SendBatchRecordCount);
         Assert.Equal(5, harness.HistoryCount);
 
-        // At rest the accounting is EXACT: the take gave back one permit per record, the parked
-        // caller consumed exactly one, so the semaphore is back at its starting count.
+        // At rest the accounting is EXACT: the take gave back one permit per record, the waiting
+        // first stage consumed exactly one, so the semaphore is back at its starting count.
         Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
         Assert.Equal(4, harness.Accumulator.AvailableAdmissions);
+    }
+
+    [Fact]
+    public async Task Admission_SaturatedBound_ReturnsTheCallAtOnce_WithItsFirstStagePending()
+    {
+        // THE CALL DOES NOT BLOCK. On a saturated bound SubmitAdmitted returns at once and only the
+        // first stage it hands back waits — Python's async send (append, then await space). The
+        // call is issued from its own task under a deadline, so a regression to the blocking shape
+        // FAILS here instead of hanging the xUnit thread.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2));
+
+        // A send that finds a permit is accepted inside the call.
+        ValueTask<Task<RecordMetadata>> first =
+            harness.AppendStaged(0xC0, callback: null, CancellationToken.None, out _);
+        Assert.True(first.IsCompletedSuccessfully, "a send that found a free permit was not accepted inside the call");
+        Task<RecordMetadata> firstDelivery = await first;
+
+        Task<RecordMetadata> second = harness.AppendOne(0xC1);
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
+
+        Task<Task<Task<RecordMetadata>>> call = Task.Factory.StartNew(
+            () => harness.AppendStaged(0xC2, callback: null, CancellationToken.None, out _).AsTask(),
+            CancellationToken.None,
+            TaskCreationOptions.DenyChildAttach,
+            TaskScheduler.Default);
+        Task<Task<RecordMetadata>> accepted = await TestTimeout.Run(() => call, s_deadline);
+
+        // A settle window, not a poll: the first stage must NOT complete while the bound is full.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(accepted.IsCompleted, "the first stage completed although the bound was full");
+
+        // The record went into the chain before the wait began.
+        Assert.Equal(3, harness.PendingCount());
+        Assert.Equal(3, harness.Accumulator.AdmittedRecordCount);
+
+        harness.DrainNow();
+
+        Task<RecordMetadata> result = await TestTimeout.Run(() => accepted, s_deadline);
+        RecordMetadata metadata = await TestTimeout.Run(() => result, s_deadline);
+        Assert.Equal(Topic, metadata.Topic);
+        await TestTimeout.Run(() => Task.WhenAll(firstDelivery, second), s_deadline);
+        Assert.Equal(3, harness.HistoryCount);
+        Assert.Equal(2, harness.Accumulator.AvailableAdmissions);
+    }
+
+    [Fact]
+    public async Task Admission_FirstStage_DoesNotResumeItsAwaiterOnTheBatchThread()
+    {
+        // The batch thread is what frees capacity (its take releases the permits). If the first
+        // stage's awaiter ran inline there, a caller's own code would stall every later drain. So
+        // the awaiter must resume elsewhere.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 1));
+
+        Task<RecordMetadata> filled = harness.AppendOne(0xD0);
+        Task<Task<RecordMetadata>> accepted =
+            harness.AppendStaged(0xD1, callback: null, CancellationToken.None, out _).AsTask();
+        Assert.False(accepted.IsCompleted, "the first stage completed although the bound was full");
+
+        bool resumed = false;
+        string? resumedOn = null;
+        Task observed = ObserveAsync();
+
+        // The batch thread does the take, and so releases the permit.
+        harness.ForceDrainWithoutWaiting();
+        await TestTimeout.Run(() => observed, s_deadline);
+
+        Assert.True(resumed, "the first stage's awaiter never resumed");
+        Assert.NotEqual("confluent-kafka-producer-send-batch", resumedOn);
+        await TestTimeout.Run(() => filled, s_deadline);
+
+        async Task ObserveAsync()
+        {
+            Task<RecordMetadata> result = await accepted.ConfigureAwait(false);
+            resumedOn = Thread.CurrentThread.Name;
+            resumed = true;
+            await result.ConfigureAwait(false);
+        }
+    }
+
+    [Fact]
+    public async Task Admission_CallersThatDoNotAwaitTheFirstStage_AreNotThrottled()
+    {
+        // ⚠ PYTHON PARITY, CHOSEN DELIBERATELY. The admission wait holds the first stage, not the
+        // calling thread, so a caller that never awaits the first stage is not throttled at all —
+        // exactly like a Python caller that does not await its async send. Pinned so the choice
+        // cannot change silently in either direction.
+        const int Cap = 4;
+        const int Sends = 40;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: Cap));
+
+        // Under a deadline: with a blocking call this would park on the fifth send.
+        Task<RecordMetadata>[] sends = Array.Empty<Task<RecordMetadata>>();
+        TestTimeout.Run(() => sends = harness.Append(Sends), TimeSpan.FromSeconds(20));
+
+        // Every record is accepted: far more than Cap, with Sends - Cap first stages waiting.
+        Assert.Equal(Sends, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(Sends, harness.PendingCount());
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
+
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
+        Assert.Equal(Sends, harness.HistoryCount);
+
+        // At rest the permits still balance: the take released one per record and each waiting
+        // first stage took one back.
+        Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(Cap, harness.Accumulator.AvailableAdmissions);
     }
 
     [Fact]
@@ -800,8 +920,8 @@ public sealed class SendAccumulatorTests
 
         for (int round = 0; round < Rounds; round++)
         {
-            // Exactly Cap sends: the last one takes the last permit and returns without parking, so
-            // this never blocks the xUnit thread.
+            // Exactly Cap sends: the last one takes the last permit inline, so no first stage is
+            // left waiting.
             Task<RecordMetadata>[] sends = harness.Append(Cap);
             Assert.Equal(Cap, sends.Length);
             Assert.Equal(Cap, harness.Accumulator.AdmittedRecordCount);
@@ -825,16 +945,20 @@ public sealed class SendAccumulatorTests
         // immediately before. A correctness-only suite cannot see that — every record is still
         // delivered, in order, exactly once — so this asserts a POPULATION rather than an outcome.
         //
+        // ⚠ THE SENDERS AWAIT THE FIRST STAGE. That is what throttles them: the call itself returns
+        // at once, and a sender that does not await its first stage is not throttled at all (Python
+        // parity, pinned by Admission_CallersThatDoNotAwaitTheFirstStage_AreNotThrottled).
+        //
         // ⚠ THE BOUND IT ASSERTS IS Cap + Senders, NOT Cap (M11/P3.4). Append-first counts a record
-        // from the moment it is appended, which is before its caller has taken a permit, so the
-        // population legitimately overshoots by the number of concurrently parked callers. That is
-        // the anchor's own shape (py_Producer_send appends unconditionally, so C concurrent senders
-        // reach bound + C - 1) and the arithmetic is derived at SendAccumulator._admission.
+        // from the moment it is appended, which is before its first stage has taken a permit, so the
+        // population legitimately overshoots by the number of first stages waiting at once — one per
+        // awaiting sender. That is the anchor's own shape (py_Producer_send appends unconditionally,
+        // so C concurrent senders reach bound + C - 1) and the arithmetic is derived at
+        // SendAccumulator._admission.
         //
         // THE REGIME. A 60 s window means nothing drains on its own, and the drainer is PACED rather
         // than free-running, so an unbounded acceptance has a window in which to pile up. It runs on
-        // its own Thread, not a pool task: the senders BLOCK, so a pool drainer could be starved by
-        // the very thing under test. The senders are LongRunning for the same reason.
+        // its own Thread, not a pool task, so a flood of pool continuations cannot starve it.
         //
         // The burst is repeated with a FRESH harness per attempt: an isolated PASS is not evidence a
         // guard is absent, nor a suite PASS that it is present, and a reused harness would start
@@ -895,20 +1019,20 @@ public sealed class SendAccumulatorTests
                 for (int s = 0; s < Senders; s++)
                 {
                     int sender = s;
-                    floods[sender] = Task.Factory.StartNew(
-                        () =>
+                    floods[sender] = Task.Run(
+                        async () =>
                         {
                             for (int i = 0; i < PerSender; i++)
                             {
-                                // Production's own entry point, blocking exactly as production's
-                                // Send blocks (DoD §12 — the fixture holds no copy of the rule).
+                                // Production's own entry point, awaited the way a throttled caller
+                                // awaits it (DoD §12 — the fixture holds no copy of the rule).
                                 int index = (sender * PerSender) + i;
-                                sends[index] = harness.AppendOne((byte)index);
+                                sends[index] = await harness
+                                    .AppendAccepted((byte)index, callback: null, CancellationToken.None)
+                                    .ConfigureAwait(false);
                             }
                         },
-                        CancellationToken.None,
-                        TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
-                        TaskScheduler.Default);
+                        CancellationToken.None);
                 }
 
                 await TestTimeout.Run(() => Task.WhenAll(floods), s_deadline);
@@ -925,7 +1049,7 @@ public sealed class SendAccumulatorTests
             Assert.True(
                 peak <= Cap + Senders,
                 $"the admitted population peaked at {peak} against a bound of {Cap} + {Senders} " +
-                "parked callers — the admission wait did not throttle the flood");
+                "waiting first stages — the admission wait did not throttle the flood");
 
             // (2) THE DRIFT DETECTOR, at rest: nothing accepted is unforwarded, and every permit is
             // back. An over-release reads above Cap here, a leak below it, and the int.MaxValue
@@ -939,15 +1063,16 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Admission_CallerTokenFiresWhileParked_DoesNotInterruptTheWait_AndTheRecordIsStillSent()
+    public async Task Admission_CallerTokenFiresWhileWaiting_EndsTheFirstStageCanceled_AndTheRecordIsStillSent()
     {
-        // ⚠ THE CONTRACT CHANGE M11/P3.4 MAKES DELIBERATELY, pinned so it cannot regress silently.
-        // Before it, a token that fired while a send was parked aborted the admission wait and the
-        // record was NOT sent. Append-first makes that unrepresentable: the record is in the chain
-        // before the wait begins, so honouring the token there would either strand an awaiter the
-        // caller was never handed, or leave a record in the chain whose caller was told nothing was
-        // sent. The token still cancels the returned Task — through NativeProducer.SendViaPump's own
-        // registration, one layer above this one — which is why the accumulator can ignore it here.
+        // ⚠ M11/P3.5 D2 (c) — user ruling: "the token lets the caller stop waiting, but the record
+        // still goes out". This replaces the POC's (a) shape, under which the token left the first
+        // stage pending until capacity freed. Append-first (M11/P3.4) still puts the record in the
+        // chain before the wait begins, so the token cannot un-send it; what it can do is release
+        // the CALLER. So a token that fires while the first stage is pending ends that stage
+        // Canceled, carrying the caller's token, while the admission wait underneath runs on and the
+        // record is sent like any other. The delivery task is cancelled by NativeProducer.SendViaPump's
+        // own registration, one layer above this one; this test pins the accumulator's half.
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
             batchWindowMs: 60_000,
@@ -957,39 +1082,39 @@ public sealed class SendAccumulatorTests
         Task<RecordMetadata>[] filled = harness.Append(2);
 
         using CancellationTokenSource cancellation = new CancellationTokenSource();
-        Task<Task<RecordMetadata>> admission =
-            harness.AppendOneFromAnotherThread(0xF5, cancellation.Token);
+        Task<Task<RecordMetadata>> firstStage = harness
+            .AppendStaged(0xF5, callback: null, cancellation.Token, out TaskCompletionSource<RecordMetadata> completion)
+            .AsTask();
 
         await Task.Delay(TimeSpan.FromMilliseconds(250));
-        Assert.False(admission.IsCompleted, "the send returned although the bound was full");
+        Assert.False(firstStage.IsCompleted, "the first stage completed although the bound was full");
         Assert.Equal(3, harness.Accumulator.AdmittedRecordCount);
 
         cancellation.Cancel();
 
-        // THE ASSERTION: the token does not end the wait. A settle window, since the property is
-        // that something must NOT happen. With the token honoured this completes here — faulted.
-        await Task.Delay(TimeSpan.FromMilliseconds(250));
-        Assert.False(
-            admission.IsCompleted,
-            "the caller's token interrupted the admission wait, which append-first forbids");
+        // THE ASSERTION: the token ends the first stage, and BEFORE capacity frees — the 60 s window
+        // means nothing has drained (the send-batch count below). Canceled, not faulted, and the
+        // OperationCanceledException carries the caller's own token.
+        OperationCanceledException canceled = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => firstStage, s_deadline));
+        Assert.Equal(cancellation.Token, canceled.CancellationToken);
+        Assert.Equal(TaskStatus.Canceled, firstStage.Status);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
 
-        // Only capacity ends it, and the record — appended before the park — is sent like any other.
-        // Asserted on the CORE's record count, not on an awaiter.
+        // And the record is STILL SENT — asserted on the CORE's record count, not on an awaiter.
         harness.DrainNow();
-        await TestTimeout.Run(() => admission, s_deadline);
-        Task<RecordMetadata> sent = await admission;
-
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
-        await TestTimeout.Run(() => sent, s_deadline);
+        await TestTimeout.Run(() => completion.Task, s_deadline);
         Assert.Equal(3, harness.HistoryCount);
         Assert.Equal(3, harness.Accumulator.SendBatchRecordCount);
     }
 
     [Fact]
-    public async Task Admission_ParkedCaller_IsReleasedByStop_AndItsRecordIsStillSent()
+    public async Task Admission_WaitingFirstStage_IsCompletedByStop_AndItsRecordIsStillSent()
     {
-        // PLAN §11 risk 2 — a caller blocked on admission that teardown does not wake hangs Dispose.
-        // The wait has no timeout at all since M11/P3.4, so nothing but the gate can release it.
+        // PLAN §11 risk 2 — a first stage waiting on admission that teardown does not complete
+        // hangs its awaiter forever. The wait has no timeout at all since M11/P3.4, so nothing but
+        // the gate can release it.
         //
         // ⚠ AND THE RECORD IS SENT, NOT REFUSED. Stop cancels the gate at its step 1 and sets
         // _closed at step 2, so the parked caller's record — appended before it parked — is in the
@@ -1020,10 +1145,13 @@ public sealed class SendAccumulatorTests
                 "the batch thread did not exit"),
             TimeSpan.FromSeconds(20));
 
-        // (1) The caller is released and does NOT throw. Awaiting the OUTER task is that assertion:
-        // it carries whatever SubmitAdmitted threw, and SubmitAdmitted must not throw here — its
+        // (1) The first stage completes and does NOT fault. Awaiting the OUTER task is that
+        // assertion: a teardown-cancelled wait completes the first stage successfully, because its
         // record is already in the chain, so "nothing was sent" would be a lie.
         await TestTimeout.Run(() => admission, TimeSpan.FromSeconds(10));
+        // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
+        // would tell the caller nothing was sent, for a record that is in the chain.
+        Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         Task<RecordMetadata> parked = await admission;
 
         // (2) Three records reached the core, not two.
@@ -1046,14 +1174,14 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Admission_ParkedCaller_IsReleasedByStopsCancel_WhenTheBatchThreadCannotDrain()
+    public async Task Admission_WaitingFirstStage_IsCompletedByStopsCancel_WhenTheBatchThreadCannotDrain()
     {
         // ⚠ THE DISCRIMINATOR FOR Stop'S _spaceGate.Cancel(), and it needs its own setup because the
         // obvious one cannot fail. Under append-first the permit arithmetic normally releases every
         // parked caller by itself: a parked caller implies the semaphore is at zero, which implies
         // the chain holds at least as many records as there are parked callers, so the final drain's
         // ReleaseAdmission wakes all of them — which is why deleting the Cancel leaves
-        // Admission_ParkedCaller_IsReleasedByStop_AndItsRecordIsStillSent green (measured: 8/8).
+        // Admission_WaitingFirstStage_IsCompletedByStop_AndItsRecordIsStillSent green (measured: 8/8).
         //
         // The Cancel is load-bearing exactly when the batch thread CANNOT take another chain, so no
         // release will ever come. That is reachable deterministically: closing the CORE producer
@@ -1099,6 +1227,9 @@ public sealed class SendAccumulatorTests
 
             // THE ASSERTION: the caller is released although nothing released a permit.
             await TestTimeout.Run(() => admission, TimeSpan.FromSeconds(10));
+            // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
+            // would tell the caller nothing was sent, for a record that is in the chain.
+            Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         }
         finally
         {
@@ -1124,7 +1255,7 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Admission_ParkedCaller_IsReleasedByTheBatchThreadsFailureHandler_AndItsRecordIsSettled()
+    public async Task Admission_WaitingFirstStage_IsCompletedByTheBatchThreadsFailureHandler_AndItsRecordIsSettled()
     {
         // The second teardown trigger: the batch thread DYING rather than being stopped. Its handler
         // must leave no caller parked and no awaiter unsettled, exactly as Stop does.
@@ -1137,7 +1268,7 @@ public sealed class SendAccumulatorTests
         // (released, settled, teardown completes) whose MECHANISM coverage is incidental — deleting
         // AbandonOnThreadFailure's Cancel turned the full net10.0 suite red in only 1 of 8 in-suite
         // reps. The deterministic guard for that Cancel is the twin below,
-        // Admission_ParkedCaller_IsReleasedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody.
+        // Admission_WaitingFirstStage_IsCompletedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
             batchWindowMs: 60_000,
@@ -1160,6 +1291,9 @@ public sealed class SendAccumulatorTests
         // THE ASSERTION, under a hard deadline so a caller that is never released FAILS rather than
         // hanging the run.
         await TestTimeout.Run(() => admission, s_deadline);
+        // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
+        // would tell the caller nothing was sent, for a record that is in the chain.
+        Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         Task<RecordMetadata> parked = await admission;
 
         // Every record the handler held is settled exactly once, with the batch-thread failure —
@@ -1180,7 +1314,7 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Admission_ParkedCaller_IsReleasedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody()
+    public async Task Admission_WaitingFirstStage_IsCompletedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody()
     {
         // ⚠ THE DISCRIMINATOR FOR AbandonOnThreadFailure'S _spaceGate.Cancel(), and — like Stop's
         // twin above — it needs its own setup because the obvious one cannot fail. Under
@@ -1232,6 +1366,9 @@ public sealed class SendAccumulatorTests
         // THE ASSERTION, under a hard deadline so a caller that is never released FAILS rather than
         // hanging the run. Nothing released a permit, before or after the failure.
         await TestTimeout.Run(() => admission, s_deadline);
+        // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
+        // would tell the caller nothing was sent, for a record that is in the chain.
+        Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         Task<RecordMetadata> parked = await admission;
 
         // The gate did the releasing, so the permit accounting is still exactly where the injection
@@ -1311,7 +1448,7 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Flush_IncludesASendWhoseCallerIsStillParkedOnAdmission()
+    public async Task Flush_IncludesASendWhoseFirstStageIsStillWaitingOnAdmission()
     {
         // M11/P3.1 §3.5's gap, re-pinned against the new shape. "Empty and idle" is ONE stage again
         // (M11/P3.4 removed the submission queue), and that single stage has to cover a record whose
@@ -1344,6 +1481,7 @@ public sealed class SendAccumulatorTests
         Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
 
         await TestTimeout.Run(() => admission, s_deadline);
+        Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
         Task<RecordMetadata> parked = await admission;
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
         await TestTimeout.Run(() => parked, s_deadline);
@@ -1413,8 +1551,8 @@ public sealed class SendAccumulatorTests
         // that: a burst on one thread completes in well under a millisecond, so with any usable
         // window every send is issued before the first drain. So the window is 60 s — nothing drains
         // on its own — and a drainer forces drains as fast as it can while the sender sends. It is a
-        // dedicated Thread, not a pool task: the sender BLOCKS on the bound, and the drainer is the
-        // only thing that can release it.
+        // dedicated Thread, not a pool task: the sender awaits each send's first stage, so it waits
+        // on the bound, and the drainer is the only thing that can release it.
         //
         // ⚠ THE BURST IS REPEATED WITH A FRESH HARNESS PER ATTEMPT, AND THE REPETITION IS THE GUARD
         // (Critic 71 FU-1). Measured on the predecessor mechanism: one burst FAILED 5/5 in isolation
@@ -1460,7 +1598,8 @@ public sealed class SendAccumulatorTests
 
                 for (int i = 0; i < Burst; i++)
                 {
-                    sends[i] = harness.AppendOne((byte)i, new OrderRecordingDeliveryCallback(observed, i));
+                    sends[i] = await harness.AppendAccepted(
+                        (byte)i, new OrderRecordingDeliveryCallback(observed, i), CancellationToken.None);
                 }
 
                 sending.Cancel();
@@ -1493,10 +1632,10 @@ public sealed class SendAccumulatorTests
         // whatever its mutex grants). So this asserts the subsequence belonging to each sender is
         // strictly increasing, never that the global order matches any particular interleaving.
         //
-        // It is the half part (ii) above cannot reach: that one runs on ONE thread, where append
-        // order is fixed by the caller's own program order. Here four threads contend for _gate and
+        // It is the half part (ii) above cannot reach: that one runs on ONE caller, where append
+        // order is fixed by the caller's own program order. Here four callers contend for _gate and
         // for the bound at once, which is where an append that moved out from under the lock — or a
-        // parked caller that resumed and appended after a later send from the same thread — would
+        // waiting send that resumed and appended after a later send from the same caller — would
         // show up.
         const int Senders = 4;
         const int PerSender = 25;
@@ -1532,19 +1671,21 @@ public sealed class SendAccumulatorTests
                 for (int s = 0; s < Senders; s++)
                 {
                     int sender = s;
-                    floods[sender] = Task.Factory.StartNew(
-                        () =>
+                    floods[sender] = Task.Run(
+                        async () =>
                         {
                             for (int i = 0; i < PerSender; i++)
                             {
                                 int index = (sender * PerSender) + i;
-                                sends[index] = harness.AppendOne(
-                                    (byte)index, new OrderRecordingDeliveryCallback(observed, index));
+                                sends[index] = await harness
+                                    .AppendAccepted(
+                                        (byte)index,
+                                        new OrderRecordingDeliveryCallback(observed, index),
+                                        CancellationToken.None)
+                                    .ConfigureAwait(false);
                             }
                         },
-                        CancellationToken.None,
-                        TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
-                        TaskScheduler.Default);
+                        CancellationToken.None);
                 }
 
                 await TestTimeout.Run(() => Task.WhenAll(floods), s_deadline);
@@ -1899,21 +2040,37 @@ public sealed class SendAccumulatorTests
         }
 
         /// <summary>
-        /// Appends one record and then parks on the admission bound if it is saturated — through the
-        /// <b>same single entry point</b> <c>NativeProducer.SendViaPump</c> uses, so the admission
-        /// bound is production's (DoD §12; M11/P3.3 §7, M11/P3.4). This fixture used to
-        /// re-implement "permit-then-<c>Submit</c>, else await-then-<c>Submit</c>", which would
-        /// have left the ordering tests below proving a property of the fixture rather than of the
-        /// code.
+        /// Appends one record and takes its admission permit through the <b>same single entry
+        /// point</b> <c>NativeProducer.SendViaPump</c> uses, and hands back exactly what production
+        /// hands back: the two-stage result (DoD §12; M11/P3.3 §7, M11/P3.4). The fixture holds no
+        /// copy of the admission rule.
         /// </summary>
         /// <remarks>
-        /// ⚠ <b>It can BLOCK the calling thread INDEFINITELY</b>, exactly as production's
-        /// <c>Send</c> does: a saturated admission bound parks the caller <em>untimed</em> until a
-        /// take returns permits, or until teardown cancels the gate (M11/P3.4). The wait has no
-        /// timeout knob at all — <c>SendAccumulatorSettings</c> carries none, so there is nothing a
-        /// test could set to bound it. Every test that saturates the bound on purpose must drive this
-        /// from its own <see cref="Task"/> — see <c>AppendOneFromAnotherThread</c> — or use
-        /// <see cref="AppendWithoutAdmission"/>, which skips the wait entirely.
+        /// The call never blocks. On a saturated bound the returned first stage is pending until a
+        /// take returns permits, or until teardown cancels the gate (both complete it successfully);
+        /// it has no timeout, and it ends canceled only when <paramref name="cancellationToken"/>
+        /// fires while it is pending (M11/P3.5 D2 (c)) — the record is appended either way.
+        /// </remarks>
+        internal ValueTask<Task<RecordMetadata>> AppendStaged(
+            byte tag,
+            IDeliveryCallback? callback,
+            CancellationToken cancellationToken,
+            out TaskCompletionSource<RecordMetadata> completion)
+        {
+            SerializedProducerRecord record = NewRecord(tag);
+            completion = NewCompletion();
+            DeliveryRegistration? delivery = NewDelivery(callback);
+            return Accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
+        }
+
+        /// <summary>
+        /// <see cref="AppendStaged"/> for a caller that does <b>not</b> await the first stage, so it
+        /// is never throttled (Python parity). Returns the record's delivery task.
+        /// </summary>
+        /// <remarks>
+        /// Use it where a test wants records in the chain and does not care about admission. A test
+        /// of the throttle must await the first stage instead — see <see cref="AppendAccepted"/> and
+        /// <see cref="AppendOneFromAnotherThread"/>.
         /// </remarks>
         internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null) =>
             AppendOne(tag, callback, CancellationToken.None, out _);
@@ -1929,47 +2086,57 @@ public sealed class SendAccumulatorTests
             CancellationToken cancellationToken,
             out TaskCompletionSource<RecordMetadata> completion)
         {
-            SerializedProducerRecord record = NewRecord(tag);
-            completion = NewCompletion();
-            DeliveryRegistration? delivery = NewDelivery(callback);
-
-            // ONE call, production's own: SubmitAdmitted appends the record and then takes the
-            // admission permit, blocking when the bound is saturated. The fixture deliberately
-            // holds no copy of that rule.
-            Accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
+            // The first stage is deliberately dropped: it never faults (it completes successfully, or
+            // ends canceled on a firing caller token, D2 (c)), and it yields the same delivery task
+            // returned here.
+            ValueTask<Task<RecordMetadata>> accepted =
+                AppendStaged(tag, callback, cancellationToken, out completion);
+            if (!accepted.IsCompleted)
+            {
+                _ = accepted.AsTask();
+            }
 
             return completion.Task;
         }
 
         /// <summary>
-        /// <see cref="AppendOne(byte, IDeliveryCallback?)"/> issued from a <b>separate</b>
-        /// <see cref="Task"/>, so a test can saturate the admission bound and then observe that the
-        /// next send <em>blocks</em> without the xUnit test thread being the one that parks.
+        /// <see cref="AppendStaged"/> for a caller that awaits the first stage — the throttled
+        /// caller. The <b>outer</b> task is the first stage; the <b>inner</b> one is the record's
+        /// delivery.
+        /// </summary>
+        internal async Task<Task<RecordMetadata>> AppendAccepted(
+            byte tag,
+            IDeliveryCallback? callback,
+            CancellationToken cancellationToken)
+        {
+            Task<RecordMetadata> delivery =
+                await AppendStaged(tag, callback, cancellationToken, out _).ConfigureAwait(false);
+            return delivery;
+        }
+
+        /// <summary>
+        /// <see cref="AppendAccepted"/> issued from a <b>separate</b> <see cref="Task"/>, so a test
+        /// that saturates the admission bound can watch the first stage stay pending without the
+        /// xUnit test thread being the one that waits — and so a regression that made the call
+        /// itself block shows up as a pending outer task rather than a hung test thread.
         /// </summary>
         /// <remarks>
-        /// The <b>outer</b> task is the admission observable: it completes when
-        /// <c>SubmitAdmitted</c> returns, or faults with whatever admission <em>threw</em> — which
-        /// is the whole contract under test. The <b>inner</b> task is the record's own delivery
-        /// future. ⚠ Since M11/P3.4 the wait has no expiry at all, so the outer task completes only
-        /// when a take returns permits or teardown cancels the gate, and it carries no failure of
-        /// its own on either path; a test of teardown or cancellation awaits the outer one for the
-        /// release and the inner one for the record's fate.
-        /// <para>
-        /// <see cref="TaskFactory.StartNew{TResult}(Func{TResult}, CancellationToken, TaskCreationOptions, TaskScheduler)"/>
-        /// rather than <see cref="Task.Run(Func{Task})"/> deliberately: <c>Task.Run</c> would
-        /// <em>unwrap</em> the inner task, so awaiting it would wait for the record's delivery
-        /// instead of for its admission — the two are exactly what this helper must keep apart.
-        /// </para>
+        /// The <b>outer</b> task is the admission observable: it completes when the first stage
+        /// does. The <b>inner</b> task is the record's own delivery future. The wait has no expiry,
+        /// so the outer task completes only when a take returns permits or teardown cancels the
+        /// gate, and it carries no failure of its own on either path — only the caller's token,
+        /// firing while it waits, ends it canceled (D2 (c)); a test of teardown or cancellation
+        /// awaits the outer one for the release and the inner one for the record's fate.
         /// </remarks>
         internal Task<Task<RecordMetadata>> AppendOneFromAnotherThread(
             byte tag,
             CancellationToken cancellationToken,
             IDeliveryCallback? callback = null) =>
             Task.Factory.StartNew(
-                () => AppendOne(tag, callback, cancellationToken, out _),
+                () => AppendAccepted(tag, callback, cancellationToken),
                 CancellationToken.None,
                 TaskCreationOptions.DenyChildAttach,
-                TaskScheduler.Default);
+                TaskScheduler.Default).Unwrap();
 
         /// <summary>
         /// Appends one record through <see cref="SendAccumulator.Submit"/> <b>without</b> the

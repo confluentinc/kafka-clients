@@ -67,14 +67,14 @@ namespace Confluent.Kafka;
 /// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
 /// <para>
-/// ⚠ <b>Do not mutate a record's key / value buffers after <c>Send</c> returns</b> (M11/P3.1
+/// ⚠ <b>Do not mutate a record's key / value buffers until its delivery task completes</b> (M11/P3.1
 /// decision D6). The async send is deferred — the binding borrows the serialized bytes until a
 /// background batch thread hands the record to the core — so a mutation in that window is visible
 /// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
 /// The <b>synchronous</b> producer has no such window.
 /// </para>
 /// <para>
-/// ⚠ <b><c>Send</c> BLOCKS the calling thread under sustained saturation</b> (M11/P3.3), exactly as
+/// ⚠ <b>Under sustained saturation <c>Send</c>'s first stage waits</b> (M11/P3.3), exactly as
 /// on <see cref="AsyncKafkaProducer{TKey, TValue}"/> — the bound lives in the shared send
 /// accumulator, so it is not a real-producer-only behaviour.
 /// <see cref="IAsyncProducer{TKey, TValue}"/> states the contract in full. It is nonetheless hard to
@@ -164,7 +164,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// forward, building the delivery-callback carrier only when one was supplied. Each overload
     /// validates its own arguments first, so this deliberately does <b>not</b> re-check them (a
     /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
-    /// synchronous rather than faulting the returned task.
+    /// synchronous rather than faulting the returned <see cref="ValueTask{TResult}"/>.
     /// </summary>
     private ValueTask<Task<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,

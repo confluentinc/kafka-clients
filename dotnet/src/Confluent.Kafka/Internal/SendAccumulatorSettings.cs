@@ -52,10 +52,10 @@ namespace Confluent.Kafka.Internal;
 /// </para>
 /// <para>
 /// ⚠ <b>One of these values has NO Python counterpart, and is the M11/P3.3 admission bound</b>
-/// (§7 option A): <see cref="MaxAdmittedRecords"/>. Python needs none, because its <c>send()</c>
-/// blocks the calling OS thread and so bounds the accepted population for free; .NET's
-/// <c>Send</c> returns a <see cref="System.Threading.Tasks.Task"/> and the caller does not await
-/// admission, so the bound has to be explicit.
+/// (§7 option A): <see cref="MaxAdmittedRecords"/>. Python's async <c>send</c> appends and then
+/// <c>await</c>s space in its own buffer, so its bound is that buffer's size. .NET's async
+/// <c>Send</c> does the same in two stages — the returned first stage waits for a permit, and only
+/// a caller that awaits it is throttled — and this value is the size of that wait's pool.
 /// </para>
 /// </remarks>
 internal readonly struct SendAccumulatorSettings

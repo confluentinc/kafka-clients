@@ -22,8 +22,8 @@ namespace Confluent.Kafka;
 /// which restore Java's <b>second</b> <c>send</c> signature
 /// (<c>Future&lt;RecordMetadata&gt; send(ProducerRecord, Callback)</c>,
 /// <c>Producer.java:86</c>) — the callback is an <b>additional</b> parameter, not an alternative:
-/// the overload still returns the <see cref="RecordMetadata"/> /
-/// <see cref="System.Threading.Tasks.Task{TResult}"/> the plain overload does.
+/// the overload still returns the <see cref="RecordMetadata"/> (sync) / yields the delivery
+/// <see cref="System.Threading.Tasks.Task{TResult}"/> (async) the plain overload does.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -97,9 +97,11 @@ namespace Confluent.Kafka;
 /// <b>Ordering — it runs BEFORE the send's result is observable (decision D3).</b> Java sets the
 /// future's value, fires the callbacks, and only then releases the future's waiters
 /// (<c>ProducerBatch.java:303-323</c> — <c>produceFuture.done()</c> is last). This binding
-/// reproduces that exactly: the callback is invoked immediately before the
+/// reproduces that exactly: the callback is invoked immediately before the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> is completed (async) and before <c>Send</c>
-/// returns or throws (sync). Note this is <b>stricter</b> than the Python sibling, which resolves
+/// returns or throws (sync). ⚠ On the async surface the callback and the delivery task are
+/// <b>unordered relative to <c>Send</c>'s first stage</b> (M11/P3.5): a saturated send's first
+/// stage can complete after its record was already delivered. Note this is <b>stricter</b> than the Python sibling, which resolves
 /// its future first and then invokes <c>on_delivery</c> (<c>producer.py:322-327</c>), so a Python
 /// awaiter can be released before the callback has run.
 /// </para>
@@ -144,7 +146,7 @@ namespace Confluent.Kafka;
 /// completion → <b>no callback</b>. Here the record <em>was</em> accepted and may still be
 /// delivered, so this outcome is neither "nothing was sent" nor "the core rejected
 /// it": it is a recorded <em>drop</em>, residual 4 below. On the sync surface it throws out of
-/// <c>Send</c>; on the async surface it faults the returned
+/// <c>Send</c>; on the async surface it faults the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/>, because the site is the send-batch
 /// thread;</item>
 /// <item>the record was accepted and the core later reported success → <b>fires</b> with the real
@@ -298,13 +300,13 @@ namespace Confluent.Kafka;
 /// user callback (<c>ProducerBatch.java:318-320</c>), and so does Python
 /// (<c>producer.py:108-117</c>). This binding does the same: the exception is caught, written to
 /// <see cref="System.Diagnostics.Trace"/> so the failure is not silent, and then <b>swallowed</b>.
-/// It does not fail the send, it does not surface on the returned
+/// It does not fail the send, it does not surface on the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> or from <c>Send</c>, and it does not stop
 /// the other records in the same completion batch from being completed.
 /// </para>
 /// <para>
 /// <b>Two distinct error surfaces.</b> An exception thrown <em>by <c>Send</c> itself</em> (or
-/// faulting the returned <see cref="System.Threading.Tasks.Task{TResult}"/>) is the send's own
+/// faulting the delivery <see cref="System.Threading.Tasks.Task{TResult}"/>) is the send's own
 /// outcome as the caller sees it; the <c>exception</c> delivered here is that same
 /// outcome delivered to the callback — one completion driving both, exactly as in Java, where one
 /// <c>completeFutureAndFireCallbacks</c> both resolves the future and fires the callbacks. The two

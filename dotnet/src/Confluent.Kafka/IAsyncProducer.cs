@@ -59,37 +59,59 @@ namespace Confluent.Kafka;
 /// ordering, non-null-metadata and throw-policy contracts.
 /// </para>
 /// <para>
-/// ⚠ <b><c>Send</c> can BLOCK the calling thread under sustained saturation (M11/P3.3).</b> This
-/// producer accepts a bounded number of records that have not yet been handed to its send-batch
-/// thread; once that bound is reached, <c>Send</c> waits for capacity before returning. Blocking is
-/// Java's own contract — <c>KafkaProducer.send()</c> blocks once its accumulator is full — and it is
-/// what keeps the client's memory and latency bounded: the <see cref="ValueTask{TResult}"/> returned
-/// here is already complete when <c>Send</c> returns, and what a caller holds is the
-/// <em>record's delivery</em> <see cref="Task{TResult}"/> rather than an admission handle, so a
-/// caller never awaits admission and an asynchronous wait would throttle nobody. The bound is sized so that
-/// reaching it is rare in practice; a producer that hits it regularly is offering records faster than
-/// its cluster can accept them. The <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no
-/// such window — it hands each record to the core inside the call, where the core's own
-/// <c>buffer.memory</c> provides the backpressure.
+/// ⚠ <b><c>Send</c> returns in two stages, and awaiting the first is what throttles you (M11/P3.5).</b>
+/// <c>Send</c> appends the record to the producer's batch chain and returns a <see cref="ValueTask{TResult}"/>
+/// that completes when the record is <b>accepted</b> under the producer's bound on records not yet handed to its
+/// send-batch thread. Its result is the record's <b>delivery</b> <see cref="Task{TResult}"/> — Java's
+/// <c>Future&lt;RecordMetadata&gt;</c>. The first stage is usually complete when <c>Send</c> returns; once the bound
+/// is reached it stays pending until capacity frees. It never parks the calling thread. This is Java's blocking
+/// <c>send()</c> on an async surface, in the Python binding's async <c>send</c> order: append, then wait for space.
+/// <code>
+/// Task&lt;RecordMetadata&gt; delivery = await producer.Send(record);   // accepted
+/// RecordMetadata metadata = await delivery;                            // delivered
+/// </code>
+/// The bound is sized so that reaching it is rare in practice; a producer that hits it regularly is offering records
+/// faster than its cluster can accept them. The <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no such
+/// window — it hands each record to the core inside the call, where the core's own <c>buffer.memory</c> provides the
+/// backpressure.
 /// </para>
 /// <para>
-/// ⚠ <b>That wait has no timeout, and the record is ALREADY ACCEPTED before it starts (M11/P3.4).</b>
-/// <c>Send</c> appends the record to the producer's batch chain first and waits afterwards — the
-/// Python binding's order — so the wait throttles the <em>caller</em> and never decides the record's
-/// fate. Consequently <c>Send</c> does not refuse a record for saturation at all: it returns when
-/// capacity frees, or when the producer is torn down underneath it — and teardown does not discard
-/// the record either, it is settled by the closing producer's own drain (sent by the final drain on
-/// a normal close; faulted if the send-batch thread itself failed). The only thing that ends the
-/// wait early is teardown.
+/// ⚠ <b>A caller that does not await the first stage is NOT throttled.</b> The record is appended before <c>Send</c>
+/// returns, so dropping or deferring the returned <see cref="ValueTask{TResult}"/> still sends it — but then nothing
+/// slows the caller: every such send is accepted, and its record, its buffers and a pending admission wait (about
+/// 1.5 KB per send, measured) accumulate until the cluster drains them. Offered faster than the cluster accepts,
+/// memory grows without bound, and <c>Flush</c> / <c>Close</c> take as long as that backlog takes to drain. This
+/// matches the Python binding's async <c>send</c>. If you do not await acceptance, bound your own outstanding sends.
 /// </para>
 /// <para>
-/// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
-/// no <c>wakeup()</c>: a canceled <see cref="CancellationToken"/> cancels the record's delivery
-/// <see cref="Task{TResult}"/>'s .NET-side wait, but does not abort the in-flight native op — it
-/// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). ⚠ A token that fires
-/// while <c>Send</c> is blocked waiting for capacity does <b>not</b> abort that wait (M11/P3.4):
-/// the record is already accepted by then, so the token only cancels the record's
-/// delivery <see cref="Task{TResult}"/>.
+/// <b>The first stage has no timeout and never fails on its own</b> (only your own token can end it early — see
+/// Cancellation). The record is accepted before the wait begins (M11/P3.4), so saturation delays acceptance rather
+/// than refusing the record. The first stage completes when capacity frees, or when the producer is torn down — and
+/// teardown does not discard the record: it is settled by the closing producer's drain (sent on a normal close;
+/// faulted if the send-batch thread itself failed) and reported through the delivery task. Buffer exhaustion inside
+/// the core (Java's <c>max.block.ms</c> case) is reported the same way, by faulting the delivery task.
+/// </para>
+/// <para>
+/// <b>Cancellation is best-effort (no native abort), and it never un-sends a record.</b> Unlike the consumer, the
+/// producer has no <c>wakeup()</c>: a canceled token cancels the .NET-side waits but does not abort the native send
+/// (a host-idiom addition Java lacks; CLAUDE.md §4). ⚠ A token that is <b>already</b> canceled when you call
+/// <c>Send</c> throws <see cref="OperationCanceledException"/> synchronously and nothing is appended. A token that
+/// fires while the first stage is pending ends that stage with <see cref="OperationCanceledException"/> carrying the
+/// token — but the record was appended before the wait began, so it is <b>still sent</b>, its delivery callback still
+/// fires, and its delivery task is cancelled (as in the Python binding's async <c>send</c>). Consequences:
+/// <list type="bullet">
+/// <item><description>A canceled or timed-out send may still be delivered. Use the delivery callback
+/// (<see cref="Send(ProducerRecord{TKey,TValue}, IDeliveryCallback, CancellationToken)"/>) to learn the
+/// outcome.</description></item>
+/// <item><description>Inside <c>await producer.Send(record, token)</c> the two cases look alike: an
+/// <see cref="OperationCanceledException"/> means "not appended" only for an already-canceled token; otherwise the
+/// record is still sent, so <b>retrying after an <see cref="OperationCanceledException"/> can duplicate it</b>. (The
+/// same duplicate-on-retry risk exists at the delivery stage, and in Java's <c>future.get(timeout)</c>.)</description></item>
+/// <item><description>A caller whose token ends the first stage is not throttled for that send: a short per-send
+/// token while the producer is stuck lets records accumulate, one per token period — as with
+/// <c>asyncio.wait_for</c> in Python, and like a caller that does not await the first stage at all
+/// (above).</description></item>
+/// </list>
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="IAsyncDisposable.DisposeAsync"/> is the primary path (graceful
@@ -112,11 +134,12 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <b>before</b> the send is enqueued.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>Do not mutate the key / value buffers after this returns.</b> The send is deferred: the
-    /// binding <b>borrows</b> the serialized bytes — it does not copy them — until a background
-    /// batch thread hands the record to the core, which happens within milliseconds but not before
-    /// this method returns. A mutation in that window <b>is</b> visible on the wire. If you need to
-    /// reuse a buffer, either await the delivery task first or hand each send its own array.
+    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes.</b> The first
+    /// stage completing does <b>not</b> end the borrow: an accepted record may not have reached the
+    /// core yet. The send is deferred — the binding <b>borrows</b> the serialized bytes, it does not
+    /// copy them, until a background batch thread hands the record to the core — so a mutation in
+    /// that window <b>is</b> visible on the wire. If you need to reuse a buffer, either await the
+    /// delivery task first or hand each send its own array.
     /// <para>
     /// This is inherent to a zero-copy send path: the alternative is a per-record copy of every
     /// value, which is exactly the allocation this binding exists to avoid. It matches the Python
@@ -124,21 +147,21 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <c>IProducer.Send</c> has no such window — it hands the record to the core inside the call.
     /// </para>
     /// <para>
-    /// ⚠ <b>Under sustained saturation this BLOCKS the calling thread until capacity frees</b> —
-    /// Java's own <c>send()</c> contract, and the only thing that bounds an async producer whose
-    /// caller never awaits admission. The record is appended before the wait starts, so saturation
-    /// delays the call rather than refusing the record. The type's remarks state the contract in
-    /// full; it applies to the <b>async</b> surface only.
+    /// ⚠ <b>Under sustained saturation the first stage waits until capacity frees; the calling
+    /// thread does not.</b> Await the first stage before the next send to be throttled by it; a
+    /// caller that does not is not throttled (Python parity). The record is appended before the wait
+    /// starts, so saturation delays the first stage rather than refusing the record. The type's
+    /// remarks state the contract in full; it applies to the <b>async</b> surface only.
     /// </para>
     /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="cancellationToken">
-    /// Best-effort cancellation of the .NET wait. An already-canceled token throws
-    /// <see cref="OperationCanceledException"/> before the send is enqueued; a token that fires
-    /// afterwards cancels the record's delivery <see cref="Task{TResult}"/> but does <b>not</b> abort the
-    /// in-flight native send (the producer has no <c>wakeup()</c>). ⚠ A token that fires while this
-    /// call is blocked waiting for accumulator capacity does <b>not</b> abort that wait — the record
-    /// is already accepted by then (M11/P3.4).
+    /// Best-effort cancellation of the .NET waits (no native abort — the producer has no
+    /// <c>wakeup()</c>). An already-canceled token throws <see cref="OperationCanceledException"/>
+    /// synchronously and nothing is appended. A token that fires afterwards cancels the record's
+    /// delivery <see cref="Task{TResult}"/>, and ends a first stage that is still pending with an
+    /// <see cref="OperationCanceledException"/> carrying the token — ⚠ but the record is <b>still
+    /// sent</b> (see the type's remarks on cancellation: retrying can duplicate it).
     /// </param>
     /// <returns>
     /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding a task
@@ -179,12 +202,14 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// the swallow-and-trace policy for a throwing callback.
     /// </para>
     /// <para>
-    /// ⚠ <b>Do not mutate the key / value buffers after this returns</b> — the same borrow window as
+    /// ⚠ <b>Do not mutate the key / value buffers until the delivery task completes</b> — the first
+    /// stage completing does <b>not</b> end the borrow (an accepted record may not have reached the
+    /// core yet); the same borrow window as
     /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, described in full there.
     /// </para>
     /// <para>
-    /// ⚠ <b>And it BLOCKS the calling thread under sustained saturation</b>, exactly as
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> does — the bound is on
+    /// ⚠ <b>And its first stage waits under sustained saturation</b>, exactly as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>'s does — the bound is on
     /// the producer, not on the overload. Saturation does not refuse the record, so it produces no
     /// <paramref name="callback"/> invocation of its own; the record's eventual delivery outcome
     /// fires it as usual. What fires <b>no</b> callback is an exception <em>thrown out of</em> this
@@ -201,10 +226,11 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
     /// <param name="cancellationToken">
-    /// Best-effort cancellation of the .NET wait, exactly as on
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>. Cancelling the wait does
+    /// Best-effort cancellation of the .NET waits, exactly as on
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>. Cancelling a wait does
     /// <b>not</b> cancel the callback obligation: <paramref name="callback"/> still fires when the
-    /// core reports the send's completion.
+    /// core reports the send's completion — including for a send whose first stage the token ended,
+    /// whose record is still sent.
     /// </param>
     /// <returns>
     /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding a task

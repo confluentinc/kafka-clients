@@ -390,10 +390,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a single record on the async surface, returning a <see cref="ValueTask{TResult}"/> that
-    /// yields the record's delivery <see cref="Task{TResult}"/> (the async send worker; Java
+    /// Sends a single record on the async surface in two stages (the async send worker; Java
     /// <c>Producer.send(record)</c>, which may block and then returns a <c>Future</c> — M11/P3.5
-    /// decision D1). Named <c>SendViaPump</c>, <b>not</b>
+    /// decision D1): the returned <see cref="ValueTask{TResult}"/> completes when the record is
+    /// admitted, and yields the record's delivery <see cref="Task{TResult}"/>. Named <c>SendViaPump</c>, <b>not</b>
     /// <c>SendWithCallback</c> like the peripherals: there is no native <c>Producer_send_async</c>
     /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
     /// so a <c>WithCallback</c> suffix would misdescribe the mechanism (M11/P3 PLAN §6.2). The
@@ -402,7 +402,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <para>
     /// <b>M11/P3.1 — the send SUBMISSION side is now the Python binding's shape (slice S3).</b> This
     /// method no longer touches the core at all: it pins the record's buffers, appends them to the
-    /// binding-side <see cref="SendAccumulator"/>, and returns the <see cref="Task{TResult}"/>
+    /// binding-side <see cref="SendAccumulator"/>, and returns
     /// immediately. A dedicated batch thread drains the accumulated chain — on a threshold or a
     /// free-running window — into a blittable <see cref="Interop.ProducerRecordNative"/> array,
     /// issues <c>kafka_producer_Producer_send_batch</c> per chunk, unpins, and hands the resulting
@@ -426,29 +426,26 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <em>before</em> the core saw the records, so no core-side setting could have restored it.
     /// </para>
     /// <para>
-    /// <b>M11/P3.3 — admission is bounded, and this method BLOCKS the calling thread when the bound
-    /// is saturated.</b> Once the producer holds
+    /// <b>Admission is bounded (M11/P3.3), and a saturated bound holds the FIRST STAGE, not the
+    /// calling thread (M11/P3.5 S3).</b> Once the producer holds
     /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
-    /// not yet handed to the batch thread, this call parks the caller until the batch thread's next
-    /// take frees capacity. Blocking is Java's shape — <c>KafkaProducer.send()</c> blocks once the
-    /// accumulator is full — and it is the only thing that throttles: what the caller holds is the
-    /// record's delivery <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2
-    /// deviation DV-1; the M11/P3.5 first stage below is already complete when this returns), so an
-    /// asynchronous admission wait bounds a container while the accepted
-    /// population grows without limit (measured: 2.05 M records in flight, p50 3,524 ms,
-    /// RSS 2.04 GiB). ⚠ Since M11/P3.4 that wait has <b>no timeout</b> and is not interrupted by
-    /// <paramref name="cancellationToken"/>: the record is already appended by then, so nothing may
-    /// make the call throw and strand an awaiter the caller has not been handed. The <b>sync</b>
-    /// <see cref="Send"/> has no such window — it hands the record to the core inside the call and
-    /// blocks on the core's own <c>buffer.memory</c>.
+    /// not yet handed to the batch thread, the returned first stage stays pending until the batch
+    /// thread's next take frees capacity; the call itself returns at once. This is Python's async
+    /// <c>send</c> (append, then <c>await</c> space). Until the two-stage send it had to block the
+    /// calling thread, because the caller was handed only the delivery task, so an asynchronous wait
+    /// throttled nobody (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB). A caller
+    /// that awaits the first stage is throttled; one that does not is not — Python parity. ⚠ The wait
+    /// has <b>no timeout</b> and is never linked to <paramref name="cancellationToken"/>: the record
+    /// is already appended by then, so nothing inside the producer fails the first stage. The
+    /// <b>sync</b> <see cref="Send"/> has no such window — it hands the record to the core inside the
+    /// call and blocks on the core's own <c>buffer.memory</c>.
     /// </para>
     /// <para>
-    /// <b>M11/P3.5 — the return is two-staged, and the first stage is always already complete.</b>
-    /// The outer <see cref="ValueTask{TResult}"/> is the "accepted" stage and its
-    /// result is the delivery <see cref="Task{TResult}"/>. Admission still blocks inside this call
-    /// (above), so by the time it returns the record is accepted and the method wraps
-    /// <c>completion.Task</c> in an already-completed <see cref="ValueTask{TResult}"/> — a struct, so
-    /// the send path allocates nothing for it (DoD §10).
+    /// <b>M11/P3.5 — the two stages.</b> The outer <see cref="ValueTask{TResult}"/> is the "accepted"
+    /// stage and its result is the delivery <see cref="Task{TResult}"/>. With a permit free it is
+    /// already complete on return — a struct over <c>completion.Task</c>, so the send path allocates
+    /// nothing for it (DoD §10); with the bound saturated it is pending
+    /// (<see cref="SendAccumulator.SubmitAdmitted"/>).
     /// </para>
     /// </summary>
     /// <remarks>
@@ -469,19 +466,23 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </para>
     /// <para>
     /// <b>Cancellation is best-effort — the .NET wait only.</b> The producer has no <c>wakeup()</c>,
-    /// so a token that fires after the record is appended cancels the returned <see cref="Task"/>
+    /// so a token that fires after the record is appended cancels the delivery <see cref="Task"/>
     /// (<see cref="TaskCompletionSource{TResult}.TrySetCanceled(CancellationToken)"/> — cancelled
     /// WITH the token, so <c>OperationCanceledException.CancellationToken</c> matches it, exactly as
     /// the async peripherals do); the record is still sent and the later
     /// <c>TrySetResult</c> / <c>TrySetException</c> on the already-canceled TCS is a safe no-op
     /// (ffi §A7). The registration is disposed when the task completes. No registration is created
     /// for a non-cancelable token — the common send path allocates nothing beyond the TCS (DoD §10).
+    /// ⚠ If the first stage is still pending when the token fires, it ends canceled too — with the
+    /// same token, through <see cref="SendAccumulator.SubmitAdmitted"/>'s own registration (M11/P3.5
+    /// D2 (c)) — and the record is still sent. An <b>already</b>-canceled token instead throws here,
+    /// before the append, and nothing is sent (D4).
     /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
     /// <param name="delivery">
     /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
-    /// <c>Send(record)</c> path. It is invoked immediately before the returned
+    /// <c>Send(record)</c> path. It is invoked immediately before the delivery
     /// <see cref="Task{TResult}"/> completes (decision D3) — on the pump thread for a record the core
     /// accepted, and on the batch thread for one the core rejected per-record. A synchronous throw out
     /// of this method fires <b>nothing</b> (decision D5), and under the accumulator every such throw
@@ -491,10 +492,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// teardown closed it.
     /// </param>
     /// <param name="cancellationToken">
-    /// Best-effort cancellation of the .NET wait (no native abort). ⚠ It does <b>not</b> interrupt
-    /// the admission wait (M11/P3.4): by then the record is appended and may already have been sent,
-    /// so the token only marks the returned <see cref="Task{TResult}"/> canceled, through the
-    /// registration below.
+    /// Best-effort cancellation of the .NET waits (no native abort). ⚠ It never reaches the admission
+    /// wait itself (M11/P3.4): by then the record is appended and may already have been sent, so the
+    /// token only marks the delivery <see cref="Task{TResult}"/> canceled, through the registration
+    /// below, and ends a still-pending first stage canceled (D2 (c)) — the record is still sent.
     /// </param>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException">
@@ -562,39 +563,35 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 TaskScheduler.Default);
         }
 
-        // APPEND FIRST, THROTTLE AFTER (M11/P3.4 — the anchor's own mechanism). SubmitAdmitted pins
-        // and appends under the accumulator's lock, then blocks this caller while the bound is
-        // saturated. That ordering is what makes submission order call order without a FIFO
-        // submission queue: a record's place is fixed before anyone can wait behind it. It also
-        // means a parked caller holds NO pins — they transferred to the node with the append —
-        // which is how the §4.4 invariant ("a blocked sender must not hold pins") is satisfied here.
-        // The decision lives on SendAccumulator so the test fixture routes through it (DoD §12).
+        // APPEND FIRST, WAIT AFTER (M11/P3.4 — the anchor's own mechanism). SubmitAdmitted pins and
+        // appends under the accumulator's lock, then takes an admission permit: inline if one is
+        // free, otherwise through a pending first stage. That ordering is what makes submission
+        // order call order without a FIFO submission queue: a record's place is fixed before anyone
+        // can wait behind it. It also means a waiting send holds NO pins — they transferred to the
+        // node with the append — which is how the §4.4 invariant ("a waiting sender must not hold
+        // pins") is satisfied here. The decision lives on SendAccumulator so the test fixture routes
+        // through it (DoD §12).
         //
         // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
         // (raised above this carrier, before the call) and the precondition throws above — the
         // already-canceled token, the disposed producer — still surface synchronously rather than
         // as a faulted ValueTask — the reason AsyncKafkaProducer.SendValidated is deliberately not
-        // `async` either. That holds with the M11/P3.5 two-stage return too: an `async`
-        // ValueTask<Task<RecordMetadata>> method would capture every one of those throws into the
-        // returned ValueTask, so a caller that never awaits it would never see them (pinned by the
-        // strict synchronous-throw guards in PublicProducerSendSynchronousThrowTests).
+        // `async` either. An `async` ValueTask<Task<RecordMetadata>> method would capture every one
+        // of those throws into the returned ValueTask, so a caller that never awaits it would never
+        // see them, and an already-canceled token would no longer be distinguishable from one that
+        // fired after the append (pinned by the strict synchronous-throw guards in
+        // PublicProducerSendSynchronousThrowTests). The admission wait does not need `async` either:
+        // SubmitAdmitted hands back the pending first stage itself.
         //
-        // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
-        // SubmitAdmitted BLOCKS this caller's thread when the producer already holds
-        // MaxAdmittedRecords records accepted but not yet handed to the batch thread (the permit
-        // comes back at TakeChainLocked, before send_batch runs, so the accepted-but-unsent
-        // POPULATION is larger than the bound by the in-flight chain — the arithmetic is at
-        // _admission). That is the fix: the caller does not await admission (what it holds is the
-        // record's delivery Task; the M11/P3.5 first stage is already complete on return), so an
-        // ASYNCHRONOUS admission wait throttles nobody and just parks continuations — measured at 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape
-        // this replaces measured 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(token) is a
-        // genuine synchronous primitive, NOT an async operation being blocked on, so it is not the
-        // sync-over-async footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4
-        // draws for the consumer's sync Seek. Making this method `async` to "await admission" would
-        // break the synchronous-throw contract above AND reintroduce the defect.
+        // ⚠ THE FIRST STAGE IS THE THROTTLE (M11/P3.3). The one-stage Send had to BLOCK this thread
+        // on a saturated bound, because the caller was handed only the delivery Task and an
+        // asynchronous wait throttled nobody (3.0 GB / p50 10 s on a sibling branch; 2.04 GiB /
+        // p50 3.5 s unbounded). With the two-stage return a caller that awaits the first stage is
+        // throttled by the asynchronous wait — Python's async send. A caller that does not await it
+        // is not throttled: Python parity, chosen deliberately (the arithmetic is at _admission).
         try
         {
-            accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
+            return accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
         }
         catch (Exception)
         {
@@ -607,11 +604,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             //   * teardown closed the accumulator between the guards above and the append ->
             //     ObjectDisposedException out of SendAccumulator.Append.
             //
-            // ⚠ NOTHING THROWS OUT OF THE ADMISSION WAIT ANY MORE (M11/P3.4). The wait runs AFTER
-            // the append, takes no timeout and ignores `cancellationToken`, and swallows the
-            // teardown cancellation — precisely so a record that IS in the chain cannot leave its
-            // caller holding an unreturned `completion`. So every path that reaches this `catch`
-            // appended nothing.
+            // ⚠ NOTHING THROWS OUT OF THE ADMISSION WAIT (M11/P3.4). The wait runs AFTER the
+            // append, takes no timeout and is never linked to `cancellationToken`, treats the
+            // teardown cancellation as accepted, and catches its own allocation and registration
+            // failures — precisely so a record that IS in the chain cannot leave its caller holding
+            // an unreturned `completion`. So every path that reaches this `catch` appended nothing.
             //
             // Each such path leaves `completion` unsettled — or settled only by the registration
             // below — so the disposing continuation chained to it may never run. Release the
@@ -619,12 +616,6 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             cancellationRegistration.Dispose();
             throw;
         }
-
-        // The SAME awaitable on both routes — the record's delivery future, never a submission
-        // handle. (It only held before because the slow path re-awaited `completion.Task` itself.)
-        // Admission already happened above, so the first stage is complete: wrapping the Task in a
-        // ValueTask struct allocates nothing (DoD §10).
-        return new ValueTask<Task<RecordMetadata>>(completion.Task);
     }
 
     /// <summary>
