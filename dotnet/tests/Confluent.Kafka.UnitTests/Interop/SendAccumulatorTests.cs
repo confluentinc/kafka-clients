@@ -1095,11 +1095,26 @@ public sealed class SendAccumulatorTests
         // THE ASSERTION: the token ends the first stage, and BEFORE capacity frees — the 60 s window
         // means nothing has drained (the send-batch count below). Canceled, not faulted, and the
         // OperationCanceledException carries the caller's own token.
+        //
+        // M11/P3.5 T16 — PROMPTLY, not merely eventually: under a 5 s bound rather than the 30 s
+        // hang guard, so the (a) shape (the token ignored, the stage pending until capacity frees)
+        // fails here on a TimeoutException instead of being rescued by a drain. The bound is not a
+        // latency claim — the token callback completes the stage on the cancelling thread, so it is
+        // already settled when Cancel() returns — only room for a loaded runner. A stage-1
+        // implementation that hopped the cancellation to the pool would still pass, which is right:
+        // the contract is "promptly", not "synchronously".
         OperationCanceledException canceled = await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => TestTimeout.Run(() => firstStage, s_deadline));
+            () => TestTimeout.Run(() => firstStage, TimeSpan.FromSeconds(5)));
         Assert.Equal(cancellation.Token, canceled.CancellationToken);
         Assert.Equal(TaskStatus.Canceled, firstStage.Status);
         Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // ...and capacity really had NOT freed when it ended: the record is still in the pending node,
+        // nothing reached the core, and the bound is still exhausted — the admission wait underneath
+        // runs on (it was never linked to the caller's token) and still holds its place in line.
+        Assert.Equal(3, harness.PendingCount());
+        Assert.Equal(0, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
 
         // And the record is STILL SENT — asserted on the CORE's record count, not on an awaiter.
         harness.DrainNow();
@@ -1849,7 +1864,7 @@ public sealed class SendAccumulatorTests
     /// the whole body is inside <see cref="DeliveryRegistration.Fire"/>'s no-throw boundary, so a
     /// timeout here cannot unwind into the batch thread.
     /// </remarks>
-    private sealed class BlockingDeliveryCallback : IDeliveryCallback
+    internal sealed class BlockingDeliveryCallback : IDeliveryCallback
     {
         private readonly ManualResetEventSlim _entered;
         private readonly ManualResetEventSlim _release;
@@ -2287,19 +2302,23 @@ public sealed class SendAccumulatorTests
         }
 
         /// <summary>The single node the accumulator is currently filling.</summary>
-        private object PendingNode() =>
-            PendingNodeOrNull()
+        private object PendingNode() => PendingNodeOf(Accumulator);
+
+        private object? PendingNodeOrNull() => PendingNodeOrNullOf(Accumulator);
+
+        private static object PendingNodeOf(SendAccumulator accumulator) =>
+            PendingNodeOrNullOf(accumulator)
                 ?? throw new InvalidOperationException(
                     "the accumulator holds no pending node — it drained before the injection landed");
 
-        private object? PendingNodeOrNull()
+        private static object? PendingNodeOrNullOf(SendAccumulator accumulator)
         {
             FieldInfo head = typeof(SendAccumulator).GetField(
                 "_head", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException(
                     "SendAccumulator no longer exposes a _head field.");
 
-            return head.GetValue(Accumulator);
+            return head.GetValue(accumulator);
         }
 
         /// <summary>
@@ -2342,9 +2361,18 @@ public sealed class SendAccumulatorTests
         /// than the test (no threshold reached, no forced drain).
         /// </para>
         /// </remarks>
-        internal TaskCompletionSource<RecordMetadata>?[] PendingCompletions()
+        internal TaskCompletionSource<RecordMetadata>?[] PendingCompletions() =>
+            PendingCompletionsOf(Accumulator);
+
+        /// <summary>
+        /// <see cref="PendingCompletions"/> for an accumulator this fixture did NOT build — a public
+        /// producer's own, reached by the public-surface tests (M11/P3.5) so they read the same slot
+        /// array through the same single copy of this reflection rather than a second one that could
+        /// drift from it. Same caller's contract: the node must be held still.
+        /// </summary>
+        internal static TaskCompletionSource<RecordMetadata>?[] PendingCompletionsOf(SendAccumulator accumulator)
         {
-            object node = PendingNode();
+            object node = PendingNodeOf(accumulator);
             return (TaskCompletionSource<RecordMetadata>?[])
                 NodeField(node, "Completions").GetValue(node)!;
         }

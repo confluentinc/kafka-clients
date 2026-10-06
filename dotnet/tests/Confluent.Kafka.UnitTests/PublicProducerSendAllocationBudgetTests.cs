@@ -60,6 +60,18 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // Repetitions before the BEST (lowest) result is taken — see the rationale at the use site.
     private const int MeasurementAttempts = 4;
 
+    // M11/P3.5 T21 (ii) — the ABSOLUTE per-send budget of the two-stage Send's fast path. The marginal
+    // budget above subtracts a constant per-send cost away, so it cannot see one: a first stage that
+    // stopped being a struct over the delivery task (one more Task<T>, 72 B) passes it unchanged.
+    // MEASURED (M11/P3.5 S3): 160 B/send on BOTH net8.0 and net10.0 — the ProducerRecord, the
+    // completion source and its task. The budget is that plus 32 B, less than one more Task<T> (72 B):
+    // verified red by injecting exactly that (a Task.FromResult first stage on the fast path).
+    private const long FastPathPerSendBudgetBytes = 192;
+
+    // More attempts than the marginal test: an absolute figure has no matched pair to cancel a node
+    // allocation within an attempt, so it needs a drain-free run among them.
+    private const int AbsoluteMeasurementAttempts = 8;
+
     [Fact]
     public async Task Send_PerRecordAllocation_HasNoValueSizedCopy()
     {
@@ -105,6 +117,42 @@ public sealed class PublicProducerSendAllocationBudgetTests
             $"Per-send caller-thread allocation marginal {perSendMarginal} B exceeded the budget " +
             $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
             "a value-sized managed copy or a Task-scoped pin would show here.");
+    }
+
+    [Fact]
+    public async Task Send_FastPath_PerRecordAllocation_StaysWithinItsMeasuredBudget()
+    {
+        // M11/P3.5 T21 (ii) — with a permit free, Send(record) returns a ValueTask over the delivery
+        // task itself and allocates nothing for the first stage. Measured absolutely (caller-thread
+        // bytes per Send over 64 sends, no token, no callback, best of 8), against a budget tight
+        // enough that one extra Task-sized allocation per send turns it red.
+        byte[] key = MakeBytes(16, 0xAB);
+        byte[] value = MakeBytes(SmallValueSize, 0xCD);
+
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _ = FireAndMeasure(producer, value, key, out Task<RecordMetadata>[] warmup);
+            await AwaitAll(warmup);
+        }
+
+        // BEST OF N, as above: a run whose window caught a drain pays for a node; the minimum is the
+        // run that did not, and a per-send regression raises every run, the minimum included.
+        long bytes = long.MaxValue;
+        for (int attempt = 0; attempt < AbsoluteMeasurementAttempts; attempt++)
+        {
+            long measured = FireAndMeasure(producer, value, key, out Task<RecordMetadata>[] sends);
+            await AwaitAll(sends);
+            bytes = Math.Min(bytes, measured);
+        }
+
+        long perSend = bytes / SendCount;
+        Assert.True(
+            perSend <= FastPathPerSendBudgetBytes,
+            $"Fast-path Send per-send caller-thread allocation {perSend} B exceeded the budget " +
+            $"{FastPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — the first stage must " +
+            "stay a struct over the delivery task when a permit is free.");
     }
 
     private static long FireAndMeasure(AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, out Task<RecordMetadata>[] sends)

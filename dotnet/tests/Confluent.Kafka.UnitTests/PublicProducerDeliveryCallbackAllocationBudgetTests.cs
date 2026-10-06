@@ -98,6 +98,19 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     // without weakening the budget.
     private const int MeasurementAttempts = 4;
 
+    // M11/P3.5 T21 (ii) — the ABSOLUTE per-send budget of the callback overload's fast path. Neither
+    // budget above can see a constant per-send regression shared by both overloads: the 512 B
+    // ceiling is generous by design, and the 64 B one is a plain-to-callback DELTA, from which a cost
+    // both overloads pay (one more Task<T> for the first stage, 72 B) cancels out.
+    // MEASURED (M11/P3.5 S3): 200 B/send on BOTH net8.0 and net10.0 — the plain path's 160 B plus the
+    // 40 B DeliveryRegistration. The budget is that plus 32 B, less than one more Task<T> (72 B): verified
+    // red by injecting exactly that (a Task.FromResult first stage on the fast path).
+    private const long CallbackFastPathPerSendBudgetBytes = 232;
+
+    // More attempts than the paired tests: an absolute figure has no matched pair to cancel a node
+    // allocation within an attempt, so it needs a drain-free run among them.
+    private const int AbsoluteMeasurementAttempts = 8;
+
     [Fact]
     public async Task PlainSend_PerRecordAllocation_IsNotRegressedByTheCallbackField()
     {
@@ -212,6 +225,40 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
             $"Callback-path per-send value-size marginal {perSendMarginal} B exceeded the budget " +
             $"{PlainPerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} " +
             "sends) — a value-sized managed copy or a Task-scoped pin would show here.");
+    }
+
+    [Fact]
+    public async Task CallbackSend_FastPath_PerRecordAllocation_StaysWithinItsMeasuredBudget()
+    {
+        // M11/P3.5 T21 (ii) — Send(record, callback) with a permit free: the first stage is a struct
+        // over the delivery task, and the callback adds its one DeliveryRegistration. Measured
+        // absolutely (caller-thread bytes per Send over 64 sends, no token, best of 8), against a
+        // budget tight enough that one extra Task-sized allocation per send turns it red.
+        byte[] key = MakeBytes(16, 0xAB);
+        byte[] value = MakeBytes(SmallValueSize, 0xCD);
+        CountingDeliveryCallback callback = new CountingDeliveryCallback();
+
+        using AsyncMockProducer<byte[], byte[]> producer =
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+        await Warmup(producer, value, key, callback);
+
+        // BEST OF N — see PlainSend_PerRecordAllocation; with no pair to cancel a node allocation,
+        // the minimum over more attempts is the drain-free run.
+        long bytes = long.MaxValue;
+        for (int attempt = 0; attempt < AbsoluteMeasurementAttempts; attempt++)
+        {
+            long measured = FireAndMeasure(producer, value, key, callback, out Task<RecordMetadata>[] sends);
+            await AwaitAll(sends);
+            bytes = Math.Min(bytes, measured);
+        }
+
+        long perSend = bytes / SendCount;
+        Assert.True(
+            perSend <= CallbackFastPathPerSendBudgetBytes,
+            $"Fast-path callback Send per-send caller-thread allocation {perSend} B exceeded the budget " +
+            $"{CallbackFastPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — the first stage " +
+            "must stay a struct over the delivery task when a permit is free.");
     }
 
     private static async Task Warmup(
