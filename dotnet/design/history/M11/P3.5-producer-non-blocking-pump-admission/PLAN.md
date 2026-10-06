@@ -552,3 +552,72 @@ Line counts at `104b0b2c`:
 7. `PublicProducerSendClosedCheckTests.cs`, `IDeliveryCallback.cs`, `soak/README.md`, `CLAUDE.md` and `ffi-marshalling.md` are outside the POC's file lists but are in scope.
 8. `f4cd3a57` uses the pre-move `bindings/dotnet/` paths, so it is applied with path translation (`-p3 --directory=dotnet`).
 9. "Make the pump path behave like Python" cannot keep today's `Task<RecordMetadata>` return type and still stay bounded (§1). The user's request therefore implies the API break in D1.
+
+## 17. Progress and evidence (Manager)
+
+| Slice | Commits | Gates |
+|---|---|---|
+| S1 | `a138b1c3` | perf "before" baseline |
+| S2 | `e221319d` + fixups `fccc23a5`, `c0323fec`, `ff46399a` (COMMENTS 91.1–91.4, false return-type docs) | unit 2932/TFM, soak 165, perf-unit 30, gRPC producer arms 38/38 |
+| Critic pass 1 | closed after three re-checks; `COMMENTS.91.md` empty | |
+| S3 | `14bf366e` (production + §8 xmldoc + ported T1–T3/T6) + fixups `75c1d392` (T4, T5, T7, T9, T12, T16–T21) and `731cc714` (T12 + submission-order test strengthened by the mutation matrix) | unit 2954/TFM (+22 since S2), soak 165, perf-unit 30, format clean |
+| S4 | `69be3670` + fixup `f9042bb0` (91.7) | perf-unit 39/TFM (+9, T14), unit unchanged |
+| Gates after S4 | `verify-dotnet-macos-docker` (unit 2954/TFM, soak 165, native gRPC `__grpc_dotnet` 145/145 = 151 − 6 txn skips, producer arms 38/38); `test-integration-perf-dotnet` (PerfV3 smoke 41 passed, 2 consumer smokes skipped on macOS by design) | `kafka-perf` untouched |
+| Critic pass 2 | a (production/docs): 91.5–91.7 LOW; b (tests): 91.8 MEDIUM (mutation-record honesty), 91.9 LOW (T21 definition). Fixed in `2b7b6b9d` (S3) and `f9042bb0` (S4); §17 updated by the Manager. Re-check: 91.10 LOW (per-new-source figure overclaimed) → `ea7dad3f` | unit 2956/TFM (+2 allocation guards), soak 165, perf-unit 39 |
+
+S3 was run as three Actor spawns (a: production, b: new tests, c: mutation matrix) to stay inside one context window each.
+
+**T21 allocation (S3b).** Caller-thread `GC.GetAllocatedBytesForCurrentThread` per send over 64 sends, best of 4 (harness) / 8 (public), net8.0 | net10.0:
+- Harness fast path 128 | 128 B. Saturated, no token: +536 | +544 marginal over the fast path, ceiling 576 B.
+- Saturated + cancelable token (the D2 (c) path), marginal over the fast path:
+  - **Recycled registration node** (the caller token's source already has a node freed by an earlier disposed registration, so best-of-4 never keeps attempt 0): +680 | +688 B, ceiling 720 B.
+  - **Fresh node** (the source's registration table already exists but it has no free node): +760 | +768 B, ceiling 800 B (guard added in `2b7b6b9d`, COMMENTS 91.9).
+  - **New `CancellationTokenSource` per send** (the per-request-timeout shape: each `Register` is its source's first, so it pays the table and the node): +824 | +832 B, ceiling 864 B (guard added in `ea7dad3f`, COMMENTS 91.10).
+  - A +72 B injection on the cancelable path turns all three guards red; the no-token guard is unaffected.
+- Public plain `Send` 160 | 160 B → new fast-path budget 192 B; callback `Send` 200 | 200 B → 232 B. The older 512 B-class budgets are unchanged; they did not catch a +72 B Task-sized injection, the new ones do.
+
+**S3 mutation matrix (S3c, net10.0).** Isolated = the targeted filter run 3× (deterministic) or 8× (timing-dependent; those tests loop K=8 in-suite with a fresh harness per rep). Full suite = one full unit run with the mutant.
+
+| # | Mutant | Target | Isolated | Full suite | Verdict |
+|---|---|---|---|---|---|
+| M1 | main's blocking `_admission.Wait(_spaceGate.Token)` | T1, T3 | 3/3 (fail-fast timeouts, no hang) | — | discriminating |
+| M2a | `ExecuteSynchronously` on the no-token `ContinueWith` | T2 | 0/8 | green | **equivalent** (SemaphoreSlim completes the wait asynchronously) |
+| M2b | stage-1 TCS without RunContinuationsAsynchronously completed from `ReleaseAdmission` | T2 | 8/8 | red | discriminating |
+| M3 | caller token linked into `WaitAsync` (D2 (b)) | T4 | 3/3 | — | discriminating |
+| M4a / M4b | `ReleaseAdmission` one short / drain skips its release | T5, T4, submission order | 8/8 | red (hung before `731cc714`) | discriminating |
+| M4c | skip the release for the final closing chain | T5, T4 | 0/8 | green | **equivalent** |
+| M5a / M5b | stage continuation only on a granted permit / no gate cancel in `AbandonOnThreadFailure` | D3 teardown tests | 8/8 | red | discriminating |
+| M6 | append deferred into the stage-1 continuation | T7 | 3/3 | — | discriminating |
+| M7 | no gate cancel in `Stop` step 1 | deterministic D3 test / public T9 | 8/8 / 0/8 | red | discriminating via the D3 test; **equivalent on the public path** (the final drain releases every wait) |
+| M8 | fault stage 1 at teardown | T12, T9 | 8/8 (0/8 before `731cc714`) | red | discriminating |
+| M9a / M9b | +1 Task-sized allocation on the fast / saturated path | T21 budgets | 3/3 | — | discriminating |
+| M10a | stage 1 ignores the caller's token ((a) behaviour) | T16, T17 | 8/8 | red | discriminating |
+| M11a / M11b | un-append / fault the record when the token wins | T17 | 8/8 | red | discriminating |
+| M12 | registration `Dispose` removed | T18 | 8/8 | red | discriminating |
+| M13a-wait | `SetResult` instead of `TrySetResult` in the wait continuation | T19 | 8/8 | red | discriminating (every token-won rep faults the discarded continuation; T19's filtered `UnobservedTaskException` listener sees it) |
+| M13a-token | `SetCanceled` instead of `TrySetCanceled` in the token callback | T19 | — | — | **effectively equivalent / structural guard**: it can throw only if `Cancel()` lands between the wait continuation's `TrySetResult` and its registration `Dispose` (two adjacent statements; 10–33 of 20,000 aimed races in a replica). What protects the caller's `Cancel()` is `TrySetCanceled` plus that dispose-right-after ordering. The S3c run of this half injected parameterless `SetCanceled()` (no token; `SetCanceled(CancellationToken)` is .NET 5+), which went 8/8 red through the **token-identity** assertions in T4/T16/T17/T19, not a Set-versus-TrySet check (COMMENTS 91.8) |
+| M13b | stage 1 never settles once the token fired | T19 | 8/8 | red | discriminating |
+| M14 | stage-1 TCS without RunContinuationsAsynchronously | T20 | 8/8 | red | discriminating |
+| M15 | D4 throws moved into the `ValueTask` | T8 | 3/3 | — | discriminating |
+
+T18's witness (S3b) is a `WeakReference` collected while the caller's token stays alive and uncancelled, with an in-run control pair. Its limits: it cannot tell "released" from "never registered" (T16 covers registration); a late release inside the 10 s collect bound passes; the token-wins outcome is not graded because `Cancel()` unregisters every callback itself.
+
+Flakes seen, both outside this phase's code: `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` (known `GetTotalMemory` budget flake, net10.0, once) and `SafeProducerHandleTests.KafkaProducer_CreateThenDispose_HandleValidThenReleased` (30 s timeout, net10.0, once; 10/10 in isolation).
+
+| Slice | Commits | Gates |
+|---|---|---|
+| S5 | `cbecd70c` (R1–R14 + the four D2 (c) adaptations) | format clean |
+| Critic pass 3 | clean on the rows; promoted 91.11 MEDIUM (the borrow does not end at a *canceled* delivery task — both cancellation paths), 91.12 LOW (SoakClient comment cited the deleted admission timeout), 91.13 LOW (the same qualifier on the concrete producers' remarks). Fixed in `e76e88ff`, `0149f6d9` (S2), `20ac9ea2`; re-checks clean | |
+| Close | unit **2956/2956** net8.0 and net10.0, soak 165/165, perf-unit 39/39, 0 W / 0 E, format clean (one rerun: the first full run hit the known `ProducerSubmitHandleRefTests` `GetTotalMemory` flake on net8.0) | Mode A: `git diff --stat 104b0b2c..HEAD -- . ':!dotnet'` empty; header SHA-1 `af0f1644…` unchanged; no `[DllImport]` line changed |
+
+**R7 reading (S5).** The approved row's replacement text carries its own "(measured twice: M11/P6 63.5k/3.0 GB; M11/P3.2 2.04 GiB)"; the Actor read "the measurement history is kept" as that parenthetical, and removed the older detailed figures (M11/P3.2 583k/537k, M11/P7 591.6k, M11/P3.3 578.6k) and "Java's own shape — `send()` blocks up to `max.block.ms`" together with the replaced paragraph. Critic pass 3 judged the reading consistent with the row (the dropped figures supported the sentence being replaced; all survive in the P3.2–P3.4 PLANs and `STATUS.md`). Flagged for the user's eye.
+
+**Stale rule text outside the approved rows — for the user (not edited; D8 covers R1–R14 only).** `ffi-marshalling.md` §A1 on `cbecd70c+` still describes the M11/P3.2 submission queue that P3.4 deleted:
+- :350-352 — a dedicated thread for the queue's appender, or more than one appender.
+- :353-362 — the "zero appenders" Dekker handshake.
+- :385-391 — the ordering test's "submission queued, inline path refused" half.
+- :392-396 — Flush must include "a send still queued for capacity".
+- :397-399 — "nothing pinned while queued (the pin belongs after the permit, §A4)": contradicts HEAD (pins are taken with the append).
+- :400-402 — "a queued submission whose token fires before it is appended … is not sent": contradicts D2 (c) and T16/T17.
+- :403-415 (partly) — "flood the submission path" / "the queue's depth", and an unqualified bound (after D6 it binds only callers that await stage 1).
+- §A4 :658 (R11's approved text) — "a buffer may be reused only after the delivery `Task` completes" is true as a necessary condition but omits 91.11's cancellation caveat.

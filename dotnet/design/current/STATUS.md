@@ -7,6 +7,27 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 11 / Phase 3.5 — "two-stage async `Send`: pump admission waits in the first stage, not the caller": DONE locally (2026-10-07); not pushed. N=91. Mode A.** Branch `prashah_dev_dotnet_binding`, base `104b0b2c`. The commits are not squashed (the `fixup!`s await an autosquash) and not pushed:
+  - Plan `12ae2d7b`. S1 `a138b1c3` (`LIMIT_RPS_SLICE_MS`; the perf "before" build).
+  - S2 `e221319d` + `fccc23a5`, `c0323fec`, `ff46399a`, `0149f6d9`.
+  - S3 `14bf366e` + `75c1d392`, `731cc714`, `2b7b6b9d`, `ea7dad3f`, `e76e88ff`, `20ac9ea2`.
+  - S4 `69be3670` (`AWAIT_ACCEPTED`; the perf "after" build) + `f9042bb0`. S5 `cbecd70c`. Then this close.
+
+  Plan and review record: `design/history/M11/P3.5-producer-non-blocking-pump-admission/` (`PLAN.md`, whose §17 holds the progress table, the T21 allocation figures and the S3 mutation matrix; `COMMENTS.DONE.91.md`). Proof of Mode A: `git diff --stat 104b0b2c..HEAD -- . ':!dotnet'` is empty, the header SHA-1 stayed `af0f1644…`, and no `[DllImport]` line changed.
+  - **⚠ Breaking (pre-publish), user ruling D1.** Both `IAsyncProducer.Send` overloads return `ValueTask<Task<RecordMetadata>>`: `await` = **accepted** (the admission stage — Java's blocking `send()`, without parking a thread), `await` again = **delivered** (the inner `Task` is Java's `Future`). The sync `IProducer.Send` is unchanged. `await producer.Send(r);` still compiles but now means accepted only; every repo caller was migrated (soak, gRPC servicer, harness, tests).
+  - **Behaviour (S3).** On the pump path the record is appended first (M11/P3.4) and the admission wait is the first stage, so a saturated bound no longer parks the caller's thread. A free permit completes stage 1 synchronously with no extra allocation. A caller that does not await stage 1 is **not throttled** (D6, Python parity; documented on the surface). Stage 1 never fails on its own; teardown completes it successfully (D3).
+  - **Cancellation, user ruling D2 = (c)** (against the plan's (a) recommendation). A caller token that fires while stage 1 is pending ends it with an `OperationCanceledException` carrying that token; the record is **still sent**, its callback fires once and its delivery task is cancelled. The admission wait is never linked to the token. An already-cancelled token still throws synchronously before the append (D4). The surface documents that retrying after an OCE can duplicate, that a cancelled send is not throttled, and that after any cancellation the buffers stay borrowed until the delivery callback fires or a later `Flush` completes (91.11).
+  - **Rules (D8, user-approved wording).** `dotnet/CLAUDE.md` R1–R5, `ffi-marshalling.md` R6–R13, `soak/README.md` R14, with the four D2 (c) adaptations to R7–R10 recorded in PLAN §11.
+  - **Gates at close.** Unit tests 2956/2956 on net8.0 and net10.0 (2932 after S2), soak 165/165, perf-unit 39/39 (30 before S4); 0 warnings and 0 errors; `dotnet format` clean. At `69be3670`: native gRPC `__grpc_dotnet` **145/145** (151 − 6 transaction skips; producer arms 38/38) and the PerfV3 smoke (41 passed, the 2 consumer smokes skipped on macOS by design).
+  - **Critic 91.** Three passes, 13 findings, all resolved: pass 1, 91.1–91.4 (false return-type docs); pass 2, 91.5–91.10 (bound wording, a misplaced sentence, a false harness rationale, the mutation-record honesty of M13a, the T21 allocation definitions); pass 3, 91.11 MEDIUM (borrow after a cancellation), 91.12 and 91.13. **No open findings.**
+  - **For the user:**
+    1. The perf runs R1–R5, plus PerfV2 R1/R5, per PLAN §12 (before = `a138b1c3`, after = `69be3670`).
+    2. The stale ffi §A1 text outside R1–R14 that still describes the deleted M11/P3.2 queue (listed in PLAN §17).
+    3. The R7 reading recorded in PLAN §17.
+  - **Known flakes, not this phase:** `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` (`GetTotalMemory` budget; red twice in this phase's full runs, net10.0 and net8.0, green on rerun) and `SafeProducerHandleTests.KafkaProducer_CreateThenDispose_HandleValidThenReleased` (one 30 s timeout).
+  - **Next unused dotnet N = 92.**
+  - **Not pushed.** The user pushes with `git push-external`.
+
 - **Milestone 15 / Phase 13.5 — ".NET Admin: parity lows (no core or ABI change)": DONE (2026-10-02). N=90. Mode A.** Branch `prashah_dev_dotnet_binding`, base `21458241` (the #225 v0.1.1 master merge). The commits are not squashed and not pushed:
   - S1: `f308d137` (S1a value types), `a69408ac` (S1b admin surface), `d5fdcc66` (S1c preconditions), `ec2ddd7a` (S1d X2).
   - S2: `0b0327ae` (S2a X6), `d2f6f656` (S2b docs) and `b6f71c2c` (S2b X8, the one rule-file edit the user authorized, D2).
