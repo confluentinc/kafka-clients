@@ -242,6 +242,37 @@ def test_interceptor_and_partitioner_keys_reach_the_core(client: _config.Client)
     assert _config.prepare(configs, client=client)[1] == configs
 
 
+def test_only_the_own_role_serde_keys_stay_with_the_binding() -> None:
+    # Configuration: a producer keeps its serializer keys and their encodings,
+    # a consumer the deserializer ones; every other key reaches the core, the
+    # other role's serde keys included (as unknown keys the core reports).
+    serializer_keys = {"key.serializer": "x.S", "value.serializer": "x.S",
+                       "serializer.encoding": "UTF-16", "key.serializer.encoding": "ascii",
+                       "value.serializer.encoding": "UTF-16BE"}
+    deserializer_keys = {"key.deserializer": "x.D", "value.deserializer": "x.D",
+                         "deserializer.encoding": "UTF-16", "key.deserializer.encoding": "ascii",
+                         "value.deserializer.encoding": "UTF-16BE"}
+    configs = {**serializer_keys, **deserializer_keys}
+    originals, native = _config.prepare(configs, client="producer")
+    assert native == deserializer_keys and dict(originals) == configs
+    originals, native = _config.prepare(configs, client="consumer")
+    assert native == serializer_keys and dict(originals) == configs
+
+
+def test_a_serializer_encoding_reaches_configure_not_the_core() -> None:
+    from confluent_kafka.common.serialization import bytes_serializer
+    from confluent_kafka.common.serialization._supply import resolve_serde
+
+    originals, native = _config.prepare(
+        {"value.serializer": "confluent_kafka.common.serialization._string_serializer."
+                             "StringSerializer",
+         "value.serializer.encoding": "UTF-16BE"}, client="producer")
+    assert native == {}
+    serializer = resolve_serde(None, originals, "value.serializer", is_key=False,
+                               default=bytes_serializer())
+    assert serializer("t", "a") == "a".encode("utf-16-be")
+
+
 def test_old_client_keys_are_accepted() -> None:
     configs = {"error_cb": print, "on_delivery": print, "logger": "x", "bootstrap.servers": "b"}
     _, native = _config.prepare(configs, client="producer")

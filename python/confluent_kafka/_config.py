@@ -23,8 +23,13 @@ Conventions, Configuration):
   type as ``ConfigDef.parseType`` does (``"true"`` equals ``True``,
   ``"1000"`` equals ``1000``), and a bad value raises ``ConfigError`` with
   Java's message;
+- the serializer keys of the client's own role stay with the binding: a
+  producer's ``key.serializer``, ``value.serializer``, ``serializer.encoding``,
+  ``key.serializer.encoding`` and ``value.serializer.encoding``, a consumer's
+  deserializer equivalents;
 - every other key is accepted and reaches the core, which reports the keys it
-  does not know (``interceptor.classes`` and ``partitioner.class`` among them).
+  does not know (``interceptor.classes``, ``partitioner.class`` and the other
+  role's serde keys among them).
 
 The keys and types are generated from Java's ``ProducerConfig`` /
 ``ConsumerConfig`` into ``_config_types``.
@@ -50,9 +55,14 @@ _TYPES: dict[str, dict[str, str]] = {
     "consumer": _config_types.CONSUMER,
 }
 
-# The serde keys: resolved by the binding (``_supply``), never passed to the core.
-_SERDE_KEYS = frozenset({"key.serializer", "value.serializer",
-                         "key.deserializer", "value.deserializer"})
+# The serializer keys of each client's own role: resolved by the binding
+# (``_supply``) and read by a serde's ``configure``, never passed to the core.
+_SERDE_KEYS: dict[str, frozenset[str]] = {
+    "producer": frozenset({"key.serializer", "value.serializer", "serializer.encoding",
+                           "key.serializer.encoding", "value.serializer.encoding"}),
+    "consumer": frozenset({"key.deserializer", "value.deserializer", "deserializer.encoding",
+                           "key.deserializer.encoding", "value.deserializer.encoding"}),
+}
 _INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
 _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
                "LONG": "a 64-bit integer (long)"}
@@ -175,8 +185,9 @@ def convert_to_string(value: object, type_name: str | None) -> str | None:
 def prepare(configs: Mapping[str, Any], *, client: Client,
             given_serdes: Collection[str] = ()) -> tuple[RecordingConfigs, dict[str, str]]:
     """Parse ``configs`` for a ``client``: the user's configs, recording what
-    the serdes read, and the string map the core parses (the serde keys and
-    ``None`` values left out).
+    the serdes read, and the string map the core parses (the client's own
+    serializer keys and ``None`` values left out; the other role's serde keys
+    reach the core like any other key).
 
     ``given_serdes`` names the serde keys (``key.serializer``, …) whose
     constructor argument is given: the argument wins and the key is not
@@ -189,6 +200,7 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
         if not isinstance(key, str):
             raise ConfigError(name=java_str(key), value=value, message="Key must be a string.")
     types = _TYPES[client]
+    serde_keys = _SERDE_KEYS[client]
     native: dict[str, str] = {}
     for key, value in configs.items():
         if key in given_serdes:
@@ -196,7 +208,7 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
         type_name = types.get(key)
         parsed = coerce(key, value, type_name) if type_name is not None else value
         text = convert_to_string(parsed, type_name)
-        if key in _SERDE_KEYS or text is None:
+        if key in serde_keys or text is None:
             continue
         native[key] = text
     return RecordingConfigs(configs), native
