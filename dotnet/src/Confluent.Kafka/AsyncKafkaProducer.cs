@@ -43,13 +43,13 @@ namespace Confluent.Kafka;
 /// <see cref="NativeProducer.SendViaPump"/>. A serializer throw is wrapped in a
 /// <see cref="SerializationException"/> and raised <b>synchronously</b> (Java-faithful — the async
 /// <c>Send</c> serializes inline before enqueuing to the pump, so the wrap surfaces before the
-/// <see cref="Task"/> is returned).
+/// <see cref="ValueTask{TResult}"/> is returned).
 /// </para>
 /// <para>
 /// <b>Both of Java's <c>send</c> signatures (M14/P1).</b>
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> adds
 /// Java's <c>send(record, Callback)</c>; the callback runs on the producer's send-completion pump
-/// thread — .NET's analogue of Java's background I/O thread — before the returned
+/// thread — .NET's analogue of Java's background I/O thread — before the record's delivery
 /// <see cref="Task{TResult}"/> is completed. See <see cref="IDeliveryCallback"/>.
 /// </para>
 /// <para>
@@ -117,7 +117,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
+    public ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
         // Precondition (ffi §A5): null record BEFORE any serialize / P-Invoke.
         if (record is null)
@@ -129,7 +129,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(
+    public ValueTask<Task<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback callback,
         CancellationToken cancellationToken = default)
@@ -161,7 +161,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
     /// synchronous rather than faulting the returned task.
     /// </summary>
-    private Task<RecordMetadata> SendValidated(
+    private ValueTask<Task<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback? callback,
         CancellationToken cancellationToken)

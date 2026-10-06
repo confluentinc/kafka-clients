@@ -121,7 +121,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         {
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated
             // per send, so any value-sized allocation here would come from the send path itself.
-            tasks[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
+            tasks[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)).Delivery();
         }
 
         long after = GC.GetAllocatedBytesForCurrentThread();

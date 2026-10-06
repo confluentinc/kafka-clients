@@ -71,7 +71,8 @@ public readonly struct PolledRecord
 
 // The producer backend is split into a sync and an async interface because the .NET sync
 // IProducer.Send returns RecordMetadata directly (a serial blocking measurement) while the async
-// IAsyncProducer.Send returns Task<RecordMetadata> (pipelined) — the key .NET-specific deviation from
+// IAsyncProducer.Send is two-stage (pipelined): it returns a ValueTask that completes when the record is
+// accepted (where Java's send() returns), holding the delivery task — the key .NET-specific deviation from
 // Python, which pipelines both (PLAN §5.1 / D5). Each per-client exe implements the one it drives for a
 // given ASYNC mode; a single unified interface would force every backend to implement the unused shape.
 
@@ -85,11 +86,16 @@ public interface IProducerBackend : IDisposable
     void Close();
 }
 
-/// <summary>The asynchronous (pipelined) producer backend — <see cref="Send"/> returns a delivery task.</summary>
+/// <summary>The asynchronous (pipelined) producer backend — <see cref="Send"/> is two-stage (accepted, then delivered).</summary>
 public interface IAsyncProducerBackend : IDisposable, IAsyncDisposable
 {
-    /// <summary>Serializes and enqueues the record, returning a task that completes with its metadata on delivery.</summary>
-    Task<PerfRecordMetadata> Send(string topic, byte[]? key, byte[]? value);
+    /// <summary>
+    /// Serializes and sends the record. The returned <see cref="ValueTask{TResult}"/> completes once the
+    /// client has accepted the record (Java's <c>send()</c> returning), and holds the task that completes
+    /// with its metadata on delivery. A send that fails before it is accepted throws, from the call or from
+    /// awaiting the returned value.
+    /// </summary>
+    ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value);
 
     /// <summary>Flushes and closes the producer, surfacing a close failure.</summary>
     Task Close();

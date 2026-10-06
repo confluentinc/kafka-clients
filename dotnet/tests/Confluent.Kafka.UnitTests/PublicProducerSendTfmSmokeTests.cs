@@ -42,7 +42,7 @@ public sealed class PublicProducerSendTfmSmokeTests
         RecordMetadata metadata = default!;
         await TestTimeout.Run(
             async () => metadata = await producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Delivery(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -56,7 +56,7 @@ public sealed class PublicProducerSendTfmSmokeTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
         // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
         // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
         producer.WaitForSendsToReachCore(s_deadline);
@@ -74,7 +74,7 @@ public sealed class PublicProducerSendTfmSmokeTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
         // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
         // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
         producer.WaitForSendsToReachCore(s_deadline);

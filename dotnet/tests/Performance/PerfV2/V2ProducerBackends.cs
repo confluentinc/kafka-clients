@@ -163,7 +163,12 @@ internal sealed class V2AsyncProducerBackend : IAsyncProducerBackend
         _producer = new ProducerBuilder<byte[], byte[]>(config).Build();
     }
 
-    public async Task<PerfRecordMetadata> Send(string topic, byte[]? key, byte[]? value)
+    // ckd's ProduceAsync has no separate accepted stage: the record is accepted inside the call, so the
+    // first stage is always already complete and every failure surfaces through the delivery task.
+    public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
+        new ValueTask<Task<PerfRecordMetadata>>(Produce(topic, key, value));
+
+    private async Task<PerfRecordMetadata> Produce(string topic, byte[]? key, byte[]? value)
     {
         // ProduceAsync enqueues synchronously (preserving send order) then completes on delivery. A
         // full-queue / delivery failure throws (ProduceException) — because this method is `async`, that

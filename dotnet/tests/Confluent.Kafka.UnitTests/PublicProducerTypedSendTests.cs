@@ -69,7 +69,7 @@ public sealed class PublicProducerTypedSendTests
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(
-            async () => metadata = await producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)),
+            async () => metadata = await producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)).Delivery(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -127,7 +127,7 @@ public sealed class PublicProducerTypedSendTests
             new AsyncMockProducer<string, string>(Serdes.String, valueSer);
 
         await TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: "k")),
+            () => producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: "k")).Delivery(),
             s_deadline);
 
         Assert.Equal(1, valueSer.InvocationCount);

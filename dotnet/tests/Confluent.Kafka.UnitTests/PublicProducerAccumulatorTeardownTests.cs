@@ -451,7 +451,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
         Task<RecordMetadata>[] sends = new Task<RecordMetadata>[SendCount];
         for (int i = 0; i < SendCount; i++)
         {
-            sends[i] = producer.Send(NewRecord(i));
+            sends[i] = producer.Send(NewRecord(i)).Delivery();
         }
 
         return sends;

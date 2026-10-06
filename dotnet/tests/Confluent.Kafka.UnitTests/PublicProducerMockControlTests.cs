@@ -40,7 +40,7 @@ public sealed class PublicProducerMockControlTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery();
 
         // The send is pending (manual mode) until completeNext resolves it.
         // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
@@ -71,7 +71,7 @@ public sealed class PublicProducerMockControlTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery();
 
         // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
 
@@ -105,7 +105,7 @@ public sealed class PublicProducerMockControlTests
         for (int i = 0; i < 3; i++)
         {
             await TestTimeout.Run(
-                async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0)),
+                async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0)).Delivery(),
                 s_deadline);
         }
 
@@ -119,7 +119,7 @@ public sealed class PublicProducerMockControlTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await TestTimeout.Run(
-            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery(),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 

@@ -247,8 +247,8 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
             ProducerRecord<byte[], byte[]> record =
                 new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0);
             tasks[i] = callback is null
-                ? producer.Send(record)
-                : producer.Send(record, callback);
+                ? producer.Send(record).Delivery()
+                : producer.Send(record, callback).Delivery();
         }
 
         long after = GC.GetAllocatedBytesForCurrentThread();

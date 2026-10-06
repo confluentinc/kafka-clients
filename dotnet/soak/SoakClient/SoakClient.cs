@@ -891,7 +891,14 @@ internal sealed class SoakClient : IDisposable
                 // the token, and Flush() then drains what is outstanding, which is
                 // exactly how the Python soak behaves (its send() takes no cancellation
                 // at all).
-                task = _producer.Send(producerRecord, CancellationToken.None);
+                //
+                // Send is two-stage (M11/P3.5: accepted, then delivered). The first stage is
+                // AWAITED here, deliberately: it is where the producer applies backpressure
+                // (Java's send() blocking on a full buffer), so a loop that took only the
+                // delivery task without awaiting acceptance would offer records unthrottled. A
+                // failure to accept lands in the catch below as one send attempt; the delivery
+                // is the task the first stage yields.
+                task = await _producer.Send(producerRecord, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

@@ -54,7 +54,7 @@ namespace Confluent.Kafka;
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> mirrors
 /// Java's <c>send(ProducerRecord, Callback)</c> (<c>Producer.java:86</c>): the callback is an
 /// <b>additional</b> parameter — the overload still returns the
-/// <see cref="Task{TResult}"/>. See <see cref="IDeliveryCallback"/> and the §4
+/// record's delivery <see cref="Task{TResult}"/>. See <see cref="IDeliveryCallback"/> and the §4
 /// <b>delivery-callback divergence</b> for the thread, ordering, non-null-metadata and throw-policy
 /// contracts.
 /// </para>
@@ -63,9 +63,10 @@ namespace Confluent.Kafka;
 /// producer accepts a bounded number of records that have not yet been handed to its send-batch
 /// thread; once that bound is reached, <c>Send</c> waits for capacity before returning. Blocking is
 /// Java's own contract — <c>KafkaProducer.send()</c> blocks once its accumulator is full — and it is
-/// what keeps the client's memory and latency bounded: because the <see cref="Task{TResult}"/>
-/// returned here is the <em>record's delivery</em> future rather than an admission handle, a caller
-/// never awaits admission, so an asynchronous wait would throttle nobody. The bound is sized so that
+/// what keeps the client's memory and latency bounded: the <see cref="ValueTask{TResult}"/> returned
+/// here is already complete when <c>Send</c> returns, and what a caller holds is the
+/// <em>record's delivery</em> <see cref="Task{TResult}"/> rather than an admission handle, so a
+/// caller never awaits admission and an asynchronous wait would throttle nobody. The bound is sized so that
 /// reaching it is rare in practice; a producer that hits it regularly is offering records faster than
 /// its cluster can accept them. The <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no
 /// such window — it hands each record to the core inside the call, where the core's own
@@ -87,8 +88,8 @@ namespace Confluent.Kafka;
 /// <see cref="Task"/>'s .NET-side wait, but does not abort the in-flight native op — it
 /// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). ⚠ A token that fires
 /// while <c>Send</c> is blocked waiting for capacity does <b>not</b> abort that wait (M11/P3.4):
-/// the record is already accepted by then, so the token only cancels the returned
-/// <see cref="Task{TResult}"/>.
+/// the record is already accepted by then, so the token only cancels the record's
+/// delivery <see cref="Task{TResult}"/>.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="IAsyncDisposable.DisposeAsync"/> is the primary path (graceful
@@ -102,17 +103,20 @@ namespace Confluent.Kafka;
 public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
 {
     /// <summary>
-    /// Serializes and publishes <paramref name="record"/> to its topic, completing when the cluster
-    /// acknowledges it (Java <c>Producer.send(record)</c> — which returns a
-    /// <c>Future&lt;RecordMetadata&gt;</c>, so a <see cref="Task{TResult}"/> here, CLAUDE.md §4). The
-    /// key / value are serialized on the caller's thread <b>before</b> the send is enqueued.
+    /// Serializes and publishes <paramref name="record"/> to its topic (Java
+    /// <c>Producer.send(record)</c>, which may block and returns a
+    /// <c>Future&lt;RecordMetadata&gt;</c> — so a <see cref="ValueTask{TResult}"/> yielding a
+    /// <see cref="Task{TResult}"/> here, CLAUDE.md §4). Awaiting the call once yields the record's
+    /// delivery task; awaiting that task yields the <see cref="RecordMetadata"/> once the cluster
+    /// acknowledges the record. The key / value are serialized on the caller's thread
+    /// <b>before</b> the send is enqueued.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>Do not mutate the key / value buffers after this returns.</b> The send is deferred: the
     /// binding <b>borrows</b> the serialized bytes — it does not copy them — until a background
     /// batch thread hands the record to the core, which happens within milliseconds but not before
     /// this method returns. A mutation in that window <b>is</b> visible on the wire. If you need to
-    /// reuse a buffer, either await this task first or hand each send its own array.
+    /// reuse a buffer, either await the delivery task first or hand each send its own array.
     /// <para>
     /// This is inherent to a zero-copy send path: the alternative is a per-record copy of every
     /// value, which is exactly the allocation this binding exists to avoid. It matches the Python
@@ -131,26 +135,29 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <param name="cancellationToken">
     /// Best-effort cancellation of the .NET wait. An already-canceled token throws
     /// <see cref="OperationCanceledException"/> before the send is enqueued; a token that fires
-    /// afterwards cancels the returned <see cref="Task{TResult}"/> but does <b>not</b> abort the
+    /// afterwards cancels the record's delivery <see cref="Task{TResult}"/> but does <b>not</b> abort the
     /// in-flight native send (the producer has no <c>wakeup()</c>). ⚠ A token that fires while this
     /// call is blocked waiting for accumulator capacity does <b>not</b> abort that wait — the record
     /// is already accepted by then (M11/P3.4).
     /// </param>
     /// <returns>
-    /// A task resolving with the published record's <see cref="RecordMetadata"/>, or faulting with
-    /// a <see cref="KafkaException"/> carrying the delivery failure.
+    /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding a task
+    /// that resolves with the record's <see cref="RecordMetadata"/> or faults with a
+    /// <see cref="KafkaException"/> carrying the delivery failure. Await it once; call
+    /// <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
+    ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Serializes and publishes <paramref name="record"/>, completing when the cluster acknowledges
-    /// it, and additionally invokes <paramref name="callback"/> with the outcome — Java's second
-    /// <c>send</c> signature, <c>Future&lt;RecordMetadata&gt; send(ProducerRecord, Callback)</c>
-    /// (<c>Producer.java:86</c>). The callback is an <b>additional</b> parameter, not an
-    /// alternative: this still returns the <see cref="Task{TResult}"/>.
+    /// Serializes and publishes <paramref name="record"/>, exactly as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> does, and additionally
+    /// invokes <paramref name="callback"/> with the outcome — Java's second <c>send</c> signature,
+    /// <c>Future&lt;RecordMetadata&gt; send(ProducerRecord, Callback)</c> (<c>Producer.java:86</c>).
+    /// The callback is an <b>additional</b> parameter, not an alternative: this still returns the
+    /// record's delivery <see cref="Task{TResult}"/>, inside the same <see cref="ValueTask{TResult}"/>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -162,13 +169,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <para>
     /// <b>On this async surface the callback runs on the producer's send-completion pump thread</b>
     /// — the .NET analogue of the "background I/O thread" Java documents
-    /// (<c>Callback.java:20-21</c>) — and <b>before</b> the returned
+    /// (<c>Callback.java:20-21</c>) — and <b>before</b> the record's delivery
     /// <see cref="Task{TResult}"/> is completed (M14/P1 decision D3, Java's
     /// <c>ProducerBatch.java:303-323</c> ordering). It is one thread per producer, so a slow
     /// callback delays every other in-flight send's completion; keep it short.
     /// <see cref="IDeliveryCallback"/> documents the full contract: non-null metadata on every path,
     /// which outcomes fire it (a synchronous throw out of <c>Send</c> does not; a resolved-then-failed
-    /// delivery does, and so does a send whose <see cref="Task{TResult}"/> was already canceled), and
+    /// delivery does, and so does a send whose delivery <see cref="Task{TResult}"/> was already canceled), and
     /// the swallow-and-trace policy for a throwing callback.
     /// </para>
     /// <para>
@@ -200,15 +207,17 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// core reports the send's completion.
     /// </param>
     /// <returns>
-    /// A task resolving with the published record's <see cref="RecordMetadata"/>, or faulting with
-    /// a <see cref="KafkaException"/>.
+    /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding a task
+    /// that resolves with the record's <see cref="RecordMetadata"/> or faults with a
+    /// <see cref="KafkaException"/> carrying the delivery failure. Await it once; call
+    /// <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    Task<RecordMetadata> Send(
+    ValueTask<Task<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback callback,
         CancellationToken cancellationToken = default);

@@ -667,7 +667,7 @@ public sealed class SendAccumulatorTests
                 new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x7A, 0xAA, 0xBB });
             send = producer.SendViaPump(
                 record,
-                new DeliveryRegistration(new BlockingDeliveryCallback(entered, release), Topic, 0));
+                new DeliveryRegistration(new BlockingDeliveryCallback(entered, release), Topic, 0)).Delivery();
 
             Assert.True(
                 entered.Wait(s_deadline), "the batch thread never entered the delivery callback");
@@ -708,7 +708,7 @@ public sealed class SendAccumulatorTests
 
         SerializedProducerRecord record =
             new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x7B, 0xAA, 0xBB });
-        Task<RecordMetadata> send = producer.SendViaPump(record, delivery: null);
+        Task<RecordMetadata> send = producer.SendViaPump(record, delivery: null).Delivery();
 
         Assert.True(producer.DrainPendingSends(s_deadline), "the accumulator did not drain in time");
 

@@ -203,7 +203,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), probe);
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), probe).Delivery();
         probe.Task = sendTask;
 
         DriveUntilResolved(producer.CompleteNext);
@@ -534,7 +534,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
             callback,
-            cts.Token);
+            cts.Token).Delivery();
 
         // Cancel the .NET wait first: the record is already with the core and cannot be aborted.
         cts.Cancel();
@@ -629,11 +629,34 @@ public sealed class PublicProducerDeliveryCallbackTests
             typeof(CancellationToken));
 
         Assert.NotNull(method);
-        Assert.Equal(typeof(Task<RecordMetadata>), method!.ReturnType);
+
+        // M11/P3.5 decision D1 (= C): the two-stage shape — the outer ValueTask is the "accepted"
+        // stage, its result the record's delivery Task. Pinned by reflection: a statement
+        // `await producer.Send(r);` compiles against either shape, so behavioural tests alone do not
+        // fix the declared type.
+        Assert.Equal(typeof(ValueTask<Task<RecordMetadata>>), method!.ReturnType);
 
         // The CancellationToken keeps its default, so `Send(record, callback)` compiles on the
         // async surface too.
         Assert.True(method.GetParameters()[2].HasDefaultValue);
+    }
+
+    [Theory]
+    [InlineData(typeof(IAsyncProducer<byte[], byte[]>))]
+    [InlineData(typeof(AsyncKafkaProducer<byte[], byte[]>))]
+    [InlineData(typeof(AsyncMockProducer<byte[], byte[]>))]
+    public void AsyncSurfaces_PlainSend_ReturnsTheTwoStageShape(Type surface)
+    {
+        // The callback-less overload carries the SAME two-stage shape (M11/P3.5 decision D1): the
+        // two overloads are one Java `send` contract, so they must not drift apart.
+        MethodInfo? method = FindSend(
+            surface,
+            typeof(ProducerRecord<byte[], byte[]>),
+            typeof(CancellationToken));
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(ValueTask<Task<RecordMetadata>>), method!.ReturnType);
+        Assert.True(method.GetParameters()[1].HasDefaultValue);
     }
 
     [Fact]
@@ -952,7 +975,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
             internal override Task<RecordMetadata> Send(
                 ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
-                _producer.Send(record, callback);
+                _producer.Send(record, callback).Delivery();
 
             internal override void SendInline(
                 ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>

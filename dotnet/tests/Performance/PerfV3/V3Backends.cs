@@ -46,8 +46,8 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
 /// <summary>
 /// Adapts our binding's <see cref="AsyncKafkaProducer{TKey, TValue}"/> to the async (pipelined)
-/// <see cref="IAsyncProducerBackend"/>: <see cref="Send"/> enqueues synchronously (to the pump) and returns
-/// the delivery <see cref="Task"/> the engine's recorder awaits.
+/// <see cref="IAsyncProducerBackend"/>: <see cref="Send"/> completes when the producer has accepted the
+/// record and hands back the delivery <see cref="Task"/> the engine's recorder awaits.
 /// </summary>
 internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 {
@@ -58,10 +58,22 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
         _producer = new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
     }
 
-    public async Task<PerfRecordMetadata> Send(string topic, byte[]? key, byte[]? value)
+    public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
     {
-        // The Send call enqueues to the pump synchronously (preserving send order) before the await.
-        RecordMetadata meta = await _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)).ConfigureAwait(false);
+        // The Send call hands the record to the producer synchronously (preserving send order). Its first
+        // stage is usually complete when it returns, so the common path builds no state machine for it.
+        ValueTask<Task<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
+        return send.IsCompletedSuccessfully
+            ? new ValueTask<Task<PerfRecordMetadata>>(Deliver(send.Result))
+            : AwaitAccepted(send);
+    }
+
+    private static async ValueTask<Task<PerfRecordMetadata>> AwaitAccepted(ValueTask<Task<RecordMetadata>> send) =>
+        Deliver(await send.ConfigureAwait(false));
+
+    private static async Task<PerfRecordMetadata> Deliver(Task<RecordMetadata> delivery)
+    {
+        RecordMetadata meta = await delivery.ConfigureAwait(false);
         return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
     }
 

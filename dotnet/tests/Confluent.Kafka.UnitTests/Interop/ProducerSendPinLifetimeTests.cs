@@ -363,7 +363,7 @@ public sealed class ProducerSendPinLifetimeTests
             // weak reference — the record itself is dropped as soon as Send returns.
             byte[] value = new byte[4096];
             references[i] = new WeakReference(value);
-            sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, partition: 0));
+            sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, partition: 0)).Delivery();
         }
 
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);

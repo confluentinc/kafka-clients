@@ -121,7 +121,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
+    public ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
         // Serialize above the bytes core (identical to the real client — Java-faithful, PLAN §7):
         // null-record precondition first (ffi §A5).
@@ -134,7 +134,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(
+    public ValueTask<Task<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback callback,
         CancellationToken cancellationToken = default)
@@ -166,7 +166,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
     /// synchronous rather than faulting the returned task.
     /// </summary>
-    private Task<RecordMetadata> SendValidated(
+    private ValueTask<Task<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback? callback,
         CancellationToken cancellationToken)
@@ -214,7 +214,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <summary>
     /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Drives
-    /// a manual send's <c>Send</c> <see cref="Task"/> to success. Inherent on the concrete
+    /// a manual send's delivery <see cref="Task"/> to success. Inherent on the concrete
     /// mock (not on <see cref="IAsyncProducer{TKey, TValue}"/>), mirroring the consumer's mock-only helpers.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
@@ -224,7 +224,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <summary>
     /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
     /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
-    /// Faults a manual send's <c>Send</c> <see cref="Task"/> with a <see cref="KafkaException"/>
+    /// Faults a manual send's delivery <see cref="Task"/> with a <see cref="KafkaException"/>
     /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for
     /// the code when <paramref name="message"/> is <see langword="null"/>).
     /// </summary>

@@ -390,8 +390,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a single record on the async surface, returning a <see cref="Task{TResult}"/> (the async
-    /// send worker; Java <c>Producer.send(record)</c>). Named <c>SendViaPump</c>, <b>not</b>
+    /// Sends a single record on the async surface, returning a <see cref="ValueTask{TResult}"/> that
+    /// yields the record's delivery <see cref="Task{TResult}"/> (the async send worker; Java
+    /// <c>Producer.send(record)</c>, which may block and then returns a <c>Future</c> — M11/P3.5
+    /// decision D1). Named <c>SendViaPump</c>, <b>not</b>
     /// <c>SendWithCallback</c> like the peripherals: there is no native <c>Producer_send_async</c>
     /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
     /// so a <c>WithCallback</c> suffix would misdescribe the mechanism (M11/P3 PLAN §6.2). The
@@ -429,15 +431,24 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
     /// not yet handed to the batch thread, this call parks the caller until the batch thread's next
     /// take frees capacity. Blocking is Java's shape — <c>KafkaProducer.send()</c> blocks once the
-    /// accumulator is full — and it is the only thing that throttles: the caller is handed the
+    /// accumulator is full — and it is the only thing that throttles: what the caller holds is the
     /// record's delivery <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2
-    /// deviation DV-1), so an asynchronous admission wait bounds a container while the accepted
+    /// deviation DV-1; the M11/P3.5 first stage below is already complete when this returns), so an
+    /// asynchronous admission wait bounds a container while the accepted
     /// population grows without limit (measured: 2.05 M records in flight, p50 3,524 ms,
     /// RSS 2.04 GiB). ⚠ Since M11/P3.4 that wait has <b>no timeout</b> and is not interrupted by
     /// <paramref name="cancellationToken"/>: the record is already appended by then, so nothing may
     /// make the call throw and strand an awaiter the caller has not been handed. The <b>sync</b>
     /// <see cref="Send"/> has no such window — it hands the record to the core inside the call and
     /// blocks on the core's own <c>buffer.memory</c>.
+    /// </para>
+    /// <para>
+    /// <b>M11/P3.5 — the return is two-staged, and the first stage is always already complete.</b>
+    /// The outer <see cref="ValueTask{TResult}"/> is the "accepted" stage and its
+    /// result is the delivery <see cref="Task{TResult}"/>. Admission still blocks inside this call
+    /// (above), so by the time it returns the record is accepted and the method wraps
+    /// <c>completion.Task</c> in an already-completed <see cref="ValueTask{TResult}"/> — a struct, so
+    /// the send path allocates nothing for it (DoD §10).
     /// </para>
     /// </summary>
     /// <remarks>
@@ -489,7 +500,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="OperationCanceledException">
     /// <paramref name="cancellationToken"/> was already canceled when this method was called.
     /// </exception>
-    internal Task<RecordMetadata> SendViaPump(
+    internal ValueTask<Task<RecordMetadata>> SendViaPump(
         SerializedProducerRecord record,
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken = default)
@@ -560,18 +571,22 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // The decision lives on SendAccumulator so the test fixture routes through it (DoD §12).
         //
         // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
-        // (raised above this carrier, before the call) and the precondition throws above still
-        // surface synchronously rather than as a faulted Task — the reason
-        // AsyncKafkaProducer.SendValidated is deliberately not `async` either.
+        // (raised above this carrier, before the call) and the precondition throws above — the
+        // already-canceled token, the disposed producer — still surface synchronously rather than
+        // as a faulted ValueTask — the reason AsyncKafkaProducer.SendValidated is deliberately not
+        // `async` either. That holds with the M11/P3.5 two-stage return too: an `async`
+        // ValueTask<Task<RecordMetadata>> method would capture every one of those throws into the
+        // returned ValueTask, so a caller that never awaits it would never see them (pinned by the
+        // strict synchronous-throw guards in PublicProducerSendSynchronousThrowTests).
         //
         // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
         // SubmitAdmitted BLOCKS this caller's thread when the producer already holds
         // MaxAdmittedRecords records accepted but not yet handed to the batch thread (the permit
         // comes back at TakeChainLocked, before send_batch runs, so the accepted-but-unsent
         // POPULATION is larger than the bound by the in-flight chain — the arithmetic is at
-        // _admission). That is the fix: the caller does not await admission (it is handed the
-        // record's delivery Task), so an ASYNCHRONOUS admission wait throttles nobody and just parks
-        // continuations — measured at 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape
+        // _admission). That is the fix: the caller does not await admission (what it holds is the
+        // record's delivery Task; the M11/P3.5 first stage is already complete on return), so an
+        // ASYNCHRONOUS admission wait throttles nobody and just parks continuations — measured at 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape
         // this replaces measured 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(token) is a
         // genuine synchronous primitive, NOT an async operation being blocked on, so it is not the
         // sync-over-async footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4
@@ -607,7 +622,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // The SAME awaitable on both routes — the record's delivery future, never a submission
         // handle. (It only held before because the slow path re-awaited `completion.Task` itself.)
-        return completion.Task;
+        // Admission already happened above, so the first stage is complete: wrapping the Task in a
+        // ValueTask struct allocates nothing (DoD §10).
+        return new ValueTask<Task<RecordMetadata>>(completion.Task);
     }
 
     /// <summary>

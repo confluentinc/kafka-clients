@@ -182,7 +182,9 @@ public static class ProducerBenchmark
                 PerfMessage message = messages[i % messages.Length];
                 try
                 {
-                    PerfRecordMetadata meta = await backend.Send(config.TopicName, message.Key, message.Value).ConfigureAwait(false);
+                    // Both stages: the accepted stage, then the delivery it yields.
+                    Task<PerfRecordMetadata> delivery = await backend.Send(config.TopicName, message.Key, message.Value).ConfigureAwait(false);
+                    PerfRecordMetadata meta = await delivery.ConfigureAwait(false);
                     Verify(meta, config);
                     warmupSent++;
                 }
@@ -259,7 +261,21 @@ public static class ProducerBenchmark
             {
                 PerfMessage message = messages[messagesSent % messages.Length];
                 long startMs = Metrics.NowMs();
-                Task<PerfRecordMetadata> task = backend.Send(config.TopicName, message.Key, message.Value);
+                Task<PerfRecordMetadata> task;
+                try
+                {
+                    // Awaits ACCEPTANCE only (the first stage, where the client applies its backpressure,
+                    // as Java's send() blocks); the delivery is awaited by the recorder.
+                    task = await backend.Send(config.TopicName, message.Key, message.Value).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // A send that fails before it is accepted (Java's send() throwing): hand the failure to
+                    // the recorder so it is counted exactly like a failed delivery. The backend takes no
+                    // token, so this is never the run's own cancellation.
+                    task = Task.FromException<PerfRecordMetadata>(ex);
+                }
+
                 await channel.Writer.WriteAsync((task, startMs), cancellationToken).ConfigureAwait(false);
                 messagesSent++;
 

@@ -176,11 +176,15 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
 
             // On the ASYNC surface the delivery callback fires on the producer's send-completion
-            // pump thread, immediately BEFORE this Task is completed (M14/P1) — so the entry is
-            // already in _callbackLog by the time the await below resumes.
-            Task<RecordMetadata> send = request.WithCallback
+            // pump thread, immediately BEFORE the delivery Task is completed (M14/P1) — so the entry
+            // is already in _callbackLog by the time the await below resumes.
+            //
+            // Send is two-stage (M11/P3.5: accepted, then delivered); Delivered awaits both, so the
+            // 120 s bound below covers a record still waiting to be accepted as well as one waiting
+            // for its ack.
+            Task<RecordMetadata> send = Delivered(request.WithCallback
                 ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
-                : producer.Send(record);
+                : producer.Send(record));
 
             // Bounded at 120 s for Python parity (grpc_server.py's future.result(timeout=120)):
             // a stuck future must fail the harness DIAGNOSABLY instead of hanging the unary RPC and
@@ -207,6 +211,13 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         {
             return new Proto.SendResponse { Error = Translate.ToProto(ex) };
         }
+    }
+
+    // Both stages of a send: the accepted stage, then the delivery task it yields.
+    private static async Task<RecordMetadata> Delivered(ValueTask<Task<RecordMetadata>> send)
+    {
+        Task<RecordMetadata> delivery = await send.ConfigureAwait(false);
+        return await delivery.ConfigureAwait(false);
     }
 
     /// <inheritdoc/>

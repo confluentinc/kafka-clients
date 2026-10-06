@@ -161,7 +161,7 @@ public sealed class ProducerCancellationTests
 
         internal int SendCount => Volatile.Read(ref _sendCount);
 
-        public Task<PerfRecordMetadata> Send(string topic, byte[]? key, byte[]? value)
+        public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
         {
             int n = Interlocked.Increment(ref _sendCount);
             if (_cts is not null && _cancelOnSend > 0 && n == _cancelOnSend)
@@ -169,7 +169,7 @@ public sealed class ProducerCancellationTests
                 _cts.Cancel();
             }
 
-            return Task.FromResult(new PerfRecordMetadata(topic, 0, n, 1));
+            return new ValueTask<Task<PerfRecordMetadata>>(Task.FromResult(new PerfRecordMetadata(topic, 0, n, 1)));
         }
 
         public Task Close() => Task.CompletedTask;
