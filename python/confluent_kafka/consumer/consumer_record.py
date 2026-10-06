@@ -18,7 +18,9 @@ Java's three constructors are one keyword-only constructor matched by
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures). The short
 ``(topic, partition, offset, key, value)`` passes ``NO_TIMESTAMP``,
 ``NO_TIMESTAMP_TYPE``, ``NULL_SIZE``, empty headers and no leader epoch to the
-11-argument form, which passes no delivery count to the full form. The record
+11-argument form, which passes no delivery count to the full form. Each of
+those parameters defaults to ``UNSET``, so an explicit value, ``None``
+included, is given and selects a form that takes it. The record
 is covariant in ``K`` and ``V``; the stubs bind a ``None`` key or value to
 ``Never``. Java defines no ``equals`` / ``hashCode``, so neither does this.
 """
@@ -117,16 +119,24 @@ class ConsumerRecord(Generic[K_co, V_co]):
                        "serialized_key_size": _NULL_SIZE,
                        "serialized_value_size": _NULL_SIZE,
                        "headers": (), "leader_epoch": None}),
+        # The 11-argument form passes no delivery count, and passes on what the
+        # 5-argument form passes it, so the 5-argument form is filled with all
+        # seven values.
         Form("topic", "partition", "offset", "timestamp", "timestamp_type",
              "serialized_key_size", "serialized_value_size", "key", "value", "headers",
-             "leader_epoch", "delivery_count", defaults={"delivery_count": None}),
+             "leader_epoch", "delivery_count",
+             defaults={"timestamp": _NO_TIMESTAMP,
+                       "timestamp_type": TimestampType.NO_TIMESTAMP_TYPE,
+                       "serialized_key_size": _NULL_SIZE,
+                       "serialized_value_size": _NULL_SIZE,
+                       "headers": (), "leader_epoch": None, "delivery_count": None}),
     )
     def __init__(self, *, topic: str, partition: int, offset: int,
                  timestamp: int = UNSET, timestamp_type: TimestampType = UNSET,
                  serialized_key_size: int = UNSET, serialized_value_size: int = UNSET,
                  key: Any, value: Any, headers: _WrittenHeaders = UNSET,
                  leader_epoch: int | None = UNSET,
-                 delivery_count: int | None = None) -> None:
+                 delivery_count: int | None = UNSET) -> None:
         """Creates a record to be received from a specified topic and
         partition: its offset, timestamp and timestamp type, the lengths of the
         serialized key and value, the key (``None`` is allowed) and value, the

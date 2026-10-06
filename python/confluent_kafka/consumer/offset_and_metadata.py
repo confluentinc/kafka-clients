@@ -18,9 +18,12 @@ Java's three constructors ``(offset, leaderEpoch, metadata)``,
 ``(offset, metadata)`` and ``(offset)`` are one keyword-only constructor matched
 by ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
 ``(offset, metadata)`` passes ``Optional.empty()`` as the leader epoch, and
-``(offset)`` passes ``""`` as the metadata of ``(offset, metadata)``. So
-``(offset, leader_epoch)`` without ``metadata`` is rejected, as in Java, and
-the stubs are ``(offset, leader_epoch, metadata)`` and ``(offset, metadata="")``.
+``(offset)`` passes ``""`` as the metadata of ``(offset, metadata)``. Both
+``leader_epoch`` and ``metadata`` default to ``UNSET``, so an explicit value is
+given: ``(offset, leader_epoch, metadata)`` with ``leader_epoch=None`` is Java's
+three-argument constructor with ``Optional.empty()``, while ``(offset,
+leader_epoch)`` without ``metadata`` is rejected, as in Java. The stubs are
+``(offset, leader_epoch, metadata)`` and ``(offset, metadata="")``.
 """
 
 from __future__ import annotations
@@ -51,11 +54,14 @@ class OffsetAndMetadata:
     def __init__(self, *, offset: int, metadata: str = "") -> None: ...
 
     @java_forms(
-        Form("offset", "leader_epoch", "metadata", defaults={"leader_epoch": None}),
+        # (offset) passes "" on to this constructor through (offset, metadata),
+        # so the one-argument form is filled with both values.
+        Form("offset", "leader_epoch", "metadata",
+             defaults={"leader_epoch": None, "metadata": ""}),
         Form("offset", "metadata", defaults={"metadata": ""}),
         Form("offset"),
     )
-    def __init__(self, *, offset: int, leader_epoch: int | None = None,
+    def __init__(self, *, offset: int, leader_epoch: int | None = UNSET,
                  metadata: str = UNSET) -> None:
         """Construct a new ``OffsetAndMetadata`` object for committing through
         ``KafkaConsumer``: the offset to be committed, the optional leader

@@ -85,15 +85,26 @@ def test_producer_record_forms_and_headers() -> None:
     null_key = ProducerRecord(topic="t", partition=0, key=None, value=b"v")
     assert (null_key.partition(), null_key.key(), null_key.value()) == (0, None, b"v")
     assert ProducerRecord(topic="t", partition=None, key=b"k", value=b"v").partition() is None
+    # timestamp and headers default to UNSET as well (constructors 3-6 pass a
+    # null to a longer one): a null timestamp selects (topic, partition,
+    # timestamp, key, value), an empty header list (topic, partition, key,
+    # value, headers).
+    null_timestamp = ProducerRecord(topic="t", partition=0, timestamp=None, key=b"k", value=b"v")
+    assert (null_timestamp.timestamp(), null_timestamp.headers()) == (None, ())
+    empty_headers = ProducerRecord(topic="t", partition=None, key=None, value=b"v", headers=())
+    assert (empty_headers.timestamp(), empty_headers.headers()) == (None, ())
     # Only Java's six constructors are accepted (CLAUDE.md, Signatures).
     forms = ("ProducerRecord() takes one of (topic, partition, timestamp, key, value, headers), "
              "(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), "
              "(topic, partition, key, value), (topic, key, value), (topic, value); got ")
     for kwargs, got in [({"partition": 0}, "(topic, partition, value)"),
                         ({"timestamp": 5}, "(topic, timestamp, value)"),
+                        ({"timestamp": None}, "(topic, timestamp, value)"),
                         ({"headers": [("h", b"1")]}, "(topic, value, headers)"),
+                        ({"headers": ()}, "(topic, value, headers)"),
                         ({"key": b"k", "headers": [("h", b"1")]},
-                         "(topic, key, value, headers)")]:
+                         "(topic, key, value, headers)"),
+                        ({"key": None, "headers": ()}, "(topic, key, value, headers)")]:
         with pytest.raises(IllegalArgumentError) as exc:
             ProducerRecord(topic="t", value=b"v", **kwargs)
         assert str(exc.value) == forms + got

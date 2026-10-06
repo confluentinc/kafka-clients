@@ -146,10 +146,12 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
         self._abort_transaction()
 
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = None) -> Future[RecordMetadata]:
+             callback: Callback | None = UNSET) -> Future[RecordMetadata]:
         """Adds the record to the list of sent records (``history()``). With
         ``auto_complete`` the returned future is complete, and the callback has
         run, when this returns. The future cannot be cancelled, as Java's."""
+        if callback is UNSET:
+            callback = None  # Java's send(record) passes null
         future: Future[RecordMetadata] = Future()
         future.set_running_or_notify_cancel()
         result: Future[RecordMetadata] = self._send(record, callback, future)

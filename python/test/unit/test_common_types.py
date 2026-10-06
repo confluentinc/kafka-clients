@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 import pickle
 import threading
 from typing import Any
@@ -35,6 +36,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NoSuchElementError, NullPointerError
+from confluent_kafka._args import UNSET
 from confluent_kafka._java import java_str
 from confluent_kafka.common import (
     Cluster,
@@ -283,6 +285,13 @@ def test_partition_info_short_form_and_equality() -> None:
                                  in_sync_replicas=(), offline_replicas=())
     assert hash(info) == hash(PartitionInfo(topic="t", partition=1, leader=None,
                                             replicas=(leader,), in_sync_replicas=()))
+    # offline_replicas defaults to UNSET (the five-argument constructor passes
+    # new Node[0]); both sets are Java constructors, so there is no check, and
+    # the constructor fills the omitted one.
+    assert inspect.signature(PartitionInfo).parameters["offline_replicas"].default is UNSET
+    assert PartitionInfo(topic="t", partition=1, leader=None, replicas=(leader,),
+                         in_sync_replicas=(), offline_replicas=(leader,)).offline_replicas() == (
+        leader,)
 
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +312,12 @@ def test_node_constructors_and_accessors() -> None:
     assert str(exc.value) == (
         "Node() takes one of (id, host, port), (id, host, port, rack), "
         "(id, host, port, rack, is_fenced); got (id, host, port, is_fenced)")
+    # is_fenced defaults to UNSET ((id, host, port, rack) passes false): a false
+    # one is given too, so it is refused without the rack.
+    with pytest.raises(IllegalArgumentError) as exc:
+        Node(id=5, host="h", port=9092, is_fenced=False)  # type: ignore[call-overload]
+    assert str(exc.value).endswith("; got (id, host, port, is_fenced)")
+    assert not Node(id=5, host="h", port=9092, rack=None, is_fenced=False).is_fenced()
     # rack defaults to UNSET, so rack=None is given: the five-argument
     # constructor with a null rack.
     fenced = Node(id=5, host="h", port=9092, rack=None, is_fenced=True)

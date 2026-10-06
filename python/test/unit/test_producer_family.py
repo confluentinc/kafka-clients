@@ -42,6 +42,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
+from confluent_kafka._args import UNSET
 from confluent_kafka.common import KafkaError, MetricName, PartitionInfo, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
@@ -183,6 +184,17 @@ def test_transaction_methods_take_no_timeout() -> None:
         for name in ("init_transactions", "begin_transaction", "send_offsets_to_transaction",
                      "commit_transaction", "abort_transaction"):
             assert "timeout" not in inspect.signature(getattr(cls, name)).parameters
+
+
+def test_send_callback_defaults_to_unset() -> None:
+    # Java's send(record) passes null to send(record, callback) (CLAUDE.md,
+    # Signatures, "'Given' means ..."): callback defaults to UNSET. Both sets
+    # are Java overloads, so there is no check, and send fills an omitted one.
+    for cls in (Producer, AsyncProducer, MockProducer, AsyncMockProducer):
+        assert inspect.signature(cls.send).parameters["callback"].default is UNSET, cls
+    p = MockProducer(auto_complete=True, partitioner=None)
+    assert p.send(record=RECORD).result().offset() == 0
+    assert p.send(record=RECORD, callback=None).result().offset() == 1
 
 
 def test_parameter_names_and_order_are_javas() -> None:

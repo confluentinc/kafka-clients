@@ -114,9 +114,11 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
         self._abort_transaction()
 
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: Callback | None = None) -> asyncio.Future[RecordMetadata]:
+                   callback: Callback | None = UNSET) -> asyncio.Future[RecordMetadata]:
         """See ``MockProducer.send``; the returned ``asyncio.Future`` is complete
         when this returns if ``auto_complete``."""
+        if callback is UNSET:
+            callback = None  # Java's send(record) passes null
         future: asyncio.Future[RecordMetadata] = asyncio.get_running_loop().create_future()
         result: asyncio.Future[RecordMetadata] = self._send(record, callback, future)
         return result

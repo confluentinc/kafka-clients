@@ -17,10 +17,11 @@
 Java's six constructors are one keyword-only constructor matched by
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the given
 arguments must be one of them, and the shorter ones delegate to the longest,
-passing ``null`` for what they leave out. ``partition`` and ``key`` default to
-``UNSET``, so an explicit ``None`` is given: ``ProducerRecord(topic=…,
-partition=0, key=None, value=…)`` is Java's ``(topic, partition, key, value)``
-with a null key, and ``(topic, partition, value)`` without the key is rejected.
+passing ``null`` for what they leave out. ``partition``, ``timestamp``, ``key``
+and ``headers`` default to ``UNSET``, so an explicit ``None`` (or ``()``) is
+given: ``ProducerRecord(topic=…, partition=0, key=None, value=…)`` is Java's
+``(topic, partition, key, value)`` with a null key, ``(topic, partition, value)``
+without the key is rejected, and so is ``(topic, timestamp=None, value)``.
 The record is covariant in ``K`` and ``V``; one stub per constructor and
 key / value binding binds an omitted or ``None`` key or value to ``Never``, so
 ``ProducerRecord(topic="t", value="v")`` is a ``ProducerRecord[Never, str]``
@@ -163,8 +164,8 @@ class ProducerRecord(Generic[K_co, V_co]):
 
     @java_forms(*_FORMS)
     def __init__(self, *, topic: str, partition: int | None = UNSET,
-                 timestamp: int | None = None, key: Any = UNSET, value: Any,
-                 headers: _WrittenHeaders = ()) -> None:
+                 timestamp: int | None = UNSET, key: Any = UNSET, value: Any,
+                 headers: _WrittenHeaders = UNSET) -> None:
         """Creates a record to be sent to a topic, and optionally to a
         partition, with a timestamp in milliseconds since epoch (if ``None``,
         the producer assigns it), a key, the value and the headers."""

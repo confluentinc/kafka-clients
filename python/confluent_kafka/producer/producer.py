@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import UNSET
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -222,10 +223,11 @@ class Producer(Generic[K, V], _ProducerState):
         run_sync(lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = None) -> Future[RecordMetadata]:
+             callback: Callback | None = UNSET) -> Future[RecordMetadata]:
         """Asynchronously send a record to a topic and invoke the provided
         ``callback`` when the send has been acknowledged (``None`` indicates no
-        callback).
+        callback). Java's ``send(record)`` passes ``null`` to it, so
+        ``callback`` defaults to ``UNSET`` (Signatures) and is filled here.
 
         The send is asynchronous and this method will return immediately
         (except for rare cases described below) once the record has been stored
@@ -271,6 +273,8 @@ class Producer(Generic[K, V], _ProducerState):
         fatal or abortable error state, which ``commit_transaction()`` then
         raises.
         """
+        if callback is UNSET:
+            callback = None
         self._check_not_closed()
         native = self._native_record(record)
         topic = record.topic()

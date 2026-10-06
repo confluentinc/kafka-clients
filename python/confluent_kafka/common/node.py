@@ -18,11 +18,12 @@ Java's three constructors ``(id, host, port)``, ``(id, host, port, rack)`` and
 ``(id, host, port, rack, isFenced)`` are one keyword-only constructor matched by
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
 ``(id, host, port)`` passes ``null`` and ``false`` to the longest, and
-``(id, host, port, rack)`` sets ``isFenced`` to ``false``. ``rack`` defaults to
-``UNSET``, so ``rack=None`` is given: ``Node(id=…, host=…, port=…, rack=None,
-is_fenced=True)`` is Java's five-argument constructor, while
-``(id, host, port, is_fenced)`` is no Java constructor and is rejected; so three
-stubs, one per constructor.
+``(id, host, port, rack)`` sets ``isFenced`` to ``false``. ``rack`` and
+``is_fenced`` default to ``UNSET``, so ``rack=None`` and ``is_fenced=False`` are
+given: ``Node(id=…, host=…, port=…, rack=None, is_fenced=True)`` is Java's
+five-argument constructor, while ``(id, host, port, is_fenced)`` is no Java
+constructor and is rejected, whatever ``is_fenced`` is; so three stubs, one per
+constructor.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ class Node:
                 Form("id", "host", "port", "rack", "is_fenced",
                      defaults={"rack": None, "is_fenced": False}))
     def __init__(self, *, id: int, host: str, port: int,  # noqa: A002 - Java's name
-                 rack: str | None = UNSET, is_fenced: bool = False) -> None:
+                 rack: str | None = UNSET, is_fenced: bool = UNSET) -> None:
         self._id = id
         self._id_string = str(id)
         self._host = host

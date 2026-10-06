@@ -15,13 +15,17 @@
 """``PartitionInfo``: Java's ``org.apache.kafka.common.PartitionInfo``.
 
 Java's two constructors are one keyword-only constructor: the shorter passes
-``new Node[0]`` as ``offlineReplicas``, so ``offline_replicas=()``. Java's
-``Node[]`` is ``tuple[Node, ...]`` (CLAUDE.md, Python Binding Conventions,
-Types).
+``new Node[0]`` as ``offlineReplicas``, so ``offline_replicas=()``. Every
+combination is one of them, so there is no ``java_forms`` check;
+``offline_replicas`` defaults to ``UNSET`` (CLAUDE.md, Python Binding
+Conventions, Signatures: one constructor requires it and the other defaults
+it), and the constructor fills it. Java's ``Node[]`` is ``tuple[Node, ...]``
+(Types).
 """
 
 from __future__ import annotations
 
+from confluent_kafka._args import UNSET
 from confluent_kafka._java import java_str
 
 from .node import Node
@@ -40,7 +44,9 @@ class PartitionInfo:
 
     def __init__(self, *, topic: str, partition: int, leader: Node | None,
                  replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...],
-                 offline_replicas: tuple[Node, ...] = ()) -> None:
+                 offline_replicas: tuple[Node, ...] = UNSET) -> None:
+        if offline_replicas is UNSET:
+            offline_replicas = ()  # the five-argument constructor's new Node[0]
         self._topic = topic
         self._partition = partition
         self._leader = leader

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import UNSET
 from confluent_kafka._async import await_to_end
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
@@ -147,7 +148,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: Callback | None = None) -> asyncio.Future[RecordMetadata]:
+                   callback: Callback | None = UNSET) -> asyncio.Future[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for buffer space (Java's
         ``send()`` blocks on ``buffer.memory``) and, with a ``transactional.id``
         and no transaction started, for the record to reach the producer,
@@ -155,6 +156,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         ``asyncio.Future`` resolves with the record's metadata. The
         ``callback`` runs on the event loop, before the future completes, and
         must not block it."""
+        if callback is UNSET:
+            callback = None  # Java's send(record) passes null
         self._check_not_closed()
         native = self._native_record(record)
         topic = record.topic()
