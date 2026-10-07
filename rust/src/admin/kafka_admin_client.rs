@@ -180,7 +180,8 @@ use super::{
 };
 use super::{
     DescribeFeaturesOptions, DescribeFeaturesResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange,
-    SupportedVersionRange, UpdateFeaturesOptions, UpdateFeaturesResult,
+    SupportedVersionRange, UnregisterControllerOptions, UnregisterControllerResult, UpdateFeaturesOptions,
+    UpdateFeaturesResult,
 };
 use crate::AlterPartitionReassignmentsRequestData;
 use crate::ApiVersionsResponseData;
@@ -188,12 +189,14 @@ use crate::CreateDelegationTokenRequestData;
 use crate::ExpireDelegationTokenRequestData;
 use crate::ListPartitionReassignmentsRequestData;
 use crate::RenewDelegationTokenRequestData;
+use crate::UnregisterControllerRequestData;
 use crate::UpdateFeaturesRequestData;
 use crate::alter_partition_reassignments_request_data::{ReassignablePartition, ReassignableTopic};
 use crate::common::TopicPartitionReplica;
 use crate::common::requests::{
     ElectLeadersResponse, JoinGroupRequest, alter_partition_reassignments_request, api_versions_request,
-    elect_leaders_request, list_partition_reassignments_request, update_features_request,
+    elect_leaders_request, list_partition_reassignments_request, unregister_controller_request,
+    update_features_request,
 };
 use crate::common::{ElectionType, Node};
 use crate::create_delegation_token_request_data::CreatableRenewers;
@@ -1331,6 +1334,68 @@ fn get_create_acls_call(
 
     Call::new(
         "createAcls",
+        deadline,
+        NodeProvider::LeastLoadedBrokerOrActiveKController,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds an `unregisterController` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.unregisterController` (KAFKA-20395), which routes
+/// through `LeastLoadedBrokerOrActiveKController`: a broker forwards the request
+/// to the active controller (`UNREGISTER_CONTROLLER` is forwardable), and a
+/// `bootstrap.controllers` client would send it to the active controller itself.
+fn get_unregister_controller_call(
+    controller_id: i32,
+    handle: KafkaFutureImpl<()>,
+    deadline: i64,
+    log_context: LogContext,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = UnregisterControllerRequestData::new();
+        data.set_controller_id(controller_id);
+        Ok(Box::new(unregister_controller_request::Builder::new(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
+        let ConcreteResponse::UnregisterController(unregister_response) = response else {
+            return HandleResult::Retry(Error::local_illegal_state("Expected an UnregisterController response"));
+        };
+        let data = unregister_response.data();
+        match Errors::for_code(data.error_code()) {
+            Errors::None => {
+                resp_handle.complete(());
+            },
+            // `throw error.exception(response.data().errorMessage())`: the throw
+            // reaches `Call.fail`, which retries this retriable error until the
+            // retry budget or the deadline runs out.
+            Errors::RequestTimedOut => {
+                return HandleResult::Retry(api_error(data.error_code(), data.error_message()));
+            },
+            _ => {
+                kafka_error!(
+                    log_context,
+                    "Unregister controller request for controller ID {} failed: {}",
+                    controller_id,
+                    data.error_message().as_deref().unwrap_or("null")
+                );
+                resp_handle.complete_with_error(api_error(data.error_code(), data.error_message()));
+            },
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle;
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
+    });
+
+    Call::new(
+        "unregisterController",
         deadline,
         NodeProvider::LeastLoadedBrokerOrActiveKController,
         create_request,
@@ -3521,6 +3586,20 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         DescribeProducersResult::new(result_map)
+    }
+
+    fn unregister_controller_with_options(
+        &self,
+        controller_id: i32,
+        options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult {
+        let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let call = get_unregister_controller_call(controller_id, handle, deadline, self.shared.log_context.clone());
+        self.submit(call);
+        UnregisterControllerResult::new(public)
     }
 
     fn abort_transaction_with_options(
@@ -10030,6 +10109,158 @@ mod tests {
         time.sleep(2000);
         pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
         assert!(result.feature_metadata().get().await.is_err());
+    }
+
+    // --- unregisterController (KAFKA-20395) ----------------------------------
+
+    use crate::UnregisterControllerResponseData;
+    use crate::common::requests::{AbstractRequest, UnregisterControllerResponse};
+
+    /// Mirrors `KafkaAdminClientTest.UNREGISTER_NODE_ID`.
+    const UNREGISTER_NODE_ID: i32 = 1;
+
+    /// Mirrors `KafkaAdminClientTest.CONTROLLER_RESPONSE_FACTORY`.
+    fn unregister_controller_response(error: Errors) -> ConcreteResponse {
+        let mut data = UnregisterControllerResponseData::new();
+        data.set_error_code(error.code());
+        data.set_error_message(Some(error.message().to_string()));
+        ConcreteResponse::UnregisterController(UnregisterControllerResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.runUnregisterScenario` for the controller
+    /// arm: prepare one response per entry of `responses_to_prepare`, issue the
+    /// call, and drive the runnable until the future resolves.
+    ///
+    /// Java's `env.kafkaClient().setNodeApiVersions(NodeApiVersions.create(
+    /// UNREGISTER_CONTROLLER, 0, 0))` has no counterpart: the Rust `MockClient`
+    /// does not negotiate versions, and the builder's only version is v0.
+    ///
+    /// Each pump iteration advances the mock clock by 100 ms so the retry
+    /// backoff (`retry.backoff.ms`, 100 ms by default) elapses between attempts,
+    /// as wall-clock time does under Java's `Time.SYSTEM` / `MockTime` env.
+    async fn run_unregister_controller_scenario(
+        extra_props: &[(&str, &str)],
+        responses_to_prepare: &[Errors],
+        options: Option<UnregisterControllerOptions>,
+    ) -> Result<(), Error> {
+        let (admin, mut runnable, time, _nodes) = env_with_props(extra_props);
+        for error in responses_to_prepare {
+            runnable.client_mut().prepare_response_matcher(
+                Box::new(|request| match request {
+                    AbstractRequest::UnregisterController(r) => r.data().controller_id() == UNREGISTER_NODE_ID,
+                    _ => false,
+                }),
+                unregister_controller_response(*error),
+            );
+        }
+        let result = match options {
+            None => admin.unregister_controller(UNREGISTER_NODE_ID),
+            Some(options) => admin.unregister_controller_with_options(UNREGISTER_NODE_ID, options),
+        };
+        let future = result.all();
+        for _ in 0..100 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert!(future.is_done(), "unregisterController did not complete");
+        future.get().await
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerSuccess`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerSuccess")]
+    async fn test_unregister_controller_success() {
+        run_unregister_controller_scenario(&[], &[Errors::None], None).await.unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerFailure`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerFailure")]
+    async fn test_unregister_controller_failure() {
+        let err = run_unregister_controller_scenario(&[], &[Errors::UnknownServerError], None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownServerError);
+        assert_eq!(err.message(), Errors::UnknownServerError.message());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerTimeoutAndSuccessRetry`:
+    /// `REQUEST_TIMED_OUT` is thrown from `handleResponse`, so the call retries.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerTimeoutAndSuccessRetry")]
+    async fn test_unregister_controller_timeout_and_success_retry() {
+        run_unregister_controller_scenario(&[], &[Errors::RequestTimedOut, Errors::None], None)
+            .await
+            .unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerTimeoutAndFailureRetry`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerTimeoutAndFailureRetry")]
+    async fn test_unregister_controller_timeout_and_failure_retry() {
+        let err = run_unregister_controller_scenario(&[], &[Errors::RequestTimedOut, Errors::UnknownServerError], None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownServerError);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerTimeoutMaxRetry`
+    /// (`RETRIES_CONFIG = "1"`): the second `REQUEST_TIMED_OUT` exhausts the
+    /// budget, and the `TimeoutException` cause is surfaced unwrapped.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerTimeoutMaxRetry")]
+    async fn test_unregister_controller_timeout_max_retry() {
+        let err = run_unregister_controller_scenario(
+            &[("retries", "1")],
+            &[Errors::RequestTimedOut, Errors::RequestTimedOut],
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout(_)), "expected a timeout, got {err:?}");
+        assert_eq!(err.message(), Errors::RequestTimedOut.message());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUnregisterControllerTimeoutMaxWait`: no
+    /// response is ever prepared and the 10 ms option deadline expires.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnregisterControllerTimeoutMaxWait")]
+    async fn test_unregister_controller_timeout_max_wait() {
+        let err = run_unregister_controller_scenario(
+            &[],
+            &[],
+            Some(UnregisterControllerOptions::new().set_timeout_ms(Some(10))),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout(_)), "expected a timeout, got {err:?}");
+    }
+
+    /// Beyond Java's tests: the wire request carries the controller id, and a
+    /// non-retriable error such as `CONTROLLER_ID_NOT_REGISTERED` (136) keeps
+    /// the broker's message.
+    #[tokio::test]
+    async fn test_unregister_controller_not_registered_keeps_the_broker_message() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let mut data = UnregisterControllerResponseData::new();
+        data.set_error_code(Errors::ControllerIdNotRegistered.code());
+        data.set_error_message(Some("Controller 7 is not registered.".to_string()));
+        // The matcher asserts (panics in `MockClient::poll`) unless the request
+        // sent is an UnregisterController request for controller 7.
+        runnable.client_mut().prepare_response_matcher(
+            Box::new(
+                |request| matches!(request, AbstractRequest::UnregisterController(r) if r.data().controller_id() == 7),
+            ),
+            ConcreteResponse::UnregisterController(UnregisterControllerResponse::new(data)),
+        );
+        let result = admin.unregister_controller(7);
+        pump_until(&mut runnable, 10, |_r| result.all().is_done()).await;
+        let err = result.all().get().await.unwrap_err();
+        assert!(matches!(err, Error::ControllerIdNotRegistered(_)), "got {err:?}");
+        assert_eq!(err.message(), "Controller 7 is not registered.");
     }
 
     /// Drives `KafkaAdminClientTest.testUpdateFeaturesDuringSuccess` — a
