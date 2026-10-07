@@ -1299,7 +1299,7 @@ class TransactionListing:
 
 class ProducerIdAndEpoch:
     """A producer id and its epoch (Java
-    ``org.apache.kafka.common.utils.ProducerIdAndEpoch``).
+    ``org.apache.kafka.common.utils.internals.ProducerIdAndEpoch``).
 
     ``NONE`` is Java's sentinel pair (-1, -1), which is what a failed
     ``fence_producers`` row reports -- 0 is a legal producer id.

@@ -2588,7 +2588,7 @@ message TransactionListingList {
   repeated TransactionListing listings = 1;
 }
 
-// Java `org.apache.kafka.common.utils.ProducerIdAndEpoch`, the value of one
+// Java `org.apache.kafka.common.utils.internals.ProducerIdAndEpoch`, the value of one
 // `fenceProducers` row.
 //
 // A record of two scalars, so it is not the collection case at all — both
