@@ -2419,24 +2419,29 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_destroy_all", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroyAll(IntPtr[] futures, int count);
 
-    // ---- kafka_producer_Producer_t — the SYNC SEND path (M11/P4, ffi §A1/§A5, PLAN §3 decision #2) ----
+    // ---- the pump's SINGLE-send read (M11/P4.2 D4; was M11/P4's sync send path, decision #2) ----
     //
-    // The sync producer's Send blocks on the caller's OWN thread — Producer_send (inline, shared with
-    // the async path) then the BLOCKING KafkaFuture_RecordMetadata_get, with no pump / TCS / callback. The
-    // block happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — this is
-    // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
+    // The sync producer's Send calls Producer_send inline on the caller's thread (shared with the
+    // async path) and hands the accepted future to the send-completion pump as a single
+    // (SendCompletionPump.EnqueueSingle). The pump, not the caller, reads it with the BLOCKING
+    // KafkaFuture_RecordMetadata_get — one per single, in FIFO order — then frees it. The block
+    // happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — the
+    // direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
     // header (Mode A). The singular KafkaFuture_RecordMetadata_destroy (below) is used instead of the
     // pump's _destroy_all wherever one future is freed or the free path must not allocate (no
-    // 1-element array); it is a genuinely-used DllImport (not dead — see its own remarks for the
-    // three call sites).
+    // 1-element array); it is a genuinely-used DllImport (not dead — see its own remarks for its
+    // call sites).
 
     /// <summary>
     /// <c>kafka_common_KafkaFuture_RecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
     /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
     /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
-    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
-    /// (PLAN §3): the block runs inside the core's multi-thread runtime (<c>block_on</c>), which parks
-    /// only the calling thread and is deadlock-free (ffi §A1) — NOT sync-over-async. The future is
+    /// non-null). The pump's single-send read (M11/P4.2): the send-completion pump calls it once per
+    /// sync send, in FIFO order, for the future that
+    /// <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
+    /// handed over once the core accepted the record; the block runs inside the core's multi-thread
+    /// runtime (<c>block_on</c>), which parks only the calling (pump) thread and is deadlock-free
+    /// (ffi §A1) — NOT sync-over-async. The future is
     /// <b>not</b> consumed — the caller still owns it and frees it with
     /// <see cref="FutureRecordMetadataDestroy"/> after reading. The returned metadata handle is owned
     /// by the caller and freed with <see cref="RecordMetadataDestroy"/>; the error (if any) is freed by
@@ -2451,13 +2456,16 @@ internal static partial class NativeMethods
     /// <c>kafka_common_KafkaFuture_RecordMetadata_destroy</c> — frees a single future handle. Null-safe
     /// (no-op). Used wherever exactly one future is freed, or wherever the free path must not
     /// allocate, because the singular form avoids the 1-element array
-    /// <see cref="FutureRecordMetadataDestroyAll"/> would need: the sync
+    /// <see cref="FutureRecordMetadataDestroyAll"/> would need: the pump's single-send read
+    /// (<c>SendCompletionPump.ProcessSingle</c>, freeing the one future after the blocking
+    /// <see cref="FutureRecordMetadataGet"/> reads its result, M11/P4.2) and a single's teardown
+    /// fault (<c>SendCompletionPump.PendingSyncSend</c>); the sync
     /// <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
-    /// path (<c>NativeProducer.Send</c>, freeing the one future after the blocking
-    /// <see cref="FutureRecordMetadataGet"/> reads its result), the async path's orphaned-future
-    /// <c>catch</c> (<c>NativeProducer.SendViaPump</c>), and the pump's own marshalling-array
-    /// allocation <c>catch</c> (<c>SendCompletionPump.ProcessBatch</c>) — the latter two reachable
-    /// only under out-of-memory, where allocating in order to free would risk leaking the handle.
+    /// path's <c>catch</c> around the hand-over to the pump (<c>NativeProducer.Send</c>, which frees
+    /// the future unread); the tail of a group whose split was cut short
+    /// (<c>SendCompletionPump.ProcessGroup</c>); and, on the async send-batch thread, the
+    /// accumulator's per-record rejection and orphaned-future paths
+    /// (<c>SendAccumulator.CompleteNode</c>, <c>SendAccumulator.FaultNode</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_RecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroy(IntPtr future);
@@ -2649,8 +2657,9 @@ internal static partial class NativeMethods
     /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
-    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
-    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
+    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
     /// </para>
@@ -2671,8 +2680,9 @@ internal static partial class NativeMethods
     /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
-    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
-    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
+    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
     /// </para>
@@ -2690,8 +2700,9 @@ internal static partial class NativeMethods
     /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
-    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
-    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
+    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
     /// </para>
@@ -2708,8 +2719,9 @@ internal static partial class NativeMethods
     /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
-    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
-    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
+    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
     /// </para>

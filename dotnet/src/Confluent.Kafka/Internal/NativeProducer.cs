@@ -49,9 +49,11 @@ namespace Confluent.Kafka.Internal;
 /// batched <c>get_all</c> on one pump thread) plus the mock send-control helpers
 /// (<see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/> / <see cref="MockHistoryCount"/> /
 /// <see cref="MockClear"/>). M14/P1 threaded the optional <see cref="DeliveryRegistration"/> through
-/// both send methods — Java's second <c>send(record, Callback)</c> signature — firing it on the pump
-/// thread (async) or inline on the caller's thread (sync); it is managed-only and adds no
-/// <c>[DllImport]</c>.
+/// both send methods — Java's second <c>send(record, Callback)</c> signature; it is managed-only and
+/// adds no <c>[DllImport]</c>. M11/P4.2 moved the sync <see cref="Send"/> onto the same pump: it
+/// still calls <c>Producer_send</c> inline, then hands the accepted future to the pump as a single
+/// and returns a <see cref="KafkaFuture{T}"/>, so the callback now fires on the pump thread on both
+/// surfaces (the sync surface fired it inline on the caller's thread until then).
 /// </para>
 /// <para>
 /// <b>Teardown — one layer, three flavors, graceful-close-before-destroy (M11/P2.1).</b> This
@@ -399,8 +401,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>Producer_send_async</c>
     /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
     /// so a <c>WithCallback</c> suffix would misdescribe the mechanism (M11/P3 PLAN §6.2). The
-    /// <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
-    /// <see cref="Send"/> (which has no pump).
+    /// <c>ViaPump</c> suffix names that real mechanism. It predates M11/P4.2, since which the sync
+    /// <see cref="Send"/> reaches the same pump too — as a single read with the singular <c>get</c>,
+    /// not a <c>send_batch</c> group — after its own inline <c>Producer_send</c>.
     /// <para>
     /// <b>M11/P3.1 — the send SUBMISSION side is now the Python binding's shape (slice S3).</b> This
     /// method no longer touches the core at all: it pins the record's buffers, appends them to the
@@ -412,10 +415,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>.
     /// </para>
     /// <para>
-    /// <b>The SYNC <see cref="Send"/> is deliberately NOT moved</b> (M11/P3.1 §3.1): it returns a
-    /// fully-materialized <see cref="RecordMetadata"/>, so routing it through a 0–10 ms accumulator
-    /// window would add that window to every sync send. It still calls the singular
-    /// <c>Producer_send</c> inline with call-scoped <c>fixed</c> pins.
+    /// <b>The SYNC <see cref="Send"/> is deliberately NOT moved onto the accumulator</b> (M11/P3.1
+    /// §3.1): it then returned a fully-materialized <see cref="RecordMetadata"/>, so routing it
+    /// through a 0–10 ms accumulator window would have added that window to every sync send. It still
+    /// calls the singular <c>Producer_send</c> inline with call-scoped <c>fixed</c> pins; since
+    /// M11/P4.2 it returns a <see cref="KafkaFuture{T}"/> once the core accepts the record, and the
+    /// completion pump reads that record's completion (<see cref="SendCompletionPump.EnqueueSingle"/>).
     /// </para>
     /// <para>
     /// <b>M11/P3.2 / M11/P3.4 — records reach <c>send_batch</c> in the order a caller called this
@@ -629,14 +634,41 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// reads the completion: the send-completion pump does, and completes the returned future.
     /// </summary>
     /// <remarks>
-    /// In order: <see cref="ThrowIfClosed"/> → <see cref="EnsurePump"/> → the send's
-    /// <see cref="SyncCompletion{T}"/>, allocated before <c>Producer_send</c> and owned by the pump
-    /// (for the guard on <c>Get</c> from that pump's thread) → <c>Producer_send</c> (call-scoped
-    /// pinning; the core copies key/value synchronously, ffi §A4, so the buffers are reusable on
-    /// return) → <see cref="SendCompletionPump.EnqueueSingle"/>, which takes ownership of the future
-    /// when it returns. If the enqueue throws, the future is destroyed here, unread, and the throw
-    /// propagates (recorded residual 4 on <see cref="IDeliveryCallback"/>). No
-    /// <see cref="System.Threading.CancellationToken"/> on the sync surface (decision #4).
+    /// <para>
+    /// <b>The order, step by step</b> (M11/P4.2; it replaced M11/P4's blocking <c>_get</c> on this
+    /// thread, decision #2, which D4 supersedes):
+    /// </para>
+    /// <list type="number">
+    /// <item><see cref="ThrowIfClosed"/> — the disposed guard, before any pin or P/Invoke (ffi §A5).
+    /// The null-record and serializer preconditions already ran in the generic client's
+    /// <c>Send</c> above this carrier.</item>
+    /// <item><see cref="EnsurePump"/> — <b>D4, the lazy pump</b>: the first sync <c>Send</c> starts
+    /// the send-completion pump (under <see cref="_pumpLock"/>, after <see cref="ThrowIfClosed"/>,
+    /// through the single creation site <see cref="EnsurePumpLocked"/>), so a sync-only producer
+    /// starts exactly one thread and never the send-batch thread.</item>
+    /// <item>The send's <see cref="SyncCompletion{T}"/> latch, allocated <b>before</b>
+    /// <c>Producer_send</c> (the M11/P4.2 PLAN §9 mutation M15 is the reverse order), so an
+    /// allocation failure here throws with nothing accepted. Its owner is the pump: a <c>Get</c> on
+    /// that pump's own thread for a send that has not completed throws instead of deadlocking
+    /// (D9).</item>
+    /// <item><c>Producer_send</c>, inline on this thread with call-scoped pinning — the core copies
+    /// key and value during the call (ffi §A4), so the caller's buffers are reusable when
+    /// <c>Send</c> returns. A synchronous <c>out_error</c> throws a <see cref="KafkaException"/>
+    /// here, and no callback fires.</item>
+    /// <item><see cref="SendCompletionPump.EnqueueSingle"/> — the ownership hand-off: the future
+    /// belongs to the pump once this returns normally (also when the pump's gate has closed, in
+    /// which case the pump faults the latch and frees the future itself). From then on the pump
+    /// reads the completion with the singular <c>get</c>, fires the delivery callback, completes
+    /// the latch and destroys the future.</item>
+    /// <item>A <see cref="KafkaFuture{T}"/> over the latch is returned: <c>Send</c> returns on
+    /// acceptance, and its <see cref="KafkaFuture{T}.Get"/> is Java's <c>future.get()</c>.</item>
+    /// </list>
+    /// <para>
+    /// <b>A throw out of the enqueue</b> leaves the future with this method: it is destroyed here,
+    /// unread, no callback fires, and the throw propagates — recorded residual 4 on
+    /// <see cref="IDeliveryCallback"/>. No <see cref="System.Threading.CancellationToken"/> on the
+    /// sync surface (decision #4).
+    /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
     /// <param name="delivery">
@@ -1040,7 +1072,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// <b>Test observation point (M11/P3.1 §3.8), not public API:</b> how many sends the completion
     /// pump has taken off its queue — i.e. how many reached <see cref="SendCompletionPump.Enqueue"/>
-    /// while the gate was still <b>open</b>.
+    /// (or, for a sync send, <see cref="SendCompletionPump.EnqueueSingle"/>) while the gate was still
+    /// <b>open</b>.
     /// </summary>
     /// <remarks>
     /// The teardown ordering (drain the accumulator, THEN close the pump's gate) has no other
@@ -1127,9 +1160,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Reads the started pump (under <see cref="_pumpLock"/>), or <see langword="null"/> if no send
     /// ever started it. The lock is ordered against the close latch: teardown wins the latch before
-    /// calling this, so <see cref="EnsureAccumulator"/> cannot create a new pump afterward (its
-    /// <see cref="ThrowIfClosed"/> under the same lock throws). Shared by the sync
-    /// <see cref="StopPump"/> and the async <see cref="StopPumpAsync"/>.
+    /// calling this, so neither creator — the sync <see cref="Send"/>'s <see cref="EnsurePump"/> nor
+    /// the async path's <see cref="EnsureAccumulator"/> — can create a new pump afterward: both go
+    /// through <see cref="EnsurePumpLocked"/>, whose <see cref="ThrowIfClosed"/> under the same lock
+    /// throws. Shared by the sync <see cref="StopPump"/> and the async <see cref="StopPumpAsync"/>.
     /// </summary>
     private SendCompletionPump? PumpToStop()
     {
@@ -1150,26 +1184,31 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <b>Flush BEFORE the join — the manual-mock no-hang fix (M11/P3).</b> The pump may be blocked
-    /// inside a <c>KafkaFuture_RecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
-    /// cannot be interrupted, so <c>_thread.Join()</c> would hang until that future resolves. The
-    /// core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks the producer
-    /// closed (verified <c>rust/src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only
-    /// <c>flush</c> drains and completes the pending completions) — so close cannot unblock the
-    /// in-flight <c>get_all</c>. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
-    /// completes pending sends (their futures resolve, so <c>get_all</c> returns); for a real
-    /// producer it delivers-or-times-out (the accepted Option-C bounded residual — Java's
-    /// <c>close()</c> flushes pending records too). The sync flush is used only on the sync
-    /// <see cref="Dispose"/> path (the async paths await <c>Producer_flush_async</c> via
-    /// <see cref="StopPumpAsync"/> to avoid sync-over-async, ffi §A7); its error is swallowed
-    /// (teardown is best-effort, and the per-flavor close step carries any surfaced error).
+    /// on a not-yet-resolved send — inside a <c>KafkaFuture_RecordMetadata_get_all</c> for an async
+    /// group, or the singular <c>KafkaFuture_RecordMetadata_get</c> for a sync send (M11/P4.2) — and
+    /// neither read can be interrupted, so <c>_thread.Join()</c> would hang until that future
+    /// resolves. The core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks
+    /// the producer closed (verified <c>rust/src/producer/mock_producer.rs</c>: <c>close</c> sets a
+    /// flag; only <c>flush</c> drains and completes the pending completions) — so close cannot
+    /// unblock the in-flight read. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
+    /// completes pending sends (their futures resolve, so the read returns); for a real producer it
+    /// delivers-or-times-out (the accepted Option-C bounded residual — Java's <c>close()</c> flushes
+    /// pending records too). The sync flush is used only on the sync teardown paths
+    /// (<see cref="Dispose"/> and the sync <see cref="Close"/>; the async paths await
+    /// <c>Producer_flush_async</c> via <see cref="StopPumpAsync"/> to avoid sync-over-async, ffi
+    /// §A7); its error is swallowed (teardown is best-effort, and the per-flavor close step carries
+    /// any surfaced error).
     /// <para>
     /// <b>The flush is unconditional (M11/P8, Blocker 2).</b> It used to sit below an early
     /// <c>pump is null</c> return, so it never ran for a producer driven only through the sync
-    /// surface — which never starts a pump, yet CAN have a concurrently blocked <see cref="Send"/>
-    /// (the mock-driving pattern <c>IProducer</c> documents as intended). Only the <em>join</em>
-    /// has anything to do with the pump's existence; the flush does not. Real-producer cost: one
-    /// redundant <c>Producer_flush</c> before <c>Producer_close</c> (which already drains) — Java's
-    /// <c>close()</c> flushes too, so this is <em>more</em> Java-faithful, not a new hazard.
+    /// surface — which then never started a pump, yet could have a concurrently blocked
+    /// <see cref="Send"/>. Since M11/P4.2 (D4) the sync surface starts the pump on its first
+    /// <see cref="Send"/>, and the thread a flush releases is one blocked in
+    /// <see cref="KafkaFuture{T}.Get"/>: the flush resolves that send's future, so the pump's read
+    /// returns and completes the latch. Only the <em>join</em> has anything to do with the pump's
+    /// existence; the flush does not. Real-producer cost: one redundant <c>Producer_flush</c> before
+    /// <c>Producer_close</c> (which already drains) — Java's <c>close()</c> flushes too, so this is
+    /// <em>more</em> Java-faithful, not a new hazard.
     /// </para>
     /// <para>
     /// <b>Gate before flush (M11/P8, Major 5).</b> <see cref="SendCompletionPump.CloseGate"/> runs
@@ -1186,17 +1225,19 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // Major 5: close the enqueue gate BEFORE the flush, so a send racing teardown either
         // (a) was enqueued before the gate closed -> the flush below resolves it, or (b) arrives
-        // after -> Enqueue faults it in place. No third case, and no window where a send is queued
-        // into a pump that is about to be joined.
+        // after -> the pump's gate (Enqueue for an async group, EnqueueSingle for a sync send)
+        // faults it in place. No third case, and no window where a send is queued into a pump
+        // that is about to be joined.
         pump?.CloseGate();
 
         try
         {
             // Blocker 2: resolve pending sends FIRST, independent of whether a pump exists. This
             // used to sit BELOW the `pump is null` return, so it never ran for a producer used only
-            // through the sync surface (only the async SendViaPump starts a pump) — yet such a
-            // producer CAN have a concurrently blocked Send, which IProducer.cs blesses as the
-            // intended cross-thread mock-driving use. Flushing unconditionally releases it.
+            // through the sync surface, which then started no pump yet could have a concurrently
+            // blocked Send. Since M11/P4.2 (D4) a sync producer's first Send starts the pump, and the
+            // thread this flush releases is one blocked in KafkaFuture.Get(): the flush resolves that
+            // send's future, so the pump's read returns and completes the latch.
             //
             // The handle is valid here — teardown is single-winner (the latch) and Producer_destroy
             // runs only after StopPump; consistent with the sync Producer_close in Dispose.
@@ -1214,17 +1255,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         // S4 (D3): the flush has now resolved everything the pump will read, so give the pump a
-        // BOUNDED chance to take the last queued groups off its queue BEFORE Stop sets _stopping —
-        // otherwise a group enqueued by StopAccumulator above is faulted merely because the pump
-        // thread was not scheduled in time. Monotone (the gate is closed, so nothing can be added)
+        // BOUNDED chance to take the last queued entries (async groups or sync singles) off its
+        // queue BEFORE Stop sets _stopping — otherwise a group enqueued by StopAccumulator above, or
+        // a sync single still queued, is faulted merely because the pump thread was not scheduled
+        // in time. Monotone (the gate is closed, so nothing can be added)
         // and bounded, so it cannot hang; on expiry Stop faults the remainder as before. The two
         // rejected shapes — draining from THIS thread, and moving RunLoop's _stopping check below
         // the drain — are argued at WaitForQueueDrain.
         pump?.WaitForQueueDrain(s_pumpDrainTimeout);
 
-        // No pump thread to join when no async send ever started one — but the flush above already
-        // ran (Blocker 2). Join outside the lock (the pump's terminal drain does not touch _pumpLock,
-        // and holding it across a thread join is needless).
+        // No pump thread to join when no send ever started one (a sync or an async send starts it,
+        // D4) — but the flush above already ran (Blocker 2). Join outside the lock (the pump's
+        // terminal drain does not touch _pumpLock, and holding it across a thread join is needless).
         pump?.Stop();
 
         ReleaseTopicCache(accumulatorDrained);
@@ -1236,8 +1278,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>Producer_flush_async</c> bridge (<see cref="FlushInternal"/>), <c>await</c>ed — so an async
     /// teardown never blocks the caller thread on the sync flush (sync-over-async is forbidden on the
     /// async paths, ffi §A7). The flush still runs <b>before</b> the join, preserving the Issue-1
-    /// no-hang property: it resolves the pending sends so the pump's blocking <c>get_all</c> returns
-    /// and the join cannot hang (see <see cref="StopPump"/>'s remarks for why close cannot do this and
+    /// no-hang property: it resolves the pending sends so the pump's blocking read (<c>get_all</c> for
+    /// an async group, the singular <c>get</c> for a sync send) returns and the join cannot hang (see
+    /// <see cref="StopPump"/>'s remarks for why close cannot do this and
     /// flush can). It takes the same two M11/P8 moves as its sync twin: the enqueue gate closes
     /// <b>before</b> the flush (Major 5), and the flush runs <b>unconditionally</b>, above the
     /// <c>pump is null</c> return (Blocker 2).
@@ -1247,7 +1290,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// shared join+destroy tail (<c>pump.Stop()</c> → <c>_thread.Join()</c>, then the flavor's
     /// <c>Producer_destroy</c>) stays synchronous — making the pump-join / destroy awaitable is
     /// deliberately out of scope (it would be over-engineering; the join is a short thread join once
-    /// the flush has unblocked <c>get_all</c>). The flush error is swallowed (best-effort teardown;
+    /// the flush has unblocked the pump's read). The flush error is swallowed (best-effort teardown;
     /// the per-flavor close step carries any surfaced error).
     /// </remarks>
     private async Task StopPumpAsync()
@@ -1280,14 +1323,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         // S4 (D3), identical to the sync twin: a BOUNDED, non-draining wait for the pump to take the
-        // last queued groups before Stop sets _stopping, so teardown completes what the core
+        // last queued entries before Stop sets _stopping, so teardown completes what the core
         // accepted instead of faulting it. Monotone behind the closed gate; on expiry it degrades to
         // the pre-S4 fault-the-remainder behaviour. It stays SYNCHRONOUS here for the same reason
         // the join does (see this method's remarks): it is a short wait on an already-resolved
         // backlog, not an I/O await, and making it awaitable would buy nothing.
         pump?.WaitForQueueDrain(s_pumpDrainTimeout);
 
-        // No pump thread to join when no async send ever started one — the flush above already ran.
+        // No pump thread to join when no send ever started one — the flush above already ran.
         // The join stays blocking by design.
         pump?.Stop();
 
@@ -1461,21 +1504,23 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Close"/> worker (M11/P4). Takes
     /// the one-shot <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
     /// <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/> — idempotent), stops the send pump
-    /// (a no-op for a sync-only producer — see the remarks), closes via the sync <c>Producer_close</c>,
+    /// (gate, flush, drain, join — see the remarks), closes via the sync <c>Producer_close</c>,
     /// then releases the handle (→ <c>Producer_destroy</c>) in a <c>finally</c> so destroy runs exactly
     /// once even on a close error. A subsequent teardown loses the latch and no-ops. Mirrors
     /// <c>NativeConsumer.CloseSync</c>.
     /// </summary>
     /// <remarks>
-    /// <b>Pump-less teardown (decision #6, corrected in M11/P8).</b> A producer used only through the
-    /// sync surface never starts the send pump (only the async <see cref="SendViaPump"/> does), so
-    /// <see cref="StopPump"/> finds <c>_pump == null</c> and skips the <em>join</em> — there is no
-    /// pump thread to join. It does <b>not</b> skip the <em>flush</em>: that was the Blocker-2 bug
-    /// (decision #6's original wording justified skipping the join, but the code silently skipped the
-    /// flush too, which is a different question). The flush now always runs, so a concurrently blocked
-    /// <see cref="Send"/> is released on the sync teardown path exactly as it is on the async one.
-    /// Unlike <see cref="Dispose"/> (which swallows the close error, best-effort), this <b>throws</b>
-    /// it — <c>close()</c> reports failures.
+    /// <b>Teardown of a sync producer's pump (decision #6, corrected in M11/P8; D4 in M11/P4.2).</b>
+    /// Until M11/P4.2 a producer used only through the sync surface never started the send pump, so
+    /// <see cref="StopPump"/> found <c>_pump == null</c> and skipped the <em>join</em>. It did
+    /// <b>not</b> skip the <em>flush</em>: skipping that too was the Blocker-2 bug (decision #6's
+    /// original wording justified skipping the join, but the code silently skipped the flush too,
+    /// which is a different question). Since M11/P4.2 the sync <see cref="Send"/> starts the pump
+    /// lazily on its first call (D4), so a sync producer that has sent stops its pump exactly as the
+    /// async paths do; only a producer that never sent skips the join. The flush always runs, so a
+    /// thread concurrently blocked in <see cref="KafkaFuture{T}.Get"/> is released on the sync
+    /// teardown path exactly as it is on the async one. Unlike <see cref="Dispose"/> (which swallows
+    /// the close error, best-effort), this <b>throws</b> it — <c>close()</c> reports failures.
     /// </remarks>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     internal void Close()
@@ -1487,8 +1532,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         // Gate + flush + join the send pump BEFORE close/destroy (producer-outlives-pump ordering).
-        // For a sync-only producer no send ever started the pump, so only the JOIN is skipped — the
-        // flush still runs and releases a concurrently blocked Send (decision #6, M11/P8 Blocker 2).
+        // A sync producer's first Send started the pump (M11/P4.2 D4), so it is stopped exactly as on
+        // the async paths; only a producer that never sent skips the JOIN. The flush always runs and
+        // releases a thread blocked in KafkaFuture.Get() (decision #6, M11/P8 Blocker 2).
         StopPump();
 
         try

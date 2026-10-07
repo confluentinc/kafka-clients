@@ -247,21 +247,22 @@ a per-send thread and never a poll loop.
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     SYNC  Send → Producer_send ───│──────►│     RecordAccumulator (enqueue, returns fast)
+     SYNC  Send → Producer_send, enqueue ─│──────►│     RecordAccumulator (enqueue, returns fast)
      ASYNC Send → pin + append to  │       │   Sender task (spawned once in _new):
              the send accumulator   │       │     NetworkClient + ONE async Selector
    send-batch thread (1 bg, async): │       │       ↕ multiplexes ALL brokers (event-driven)
      _send_batch(records[]) ───────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
      unpin, hand futures to the pump │     │
-   completion pump (1 bg thread):    │       │
-     get_all(futures) ─block_on─────►│──────►│
+   completion pump (1 bg thread, both paths): │       │
+      get_all / get(sync) ─block_on─►│──────►│
      ◄── per-message metadata/err ───│◄──────│
    Dispose: drain accumulator → join pump → flush/close
 ```
 
 ⚠ **The "at most two" is a cap on *kinds*, not a licence for more.** The batch thread
 is one thread for **all** sends on a producer, it polls nothing, and the sync path
-starts neither thread. A per-send thread and a poll loop remain forbidden, verbatim.
+starts only the completion pump (M11/P4.2), never the batch thread. A per-send thread
+and a poll loop remain forbidden, verbatim.
 
 **Rule:**
 
@@ -276,7 +277,9 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     ⚠ **Amended in M11/P3.1** — this read "exactly one completion pump". The
     prohibitions it was really about are unchanged and still hold: the batch thread is
     one thread for all of a producer's sends (not per-send), and it does not poll. The
-    **sync** path starts neither thread, so a sync-only producer still spins nothing.
+    **sync** path starts only the completion pump — lazily, on its first `Send`
+    (M11/P4.2) — and never the batch thread, so a sync-only producer spins exactly one
+    thread.
   - **Submission order is call order.** The submission path must hand records to the
     core in the order a caller called `Send`. Java documents ordering as preserved in
     the default configuration
@@ -443,7 +446,7 @@ pump deadlock-free (the Sender runs on other worker threads).
 |---|---|---|---|
 | `Producer_t` | 1 — client (`SafeHandle`) | `KafkaProducer_new` / `MockProducer_new` | `ReleaseHandle → Producer_destroy` (via `Dispose`) |
 | `ProducerProperties_t` | 1 — config (`SafeHandle`, short) | `ProducerProperties_new` / `_from_configs` | the binding, after `KafkaProducer_new` |
-| `FutureRecordMetadata_t` | 2 — flat transient | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (`get_all` doesn't consume) |
+| `FutureRecordMetadata_t` | 2 — flat transient | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (`get_all` doesn't consume); a sync send's single future: the pump's `_destroy` after `_get` (M11/P4.2) |
 | `RecordMetadata_t` | 2 — flat transient | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
 | `KafkaError_t` | 2 — flat transient | any `out_error` slot | the reader: read accessors, then `_destroy` |
 | `kafka_producer_MetricMap_t` | 3 — owned result (borrow-root) | `Producer_metrics` | the reader: copy every entry out, then `kafka_producer_MetricMap_destroy` |
@@ -816,7 +819,8 @@ cross the ABI:
     signature (`Future<RecordMetadata> send(ProducerRecord, Callback)`,
     `Producer.java:86`) is restored **on top of the completion path already in
     use** — the pull-pump's batched `FutureRecordMetadata_get_all` (§A7 Option A/C)
-    or the sync blocking `FutureRecordMetadata_get`. Nothing new is registered with
+    or, for a sync send, the pump's single `FutureRecordMetadata_get` (M11/P4.2).
+    Nothing new is registered with
     native, so there is **no delegate to root, no `GCHandle`, no `user_data`, no
     `user_data_destroy` hook and no new `[DllImport]`** — the whole form is Mode A.
     It is a *binding-layer* callback: the ABI has no idea it exists.
@@ -855,13 +859,13 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
     placeholder needs — never a closure and never the public record, so the
     allocation-budgeted send path is unchanged (DoD §10).
   - **Fire it where the completion is read, on whichever thread reads it.** That
-    is the pump thread for the async surface (.NET's analogue of Java's background
-    I/O thread, `Callback.java:20-21`) and the *caller's* thread for the blocking
-    sync surface, which has no pump. Both are legitimate; they are the same two
-    threads that already free the completion's native handles.
+    is the pump thread on both surfaces (.NET's analogue of Java's background I/O
+    thread, `Callback.java:20-21`; the blocking sync surface read it inline on the
+    caller's thread until M11/P4.2) — the thread that already frees the completion's
+    native handles.
   - **Invoke it BEFORE the delivery awaiter is released** (it is unordered relative to
     the admission stage) — before `TrySetResult` /
-    `TrySetException`, and before the sync send returns or throws. Java's
+    `TrySetException`, and before the sync future's `Get()` returns or throws. Java's
     `ProducerBatch.completeFutureAndFireCallbacks` sets the future's value, fires
     the callbacks, and only then calls `produceFuture.done()`
     (`ProducerBatch.java:303-323`).
@@ -1013,7 +1017,7 @@ which is why it is Mode A and why the pull-pump stays the engine underneath it.
     completion the binding already reads can deliver. That is a Mode-B change to
     the completion **engine** masquerading as a callback feature, and the push
     engine is measured slower than the pull-pump.
-  - *(form C)* Firing it *after* `TrySetResult` / after the sync return, or gating
+  - *(form C)* Firing it *after* `TrySetResult` / after the sync completion is set, or gating
     it on `TrySet*`'s `bool` — the first breaks Java's ordering, the second drops
     the notification for a canceled awaiter.
   - *(form C)* A second `try`/`catch` wrapped around the shared invocation helper
@@ -1112,6 +1116,14 @@ Note: the diagram predates the M11/P3.1 send-batch thread.
     close cannot wake) into a managed, cancellable wait, closer to Java's `send`. ⚠
     Lettering collision: "Option A" *here* is the pull pump, while M11/P3.1's PLAN calls
     the send-batching design "Option A" — different letterings of different questions.
+    ⚠ **M11/P4.2 — the sync path now follows this rule too.** Its `Send` still calls
+    `Producer_send` inline (the core copies key and value during the call, so the
+    caller's buffers are reusable on return), then hands `(future, latch, callback)` to
+    this pump and returns a `KafkaFuture<RecordMetadata>`; it no longer blocks in `_get`
+    on the caller's thread. The bullets below describe the async batch path; a sync send
+    is read with the singular `_get` (one record per entry, in FIFO order), freed with
+    `_destroy`, and completes a `Monitor` latch rather than a TCS, so it runs no
+    continuation on the pump.
   - **Exactly one** pump thread does all waits via batched `get_all` — O(1)
     threads for unbounded in-flight sends. Per result: read fields + free handles
     on the pump (§A2), `SetResult`/`SetException`, `destroy_all` the futures.

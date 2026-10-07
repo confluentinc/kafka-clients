@@ -1525,10 +1525,12 @@ internal sealed class SendAccumulator
     /// slots zero, i.e. the throw preceded this record's <c>send_batch</c>. That case is §6.2's
     /// "correct and complete": nothing was sent, so a failure notification invents nothing and can
     /// never duplicate. Where the core <em>did</em> accept the record (a live future this method
-    /// destroys unread), no callback is fired, for the reason recorded residuals 1–3 give: there is
-    /// no core completion in hand and the record may still be delivered, so a fabricated failure
-    /// would be an invented one. Reachable only under an unexpected managed or native failure on the
-    /// batch thread (out of memory, or a P/Invoke against a torn-down producer).
+    /// destroys unread), no callback is fired: that is recorded residual 4 on
+    /// <see cref="IDeliveryCallback"/> — the core accepted the record, the throw came before its
+    /// future was handed to the completion pump, and so nothing will read its completion. There is
+    /// no core completion in hand here and the record may still be delivered, so a fabricated
+    /// failure would be an invented one. How this residual relates to the others is stated in
+    /// <see cref="IDeliveryCallback"/>'s remarks.
     /// </remarks>
     private static void FaultNode(Node node, int settled, int count, Exception cause)
     {

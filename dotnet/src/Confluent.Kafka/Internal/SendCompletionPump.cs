@@ -24,18 +24,55 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// The producer send-completion pump (inline pull-pump — PLAN §3 Option C; ffi §A7's pull surface; §6.3): one
-/// background thread per <see cref="NativeProducer"/> that takes one <c>send_batch</c> group at a
-/// time off an unbounded MPSC queue (M11/P3.2 §3B — the anchor's unit, one <c>BatchNode</c> per
-/// <c>get_all</c>), blocks on a batched
-/// <c>KafkaFuture_RecordMetadata_get_all</c>, completes each <see cref="TaskCompletionSource{TResult}"/>
-/// (built with <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>), and frees the
-/// future handles with <c>KafkaFuture_RecordMetadata_destroy_all</c>. There is no <b>native</b> per-send
+/// background thread per <see cref="NativeProducer"/> that takes one entry at a time off a single
+/// unbounded MPSC queue and resolves it. An entry is one of two kinds:
+/// <list type="bullet">
+/// <item>a <see cref="PendingSendBatch"/> — one async <c>send_batch</c> group (M11/P3.2 §3B — the
+/// anchor's unit, one <c>BatchNode</c> per <c>get_all</c>): the pump blocks on one batched
+/// <c>KafkaFuture_RecordMetadata_get_all</c> for the group, completes each
+/// <see cref="TaskCompletionSource{TResult}"/> (built with
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>), and frees the future handles
+/// with <c>KafkaFuture_RecordMetadata_destroy_all</c>;</item>
+/// <item>a <see cref="PendingSyncSend"/> — one sync send (M11/P4.2): the pump blocks on one singular
+/// <c>KafkaFuture_RecordMetadata_get</c> for its future, in FIFO order with everything else in the
+/// queue (decision D1 (a)), completes its <see cref="SyncCompletion{T}"/> — a <c>Monitor</c>
+/// latch, not a TCS — and frees the future with <c>KafkaFuture_RecordMetadata_destroy</c>.</item>
+/// </list>
+/// There is no <b>native</b> per-send
 /// callback and no producer handle here — the pump owns only the flat transient future / metadata /
 /// error handles (ffi §A2 Category 2); the producer-outlives-pump invariant is enforced by
 /// <see cref="NativeProducer"/>'s teardown ordering (stop + join the pump before
 /// <c>Producer_destroy</c>, §A2), not by this type.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>One queue for both entry kinds (M11/P4.2 decision D11 (a)).</b> Each producer object owns its
+/// own pump, and a producer exposes either the sync or the async surface (decision S-4), so in
+/// practice a pump holds singles or groups, never both. They share one queue anyway, under a common
+/// <see cref="PendingEntry"/> base, so one ordering and one set of teardown paths — the enqueue gate
+/// (<see cref="EnqueueEntry"/>), the terminal drain (<see cref="DrainAndFaultRemaining"/>) and
+/// <see cref="RunLoop"/>'s <c>catch</c> — cover both. <see cref="RunLoop"/> dispatches on the
+/// entry's kind: <see cref="ProcessSingle"/> for a single, <see cref="ProcessGroup"/> for a group,
+/// which is unchanged by singles. A single is never coalesced with other singles into a
+/// <c>get_all</c>: that call returns only once every future in its array resolves (D1 (a)).
+/// </para>
+/// <para>
+/// <b>The sync latch runs no continuation on the pump.</b> Completing a single's
+/// <see cref="SyncCompletion{T}"/> pulses whichever thread is blocked in
+/// <see cref="KafkaFuture{T}.Get"/> and runs nothing else on this thread, so the
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> reasoning below applies to the
+/// async groups' TCSes only.
+/// </para>
+/// <para>
+/// <b>D9 — the current-pump guard (M11/P4.2).</b> <see cref="RunLoop"/> marks its own dedicated
+/// thread in a <see cref="ThreadStaticAttribute"/> field (<c>s_currentPump</c>, read through
+/// <see cref="IsCurrentThread"/>). A <see cref="SyncCompletion{T}"/> owned by this pump reads it
+/// before it blocks, so a <see cref="KafkaFuture{T}.Get"/> called on this thread — from inside a
+/// delivery callback — for a send that has not completed throws
+/// <see cref="InvalidOperationException"/> instead of deadlocking: on this thread the latch's
+/// completer is this very loop. A <c>Get</c> on a completed send, and a <c>Get</c> on another
+/// producer's send, are allowed.
+/// </para>
 /// <para>
 /// <b>It DOES run one piece of managed user code (M14/P1).</b> A send made through
 /// <c>Send(record, IDeliveryCallback)</c> carries a <see cref="DeliveryRegistration"/>, and this
@@ -73,27 +110,27 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the
 /// <see cref="NativeProducer"/> close latch is won: signals the loop to stop, joins the thread
-/// (so no future handle is in use), then faults + frees anything still queued. A
-/// <see cref="Enqueue"/> that races a completed <see cref="Stop"/> is caught under
-/// <see cref="_stopLock"/> and faulted + freed in place — so no send is stranded or leaked
-/// (deterministic — no <em>strand or leak</em> residual on the enqueue-vs-stop race). That branch
-/// does drop the send's delivery notification, which is recorded residual 1 — see
-/// <see cref="Enqueue"/>.
+/// (so no future handle is in use), then faults + frees anything still queued. An
+/// <see cref="Enqueue"/> or <see cref="EnqueueSingle"/> that races a completed <see cref="Stop"/> is
+/// caught under <see cref="_stopLock"/> and faulted + freed in place — so no send is stranded or
+/// leaked (deterministic — no <em>strand or leak</em> residual on the enqueue-vs-stop race). That
+/// branch does drop the send's delivery notification, which is recorded residual 1 — see
+/// <see cref="Enqueue"/> and <see cref="EnqueueSingle"/>.
 /// </para>
 /// <para>
 /// <b>The in-flight <c>get_all</c> is unblocked by a flush, NOT by close.</b> <c>get_all</c> blocks
-/// until every future in its batch resolves and cannot be interrupted, so if the pump is inside
-/// <c>get_all</c> on a not-yet-resolved send when teardown starts, <c>_thread.Join()</c> would hang
-/// until that future resolves. <see cref="NativeProducer"/>'s teardown therefore flushes pending
-/// sends (the sync <c>Producer_flush</c> on the blocking <c>Dispose</c> path, or an awaited
-/// <c>Producer_flush_async</c> on the async paths — ffi §A7) <b>before</b> calling
+/// until every future in its batch resolves and cannot be interrupted — and so does a sync single's
+/// singular <c>get</c> (M11/P4.2) — so if the pump is inside either read on a not-yet-resolved send
+/// when teardown starts, <c>_thread.Join()</c> would hang until that future resolves.
+/// <see cref="NativeProducer"/>'s teardown therefore flushes pending sends (the sync
+/// <c>Producer_flush</c> on the blocking sync paths — <c>Dispose</c> and the sync <c>Close</c> — or
+/// an awaited <c>Producer_flush_async</c> on the async paths — ffi §A7) <b>before</b> calling
 /// <see cref="Stop"/>: the core's <c>Producer_close</c> does <b>not</b> drive pending sends (it only
 /// marks the producer closed — verified <c>rust/src/producer/mock_producer.rs</c>), so close cannot
-/// unblock <c>get_all</c>; <c>flush</c> can, and does — completing a <c>MockProducer</c>'s pending
+/// unblock the read; <c>flush</c> can, and does — completing a <c>MockProducer</c>'s pending
 /// sends (their futures resolve), or delivering-or-timing-out a real producer's (the accepted
 /// Option-C bounded residual, ffi §A7). Once the flush has resolved the pending sends, the in-flight
-/// <c>get_all</c> returns and <see cref="Stop"/>'s join completes; the loop is never interrupted
-/// mid-<c>get_all</c>.
+/// read returns and <see cref="Stop"/>'s join completes; the loop is never interrupted mid-read.
 /// </para>
 /// <para>
 /// <b>Background thread.</b> The pump thread is a background thread, so a producer leaked without
@@ -395,15 +432,18 @@ internal sealed class SendCompletionPump
     /// <b>Airtight in both directions</b> once the gate closes before the flush:
     /// a send enqueued <em>before</em> the gate closed had its <c>Producer_send</c> ≺
     /// <c>Enqueue</c> ≺ <c>CloseGate</c> ≺ flush, so the flush resolves it and <c>get_all</c>
-    /// returns; a send arriving <em>after</em> takes <see cref="Enqueue"/>'s fault-in-place branch
-    /// (which faults the <see cref="Task"/> <b>and</b> frees the future). There is no third case.
+    /// returns; a send arriving <em>after</em> takes the gate's fault-in-place branch
+    /// (<see cref="EnqueueEntry"/>, reached from <see cref="Enqueue"/> and <see cref="EnqueueSingle"/>,
+    /// which faults the send's <see cref="Task"/> or sync latch <b>and</b> frees the future). There is
+    /// no third case.
     /// </para>
     /// <para>
     /// No new state and no new free site — this only makes the existing <c>_stopped</c> guard
     /// <em>reachable</em>. <see cref="Stop"/> re-setting <c>_stopped</c> under the same lock stays
     /// harmless (idempotent). The accepted semantic is unchanged from today's <c>_stopped</c>
     /// branch: a send faulted in place has already been handed to native, so the record may still
-    /// be delivered while its <see cref="Task"/> faults — pre-existing teardown-race behavior.
+    /// be delivered while its <see cref="Task"/> (or sync latch) faults — pre-existing teardown-race
+    /// behavior.
     /// </para>
     /// </remarks>
     internal void CloseGate()
