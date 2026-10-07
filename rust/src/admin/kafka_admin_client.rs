@@ -66,10 +66,12 @@ use crate::DescribeLogDirsRequestData;
 use crate::DescribeTopicPartitionsRequestData;
 use crate::DescribeUserScramCredentialsRequestData;
 use crate::DescribeUserScramCredentialsResponseData;
+use crate::HostResolver;
 use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
+use crate::MetadataUpdater;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -80,6 +82,7 @@ use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
+use crate::common::network::Selectable;
 use crate::common::network::Selector;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
@@ -491,26 +494,13 @@ impl KafkaAdminClient {
         selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        // `ClientUtils.createNetworkClient` (`ClientUtils.java:291-317`): the socket
-        // buffers, `metadata.recovery.strategy` and
-        // `metadata.recovery.rebootstrap.trigger.ms` come from the config.
-        let mut client = NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
+        let mut client = Self::create_network_client(
+            &config,
             selector,
             metadata_manager.updater(),
             &client_id,
-            100, // max in-flight requests per connection (admin sends <= 1 per node)
-            config.reconnect_backoff_ms(),
-            config.reconnect_backoff_max_ms(),
-            config.send_buffer_bytes(),
-            config.receive_buffer_bytes(),
-            config.request_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_max_ms(),
-            true, // discover_broker_versions
             api_versions,
             DefaultHostResolver::new(),
-            config.metadata_recovery_rebootstrap_trigger_ms(),
-            config.metadata_recovery_strategy(),
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
@@ -537,6 +527,47 @@ impl KafkaAdminClient {
         config.log_unused();
         admin.spawn(runnable);
         Ok(admin)
+    }
+
+    /// Builds the admin `NetworkClient` with the arguments
+    /// `KafkaAdminClient.createInternal` passes to `ClientUtils.createNetworkClient`
+    /// (`KafkaAdminClient.java:617-631`, `ClientUtils.java:291-317`): the socket
+    /// buffers, `metadata.recovery.strategy` and
+    /// `metadata.recovery.rebootstrap.trigger.ms` come from the config.
+    ///
+    /// `maxInFlightRequestsPerConnection` is `1` (`:625`). The admin loop sends at
+    /// most one call per node and checks `client.ready(..)` first, so the limit
+    /// does not change what is sent; it matters to `least_loaded_node` and
+    /// `ready`, which treat a node with an in-flight request as busy only when the
+    /// connection cannot take another one.
+    pub(crate) fn create_network_client<S: Selectable, H: HostResolver>(
+        config: &AdminClientConfig,
+        selector: S,
+        metadata_updater: Box<dyn MetadataUpdater>,
+        client_id: &str,
+        api_versions: Arc<ApiVersions>,
+        host_resolver: H,
+        log_context: LogContext,
+    ) -> NetworkClient<S, H> {
+        NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
+            selector,
+            metadata_updater,
+            client_id,
+            1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
+            config.reconnect_backoff_ms(),
+            config.reconnect_backoff_max_ms(),
+            config.send_buffer_bytes(),
+            config.receive_buffer_bytes(),
+            config.request_timeout_ms(),
+            config.socket_connection_setup_timeout_ms(),
+            config.socket_connection_setup_timeout_max_ms(),
+            true, // discover_broker_versions
+            api_versions,
+            host_resolver,
+            config.metadata_recovery_rebootstrap_trigger_ms(),
+            config.metadata_recovery_strategy(),
+            log_context,
+        )
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
