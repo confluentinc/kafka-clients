@@ -1253,10 +1253,16 @@ where
 }
 
 /// Computes the absolute deadline for a call. Mirrors
-/// `KafkaAdminClient.calcDeadlineMs`.
+/// `KafkaAdminClient.calcDeadlineMs` (`KafkaAdminClient.java:496-500`): a
+/// negative option timeout is clamped to zero (`now + Math.max(0, optionTimeoutMs)`),
+/// so the call is still sent once instead of expiring before it is assigned a node.
+/// The default API timeout is not clamped, as in Java.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#calcDeadlineMs")]
 fn calc_deadline_ms(now: i64, option_timeout: Option<i32>, default_api_timeout_ms: i32) -> i64 {
-    now + option_timeout.unwrap_or(default_api_timeout_ms) as i64
+    match option_timeout {
+        Some(option_timeout_ms) => now + i64::from(option_timeout_ms.max(0)),
+        None => now + i64::from(default_api_timeout_ms),
+    }
 }
 
 /// Re-keys a `CoordinatorKey`-keyed future map by the coordinator key's id
@@ -7495,6 +7501,36 @@ mod tests {
         pump(&mut runnable, 5).await;
         let names = result.names().get().await.unwrap();
         assert!(names.contains("__consumer_offsets"));
+    }
+
+    /// Java's `calcDeadlineMs` clamps a negative option timeout to zero
+    /// (`now + Math.max(0, optionTimeoutMs)`, `KafkaAdminClient.java:496-500`), so
+    /// on a frozen clock a call with `timeoutMs = -1` has `deadlineMs == now`. The
+    /// timeout processor only expires a call whose remaining time is `< 0`
+    /// (`:1060-1061`, `:1080-1081`), so the call is sent and succeeds. Without the
+    /// clamp the deadline is `now - 1` and the call expires unsent.
+    #[tokio::test]
+    async fn test_negative_option_timeout_is_clamped_to_zero() {
+        let (admin, mut runnable, time, nodes) = env();
+        let result = admin.list_topics_with_options(ListTopicsOptions::new().set_timeout_ms(Some(-1)));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                vec![topic_meta("visible", false, Uuid::new(0, 1), 1)],
+            )));
+        pump(&mut runnable, 5).await;
+        let names = result.names().get().await.expect("the call must be sent, not expired");
+        assert!(names.contains("visible"));
+
+        let now = time.milliseconds();
+        assert_eq!(calc_deadline_ms(now, Some(-1), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(i32::MIN), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(0), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(5), 60_000), now + 5);
+        assert_eq!(calc_deadline_ms(now, None, 60_000), now + 60_000);
     }
 
     // --- describeTopics ------------------------------------------------------
