@@ -22,7 +22,7 @@ use crate::common::Error;
 use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
-use crate::{ClientDnsLookup, CommonClientConfigs};
+use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 
 /// Configuration for the admin client.
 ///
@@ -44,6 +44,8 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    metadata_recovery_strategy: MetadataRecoveryStrategy,
+    metadata_recovery_rebootstrap_trigger_ms: i64,
 
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
@@ -95,6 +97,19 @@ impl AdminClientConfig {
     pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// `sasl.jaas.config`
     pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
+    /// `metadata.recovery.strategy`. Java's `AdminClientConfig.java` declares it as
+    /// its own public alias of `CommonClientConfigs.METADATA_RECOVERY_STRATEGY_CONFIG`.
+    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG;
+    /// The default `metadata.recovery.strategy` (`rebootstrap`).
+    pub const DEFAULT_METADATA_RECOVERY_STRATEGY: &'static str =
+        CommonClientConfigs::DEFAULT_METADATA_RECOVERY_STRATEGY;
+    /// `metadata.recovery.rebootstrap.trigger.ms`. Java's `AdminClientConfig.java` declares it as
+    /// its own public alias of `CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG`.
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
+        CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG;
+    /// The default `metadata.recovery.rebootstrap.trigger.ms` (5 minutes).
+    pub const DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS: i64 =
+        CommonClientConfigs::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS;
 
     /// Creates a config from a property map. `bootstrap.servers` must be non-empty.
     ///
@@ -149,6 +164,12 @@ impl AdminClientConfig {
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
                         )
                     })?;
+                },
+                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                    config.metadata_recovery_strategy = parse_metadata_recovery_strategy(key, value)?;
+                },
+                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                    config.metadata_recovery_rebootstrap_trigger_ms = parse_rebootstrap_trigger_ms(key, value)?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
                     config.sasl_config.mechanism = value.to_string();
@@ -268,6 +289,16 @@ impl AdminClientConfig {
         self.socket_connection_setup_timeout_ms
     }
 
+    /// `metadata.recovery.strategy`.
+    pub(crate) fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy {
+        self.metadata_recovery_strategy
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms`.
+    pub fn metadata_recovery_rebootstrap_trigger_ms(&self) -> i64 {
+        self.metadata_recovery_rebootstrap_trigger_ms
+    }
+
     /// `security.protocol`.
     pub fn security_protocol(&self) -> SecurityProtocol {
         self.security_protocol
@@ -301,6 +332,8 @@ impl Default for AdminClientConfig {
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
+            metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
+            metadata_recovery_rebootstrap_trigger_ms: Self::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
@@ -314,6 +347,36 @@ fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
+}
+
+/// `metadata.recovery.strategy`: a trimmed `Type.STRING` (`ConfigDef.java:729-731`)
+/// validated by `CaseInsensitiveValidString.in(Utils.enumOptions(MetadataRecoveryStrategy.class))`
+/// (`AdminClientConfig.java:275-280`), then read through
+/// `MetadataRecoveryStrategy.forName` as `KafkaAdminClient`'s constructor does.
+///
+/// The valid strings are the upper-cased enum constant names, held in a
+/// `HashSet`; the message lists them in that set's iteration order, which for
+/// these two names is `REBOOTSTRAP, NONE`.
+fn parse_metadata_recovery_strategy(key: &str, value: &str) -> Result<MetadataRecoveryStrategy, Error> {
+    let trimmed = value.trim();
+    MetadataRecoveryStrategy::for_name(trimmed).map_err(|_| {
+        Error::config_name_value_message(key, trimmed, "String must be one of (case insensitive): REBOOTSTRAP, NONE")
+    })
+}
+
+/// `metadata.recovery.rebootstrap.trigger.ms`: a `Type.LONG` with `atLeast(0)`
+/// (`AdminClientConfig.java:281-286`). `ConfigDef.parseType` reports an
+/// unparsable value with "Not a number of type LONG", and `Range.atLeast` a
+/// negative one with "Value must be at least 0".
+fn parse_rebootstrap_trigger_ms(key: &str, value: &str) -> Result<i64, Error> {
+    let parsed = value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| Error::config_name_value_message(key, value, "Not a number of type LONG"))?;
+    if parsed < 0 {
+        return Err(Error::config_name_value_message(key, parsed, "Value must be at least 0"));
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -555,6 +618,95 @@ mod tests {
         assert_eq!(
             AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
             ["a:1".to_string(), "b:1".to_string()]
+        );
+    }
+
+    fn with_bootstrap(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        props
+    }
+
+    /// Translated from `AdminClientConfigTest.testDefaultMetadataRecoveryStrategy`
+    /// (Rust's constructor also requires `bootstrap.servers`, which Java checks
+    /// later, in `AdminBootstrapAddresses.fromConfig`). Also pins the trigger
+    /// default (`CommonClientConfigs.java:248`).
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfigTest#testDefaultMetadataRecoveryStrategy")]
+    fn test_default_metadata_recovery_strategy() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[])).unwrap();
+        assert_eq!(config.metadata_recovery_strategy(), MetadataRecoveryStrategy::Rebootstrap);
+        assert_eq!(
+            AdminClientConfig::DEFAULT_METADATA_RECOVERY_STRATEGY,
+            MetadataRecoveryStrategy::Rebootstrap.name()
+        );
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms(), 300_000);
+        assert_eq!(AdminClientConfig::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS, 300_000);
+        assert_eq!(
+            AdminClientConfig::METADATA_RECOVERY_STRATEGY_CONFIG,
+            "metadata.recovery.strategy"
+        );
+        assert_eq!(
+            AdminClientConfig::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG,
+            "metadata.recovery.rebootstrap.trigger.ms"
+        );
+    }
+
+    /// Translated from `AdminClientConfigTest.testInvalidMetadataRecoveryStrategy`,
+    /// asserting Java 4.3.1's whole message rather than only the key it contains.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfigTest#testInvalidMetadataRecoveryStrategy")]
+    fn test_invalid_metadata_recovery_strategy() {
+        let err = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", "abc")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration metadata.recovery.strategy: \
+             String must be one of (case insensitive): REBOOTSTRAP, NONE"
+        );
+    }
+
+    /// `CaseInsensitiveValidString` on a trimmed `Type.STRING`: any case, and
+    /// surrounding whitespace, is accepted.
+    #[test]
+    fn metadata_recovery_strategy_is_case_insensitive_and_trimmed() {
+        for (value, expected) in [
+            ("none", MetadataRecoveryStrategy::None),
+            ("NoNe", MetadataRecoveryStrategy::None),
+            (" none ", MetadataRecoveryStrategy::None),
+            ("REBOOTSTRAP", MetadataRecoveryStrategy::Rebootstrap),
+            ("rebootstrap", MetadataRecoveryStrategy::Rebootstrap),
+        ] {
+            let config = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", value)])).unwrap();
+            assert_eq!(config.metadata_recovery_strategy(), expected, "value {value:?}");
+        }
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` is a `Type.LONG` with
+    /// `atLeast(0)`; the messages are Java 4.3.1's.
+    #[test]
+    fn metadata_recovery_rebootstrap_trigger_ms_is_validated() {
+        let key = "metadata.recovery.rebootstrap.trigger.ms";
+        let config = AdminClientConfig::new(&with_bootstrap(&[(key, " 0 ")])).unwrap();
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms(), 0);
+        let config = AdminClientConfig::new(&with_bootstrap(&[(key, "1000")])).unwrap();
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms(), 1000);
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[(key, "-1")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: Value must be at least 0"
+        );
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[(key, "abc")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration metadata.recovery.rebootstrap.trigger.ms: Not a number of type LONG"
         );
     }
 }
