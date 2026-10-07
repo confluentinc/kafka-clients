@@ -23,6 +23,7 @@
 pub(crate) mod cluster_config;
 #[path = "../../../tests/common/cluster_pool.rs"]
 pub(crate) mod cluster_pool;
+#[expect(dead_code)]
 #[path = "../../../tests/common/kafka_cluster.rs"]
 pub(crate) mod kafka_cluster;
 #[path = "../../../tests/common/test_certs.rs"]
