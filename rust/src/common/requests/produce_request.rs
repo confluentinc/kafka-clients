@@ -330,6 +330,99 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
+    use crate::produce_request_data::TopicProduceData;
+
+    /// Java `RequestContextTest.serialize`: writes `data` into a buffer of exactly
+    /// its serialized size.
+    fn serialize(version: i16, data: &mut ProduceRequestData) -> Vec<u8> {
+        let mut cache = ObjectSerializationCache::new();
+        let size = Message::size(data, &mut cache, version).unwrap();
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+        Message::write(data, &mut buffer, &cache, version).unwrap();
+        buffer.into_buffer()
+    }
+
+    /// `count` topics named `t0`, `t1`, ... with no partition data.
+    fn produce_data_with_topics(count: usize) -> ProduceRequestData {
+        let mut data = ProduceRequestData::new();
+        data.set_acks(-1).set_timeout_ms(1);
+        for i in 0..count {
+            let mut topic = TopicProduceData::new();
+            topic.set_name(format!("t{i}")).set_partition_data(Vec::new());
+            data.topic_data_mut().push(topic);
+        }
+        data
+    }
+
+    // The three `RequestContextTest` cases below exercise the generated
+    // `ProduceRequestData` reader that Java's `RequestContext.parseRequest` drives.
+    // `RequestContext` is the broker's view of an inbound request and has no client
+    // counterpart, so the tests read the data class directly: where Java asserts on
+    // the `InvalidRequestException`'s cause, they assert on the reader's error, and
+    // where Java asserts only the exception type, they assert the read fails.
+
+    /// Translated from Java
+    /// `RequestContextTest.testInvalidRequestForImplicitHashCollectionWithMaxPreAllocation`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testInvalidRequestForImplicitHashCollectionWithMaxPreAllocation"
+    )]
+    fn test_invalid_request_for_implicit_hash_collection_with_max_pre_allocation() {
+        let version: i16 = 7; // non-flexible, name-based and no topicId
+        let actual_topic_count = 1010; // (greater than the 1000 pre-alloc cap)
+        let mut buffer = serialize(version, &mut produce_data_with_topics(actual_topic_count));
+
+        // Inflate the declared topic_data array length.
+        buffer[8..12].copy_from_slice(&5000i32.to_be_bytes());
+
+        let mut accessor = ByteBufferAccessor::new(buffer);
+        assert!(ProduceRequestData::read(&mut accessor, version).is_err());
+    }
+
+    /// Translated from Java `RequestContextTest.testProduceRequestV3WithHugeDeclaredTopicCountIsRejected`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testProduceRequestV3WithHugeDeclaredTopicCountIsRejected"
+    )]
+    fn test_produce_request_v3_with_huge_declared_topic_count_is_rejected() {
+        let version: i16 = 3; // ProduceRequestData.LOWEST_SUPPORTED_VERSION
+        let declared_topic_count: i32 = 89_999_978;
+
+        // Real ~90MB buffer, backed by declared_topic_count padding bytes, so the
+        // pre-existing count-vs-remaining-bytes guard alone would let this through and
+        // the new hard cap is what has to catch it.
+        let mut buffer = vec![0u8; 12 + declared_topic_count as usize];
+        buffer[0..2].copy_from_slice(&(-1i16).to_be_bytes()); // null transactionalId
+        buffer[2..4].copy_from_slice(&(-1i16).to_be_bytes()); // acks
+        buffer[4..8].copy_from_slice(&1i32.to_be_bytes()); // timeoutMs
+        buffer[8..12].copy_from_slice(&declared_topic_count.to_be_bytes()); // topic_data declared length
+
+        let mut accessor = ByteBufferAccessor::new(buffer);
+        let e = ProduceRequestData::read(&mut accessor, version).unwrap_err();
+        assert!(
+            e.to_string().contains("exceeds the maximum allowed size"),
+            "Expected a hard-cap rejection, but got: {e}"
+        );
+        assert_eq!(
+            "Tried to read a collection of size 89999978, which exceeds the maximum allowed size of 1000000.",
+            e.to_string()
+        );
+    }
+
+    /// Translated from Java `RequestContextTest.testKeyedCollectionAboveInitialCapacityStillParses`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testKeyedCollectionAboveInitialCapacityStillParses"
+    )]
+    fn test_keyed_collection_above_initial_capacity_still_parses() {
+        let version: i16 = 7; // non-flexible, name-based and no topicId
+        let count = 1010;
+        let buffer = serialize(version, &mut produce_data_with_topics(count));
+        let parsed = ProduceRequestData::read(&mut ByteBufferAccessor::new(buffer), version).unwrap();
+
+        assert_eq!(count, parsed.topic_data().len());
+    }
 
     #[test]
     fn test_produce_request_basic() {

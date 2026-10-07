@@ -24,6 +24,7 @@ use crate::common::Uuid;
 use crate::common::protocol::MessageUtil;
 use crate::common::protocol::types::RawTaggedField;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache};
+use crate::common::utils::internals::ByteUtils;
 
 // Re-export generated types
 use crate::AddOffsetsToTxnRequestData;
@@ -395,6 +396,73 @@ fn test_simple_message() {
     assert_ne!(message, duplicate);
 
     test_all_message_round_trips_from_version(2, &message);
+}
+
+/// Encodes a raw tagged-field section: the declared count, then `(tag, size)` pairs
+/// with no payload (Java `MessageTest.rawTaggedFieldsSection`).
+fn raw_tagged_fields_section(declared_count: u32, tags_and_sizes: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    ByteUtils::write_unsigned_varint(declared_count, &mut bytes).unwrap();
+    for pair in tags_and_sizes.chunks(2) {
+        ByteUtils::write_unsigned_varint(pair[0], &mut bytes).unwrap();
+        ByteUtils::write_unsigned_varint(pair[1], &mut bytes).unwrap();
+    }
+    bytes
+}
+
+/// Serializes an empty `SimpleExampleMessageData` and swaps its (empty) trailing
+/// tagged-field section for `tagged_fields_section` (Java
+/// `MessageTest.messageWithTaggedFieldsSection`).
+fn message_with_tagged_fields_section(version: i16, tagged_fields_section: &[u8]) -> ByteBufferAccessor {
+    let mut message = SimpleExampleMessageData::new();
+    let mut cache = ObjectSerializationCache::new();
+    let size = message.size(&mut cache, version).unwrap();
+    let mut prefix = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+    Message::write(&mut message, &mut prefix, &cache, version).unwrap();
+    let mut bytes = prefix.into_buffer();
+    assert_eq!(Some(0u8), bytes.pop(), "expected an empty tagged-fields section to replace");
+    bytes.extend_from_slice(tagged_fields_section);
+    ByteBufferAccessor::new(bytes)
+}
+
+#[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTaggedFieldCountRejectedWhenLargerThanRemainingBytes")]
+fn test_tagged_field_count_rejected_when_larger_than_remaining_bytes() {
+    let version: i16 = 1;
+    let mut buf = message_with_tagged_fields_section(version, &raw_tagged_fields_section(1_000_000, &[]));
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert!(
+        e.to_string().contains("tagged fields"),
+        "Expected a bounded-count rejection, but got: {e}"
+    );
+    // Rust-side pin of the exact text: the count is checked before the loop, against
+    // the bytes left after the count itself (none here).
+    assert_eq!(
+        "Tried to read 1000000 tagged fields, but there are only 0 bytes remaining.",
+        e.to_string()
+    );
+}
+
+#[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTaggedFieldCountRejectedWhenExceedingHardCap")]
+fn test_tagged_field_count_rejected_when_exceeding_hard_cap() {
+    let version: i16 = 1;
+    let declared_count = MessageUtil::MAX_TAGGED_FIELD_COUNT + 1;
+    let mut section = raw_tagged_fields_section(declared_count as u32, &[]);
+    // Padding so the remaining-bytes guard alone would let the count through.
+    section.resize(section.len() + declared_count as usize, 0);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert!(
+        e.to_string().contains("exceeds the maximum allowed count"),
+        "Expected a hard-cap rejection, but got: {e}"
+    );
+    assert_eq!(
+        "Tried to read 10001 tagged fields, which exceeds the maximum allowed count of 10000.",
+        e.to_string()
+    );
 }
 
 #[test]

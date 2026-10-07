@@ -38,6 +38,19 @@ impl MessageUtil {
     /// Maximum value of an unsigned 32-bit integer.
     pub const UNSIGNED_INT_MAX: u64 = 0xFFFF_FFFF;
 
+    /// Upper bound on the initial capacity a generated reader pre-allocates for
+    /// an array field. A larger declared count still parses: the collection
+    /// grows on demand as elements are read.
+    pub const MAX_PREALLOCATED_ARRAY_CAPACITY: i32 = 1000;
+
+    /// Largest array length a generated reader accepts; a larger declared
+    /// length is rejected before any element is read.
+    pub const MAX_ARRAY_LENGTH: i32 = 1_000_000;
+
+    /// Largest number of tagged fields a generated reader accepts in one
+    /// tagged-field section.
+    pub const MAX_TAGGED_FIELD_COUNT: i32 = 10_000;
+
     /// Compares two lists of raw tagged fields.
     ///
     /// An empty slice is considered equivalent to no tagged fields.

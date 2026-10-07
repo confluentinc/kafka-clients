@@ -2253,6 +2253,91 @@ fn generate_display_impl(file: &mut fs::File, struct_name: &str) -> Result<(), B
     Ok(())
 }
 
+/// Initial capacity of a generated reader's array: the declared `length`,
+/// capped at `MessageUtil::MAX_PREALLOCATED_ARRAY_CAPACITY` (Java
+/// `Math.min(arrayLength, MessageUtil.MAX_PREALLOCATED_ARRAY_CAPACITY)`,
+/// KAFKA 4.4 1a770734fe). A larger declared count still parses; the `Vec`
+/// grows on demand as elements are read.
+const PREALLOCATED_CAPACITY_EXPR: &str =
+    "std::cmp::min(length, crate::common::protocol::MessageUtil::MAX_PREALLOCATED_ARRAY_CAPACITY as u32) as usize";
+
+/// Emits the hard cap on a declared array length, which mirrors Java's
+/// `if (arrayLength > MessageUtil.MAX_ARRAY_LENGTH)` guard. It follows the
+/// remaining-bytes check, as in Java, so the error a reader returns for a
+/// length that fails both is the remaining-bytes one.
+fn write_array_length_cap_check(file: &mut fs::File, ind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(
+        file,
+        "{}if length > crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH as u32 {{",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read a collection of size {{}}, which exceeds the maximum allowed size of {{}}.\", length, crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    Ok(())
+}
+
+/// Emits the read of a tagged-field section's count with Java's three guards
+/// (`MessageDataGenerator.generateClassReader`, KAFKA 4.4 1a770734fe): a
+/// negative count, a count larger than the remaining bytes, and a count above
+/// `MessageUtil::MAX_TAGGED_FIELD_COUNT` are rejected before the loop.
+///
+/// Java reads the count with `readUnsignedVarint()` into an `int`, so a varint
+/// of 2^31 or more is negative there; the `as i32` reproduces that so the
+/// negative-count guard and its message match.
+fn write_tagged_field_count_read(file: &mut fs::File, ind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}let num_tagged_fields = readable.read_unsigned_varint()? as i32;", ind)?;
+    writeln!(file, "{}if num_tagged_fields < 0 {{", ind)?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Invalid negative number of tagged fields {{}}\", num_tagged_fields)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    writeln!(file, "{}if num_tagged_fields as usize > readable.remaining() {{", ind)?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read {{}} tagged fields, but there are only {{}} bytes remaining.\", num_tagged_fields, readable.remaining())));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    writeln!(
+        file,
+        "{}if num_tagged_fields > crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT {{",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read {{}} tagged fields, which exceeds the maximum allowed count of {{}}.\", num_tagged_fields, crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    Ok(())
+}
+
 fn generate_tagged_field_read(
     file: &mut fs::File,
     tagged_fields: &[&FieldSpec],
@@ -2261,11 +2346,7 @@ fn generate_tagged_field_read(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let indent = if indented { "    " } else { "" };
 
-    writeln!(
-        file,
-        "{}        let num_tagged_fields = readable.read_unsigned_varint()?;",
-        indent
-    )?;
+    write_tagged_field_count_read(file, &format!("{}        ", indent))?;
     writeln!(file, "{}        for _ in 0..num_tagged_fields {{", indent)?;
     writeln!(file, "{}            let tag = readable.read_unsigned_varint()?;", indent)?;
     writeln!(file, "{}            let size = readable.read_unsigned_varint()?;", indent)?;
@@ -2413,10 +2494,11 @@ fn generate_tagged_field_read(
                             indent
                         )?;
                         writeln!(file, "{}                        }}", indent)?;
+                        write_array_length_cap_check(file, &format!("{}                        ", indent))?;
                         writeln!(
                             file,
-                            "{}                        let mut _arr = Vec::with_capacity(length as usize);",
-                            indent
+                            "{}                        let mut _arr = Vec::with_capacity({});",
+                            indent, PREALLOCATED_CAPACITY_EXPR
                         )?;
                         writeln!(file, "{}                        for _ in 0..length {{", indent)?;
                     } else {
@@ -2440,10 +2522,11 @@ fn generate_tagged_field_read(
                             indent
                         )?;
                         writeln!(file, "{}                        }}", indent)?;
+                        write_array_length_cap_check(file, &format!("{}                        ", indent))?;
                         writeln!(
                             file,
-                            "{}                        result.{} = Vec::with_capacity(length as usize);",
-                            indent, field_name
+                            "{}                        result.{} = Vec::with_capacity({});",
+                            indent, field_name, PREALLOCATED_CAPACITY_EXPR
                         )?;
                         writeln!(file, "{}                        for _ in 0..length {{", indent)?;
                     }
@@ -3265,7 +3348,7 @@ fn generate_read_method(
         writeln!(file)?;
         if flexible_versions.lowest() == 0 {
             writeln!(file, "        // Read tagged fields (flexible version)")?;
-            writeln!(file, "        let num_tagged_fields = readable.read_unsigned_varint()?;")?;
+            write_tagged_field_count_read(file, "        ")?;
             writeln!(file, "        for _ in 0..num_tagged_fields {{")?;
             writeln!(file, "            let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "            let size = readable.read_unsigned_varint()?;")?;
@@ -3287,7 +3370,7 @@ fn generate_read_method(
                 )?;
             }
             writeln!(file, "            // Read tagged fields (flexible version)")?;
-            writeln!(file, "            let num_tagged_fields = readable.read_unsigned_varint()?;")?;
+            write_tagged_field_count_read(file, "            ")?;
             writeln!(file, "            for _ in 0..num_tagged_fields {{")?;
             writeln!(file, "                let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "                let size = readable.read_unsigned_varint()?;")?;
@@ -3886,15 +3969,24 @@ fn generate_array_read(
             ind
         )?;
         writeln!(file, "{}}}", ind)?;
+        write_array_length_cap_check(file, ind)?;
         if nullable {
-            writeln!(file, "{}let mut _arr = Vec::with_capacity(length as usize);", ind)?;
+            writeln!(
+                file,
+                "{}let mut _arr = Vec::with_capacity({});",
+                ind, PREALLOCATED_CAPACITY_EXPR
+            )?;
             // We need a temporary field_name for element reads
             writeln!(file, "{}for _ in 0..length {{", ind)?;
             generate_array_element_read_to_vec(file, element_type, "_arr", flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
             writeln!(file, "{}result.{} = Some(_arr);", ind, fn_name)?;
         } else {
-            writeln!(file, "{}result.{} = Vec::with_capacity(length as usize);", ind, fn_name)?;
+            writeln!(
+                file,
+                "{}result.{} = Vec::with_capacity({});",
+                ind, fn_name, PREALLOCATED_CAPACITY_EXPR
+            )?;
             writeln!(file, "{}for _ in 0..length {{", ind)?;
             generate_array_element_read(file, element_type, fn_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
@@ -5384,5 +5476,93 @@ mod tests {
                  "nullableVersions": "0+", "default": "null" }"#,
         );
         assert_eq!(get_default_value_for_field(&explicit), "None");
+    }
+
+    /// Generates the full source of one message spec, as `process_spec_file` does,
+    /// into a scratch file and returns it (Java `MessageDataGeneratorTest.generateMessageSource`).
+    fn emit_message(spec_json: &str, tag: &str) -> String {
+        let spec: MessageSpec = serde_json::from_str(spec_json).expect("valid message spec");
+        let path = std::env::temp_dir().join(format!("ckr-gen-msg-{}-{}.rs", std::process::id(), tag));
+        {
+            let mut file = fs::File::create(&path).expect("create scratch file");
+            generate_message_struct(&mut file, &spec).expect("generate");
+        }
+        let emitted = fs::read_to_string(&path).expect("read scratch file");
+        let _ = fs::remove_file(&path);
+        emitted
+    }
+
+    /// The Java `CapTest` spec: a primitive array plus a keyed struct array that holds
+    /// a nested keyed struct array, so all three array readers are emitted.
+    const CAP_TEST_SPEC: &str = r#"{
+      "type": "request", "name": "CapTest", "validVersions": "0-2", "flexibleVersions": "none",
+      "fields": [
+        { "name": "Foo", "type": "[]int32", "versions": "0+" },
+        { "name": "Bar", "type": "[]Baz", "versions": "1+", "fields": [
+          { "name": "Key", "type": "int32", "versions": "1+", "mapKey": true },
+          { "name": "Value", "type": "[]Bam", "versions": "2+", "fields": [
+            {"name": "NestedKey", "type": "string", "versions": "2+", "mapKey": true },
+            { "name": "NestedValue", "type": "string", "versions": "2+" }
+          ]}
+        ]}
+      ]
+    }"#;
+
+    /// The Rust generator emits keyed collections as a `Vec`, like plain arrays, so
+    /// Java's separate `ArrayList` / `BazCollection` / `BamCollection` assertions all
+    /// land on the one capped `Vec::with_capacity` form, once per array field.
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testArrayPreallocationIsCapped")]
+    fn test_array_preallocation_is_capped() {
+        let source = emit_message(CAP_TEST_SPEC, "prealloc");
+        let capped = format!("Vec::with_capacity({PREALLOCATED_CAPACITY_EXPR})");
+        assert_eq!(
+            3,
+            source.matches(&capped).count(),
+            "expected the capped pre-allocation for Foo, Bar and Value:\n{source}"
+        );
+        assert!(
+            !source.contains("Vec::with_capacity(length as usize)"),
+            "an uncapped pre-allocation is left:\n{source}"
+        );
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testArrayLengthIsCapped")]
+    fn test_array_length_is_capped() {
+        let source = emit_message(CAP_TEST_SPEC, "length");
+        let occurrences = source
+            .matches("if length > crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH as u32 {")
+            .count();
+        assert_eq!(
+            3, occurrences,
+            "Expected the cap check for all 3 array fields (Foo, Bar, Value), but found {occurrences}"
+        );
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testTaggedFieldCountIsBounded")]
+    fn test_tagged_field_count_is_bounded() {
+        let source = emit_message(
+            r#"{
+              "type": "request", "name": "TagBoundTest", "validVersions": "0-1", "flexibleVersions": "1+",
+              "fields": [
+                { "name": "Foo", "type": "int32", "versions": "1+", "taggedVersions": "1+", "tag": 0, "default": "0" }
+              ]
+            }"#,
+            "tagged",
+        );
+        for expected in [
+            "if num_tagged_fields < 0 {",
+            "if num_tagged_fields as usize > readable.remaining() {",
+            "\"Tried to read {} tagged fields, but there are only {} bytes remaining.\", num_tagged_fields, readable.remaining()",
+            "if num_tagged_fields > crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT {",
+            "\"Tried to read {} tagged fields, which exceeds the maximum allowed count of {}.\", num_tagged_fields, crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT",
+        ] {
+            assert!(
+                source.contains(expected),
+                "Expected string to contain '{expected}', but it was {source}"
+            );
+        }
     }
 }
