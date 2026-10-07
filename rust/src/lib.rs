@@ -46,7 +46,6 @@ mod kafka_client;
 mod least_loaded_node;
 #[expect(dead_code)]
 mod metadata;
-#[cfg_attr(not(test), expect(dead_code))]
 mod metadata_recovery_strategy;
 mod metadata_snapshot;
 mod metadata_updater;
