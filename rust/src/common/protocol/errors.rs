@@ -175,6 +175,25 @@ pub enum Errors {
     ControllerIdNotRegistered = 136,
 }
 
+/// Test-only view of the declared code range, standing in for Java's
+/// `Errors.values()` in every test that must walk all codes.
+#[cfg(test)]
+impl Errors {
+    /// The highest code Java's `Errors` declares (4.4: `CONTROLLER_ID_NOT_REGISTERED`).
+    ///
+    /// The single bound every full-code test walk uses (`-1..=MAX_CODE`).
+    /// `test_enum_name_matches_java_constant_for_every_code` pins it from both
+    /// sides: every code up to it is declared, and `MAX_CODE + 1` is not — so
+    /// adding a code without bumping this fails there instead of silently
+    /// shrinking the other walks.
+    pub(crate) const MAX_CODE: i16 = 136;
+
+    /// Every declared constant, in code order (`-1..=MAX_CODE`, contiguous).
+    pub(crate) fn all_for_test() -> Vec<Errors> {
+        (-1i16..=Self::MAX_CODE).map(Errors::for_code).collect()
+    }
+}
+
 impl Errors {
     /// The error code for this error.
     #[doc(alias = "org.apache.kafka.common.protocol.Errors#code")]
@@ -1576,7 +1595,7 @@ mod tests {
         assert_eq!(names.len(), JAVA_CONSTANT_NAMES.len(), "duplicate constant name in the table");
         let codes: HashSet<i16> = JAVA_CONSTANT_NAMES.iter().map(|(code, _)| *code).collect();
         assert_eq!(codes.len(), JAVA_CONSTANT_NAMES.len(), "duplicate code in the table");
-        for code in -1..=136i16 {
+        for code in -1..=Errors::MAX_CODE {
             assert_eq!(
                 Errors::for_code(code).code(),
                 code,
@@ -1587,7 +1606,7 @@ mod tests {
         // The table ends where the enum ends: a newly added code falls back to
         // `UnknownServerError`, which is the signal to extend both.
         assert_eq!(
-            Errors::for_code(137),
+            Errors::for_code(Errors::MAX_CODE + 1),
             Errors::UnknownServerError,
             "a new error code was added — add it to JAVA_CONSTANT_NAMES"
         );
@@ -2314,7 +2333,7 @@ mod tests {
         // Verify no duplicate codes exist by checking round-trip for all codes in range
         use std::collections::HashSet;
         let mut seen = HashSet::new();
-        for code in -1..=136 {
+        for code in -1..=Errors::MAX_CODE {
             let error = Errors::for_code(code);
             if error != Errors::UnknownServerError || code == -1 {
                 assert!(seen.insert(error.code()), "Duplicate code: {}", error.code());
@@ -2339,12 +2358,12 @@ mod tests {
     /// distinctness assertion is what keeps it that way if a constant is ever
     /// added out of range.
     fn all_codes() -> Vec<Errors> {
-        let codes: Vec<Errors> = (-1i16..=136).map(Errors::for_code).collect();
+        let codes = Errors::all_for_test();
         let distinct: HashSet<Errors> = codes.iter().copied().collect();
         assert_eq!(
             distinct.len(),
             codes.len(),
-            "for_code(-1..=136) must reach each constant exactly once, or every \
+            "for_code(-1..=MAX_CODE) must reach each constant exactly once, or every \
              ErrorsTest translation below passes vacuously"
         );
         assert_eq!(codes.len(), 138, "Errors declares 138 constants in Kafka 4.4");

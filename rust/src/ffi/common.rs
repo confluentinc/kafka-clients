@@ -2328,7 +2328,7 @@ mod tests {
     /// Java's lowest and highest `Errors` codes — the full range `Errors::for_code`
     /// resolves to a named constant.
     const FIRST_CODE: i16 = -1;
-    const LAST_CODE: i16 = 136;
+    const LAST_CODE: i16 = Errors::MAX_CODE;
 
     /// The 28 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.

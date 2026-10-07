@@ -1386,8 +1386,10 @@ mod tests {
     /// removed. We mirror that exactly: iterate every `Errors` variant and
     /// skip the ones with dedicated handling (the `Errors::None` happy path
     /// plus the metadata-refresh / OOR / auth / leader-epoch / server /
-    /// corrupt arms). This is the full set, not a 3-error sample, so adding
-    /// a new "other" error to the enum is automatically covered.
+    /// corrupt arms). This is the full set, not a 3-error sample: the walk is
+    /// bounded by `Errors::MAX_CODE`, the same bound the `errors.rs` walks use
+    /// and pin against the enum, so a new "other" error is covered as soon as
+    /// it is added there.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithOtherErrors")]
     fn test_fetch_with_other_errors() {
@@ -1414,15 +1416,13 @@ mod tests {
         // Rust's `Errors` has no `values()` array (adding one would be a
         // production change, out of scope for a test-parity phase), so we
         // enumerate the full set by walking every assigned error code via
-        // `Errors::for_code` and de-duplicating. Codes 0..=133 cover the
-        // current enum; unassigned codes fold into `UnknownServerError`
-        // (which is in `handled`, so they are skipped). This mirrors
-        // Java's `Errors.values()` minus the removed set.
-        let all_errors: std::collections::BTreeSet<i16> = (0i16..=133).collect();
+        // `Errors::for_code`. `Errors::all_for_test()` walks
+        // `-1..=Errors::MAX_CODE`, the bound `errors.rs` pins against the enum
+        // (every code up to it declared, the next one not), so it is exactly
+        // Java's `Errors.values()`; the removed set is skipped below.
         let mut seen: HashSet<Errors> = HashSet::new();
         let mut checked = 0usize;
-        for code in all_errors {
-            let error = Errors::for_code(code);
+        for error in Errors::all_for_test() {
             if !seen.insert(error) {
                 continue;
             }
