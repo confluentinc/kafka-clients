@@ -65,11 +65,13 @@ use crate::DescribeLogDirsRequestData;
 use crate::DescribeTopicPartitionsRequestData;
 use crate::DescribeUserScramCredentialsRequestData;
 use crate::DescribeUserScramCredentialsResponseData;
+use crate::HostResolver;
 use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
 use crate::MetadataRecoveryStrategy;
+use crate::MetadataUpdater;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -80,6 +82,7 @@ use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
+use crate::common::network::Selectable;
 use crate::common::network::Selector;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::Errors;
@@ -371,11 +374,46 @@ impl KafkaAdminClient {
         selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = Self::create_network_client(
+            &config,
             selector,
             metadata_manager.updater(),
             &client_id,
-            100, // max in-flight requests per connection (admin sends <= 1 per node)
+            api_versions,
+            DefaultHostResolver::new(),
+            log_context.clone(),
+        );
+        client.set_time(Arc::clone(&time));
+
+        crate::preview_warning::log_preview_warning(&log_context);
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
+        admin.spawn(runnable);
+        Ok(admin)
+    }
+
+    /// Builds the admin `NetworkClient` with the arguments
+    /// `KafkaAdminClient.createInternal` passes to `ClientUtils.createNetworkClient`
+    /// (`KafkaAdminClient.java:553-566`).
+    ///
+    /// `maxInFlightRequestsPerConnection` is `1` (`:561`). The admin loop sends at
+    /// most one call per node and checks `client.ready(..)` first, so the limit
+    /// does not change what is sent; it matters to `least_loaded_node` and
+    /// `ready`, which treat a node with an in-flight request as busy only when the
+    /// connection cannot take another one.
+    pub(crate) fn create_network_client<S: Selectable, H: HostResolver>(
+        config: &AdminClientConfig,
+        selector: S,
+        metadata_updater: Box<dyn MetadataUpdater>,
+        client_id: &str,
+        api_versions: Arc<ApiVersions>,
+        host_resolver: H,
+        log_context: LogContext,
+    ) -> NetworkClient<S, H> {
+        NetworkClient::with_metadata_updater(
+            selector,
+            metadata_updater,
+            client_id,
+            1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:561`)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
             USE_DEFAULT_BUFFER_SIZE,
@@ -385,16 +423,10 @@ impl KafkaAdminClient {
             config.socket_connection_setup_timeout_ms(),
             true, // discover_broker_versions
             api_versions,
-            DefaultHostResolver::new(),
+            host_resolver,
             MetadataRecoveryStrategy::None,
-            log_context.clone(),
-        );
-        client.set_time(Arc::clone(&time));
-
-        crate::preview_warning::log_preview_warning(&log_context);
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
-        admin.spawn(runnable);
-        Ok(admin)
+            log_context,
+        )
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.

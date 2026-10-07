@@ -2240,6 +2240,57 @@ mod tests {
         assert!(least_loaded_node.node().is_none(), "There should be NO leastloadednode");
     }
 
+    /// The admin client builds its `NetworkClient` with one in-flight request per
+    /// connection (`KafkaAdminClient.java:561`), so a connected node that already
+    /// has a request in flight cannot take another one and `leastLoadedNode`
+    /// prefers a node it can connect to (`NetworkClient.java` `leastLoadedNode`:
+    /// `canSendRequest` is false, `canConnect` is true). With a larger limit the
+    /// busy node would be returned as the "ready" candidate instead.
+    #[tokio::test]
+    async fn test_admin_least_loaded_node_skips_node_with_in_flight_request() {
+        let node0 = Node::new(0, "localhost".to_string(), 9092);
+        let node1 = Node::new(1, "localhost".to_string(), 9093);
+        let mut props = std::collections::HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let config = crate::admin::AdminClientConfig::new(&props).unwrap();
+        let mut client = crate::admin::KafkaAdminClient::create_network_client(
+            &config,
+            MockSelector::new(),
+            Box::new(TestMetadataUpdater::new(vec![node0.clone(), node1.clone()])),
+            "admin",
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            LogContext::empty(),
+        );
+        client.set_mock_time();
+        let now = 0_i64;
+
+        client.ready(&node0, now).await;
+        await_ready(&mut client, &node0).await;
+        client.poll(1, now).await;
+        assert!(client.is_ready(&node0, now), "node 0 should be ready");
+
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let request = client.new_client_request(node0.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        client.poll(1, now).await;
+        assert_eq!(1, client.in_flight_request_count_for_node(node0.id_string()));
+
+        // `leastLoadedNode` starts at a random offset; the choice must not depend on it.
+        for _ in 0..10 {
+            let least_loaded_node = client.least_loaded_node(now);
+            assert_eq!(
+                least_loaded_node.node().map(|n| n.id()),
+                Some(node1.id()),
+                "node 0 is busy, so the not-yet-connected node 1 is the least loaded"
+            );
+            assert!(
+                least_loaded_node.has_node_available_or_connection_ready(),
+                "node 0's connection is ready, so a node is available"
+            );
+        }
+    }
+
     /// Translated from `NetworkClientTest.testConnectionDelay`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelay")]
