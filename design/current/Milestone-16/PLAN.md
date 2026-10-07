@@ -1,0 +1,500 @@
+# Milestone 16 — Bring the Rust client up to Apache Kafka 4.4
+
+**Status:** DRAFT 2026-10-07 — awaiting user approval. Phases run through the Manager → Actor → Critic loop.
+
+**Branch:** `milestone-16-ak-4.4` (off `master`). If tracks run in parallel (§4), each track gets its own
+branch/worktree off the milestone branch and is merged back with a merge commit — never rebase + force-push.
+
+**Java source:** Apache Kafka **4.4.0-rc4** (`1156b2752a`, tagged 2026-10-06). `4.4.0-rc3..4.4.0-rc4` has
+**no** change under `clients/src/main`, so the repo's existing `AUDIENCE_REF` / `DEPRECATION_REFS`
+(`4.4.0-rc3`, `rust/xtask/src/java.rs`) stay valid. Phase 13 re-diffs against `4.4.0` final once it is tagged.
+
+**Agent numbers:** 90–103 (Phase N → agent 90+N). The highest number used so far is 86.
+
+## 1. What this milestone delivers
+
+It translates the 4.3.1 → 4.4 Java clients delta for every Java file that has a Rust counterpart. It also
+syncs `rust/generator/messages/` to the 4.4 specs, adds the new public API to the C and Python bindings,
+and moves the `kafka/` submodule and the docs' source-reference line to 4.4.
+
+**Measured delta** (`git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4`):
+
+- 848 unique commits overall. **190 touch `clients/src`** (168 touch main code). On the M13 metric
+  (`-- clients/src/main/java/org/apache/kafka/clients`) there are 116 commits, against 81 for 4.2.0 → 4.3.1.
+- **67 commits to port**: 54 behaviour/API/wire (P) and 13 test-only (T). One more, the trunk-only
+  KAFKA-20864, is added by decision D3.
+- The rest:
+  - **57 out of scope:** Streams 24, broker/server 14, Share 11, Classic 5, untranslated areas 3.
+  - **37 no-op for Rust.**
+  - **21 doc/log-only.**
+  - **6 reverted inside the range:** KAFKA-20385/20684 RebalanceListener (it returns in 4.5), and 2PC.
+  - **2 already ported in M13**, because they were backported to 4.3.1 under different hashes:
+    KAFKA-20426 `44bafc60e7` and KAFKA-20428 `4b9eddc132`.
+- `rust/generator/messages/` currently matches 4.3.1 **exactly**: 18 spec files differ from 4.4, 5 of them new.
+
+The per-commit classification table is §6. Phase 13 completes it into the formal audit.
+
+### 1.1 Scope decisions
+
+- **Skip untranslated areas**, as M13 did: Share (KIP-932), Streams-protocol consumer internals and Streams
+  admin (`describeStreamsGroups` topology description), the Classic consumer, broker/server code
+  (authorizer, quota callback, policy, OAuth broker validator, `FileRecords`), the Raft-voter admin API
+  (`RaftVoterEndpoint`), `ListDeserializer`, config providers (`AllowedPaths`), `TopicConfig` constants, and
+  telemetry.
+- **Include KIP-1332 incremental buffer allocation** (KAFKA-20578), user-confirmed 2026-10-07, with the type
+  mapping in §2.3.
+- **The KIP-1265 `@InterfaceAudience` annotations are already applied** (`AUDIENCE_REF = 4.4.0-rc3`). This
+  milestone adds no audience work beyond keeping the lint green for the new public types.
+- **The CLAUDE.md "Source Reference" line edit (4.3.1 → 4.4.0) is human-approved through this plan**, as in
+  M13. Only that line changes. Any other CLAUDE.md or rules change goes through the suggestion process
+  (drafts go in `design/current/Milestone-16/rules-errata.md`).
+
+### 1.2 Method: per-subsystem tree diff, with the commit list as a checklist
+
+As in M13, Actors translate from the tree diff (`git -C kafka diff 4.3.1 4.4.0-rc4 -- <files>`), not by
+replaying commits one by one. Each phase lists its KAFKA-ids so the Actor has the rationale and the Critic
+can audit completeness. Every Java hunk in a phase's files is either applied or recorded as a skip with a
+reason in that phase's completion notes.
+
+### 1.3 Open decisions (defaults used by this plan unless the user overrides)
+
+| # | Decision | Default |
+|---|---|---|
+| D1 | Target | Start on **4.4.0-rc4** now; Phase 13 re-diffs and bumps refs to **4.4.0 final**. |
+| D2 | Java's `common.utils` → `common.utils.internals` package moves (KAFKA-20297) | **Mirror them** (M13 precedent: `record` → `record::internal`). In Rust this affects only `byte_utils`, `exponential_backoff`, `log_context`, `producer_id_and_epoch`. |
+| D3 | KAFKA-20864 (trunk-only fix to the 4.4 incremental-allocation code: closing the wrong batch on extension failure, unbounded retries) | **Include it** as a recorded deviation ahead of 4.4. Otherwise the 4.4 bug would be ported faithfully. |
+| D4 | Representing `UnsupportedProtocolFieldException` (crate-private, `extends UnsupportedVersionException`) | Model it as a crate-private kind on the existing `UnsupportedVersion` variant, so the public `Error` surface still matches Java's public view (§2.4). |
+
+## 2. Key findings that shape the phases
+
+### 2.1 KIP-909 (async bootstrap DNS) is the riskiest change
+
+KAFKA-14648 with its follow-ups (KAFKA-20939, the KIP-909 follow-ups) adds:
+- `bootstrap.resolve.timeout.ms` and `BootstrapConfiguration`;
+- `BootstrapResolutionException`;
+- lazy bootstrap in `NetworkClient` / `MetadataUpdater` (`bootstrap`, `isBootstrapped`, `bootstrapFailed`);
+- `Metadata.bootstrapFatalError` / `maybeThrowBootstrapFatalException`;
+- `AdminMetadataManager` changes, and the removal of `AdminBootstrapAddresses`.
+
+Java needed three follow-up fixes for consumer busy loops it caused (KAFKA-20854/21010/20970).
+
+- **Default:** `0` keeps today's synchronous resolve-at-construction behaviour. A positive value switches
+  to asynchronous resolution, and the setting is marked experimental.
+- **Rust specifics:** `ClientUtils::resolve` is already `async`. The new risk is Rust-only: async resolution
+  must never sit inside a `select!` arm (CLAUDE.md §11.6, consumer-threading §10). The consumer busy-loop
+  fixes must be checked against the Rust `maximum_time_to_wait` / poll-timer logic, not just transcribed.
+
+### 2.2 TxnOffsetCommit v6 must not go live before the producer can fill it
+
+KIP-1319 v6 swaps topic **names** for topic **IDs** in TxnOffsetCommit. If the v6 spec were synced in
+Phase 0 while the builder still populated names, the client would negotiate v6 and send requests without
+topic IDs.
+
+**Rule:** Phase 0 syncs every spec **except** `TxnOffsetCommitRequest.json` / `TxnOffsetCommitResponse.json`.
+Those are synced in Phase 5, together with the builder and `TransactionManager` changes. The builder's
+`latest_allowed_version` follows Java's `super(...)` call (producer-transactions.md §12).
+
+`DeleteGroups` v3, `ApiVersions` v5 and `DescribeProducers` (`mapKey`) are safe to sync in Phase 0: their
+new fields are ignorable, or default to null/-1.
+
+### 2.3 KIP-1332: how Java's subclasses map to Rust
+
+Java adds `ChunkedRecordAccumulator extends RecordAccumulator` and `ChunkedProducerBatch extends ProducerBatch`.
+Rust has no inheritance, so each is mapped separately:
+
+- **`ChunkedRecordAccumulator`: a real struct, by composition.** This follows the existing precedent
+  `ConsumerHeartbeatRequestManager { inner: AbstractHeartbeatRequestManager }`.
+  - The struct is `ChunkedRecordAccumulator { base: Arc<RecordAccumulator>, .. }` in
+    `chunked_record_accumulator.rs`, with its own `append` / `try_append`.
+  - `Sender` keeps `Arc<RecordAccumulator>` and does not change. Its accumulator calls (`ready`, `drain`,
+    expiry, `reenqueue`, `deallocate`) are all inherited unchanged in Java. In production, `append` is
+    called only from `kafka_producer.rs` (around `:1861`), and that one site dispatches on the strategy.
+  - Java's virtual `tryAppend` / `createProducerBatch` inside the base `appendNewBatch` become parameters
+    of the base `append_new_batch`.
+- **`ChunkedProducerBatch`: folded into `ProducerBatch` (a justified deviation, recorded per DoD #7).**
+  - One partition deque holds both kinds of batch: split batches stay plain even in incremental mode.
+  - `ProducerBatch` is not `Clone` and moves by value between the accumulator, `Sender` and
+    `TransactionManager` (producer-transactions.md §7).
+  - So `ProducerBatch` carries a single-or-chunked buffer. The Java methods live in
+    `chunked_producer_batch.rs` as an `impl ProducerBatch` block, and `instanceof ChunkedProducerBatch`
+    becomes `batch.is_chunked()`.
+- **The builder's buffer abstraction** (a single `Vec<u8>` or a `ChunkedByteBufferOutputStream`) is the one
+  new Rust type. It matches Java 4.5's abstract `ByteBufferOutputStream` / `SingleByteBufferOutputStream`
+  (KAFKA-20807), so the shape is already right for the next bump.
+- **Flatten copy:** the Rust builder already copies once at close (`take_batch_data`, a documented §14
+  deviation). The chunked path makes that same single copy, so it is no regression. Do **not** send
+  straight from the chunks with `IoSlice` yet: that is Java's future KAFKA-20580, and doing it now would
+  change when chunks can be returned to the pool.
+- **Rust-only hazards:**
+  - A chunk `Vec` must never grow. Java's fixed-capacity `ByteBuffer` throws on overflow, whereas a Rust
+    `Vec` would silently break the memory accounting.
+  - A cancelled `append` future must refund new-batch and extension chunks (extend `AppendGuard`).
+  - `reopen_and_rewrite_producer_state` must rewrite the header of the flattened buffer.
+- **Draft a rules note** (in `rules-errata.md`, applied by a human) recording the batch fold, so Critics
+  don't flag the missing type.
+
+### 2.4 `UnsupportedVersionException` gains a subclass
+
+KAFKA-18157 adds `common.internals.UnsupportedProtocolFieldException extends UnsupportedVersionException`.
+About 15 request builders throw it, and `ConsumerHeartbeatRequestManager` tells it apart from its parent.
+
+- The class is not public. Under D4 the public `Error` keeps one `UnsupportedVersion` variant, with a
+  crate-private kind that the heartbeat manager checks.
+- The Phase 1 Critic must confirm whether CLAUDE.md §12.4 then requires an `is_unsupported_version_error()`
+  predicate (plus a test in both directions and the C FFI twin). If the hidden-kind design is rejected,
+  the predicate becomes mandatory.
+
+### 2.5 New public API → bindings
+
+| Item | Rust | C FFI | Python |
+|---|---|---|---|
+| `Admin.unregisterController(int[, options])` + `UnregisterControllerOptions/Result` | `admin` | sync + async | `admin.py` sync + asyncio |
+| `MockConsumer.losePartitions` | `consumer::MockConsumer` | `kafka_consumer_MockConsumer_lose_partitions` | `consumer.py` mock |
+| Errors 134 `GROUP_DELETION_FAILED`, 135 `STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED`, 136 `CONTROLLER_ID_NOT_REGISTERED`; `BootstrapResolutionException` (non-wire) | `common::errors` | error code / predicates as applicable | `_error_code.py` |
+| Configs: `bootstrap.resolve.timeout.ms`, `metadata.cluster.check.enable`, `partitioner.rack.aware`, producer `client.rack`, internal `buffer.memory.allocation.strategy` | config structs | pass-through | pass-through |
+
+Each binding change lands in the phase that adds the Rust API.
+
+The configs must be wired end to end, not just parsed (see the 2026-09-30 config audit,
+`design/current/config-audit-master-7ac1391b.md`: silently ignored configs were the main finding class).
+
+## 3. Phases
+
+Every phase works the same way:
+- The Actor (agent 90+N) implements and commits step by step.
+- The Critic (agent 90+N) reviews into `COMMENTS.9N.md` (`COMMENTS.10N.md` for N ≥ 10).
+- The Actor fixes, moves the items to `COMMENTS.DONE.*`, and the loop repeats until the review is clean.
+- Gates for every phase: `cargo build`, `cargo test`, `cargo xtask format-check`, `cargo xtask lint`; then
+  `make verify` before the phase closes.
+
+### Phase 0 — Reference bump, spec corpus, errors, bookkeeping (agent 90)
+
+- Move the `kafka/` submodule to `4.4.0-rc4` (`1156b2752a`) and commit the gitlink.
+- Sync `rust/generator/messages/` from `kafka/clients/src/main/resources/common/message/`: 16 of the 18
+  changed files, holding back the TxnOffsetCommit pair (§2.2).
+  - New: `UnregisterController{Request,Response}`, `StreamsGroupTopologyDescriptionUpdate{Request,Response}`,
+    `AbortedTxn`.
+  - Modified: `ApiVersions` v5, `DeleteGroups` v3, `DescribeProducersRequest` `mapKey`,
+    `ConsumerGroupHeartbeatResponse`, `ShareGroupHeartbeatResponse`, and the Streams specs.
+  - Regenerate, then fix compile fallout. Expected: `DescribeProducersHandler` (keyed collection) and the
+    `ApiKeys` / `ConcreteRequest` / `ConcreteResponse` match arms for the two new APIs (admin-client.md §7).
+    Only UnregisterController gets a real wrapper, in Phase 12. StreamsGroupTopologyDescriptionUpdate gets
+    only whatever minimal wiring the existing Streams APIs have, and that has to be checked.
+- `Errors`:
+  - add codes 134–136 and the three error types (`GroupDeletionFailedError`,
+    `StreamsTopologyDescriptionUpdateFailedError`, `ControllerIdNotRegisteredError`);
+  - add `BootstrapResolutionError` (non-wire, needed by Phase 2);
+  - change the `FENCED_STATE_EPOCH` message text (8ba75d04cb);
+  - update `python/_error_code.py` and any C-side code list.
+  - The full-error-code hierarchy tests (`test_retriable_errors_match_java_hierarchy` and its siblings)
+    must cover the new codes.
+- Update `README.md` and the `CLAUDE.md:93` source line "(Apache Kafka 4.3.1)" → "(Apache Kafka 4.4.0)".
+- Rules errata survey: re-check the Java `file:line` citations in `.claude/rules/*.md` against 4.4, chiefly
+  `producer-transactions.md` (TransactionManager moves under KIP-1319) and `consumer-threading.md`. Write
+  the list to `design/current/Milestone-16/rules-errata.md`.
+- Commits covered: 7997c9ebe0 (spec + errors portion only; the Streams RPC itself is out of scope),
+  c274a7348f (spec + error portion), 8ba75d04cb, 04c3c00f25, 89ccd6a126 / 6be48c6e54 / 70dfc4236c
+  (spec-only syncs).
+
+### Phase 1 — Common and wire foundations (agent 91)
+
+- **D2 module moves:** `common::utils::{byte_utils, exponential_backoff, log_context, producer_id_and_epoch}`
+  → `common::utils::internals`, crate-private, with the Java package docs carried over. Fix imports across
+  the crate. This goes first because it renames imports everywhere.
+- **Generated-reader hardening** (f66a67fcef, 1a770734fe):
+  - `MessageUtil` array-length limits, plus bounded array and tagged-field allocation in generated readers
+    (`rust/generator/src/lib.rs`, `common/protocol/message_util.rs`, schema `ArrayOf` / `CompactArrayOf` if
+    a counterpart exists).
+  - Tests: `MessageTest` / `SimpleArraysMessageTest` additions, `SimpleKeyedArraysMessage.json`
+    (dedicated per-message test file — DoD #3), `RequestHeaderTest`, `RequestContextTest`,
+    `ProtocolSerializationTest`.
+- **KAFKA-18157** (239a3e4990): `UnsupportedProtocolField` per D4 / §2.4, the ~15 request builders, and
+  the `ConsumerHeartbeatRequestManager` branch. Tests: `NetworkClientTest` and
+  `ConsumerHeartbeatRequestManagerTest` hunks, with exact error messages asserted.
+- **KAFKA-20828** (63f445aaa9): `AbstractResponse` throttle time is derived from the response schema;
+  remove the per-response overrides in the Rust wrappers that have counterparts. Test: `RequestResponseTest`
+  (+55).
+- **KAFKA-20072** (474798afbe): `Uuid::random` must never produce an ID that starts with `-` (or contains
+  hyphens, per the Java change). Test: `UuidTest`.
+- `KafkaMetric` `Display` (46ad599a6e) + `KafkaMetricTest`; `ByteUtilsTest` split (8b6d31f00c).
+- Hot-path note (DoD #10): the reader bounds sit on the receive / response path; confirm there is no new
+  per-record allocation.
+
+### Phase 2 — KIP-909 core: bootstrap DNS resolution (agent 92)
+
+- Translate in tree-diff order:
+  - `BootstrapConfiguration` (new);
+  - `ClientUtils` (`bootstrapConfiguration`, `maybeBootstrapMetadataSynchronously`, `parseAddresses`);
+  - `CommonClientConfigs` `BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG` (default 0, experimental doc);
+  - `MetadataUpdater` defaults (`bootstrap`, `isBootstrapped`, `bootstrapFailed`, `clusterId`);
+  - `NetworkClient` (+216) and `Metadata` (`bootstrapFatalError`, `maybeThrowBootstrapFatalException`);
+  - `AdminMetadataManager` (+42), `KafkaAdminClient` (+90/−6), `AdminClientConfig`;
+  - `KafkaProducer` / `ProducerConfig` construction;
+  - consumer construction and config wiring (`ConsumerConfig`, `KafkaConsumer`, `AsyncKafkaConsumer`,
+    `NetworkClientDelegate`, `ConsumerUtils`).
+  - Java deletes `AdminBootstrapAddresses`; confirm Rust has no counterpart to delete.
+- KAFKA-20939 (0df48ff5c5, 87943b2ff8): a DNS-failure regression fix and the "experimental" marking.
+- MINOR 0720ba1141: port validation, dead code.
+- Tests: `NetworkClientTest`, `KafkaAdminClientTest`, `KafkaProducerTest`, `KafkaConsumerTest` (non-share,
+  non-classic slices), `ClientUtilsTest`, `MetadataTest` hunks. The behaviour of both modes (0 and
+  positive) is the contract.
+- Integration: a test with an unresolvable bootstrap host under a positive timeout, asserting the
+  `BootstrapResolutionError` message.
+- Commits covered: 507d01da42 (minus its Share/Classic files), 0df48ff5c5, 87943b2ff8, 0720ba1141.
+  Recorded skip: d1c0bd82c0 (ShareConsumerImpl only).
+
+### Phase 3 — KIP-909 consumer follow-ups (agent 93)
+
+- KAFKA-20854 (642e0a5db0): `AbstractFetch` (+61), `FetchRequestManager`, `Fetcher` (classic → skip),
+  `RequestManagers`, `SubscriptionState`, `AsyncKafkaConsumer`.
+- KAFKA-21010 (d12e95da90): `AbstractHeartbeatRequestManager`, `HeartbeatRequestState`,
+  `CommitRequestManager`.
+- KAFKA-20970 (cd44c5de0f): `CommitRequestManager`.
+- Tests: `FetchRequestManagerTest` (+158), `ConsumerHeartbeatRequestManagerTest` (+121),
+  `CommitRequestManagerTest` (+95), `AbstractHeartbeatRequestManagerTest`. Skip the Share / Streams test
+  hunks with reasons.
+- Busy-loop fixes must be shown not to spin in Rust: assert poll-timer / `maximum_time_to_wait` values;
+  don't rely on wall-clock behaviour alone.
+
+### Phase 4 — KIP-1242 misrouted-connection detection + NetworkClient fixes (agent 94)
+
+- ede01b871e: the `metadata.cluster.check.enable` config in `CommonClientConfigs` and the
+  producer / consumer / admin configs.
+- 0ef4a4c80e:
+  - ApiVersions v5 carries the `ClusterId` / `NodeId` the client expects (`ApiVersionsRequest` setters).
+  - `NetworkClient` (+58): send them, and handle a mismatch or `REBOOTSTRAP_REQUIRED` by disconnecting
+    and rebootstrapping.
+  - `MetadataUpdater.clusterId`.
+- 7be741d08b: a new `GroupCoordinatorNode` (`consumer::internals`) so coordinator connections carry the
+  real broker id; `Node` changes; `CoordinatorRequestManager`. Skip `AbstractCoordinator` (classic).
+- KAFKA-20393 (123ee9e45d): the `stickyNode` stale-IP fix in `NetworkClient`.
+- Tests: `NetworkClientTest` (+164 across commits), `GroupCoordinatorNodeTest` (+54),
+  `CoordinatorRequestManagerTest`, `KafkaAdminClientTest` / `KafkaConsumerTest` hunks. Byte-level
+  ApiVersions v5 encoding test (DoD #3).
+- Runs after Phase 2 (both edit `NetworkClient`).
+
+### Phase 5 — Producer: KIP-1319 TxnOffsetCommit v6 with topic IDs (agent 95)
+
+- Sync the held-back `TxnOffsetCommit{Request,Response}.json` (§2.2): v6, `GenerationIdOrMemberEpoch`
+  rename, `TopicId`, stable.
+- `TxnOffsetCommitRequest`:
+  - reshaped Builder: `forTopicNames` / `forTopicIdsOrNames` (7340eefc48, 2342c80dca);
+  - `supportsGroupIdNotFoundError` / `supportsStaleMemberEpochError` (723847904b);
+  - `getTopics`.
+- `TxnOffsetCommitResponse`:
+  - reshaped Builder and `newBuilder(useTopicIds)` (20c2450e5b, baa064e422);
+  - `useTopicIds`;
+  - topic-level structure preserved (89f3888c87);
+  - 319dd61cb3's client-side hunk.
+- `TransactionManager`:
+  - topic IDs wired through (83976543fe);
+  - `GROUP_ID_NOT_FOUND` / `STALE_MEMBER_EPOCH` handling (7f5861817d);
+  - v6 marked stable (b9945c8e84).
+  - Every new call site must keep the explicit `Caller` (producer-transactions.md §1).
+- `KafkaProducer` + `ProducerMetadata`: refresh metadata before TxnOffsetCommit, so topic IDs are known
+  (6208dfc014). The await must not hold a `TransactionManager` guard (§4).
+- Deterministic topic order before encoding (producer-transactions.md §10).
+- Tests: `TxnOffsetCommitRequestTest` / `TxnOffsetCommitResponseTest`, the `RequestResponseTest` hunks,
+  `TransactionManagerTest` (+157), `KafkaProducerTest` (+160, incl. the 930ebc5608 deflake), `SenderTest`,
+  `MessageTest`. Byte-level v6 encoding test.
+
+### Phase 6 — Producer: rack-aware partitioning (agent 96)
+
+- KAFKA-19193 (a3f17327de, 88b48794ea, 165d7ec933, fc18c47efd docs):
+  - `partitioner.rack.aware`, and producer `client.rack` in `ProducerConfig`;
+  - `BuiltInPartitioner` (+98) with rack-local load stats and trace logging;
+  - `RecordAccumulator` `partitionerRackAware` / `rack` and `ConfigException` on an empty rack;
+  - `KafkaProducer` wiring.
+- Tests: `BuiltInPartitionerTest` (+228), and the `RecordAccumulatorTest` / `SenderTest` hunks.
+- DoD #10 applies: the partitioner is on the send path.
+- Runs before Phases 7–8 (they also edit `RecordAccumulator`).
+
+### Phase 7 — Producer: KIP-1332 part A — chunked pool, stream, builder (agent 97)
+
+- `BufferPool`:
+  - `AllocationMode { Full, Incremental }`;
+  - `allocate_chunks` (async, FIFO single-waiter fairness, refund on timeout / close / error);
+  - the extraction of `await_memory`, `signal_next_waiter_if_memory_available`, `release_reserved_bytes`
+    and `record_buffer_exhausted`;
+  - the mode guards on `allocate` / `allocate_chunks`;
+  - the non-blocking (0 ms) path used by extension.
+- `ChunkedByteBufferOutputStream` (new file): `io::Write` across fixed 16 KiB chunks that **never grow**,
+  `position()` / `set_position`, `add_buffers`, release of unused chunks on close, flatten on `buffer()`.
+- `MemoryRecordsBuilder`: the single/chunked buffer type (§2.3), `estimated_bytes_written_after`, and
+  `buffer_stream()`. The reopen/rewrite path must work with the flattened buffer.
+- Tests: `BufferPoolChunkAllocationTest` (+402), `ChunkedByteBufferOutputStreamTest` (+312). Rust-only
+  tests: a cancelled `allocate_chunks` neither leaks waiters nor memory; no chunk grows past its capacity.
+- DoD #10: re-run the hot-path allocation test, and do a throughput A/B on the default `full` path to show
+  no regression.
+
+### Phase 8 — Producer: KIP-1332 part B — accumulator, batch, producer wiring (agent 98)
+
+- `RecordAccumulator` refactor (+164/−64): `topic_info_for`, `partition_changed`, `set_partition`,
+  `update_partition_info_on_append`, `append_new_batch` taking the try-append / create-batch steps,
+  `RecordAppendResult::needs_extension`, and batch-level deallocate hooks.
+- `ChunkedRecordAccumulator` (new file, composition per §2.3):
+  - `append` with the extension path and the new-batch path;
+  - a shared `max.block.ms` budget;
+  - refund of chunks when the partition changes;
+  - the `AppendGuard` extended to new-batch and extension chunks.
+- `ProducerBatch` + `chunked_producer_batch.rs`: `extension_bytes_needed`, `add_buffers`, chunk-aware
+  `deallocate_buffer` / `deallocate_inflight_buffer`, `is_chunked`. Remove `is_writable` if Rust has it.
+- `ProducerConfig` `buffer.memory.allocation.strategy` (internal, default `full`, case-insensitive), plus
+  `KafkaProducer` wiring:
+  - fall back with a warning when `batch.size` < 16 KiB;
+  - `ConfigException` when compression ≠ none.
+- **D3:** KAFKA-20864 (`cc6d42206f`, trunk): close the batch only if it is the one being extended; bound
+  retries by the remaining `max.block.ms`. This also covers its `RecordAccumulatorTest` (+51) and
+  `ChunkedRecordAccumulatorTest` (+567) additions. Record it as ahead-of-4.4.
+- Tests: `ChunkedRecordAccumulatorTest` (+716, plus the D3 additions), `ProducerConfigTest` (+35), and the
+  `KafkaProducerTest` / `RecordAccumulatorTest` hunks. Integration: rerun the producer send integration
+  tests with `buffer.memory.allocation.strategy=incremental`
+  (`IncrementalAllocationProducerSendTest` / `BaseProducerSendTest` analog).
+- Deliverable: draft the `ProducerBatch`-fold rules note into `rules-errata.md` (§2.3).
+- DoD #10 applies.
+
+### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
+
+- KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
+  `CommitRequestManager` and `CoordinatorRequestManager`.
+- KAFKA-20761 (56410c311b): log the group configs defined on the broker.
+- b8429b93a7: no-op call removed.
+- KAFKA-20681 (6a6b536fbc): heartbeat-success handling consolidated into `AbstractMembershipManager`
+  (consumer half only).
+- KAFKA-20145 (e320142b7c): no redundant partial heartbeat acks from network-thread reconcile.
+- KAFKA-20765 (fe88647935): OffsetFetch stale-epoch retry spinning.
+- Test consolidation e7b0cb7908 (`AbstractHeartbeatRequestManagerTest` +330): mirror it if Rust keeps
+  separate files, otherwise record how it maps.
+- Tests: `ConsumerHeartbeatRequestManagerTest`, `AbstractHeartbeatRequestManagerTest`,
+  `ConsumerMembershipManagerTest` (+44), `CommitRequestManagerTest` (+60), `CoordinatorRequestManagerTest`.
+- Check every change against the consumer-threading §31 reconcile / ack machinery (Phase 41 design).
+
+### Phase 10 — Consumer: fetch, offsets, poll, MockConsumer (agent 100)
+
+- KAFKA-20187 (65ffe10e3b): the `endOffsetRequested` flag in `OffsetsRequestManager` (+83) and
+  `ApplicationEventProcessor` (−33).
+- KAFKA-20312 (d0e0ec478c): a null leader during regroup, in `OffsetFetcherUtils` and
+  `OffsetsRequestManager`.
+- KAFKA-20780 (20e952c783): clear a completed in-flight poll on an empty fetch.
+- KAFKA-15529 (5d03ccff57): the `isConsumed` / position race in `CompletedFetch` / `FetchCollector`.
+- KAFKA-18812 (8c0ca4ae35): API errors after a background task failure, in `ApplicationEventHandler` and
+  `ConsumerNetworkThread`.
+- KAFKA-20570 (f7dbf0bf3b): `ConsumerProtocol` deserialization errors become `SchemaError` / `KafkaError`.
+- KAFKA-20575 (2768948823): `MockConsumer::lose_partitions` (public), plus the FFI
+  `kafka_consumer_MockConsumer_lose_partitions` and the Python mock binding.
+- Test-only commits:
+  - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
+    hunks);
+  - 36aab4fddd and 40e9fcd742 (pause/re-assign and unsubscribe-no-autocommit tests, plus rustdoc);
+  - 0fd8327920 (single in-flight poll event).
+- Tests: `OffsetsRequestManagerTest` (+60), `FetchCollectorTest` (+32), `ConsumerProtocolTest` (+85, unit
+  tests in `consumer_protocol.rs` per the consumer-threading §20 carve-out), `MockConsumerTest` (+105),
+  `ApplicationEventHandlerTest`, `ConsumerNetworkThreadTest`, and the `AsyncKafkaConsumerTest` /
+  `KafkaConsumerTest` / `FetchRequestManagerTest` hunks.
+- DoD #10 applies (`CompletedFetch` / `FetchCollector` are on the per-record receive path; §27).
+
+### Phase 11 — Consumer metrics: sensor lifecycle (agent 101)
+
+- KAFKA-19542 (9a28bd23ad):
+  - `MetricsLedger` (new);
+  - `AbstractConsumerMetricsManager` (new);
+  - `SensorBuilder` moved to the `consumer.internals.metrics` package (mirror it if the Rust layout
+    mirrors that package);
+  - every metrics manager removes its sensors on close;
+  - `AsyncKafkaConsumer` / `FetchMetricsManager` wiring.
+- KAFKA-20750 (02c0ce9707): divide-by-zero guard in `KafkaConsumerMetrics`.
+- c39e2af92c (`ConsumerMetrics` wrapper removed): record N/A if Rust never had it; apply the
+  `FetchMetricsRegistry` hunk.
+- Tests: the metrics-manager tests, a `KafkaConsumerTest` close-removes-all-sensors assertion, and the
+  divide-by-zero test.
+
+### Phase 12 — Admin (agent 102)
+
+- KAFKA-20395 (c274a7348f): `unregister_controller` / `unregister_controller_with_options`
+  (admin-client.md §1 shape), `UnregisterControllerOptions/Result`, the
+  `UnregisterControllerRequest/Response` wrappers with byte-level tests, the `MockAdminClient` behaviour
+  per Java's mock, and C FFI sync + async plus Python `admin.py` sync + asyncio.
+- 58f63f448e: complete the `nodeApiVersions` future when `describeFeatures` fails.
+- KAFKA-19663 (3b849ff2bd): `InternalDescribeFeaturesResult` (crate-private) and the
+  `DescribeFeaturesResult` delta.
+- KAFKA-20673 follow-up (cb2f143b0d): skip the stale-leader lookup retry while closing.
+- Tests: the `KafkaAdminClientTest` slices (Java split it into per-domain classes in 1a443b2d23; map them
+  to the Rust test layout), `RequestResponseTest` hunks, and FFI / Python tests.
+- Can run as soon as Phase 2 lands (both edit `KafkaAdminClient`).
+
+### Phase 13 — Close-out (agent 103)
+
+- **D1:** if `4.4.0` final is tagged, re-diff `4.4.0-rc4..4.4.0` across clients and specs. Port any delta,
+  then bump the submodule, `AUDIENCE_REF`, `DEPRECATION_REFS` and the refreshed audience/deprecation lists
+  (`cargo xtask fetch-java-refs`).
+- Rustdoc sync for the 21 doc-only commits that touch translated types. The largest is 67850b0b68
+  (+427 consumer javadoc); also 6ce2682d7b `auto.offset.reset` / `by_duration`, and 05185c1ef8 return
+  semantics.
+- **Completeness audit:** a table of every commit in §6 mapped to its phase or skip reason, appended here.
+- `make verify` (macOS caveats: PIP_INDEX_URL override, Docker arms are Linux-CI-only), and updates to
+  `MILESTONES.md` and `design/current/status.md`.
+- Hand the drafted `rules-errata.md` amendments to the user.
+
+## 4. Ordering and parallelism
+
+```
+0 → 1 ─┬─ network/consumer:  2 → 3 → 4 → 9 → 10 → 11
+       ├─ producer:          5 → 6 → 7 → 8
+       └─ admin:             (after 2) 12
+                                          → 13
+```
+
+- **Phase 1 goes first:** its module moves rename imports crate-wide.
+- **Network/consumer track (2 → 3 → 4 → 9 → 10 → 11):** this is the critical path. Phase 2 precedes 3 and
+  4 because all three edit `NetworkClient` and the request managers. Phases 9 → 10 → 11 run in that order
+  because they share `AbstractHeartbeatRequestManager`, `AsyncKafkaConsumer` and the metrics managers.
+- **Producer track (5 → 6 → 7 → 8):** independent of the network work, apart from a small `KafkaProducer`
+  constructor overlap with Phase 2, which resolves at merge time.
+- **Admin (12):** needs only Phase 2.
+- **Run in parallel**, the critical path is 0 → 1 → 2 → 3 → 4 → 9 → 10 → 11 → 13: nine loops instead of
+  fourteen. Each track uses its own worktree (beware the macOS `/tmp` reaper for scratchpad worktrees) and
+  merges into the milestone branch with merge commits.
+
+## 5. DoD notes
+
+- DoD applies in full in every phase:
+  - Java tests are translated, with exact error messages asserted.
+  - `@RepeatedTest` becomes a loop.
+  - Changed encodings get byte-level tests (ApiVersions v5, DeleteGroups v3, TxnOffsetCommit v6,
+    UnregisterController).
+  - No TODO / FIXME, even where Java leaves TODOs (e.g. KIP-1332's compression TODO becomes an explicit
+    `ConfigException` / error path, as Java's constructor does).
+- **DoD #10** (hot-path allocation audit) applies to Phases 1 (reader bounds), 6, 7, 8 and 10. State N/A
+  explicitly elsewhere.
+- **DoD #7:** two justified deviations are recorded up front: the `ProducerBatch` fold and the builder
+  buffer type (§2.3). D4 adds a crate-private error kind.
+- **Out-of-scope tests** are skipped with the standing reasons. Each phase lists which tests it skipped.
+  These include `ShareHeartbeatRequestManagerTest`, `StreamsGroupHeartbeatRequestManagerTest`,
+  `KafkaShareConsumerTest`, `ConsumerCoordinatorTest`, `AbstractCoordinatorTest`, `OffsetFetcherTest`
+  (classic), `RaftVoterEndpointTest`, the Streams admin tests, and the 1a443b2d23 test-class split
+  (a reorganisation).
+
+## 6. Commit classification (input to the Phase 13 audit)
+
+The full 190-row table (SHA, component, classification, subject, line counts) is in
+[`commits.md`](commits.md), generated from
+`git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`.
+The summary by component:
+
+| Component | Total | Port (P) | Test-only (T) | Doc | No-op | Out of scope (O) / reverted (R) / already in 4.3.1 (A) |
+|---|---|---|---|---|---|---|
+| Consumer | 49 | 18 | 11 | 6 | 7 | R 5, A 2 |
+| Common | 33 | 3 | 1 | 6 | 21 | O 2 |
+| Streams | 24 | – | – | – | – | O 24 |
+| Wire | 16 | 12 | – | 1 | 3 | – |
+| Producer | 14 | 9 | 1 | 1 | 2 | R 1 |
+| Broker | 13 | – | – | – | – | O 13 |
+| Network | 12 | 8 | – | 3 | 1 | – |
+| Share | 11 | – | – | – | – | O 11 |
+| Admin | 11 | 4 | – | 4 | 2 | O 1 (Raft voter) |
+| Classic | 5 | – | – | – | – | O 5 |
+| Security | 2 | – | – | – | 1 | O 1 |
+| **Total** | **190** | **54** | **13** | **21** | **37** | **O 57, R 6, A 2** |
+
+Phase → P/T commit counts (sum 67): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
+P7+P8 1 (+1 trunk commit for D3), P9 7, P10 17, P11 2, P12 4.
