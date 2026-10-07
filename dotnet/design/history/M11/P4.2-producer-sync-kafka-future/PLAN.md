@@ -721,3 +721,23 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
   - Deviations: C11 also accepts the core's "MockProducer is already closed." and the SafeHandle "Safe handle has been closed." outcomes for a sender that loses the race, each with its exact message (observed sent 75 / disposed 125 / core-closed 0). C8 asserts whichever race outcome occurs: read (count 1, same metadata) or teardown fault ("The producer was closed before the send completed.", count 0); observed read.
   - Actor's kill reasoning: M13 → C6, M16 → C9, M17 → C2 (and C4), M18 → C5, M19 → A1 are deterministic. **M14 is weak:** C10 cannot kill it, because `Send` calls `ThrowIfClosed` before `EnsurePump`; C11 catches the no-lock variant probabilistically and the skip-`ThrowIfClosed`-under-the-lock variant only by chance. S4m measures this.
   - Gates: build 0W/0E; test-dotnet unit **3009/TFM** (2997 + 12), soak 165/TFM, format clean; the new class 3× per TFM 11/11, A1 + `Ordering_Sync_*` 3× per TFM 3/3; perf-unit 39/TFM; Mode A unchanged.
+- **S4m** (Actor 93; production byte-identical to HEAD afterwards apart from the fixup; det rows net10.0 unless noted; "full suite" = the whole unit suite):
+
+  | Row | Mutation | Target | Regime | Result |
+  |---|---|---|---|---|
+  | M13 | D9 guard deleted from `SyncCompletion.WaitUntilDone` | C6 | det ×3 | red 3/3, each in 60–61 s (30 s `TestTimeout` + bounded dispose): fails, does not hang |
+  | M14a | `EnsurePump`'s lock body → `_pump ??= new SendCompletionPump()` (no `ThrowIfClosed`; sync path only) | C10, C11 | C10 det ×3; C11 K=8 both TFMs | C10 green 3/3 (cannot see it: `Send`'s own `ThrowIfClosed` runs first). C11 full suite red only 3/8 (net10.0), 2/8 (net8.0) → **gap, fixed in `93a42813`**; after the fix the new test is red 3/3 per TFM and C11 is red 8/8 on both TFMs, in isolation and in the full suite |
+  | M14b | `EnsurePump` without `lock (_pumpLock)` | C11 | K=8 both TFMs, isolated + full suite | red 8/8 in all four (also C4 red 16/16 in the full suite); race-only, no seam |
+  | M15 | completion allocated after `Producer_send` | — | — | **structural** (Critic: statement order) |
+  | M16 | `StopPump` returns before `pump?.Stop()` when no accumulator (gate, flush, drain kept) | C9, teardown `:163` | det ×3 | C9 red 3/3. `:163` green 3/3: equivalent for that test (the unstopped pump still reads the flushed future); C9 kills the row |
+  | M17 | pump skips `Fire` for singles (`EnqueueSingle(…, null)`) and `Send` `Get`s + fires on the caller | C2, C4 | C2 det ×3; C4 K=8 both TFMs | C2 red 3/3; C4 red 8/8 per TFM (MaxConcurrency 8) |
+  | M18 | `_ = completion.Get();` before `Send`'s return | C5 | det ×3 | red 3/3 (`Send` throws the metadata timeout) |
+  | M19a | `(KafkaFuture<…>)(object)new KafkaFuture<…>(…)` | A1 | det ×3 both TFMs | green: **equivalent**, the JIT elides the box (still 272 B) |
+  | M19b | box stored in a field via `Volatile.Write`, then unboxed | A1 | det ×3 both TFMs | red 3/3 per TFM (296 B/send) |
+  | M20 | a retyped test loses its `.Get()` | — | — | Critic re-grep |
+
+  Fixup `93a42813` `fixup! test(dotnet): sync KafkaFuture callback and error semantics; allocation budget (M11/P4.2 S4)`:
+  - **Manager-approved seam (M14a only):** `NativeProducer.EnsurePump` goes from `private` to `internal` (visibility only; reachable through the existing `InternalsVisibleTo`).
+  - New test `EnsurePump_AfterTheCloseLatch_Throws_AndStartsNoPump`. It disposes a producer that never sent, calls `EnsurePump()`, and asserts the exact `ObjectDisposedException` message and `ObjectName`, that `StartedPumpThread` is null, and that no accumulator exists.
+  - C11 test defect: its released-handle branch expected `DangerousAddRef`'s message. On net8.0 and net10.0 the P/Invoke marshaler instead refuses a disposed `SafeProducerHandle` with "Cannot access a disposed object. Object name: '…SafeProducerHandle'.", so a normal run reaching that branch would have failed falsely. The fix accepts that message and keeps `DangerousAddRef`'s, because net462 was not measured. Before the fix, every M14a/M14b red was this check, not the pump assertion; after it, they are the pump assertion. This edit is test-only.
+  - Gates: build 0W/0E; test-dotnet unit **3010/TFM**, soak 165/TFM, format clean. One M14b full-suite run on net8.0 also tripped the known R12 heap-budget flake, outside the target; the final gate was green.
