@@ -32,6 +32,9 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 public sealed class SyncCompletionTests
 {
+    // How many misses a hot spin takes in a row before it yields once (see OnMiss).
+    private const int HotSpins = 1 << 16;
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     // How long a blocked waiter must stay blocked before the latch is completed.
@@ -175,6 +178,110 @@ public sealed class SyncCompletionTests
             Assert.True(getter.Join(s_deadline), $"Iteration {iteration}: Get() was never released — a lost wakeup.");
             Assert.Same(offered, observed);
         }
+
+        // The other half of the race: a completion against Get()'s lock-free fast path. A completer that published
+        // `_done` before the value or the error (mutation M2′) mostly survived the loop above, which seldom lands a
+        // getter's read BETWEEN the completer's two stores: a fresh thread and a barrier per iteration leave the two
+        // far apart. Which release shape lands in that window more often differs by runtime, so both run.
+        AssertTheFastPathNeverSeesDoneWithoutTheOutcome(getterSpinsOnIsDone: false);
+        AssertTheFastPathNeverSeesDoneWithoutTheOutcome(getterSpinsOnIsDone: true);
+    }
+
+    // One long-lived getter thread and this completer thread, in lockstep over fresh latches: the completer publishes a
+    // latch, waits for the getter to finish the previous round, releases it and completes the latch at once. The getter
+    // then calls Get() straight away or, with getterSpinsOnIsDone, first spins on IsDone — the volatile read Get()'s
+    // fast path makes. A read that lands between a reordered completer's two stores sees the latch done with its
+    // outcome still missing (null). Results and exceptions alternate.
+    private static void AssertTheFastPathNeverSeesDoneWithoutTheOutcome(bool getterSpinsOnIsDone)
+    {
+        const int Rounds = 20_000;
+
+        object[] offered = Enumerable.Range(0, Rounds)
+            .Select(round => round % 2 == 0
+                ? (object)NewMetadata(round)
+                : new KafkaException(round, "Round " + round + " failed.", isRetriable: false))
+            .ToArray();
+        SyncCompletion<RecordMetadata>?[] latches = new SyncCompletion<RecordMetadata>?[Rounds];
+        object?[] observed = new object?[Rounds];
+        int released = -1;
+        int finished = -1;
+        Exception? getterFailure = null;
+        System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        Thread getter = StartThread(() =>
+        {
+            try
+            {
+                for (int round = 0; round < Rounds; round++)
+                {
+                    int misses = 0;
+                    while (Volatile.Read(ref released) != round)
+                    {
+                        OnMiss(ref misses, elapsed, "the completer to release a round");
+                    }
+
+                    // Published before the release, so the acquiring read above makes it visible.
+                    SyncCompletion<RecordMetadata> latch = latches[round]!;
+                    if (getterSpinsOnIsDone)
+                    {
+                        while (!latch.IsDone)
+                        {
+                            OnMiss(ref misses, elapsed, "the completer to complete a latch");
+                        }
+                    }
+
+                    observed[round] = Outcome(latch);
+                    Volatile.Write(ref finished, round);
+                }
+            }
+            catch (Exception exception)
+            {
+                Volatile.Write(ref getterFailure, exception);
+            }
+        });
+
+        for (int round = 0; round < Rounds; round++)
+        {
+            SyncCompletion<RecordMetadata> latch = new SyncCompletion<RecordMetadata>();
+            latches[round] = latch;
+            int misses = 0;
+            while (Volatile.Read(ref finished) != round - 1 && Volatile.Read(ref getterFailure) is null)
+            {
+                OnMiss(ref misses, elapsed, "the getter to finish a round");
+            }
+
+            Volatile.Write(ref released, round);
+            bool won = offered[round] is RecordMetadata metadata
+                ? latch.TrySetResult(metadata)
+                : latch.TrySetException((KafkaException)offered[round]);
+            Assert.True(won);
+        }
+
+        Assert.True(getter.Join(s_deadline), "The fast-path getter thread did not finish.");
+        Assert.Null(Volatile.Read(ref getterFailure));
+        int stale = Enumerable.Range(0, Rounds).Count(round => !ReferenceEquals(offered[round], observed[round]));
+        Assert.True(
+            stale == 0,
+            $"{stale} of {Rounds} Get() calls (getter spinning on IsDone: {getterSpinsOnIsDone}) saw the latch done " +
+            "without its outcome.");
+    }
+
+    // A miss of a hot spin: after HotSpins misses in a row, yield once — so a single-core machine still makes
+    // progress — and fail past the deadline instead of spinning forever.
+    private static void OnMiss(ref int misses, System.Diagnostics.Stopwatch elapsed, string waitingFor)
+    {
+        if (++misses < HotSpins)
+        {
+            return;
+        }
+
+        misses = 0;
+        if (elapsed.Elapsed > s_deadline)
+        {
+            throw new TimeoutException($"Timed out waiting for {waitingFor}.");
+        }
+
+        Thread.Yield();
     }
 
     // Get()'s outcome as an object: the value, or the exception it rethrew.
