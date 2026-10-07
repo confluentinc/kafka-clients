@@ -2657,9 +2657,12 @@ pub unsafe extern "C" fn kafka_producer_SendAccepted_destroy(accepted: *mut kafk
     }
 }
 
-/// Registers a one-shot bell to ring once the number of records queued for the
-/// submission task drops below the bound that made
-/// [`kafka_producer_Producer_send_async`] return `true`.
+/// Registers a one-shot bell to ring once the number of records queued by
+/// [`kafka_producer_Producer_send_async`] / `send_batch_async` and not yet accepted
+/// or refused — in the submission queue, or waiting in a `send_waiter` — drops
+/// below [`MAX_QUEUED_SENDS`]. The queue itself never turns a record away; this
+/// bell is how a caller that queues without waiting on each acceptance handle
+/// bounds its own memory.
 ///
 /// Returns `true` — **without** storing `callback` — when space is already
 /// available (the depth is below `MAX_QUEUED_SENDS`), so the caller may queue

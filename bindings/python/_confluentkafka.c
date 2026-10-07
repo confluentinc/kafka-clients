@@ -592,9 +592,11 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
     return Producer_wrap(kafka_producer, producer_obj);
 }
 
-// Queue one record on the Rust outbox. Returns True when this record brought
-// the outbox to its bound (the Python side then waits on
-// Producer_on_space_available before sending more), False otherwise.
+// Queue one record on the Rust outbox. The outbox never turns a record away:
+// each Python caller is parked on its own record's acceptance instead (see the
+// return contract on py_Producer_send below), so the number of records queued
+// or waiting is bounded by the number of concurrent callers, and the
+// Producer_on_space_available bell is not used by the Python side.
 //
 // The Rust call runs with the GIL released, like the other producer entry
 // points. The push itself is cheap, but an application thread flooding send()
