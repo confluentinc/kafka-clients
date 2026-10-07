@@ -9218,6 +9218,43 @@ mod tests {
         );
     }
 
+    /// Java's `listTransactions()` is `listTransactions(new ListTransactionsOptions())`
+    /// (`Admin.java`), whose `filteredDuration` starts at `-1L`
+    /// (`ListTransactionsOptions.java:33`), and `ListTransactionsHandler.buildBatchedRequest`
+    /// copies it into `DurationFilter`. So the no-arg call asks every broker with
+    /// `DurationFilter = -1` (no duration filter), not `0`.
+    #[tokio::test]
+    async fn test_list_transactions_without_options_sends_no_duration_filter() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, vec![]));
+
+        let duration_filters = Arc::new(Mutex::new(Vec::new()));
+        for node in &nodes {
+            let seen = Arc::clone(&duration_filters);
+            runnable.client_mut().prepare_response_from_matcher(
+                Box::new(move |body: &AbstractRequest| match body {
+                    AbstractRequest::ListTransactions(request) => {
+                        seen.lock().unwrap().push(request.data().duration_filter);
+                        true
+                    },
+                    _ => false,
+                }),
+                list_transactions_resp(&TransactionListing::new(
+                    format!("txn-{}", node.id()),
+                    i64::from(node.id()),
+                    TransactionState::Ongoing,
+                )),
+                node,
+            );
+        }
+
+        let result = admin.list_transactions();
+        let all = result.all();
+        pump_until(&mut runnable, 60, |_r| all.is_done()).await;
+        assert_eq!(all.get().await.unwrap().len(), nodes.len());
+        assert_eq!(*duration_filters.lock().unwrap(), vec![-1; nodes.len()]);
+    }
+
     /// Mirrors `KafkaAdminClientTest.testForceTerminateTransaction`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testForceTerminateTransaction")]
