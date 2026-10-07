@@ -774,3 +774,21 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
       - `:1490-1491` (`Close()`).
     - NativeMethods `:2425`, `:2456`, `:2653`, `:2675`, `:2694`, `:2712` ("blocked in Send").
     - Line numbers are at `638d12b7`; re-grep before editing.
+- **Fix cycle 2:**
+  - `7830cf11` `fixup! feat(dotnet)!: sync Send returns KafkaFuture<RecordMetadata> (M11/P4.2 S3)` fixes C93-2. It makes these true after S3:
+    - the `RecordMetadata` summary, which now names `KafkaFuture{T}.Get()` and `AsyncKafkaFuture{T}.Get()`; both `Send` crefs are kept;
+    - the async servicer's contrast with the sync servicer and its twin at `ProducerServiceImpl.cs:33-34` (the D-3 wait is untouched and still unbounded);
+    - two test comments.
+  - `a65fcf4e` `fixup! test(dotnet): … (M11/P4.2 S4)` fixes C93-3:
+    - C11 accepts `NativeProducer`'s closed-check message plus **one** released-handle string, probed at runtime by `ReleasedSafeProducerHandleMessage()`: `DangerousAddRef` on a disposed, invalid (`IntPtr.Zero`) `SafeProducerHandle` created through its private ctor. `IsInvalid` holds, so `Dispose` never runs `ReleaseHandle`, and no native call is made.
+    - The dead `SafeWaitHandle` disjunct is gone.
+    - The probed string equals the marshaler's refusal on net8.0 and net10.0.
+    - C93-3's step 3 (correct the PLAN S4 / S4m bullets) is the "Record corrections" line in the pass-2 record above.
+  - Gates:
+    - build 0W/0E;
+    - test-dotnet: unit 3010/TFM, soak 165/TFM, format clean;
+    - perf-unit 39/TFM;
+    - grpc-server Release build 0W/0E, and `dotnet format --verify-no-changes` is clean;
+    - C11 plus the seam test, run 3× per TFM: 2/2 each time;
+    - Mode A is unchanged.
+  - **Critic re-review: no findings. Pass 2 closed; `COMMENTS.93.md` has 0 open items** (C93-2 and C93-3 are in `COMMENTS.DONE.93.md`).
