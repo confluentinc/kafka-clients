@@ -712,6 +712,124 @@ Phase 5 completion notes (agent 95):
 - DoD #10 applies: the partitioner is on the send path.
 - Runs before Phases 7–8 (they also edit `RecordAccumulator`).
 
+Phase 6 completion notes (agent 96):
+
+- **What landed** (06469f7a, d0171254 + fixup 33506759):
+  - `ProducerConfig`: `PARTITIONER_RACK_AWARE_CONFIG` (boolean, default false, Java's doc text) and
+    `CLIENT_RACK_CONFIG` / `DEFAULT_CLIENT_RACK`. These alias new `CommonClientConfigs::CLIENT_RACK_CONFIG` /
+    `DEFAULT_CLIENT_RACK`. `ConsumerConfig::CLIENT_RACK_CONFIG` now reuses the common constant, as Java's
+    does. `client.rack` is trimmed like every `Type.STRING`.
+  - `BuiltInPartitioner`:
+    - the `rack_aware` / `rack` fields and the fc18c47efd parameter docs;
+    - `PartitionLoadStatsHolder { total, in_this_rack }`, `create_partition_load_stats_for_this_rack_if_needed`,
+      `invert_and_fold_queue_size_array` and `load_stats_in_this_rack_range_end`;
+    - the rack-aware uniform choice;
+    - the 88b48794ea trace log, behind `log_enabled!(Trace)`, which is Java's `isTraceEnabled()`.
+    `update_partition_load_stats` gains `partition_leader_racks: &[Option<&str>]`. A `None` there is a
+    leader with no rack, which is Java's `null` array element.
+  - `RecordAccumulator`:
+    - `partitioner_rack_aware` / `rack: Arc<str>`, handed to each new topic's partitioner through a
+      translated `create_built_in_partitioner`;
+    - `partition_ready` fills a `partition_leader_racks` vec beside `queue_sizes`, allocated under the
+      same condition as Java's `String[]`;
+    - `PartitionerConfig::new(adaptive, timeout, rack_aware, rack) -> Result`, which returns
+      `Error::Config("client.rack must be provided if partitioner.rack.aware is enabled")` when the rack is
+      blank (165d7ec933). Its fields are now **private**, as in Java, so the check can't be bypassed.
+      `Default` is Java's no-arg `this(false, 0, false, "")`.
+  - `Utils::is_blank`: Java trims chars <= U+0020, not Unicode whitespace.
+  - `KafkaProducer` passes both configs whether or not a custom partitioner is set (Java does too), so
+    construction fails, wrapped in "Failed to construct kafka producer", even with `RoundRobinPartitioner`.
+  - The soak client's `PRODUCER_CONFIG_KEYS` gains both keys.
+  - Bindings (§2.5): both are plain string config keys, so they pass through the C/Python config maps
+    unchanged. No FFI surface was added.
+- **Tests:**
+  - `BuiltInPartitionerTest`: all 6 cases. The two `@ParameterizedTest`s loop over their `@CsvSource`
+    rows (4 and 3); Java's empty CSV rack (`null`) is `""`.
+  - The test `SequentialPartitioner` used to re-implement `nextPartition` in the fixture, which DoD #12
+    rules out. It now only replaces `randomPartition()`, through a `#[cfg(test)] mock_random` seam on
+    `BuiltInPartitioner`, as Java's subclass does.
+  - `RecordAccumulatorTest`: 4.4's hunk only changes `testAdaptiveBuiltInPartitioner` /
+    `createTestRecordAccumulator` constructor arguments. `testAdaptiveBuiltInPartitioner` and
+    `testUniformBuiltInPartitioner` had never been translated (listed missing since M2 Phase 6). Both are
+    translated now, through a `#[cfg(test)] set_mock_random_for_test` that stands in for Java's
+    `createBuiltInPartitioner` override.
+  - `testUniformBuiltInPartitioner` builds its `Cluster` from a vec, as Java does. A
+    `MetadataSnapshot`'s cluster view does not keep partition order.
+  - `SenderTest`: the hunk is only the constructor argument (`PartitionerConfig::new(false, 42, false, "")`).
+  - `ProducerConfigTest`: no 4.4 hunk.
+  - Rust-only additions:
+    - a rack-aware run of the adaptive accumulator test, which pins that the racks come from the snapshot's
+      leader nodes;
+    - the `PartitionerConfig` blank-rack check, with the exact message;
+    - config parsing;
+    - producer wiring, with the exact cause message;
+    - `test_rack_aware_uniform_choice_matches_filtered_list`;
+    - `test_partition_switch_does_not_allocate`.
+  - Teeth checks:
+    - Disabling the rack branch in `next_partition` fails 3 partitioner tests.
+    - Writing `None` racks in `partition_ready` fails the accumulator rack test.
+    - Collecting a `Vec` in the rack branch fails the allocation test (20 allocations).
+- **DoD #10.** The partition choice runs on the send path at every sticky switch, roughly once per
+  `batch.size` bytes.
+  - Java collects the in-rack partitions into a new list. Rust counts them, then indexes the
+    `(random % n)`-th in place: same choice, no allocation. `test_rack_aware_uniform_choice_matches_filtered_list`
+    checks this against the filtered list.
+  - The rack is an `Arc<str>`, refcounted once per new topic. It is never cloned per record. The
+    in-rack test compares `&str` with no copy.
+  - Nothing is boxed. `test_partition_switch_does_not_allocate` asserts zero allocations over 20 switches,
+    for uniform and adaptive, each with rack-aware off, on, and on with no in-rack partition.
+  - The existing producer-level allocation tests send keyed records or explicit partitions, so they can't
+    reach the switch. They were not extended, and the partitioner-level test covers this instead.
+  - The extra `Vec`s are per topic per `ready()` call (in-rack CFT and ids; the racks vec), not per record.
+    Java allocates the same arrays there.
+- **Recorded skips and deviations:**
+  - No Java test skipped.
+  - `with_built_in_partitioner_for_test` (closure over the locked partitioner) stands in for
+    `getBuiltInPartitioner`. Because it is Rust-only, it carries no Java marker (the lint fixup).
+  - Pre-existing, not fixed: `ProducerConfig::parse_bool` reports `"Invalid value X for configuration K"`.
+    It is missing Java's `": Expected value to be either true or false"`, and it is case-sensitive where
+    Java's `BOOLEAN` parse is not. This affects every boolean key. The new test asserts the prefix only and
+    says why. It is a candidate for the Phase 13 config audit.
+- **For Phases 7–8 (`RecordAccumulator`):**
+  - `PartitionerConfig` has private fields: build it with `PartitionerConfig::new(..).unwrap()` in tests,
+    or `PartitionerConfig::default()`. Struct literals no longer compile.
+  - New topic partitioners come only from `create_built_in_partitioner` (Java's override point). Keep any
+    new `TopicInfo` construction going through it, or the test seam and the rack settings are lost.
+  - `partition_ready` now has three parallel arrays (`queue_sizes`, `partition_ids`,
+    `partition_leader_racks`) indexed by `queue_sizes_index`. Keep them in step if the drain or ready loop
+    is reshaped.
+  - `#[cfg(test)]` fields `mock_random` on `RecordAccumulator` and `BuiltInPartitioner` must be kept in
+    any new struct-literal constructor.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, Java diffs, Rust sources) | 22:06 | 22:11 | 5 |
+  | 1 `BuiltInPartitioner` + `BuiltInPartitionerTest` | 22:11 | 22:17 | 6 |
+  | 2 `Utils::is_blank`, `PartitionerConfig`, accumulator, configs, producer, tests, commits | 22:17 | 22:24 | 7 |
+  | 3 gates: format-check, lint (+ fixup), full `cargo test` | 22:24 | 22:28 | 4 |
+  | 4 producer integration tests (Docker) | 22:28 | 22:31 | 3 |
+  | 5 `make -k verify`, rerun of its failures, notes | 22:31 | 22:41 | 10 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4341 passed, 0 failed, 10 ignored (lib 4292 / 3 ignored, plus 36, 8 and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: exactly the 13 remaining §5.1 rows, nothing new. All other steps pass.
+    The first run had a 14th finding, this phase's alias on the test-only helper; fixed in 33506759.
+  - `cargo test --features integration-tests --test integration -- producer` (Docker, default broker):
+    93 passed, 0 failed.
+  - `make -k verify` (22:31-22:39) fails in three targets:
+    - `build-c`: `cmake: command not found`. This is the environment: cmake is not installed here.
+    - `lint`: the 13 §5.1 rows only, which the §5.1 gate rule expects.
+    - `test-rust-all-features`: 4536 lib tests passed; integration 298 passed, 3 failed. The failures are
+      `producer_transactions_test::test_fatal_error_after_invalid_producer_id_mapping_with_tv2`
+      ("Transaction state never expired."), `..._test_transaction_after_producer_id_expires_with_tv2`, and
+      `plaintext_consumer_assign_test::test_async_poll_after_topic_deleted`. All three pass on rerun in
+      isolation (3/3), and both transaction tests also passed in the producer-only run above. They depend
+      on broker producer-id or transaction expiry timing under full-suite load. None takes the rack-aware
+      path, since `partitioner.rack.aware` defaults to false.
+    - Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` (29), soak (156).
+
 ### Phase 7 — Producer: KIP-1332 part A — chunked pool, stream, builder (agent 97)
 
 - `BufferPool`:
