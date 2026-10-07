@@ -271,8 +271,8 @@ impl KafkaAdminClient {
     /// concrete return type, `InternalDescribeFeaturesResult` (KAFKA-19663),
     /// which also carries the answering node's API versions. Java's internal
     /// tools reach it by casting the `Admin.describeFeatures` result; Rust has
-    /// no downcast, so the crate calls this instead.
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#describeFeatures")]
+    /// no downcast, so the crate calls this instead. (A Rust-only accessor: the
+    /// Java method's marker stays on the trait method.)
     pub(crate) fn describe_features_internal(
         &self,
         options: DescribeFeaturesOptions,

@@ -276,7 +276,6 @@ impl MockAdminClient {
     /// Mirrors Java's `MockAdminClient.Builder.usingRaftController` (default
     /// `false`). Like [`set_feature_levels`](Self::set_feature_levels), a Java
     /// builder option becomes a setter on the constructed mock.
-    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#usingRaftController")]
     pub fn set_using_raft_controller(&self, using_raft_controller: bool) {
         self.state.lock().unwrap().using_raft_controller = using_raft_controller;
     }

@@ -353,7 +353,6 @@ impl Call {
     /// Translated from `Call.handleTimeoutFailure`. A cause that already is a
     /// timeout (`cause instanceof TimeoutException`) is passed through
     /// unchanged; anything else is wrapped with the call's rendering.
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$Call#handleTimeoutFailure")]
     pub(crate) fn handle_timeout_failure(&mut self, now: i64, cause: Error) {
         let error = if cause.error() == Errors::RequestTimedOut {
             cause
