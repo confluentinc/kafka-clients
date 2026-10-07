@@ -2069,9 +2069,8 @@ mod chunk_allocation_tests {
     }
 
     /// The non-blocking path (Java's `allocateChunks(n, 0L)`): succeeds from free memory, fails
-    /// fast with Java's message and no accounting change when memory is short, does not record
-    /// the buffer-exhausted metric, and still signals a parked waiter that the remaining memory
-    /// can serve.
+    /// fast with Java's message and no accounting change when memory is short, never parks, and
+    /// does not record the buffer-exhausted metric.
     #[tokio::test]
     async fn test_try_allocate_chunks() {
         let chunk_size = 64;
@@ -2144,6 +2143,55 @@ mod chunk_allocation_tests {
             p.deallocate(chunk);
         }
         assert_eq!(total, p.available_memory());
+    }
+
+    /// Java's free-list-before-raw swap in the wait loop (`BufferPool.java:338-344`): a waiter
+    /// that already reserved a raw chunk and then finds enough free-list chunks takes them and
+    /// hands the raw reservation back. Without the swap it keeps both, and the raw part is never
+    /// materialised or refunded, so one chunk of `buffer.memory` leaks.
+    #[tokio::test]
+    async fn test_waiter_hands_back_raw_reservation_when_free_list_chunks_arrive() {
+        let chunk_size = 64;
+        let total = 4 * chunk_size as i64;
+        let p = pool(total, chunk_size);
+        // Three raw chunks held, so exactly one chunk of non-pooled memory is free.
+        let h1 = take_one(&p, chunk_size).await;
+        let h2 = take_one(&p, chunk_size).await;
+        let h3 = take_one(&p, chunk_size).await;
+        assert_eq!(chunk_size as i64, p.available_memory());
+
+        // w0 wants the whole pool and will time out; w1 queues behind it.
+        let w0 = {
+            let p = Arc::clone(&p);
+            tokio::spawn(async move { p.allocate_chunks(4 * chunk_size as i32, 50).await })
+        };
+        wait_for_condition(|| p.queued() == 1, "w0 should be parked").await;
+        let w1 = {
+            let p = Arc::clone(&p);
+            tokio::spawn(async move { p.allocate_chunks(3 * chunk_size as i32, 5_000).await })
+        };
+        wait_for_condition(|| p.queued() == 2, "w1 should be parked behind w0").await;
+
+        // w0 times out; its exit signals w1, which reserves the one free raw chunk.
+        assert!(matches!(w0.await.unwrap(), Err(Error::ProducerBufferExhausted(_))));
+        wait_for_condition(|| p.available_memory() == 0, "w1 should reserve the free raw chunk").await;
+
+        // Three chunks land on the free list with no await in between; w1 needs only 3 in total,
+        // so it must take them and return its raw reservation.
+        p.deallocate(h1);
+        p.deallocate(h2);
+        p.deallocate(h3);
+        let chunks = w1.await.unwrap().expect("w1 must be served");
+        assert_eq!(3, chunks.len());
+        assert_eq!(
+            chunk_size as i64,
+            p.available_memory(),
+            "the raw reservation must be handed back once free-list chunks cover the request"
+        );
+        for chunk in chunks {
+            p.deallocate(chunk);
+        }
+        assert_eq!(total, p.available_memory(), "no chunk of buffer.memory may leak");
     }
 
     /// Java's `finally { if (error) releaseReservedBytes(memoryRequired); }` around the raw chunk
