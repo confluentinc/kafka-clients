@@ -1464,14 +1464,6 @@ impl SubscriptionState {
         result
     }
 
-    /// Translates Java's `hasPartitionsNeedingValidation(long)`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasPartitionsNeedingValidation")]
-    pub(crate) fn has_partitions_needing_validation(&self, now_ms: i64) -> bool {
-        self.assignment
-            .state_iter()
-            .any(|s| s.awaiting_validation() && !s.awaiting_retry_backoff(now_ms) && s.position.is_some())
-    }
-
     // ── Pause / resume / fetchable ──────────────────────────────────────
 
     /// Translates Java's `pausedPartitions()`.

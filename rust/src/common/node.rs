@@ -33,19 +33,19 @@ static NO_NODE: std::sync::LazyLock<Node> = std::sync::LazyLock::new(|| Node::ne
 
 impl Node {
     /// Creates a new `Node` with no rack and not fenced.
-    #[doc(alias = "org.apache.kafka.common.Node#Node")]
+    #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int)")]
     pub fn new(id: i32, host: String, port: i32) -> Self {
         Self::with_rack(id, host, port, None)
     }
 
     /// Creates a new `Node` with the given rack.
-    #[doc(alias = "org.apache.kafka.common.Node#Node")]
+    #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String)")]
     pub fn with_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
         Self::with_rack_is_fenced(id, host, port, rack, false)
     }
 
     /// Creates a new `Node` with the given rack and fenced status.
-    #[doc(alias = "org.apache.kafka.common.Node#Node")]
+    #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String,boolean)")]
     pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
         Self { id, id_string: id.to_string(), host, port, rack, is_fenced }
     }
