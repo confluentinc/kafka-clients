@@ -161,6 +161,13 @@ pub struct ProducerConfig {
     /// Default: 1000 ms.
     pub(crate) retry_backoff_max_ms: i64,
 
+    /// `bootstrap.resolve.timeout.ms` - Selects the bootstrap DNS resolution
+    /// mode (KIP-909): `0` resolves `bootstrap.servers` synchronously at
+    /// construction; a positive value resolves asynchronously for at most this
+    /// long. Default: 0. See
+    /// [`ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG`].
+    pub(crate) bootstrap_resolve_timeout_ms: i64,
+
     // --- Socket ---
     /// `send.buffer.bytes` - TCP send buffer size. Default: 131072 (128 KiB).
     pub(crate) send_buffer_bytes: i32,
@@ -348,6 +355,7 @@ impl Default for ProducerConfig {
             reconnect_backoff_max_ms: 1000,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             send_buffer_bytes: 128 * 1024,
             receive_buffer_bytes: 32 * 1024,
             socket_connection_setup_timeout_ms: 10_000,
@@ -424,6 +432,21 @@ impl ProducerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909)
+    ///
+    /// Selects the client's bootstrap DNS resolution mode. When set to `0` (the
+    /// default), DNS is resolved synchronously during client construction; any
+    /// failure surfaces as a config error and no client instance is created.
+    /// When set to a positive value, DNS is resolved asynchronously and this is
+    /// the maximum amount of time the client will spend retrying resolution
+    /// before failing with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError)
+    /// from subsequent API calls (the client must then be closed and re-created
+    /// after fixing the underlying DNS or `bootstrap.servers` configuration
+    /// issue). Setting this config to a positive value enables an evolving
+    /// feature whose compatibility may be broken in a minor release.
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// Config key: `send.buffer.bytes`
     pub const SEND_BUFFER_CONFIG: &'static str = "send.buffer.bytes";
     /// Config key: `receive.buffer.bytes`
@@ -587,6 +610,14 @@ impl ProducerConfig {
                 },
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
                     config.retry_backoff_max_ms = Self::parse_i64(key, value)?;
+                },
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // Java `ProducerConfig` (`:471-476`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
                 },
                 Self::SEND_BUFFER_CONFIG => {
                     config.send_buffer_bytes = Self::parse_i32(key, value)?;
@@ -1115,6 +1146,32 @@ mod tests {
             config_error.message(),
             "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
              Value must be at least 0"
+        );
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn test_bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(c.bootstrap_resolve_timeout_ms, 0);
+
+        let mut props = base_props();
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(ProducerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms, 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
         );
     }
 

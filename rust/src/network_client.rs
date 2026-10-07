@@ -36,7 +36,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::common::errors::UnsupportedVersionError;
+use crate::common::errors::{BootstrapResolutionError, UnsupportedVersionError};
 use crate::common::network::NetworkSend;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
@@ -49,8 +49,10 @@ use crate::common::requests::api_versions_request;
 use crate::common::requests::metadata_request;
 use crate::common::requests::{AbstractRequest, RequestBuilder, RequestHeader};
 
+use super::BootstrapConfiguration;
 use super::ClientRequest;
 use super::ClientResponse;
+use super::ClientUtils;
 use super::ClusterConnectionStates;
 use super::HostResolver;
 use super::KafkaClient;
@@ -69,6 +71,29 @@ use crate::common::utils::{SystemTime, Time};
 const STATE_ACTIVE: u8 = 0;
 const STATE_CLOSING: u8 = 1;
 const STATE_CLOSED: u8 = 2;
+
+/// An asynchronous bootstrap DNS resolution in progress (KIP-909).
+///
+/// Java's `CompletableFuture<List<InetSocketAddress>> pendingBootstrapResolution`,
+/// run on the `kafka-bootstrap-dns-resolver` daemon thread of a single-thread
+/// executor. Rust runs [`ClientUtils::parse_addresses`] — a blocking
+/// `getaddrinfo` loop — on a detached OS thread of the same name, one per
+/// attempt (attempts never overlap, so this is the executor's one thread at a
+/// time). No tokio runtime owns that thread, so it can never hold up a runtime's
+/// shutdown (a `spawn_blocking` task would: dropping a runtime waits for its
+/// running blocking tasks without bound), and, as a Java daemon thread, it does
+/// not keep the process alive (DoD #7).
+///
+/// The event loop never awaits the result: `poll()` only `try_recv`s it, so the
+/// resolution can never sit in a `select!` arm or hold up the network poll
+/// (CLAUDE.md §11.6, consumer-threading.md §10).
+struct PendingBootstrapResolution {
+    /// Java's `isDone()` / `getNow()`. Closed without a value when the thread
+    /// failed, Java's `CompletionException`. Dropping it is Java's
+    /// `cancel(true)` plus the `shutdownNow()` interrupt: the thread's
+    /// `is_interrupted` check sees the closed channel and stops at the next URL.
+    result: tokio::sync::oneshot::Receiver<Vec<(String, SocketAddr)>>,
+}
 
 /// Data for an in-progress metadata request.
 #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater$InProgressData")]
@@ -156,6 +181,29 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// sensor). `None` unless a caller wires one in via
     /// [`set_throttle_time_sensor`](Self::set_throttle_time_sensor).
     throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
+
+    // --- KIP-909 asynchronous bootstrap resolution ---
+    /// Java's `bootstrapConfiguration`. [`BootstrapConfiguration::DISABLED`]
+    /// unless a client wires one in via
+    /// [`set_bootstrap_configuration`](Self::set_bootstrap_configuration).
+    bootstrap_configuration: BootstrapConfiguration,
+    /// Java's `Timer bootstrapTimer`, as its deadline: `None` until the first
+    /// poll starts it. `org.apache.kafka.common.utils.Timer` has no translation
+    /// (see [`Time`]); `deadline - now` is its `remainingMs()` and
+    /// `now >= deadline` its `isExpired()`.
+    bootstrap_deadline_ms: Option<i64>,
+    /// Java's `pendingBootstrapResolution`.
+    pending_bootstrap_resolution: Option<PendingBootstrapResolution>,
+    /// Java's `bootstrapResolutionRetryMs`: when the next attempt may start,
+    /// `-1` for "no backoff pending".
+    bootstrap_resolution_retry_ms: i64,
+    /// Java's `bootstrapException`: set once the timeout expired; never
+    /// cleared.
+    bootstrap_error: Option<BootstrapResolutionError>,
+    /// Closed when the latest resolver thread exits: what `close()` waits on
+    /// in place of Java's `bootstrapExecutor.awaitTermination`. Kept after the
+    /// attempt is cancelled, as Java's executor still runs a cancelled task.
+    bootstrap_resolver_exit: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Names one concrete instantiation of [`NetworkClient`] so its
@@ -326,6 +374,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             in_progress: None,
             metadata_attempt_start_ms: None,
             throttle_time_sensor: None,
+            bootstrap_configuration: BootstrapConfiguration::DISABLED,
+            bootstrap_deadline_ms: None,
+            pending_bootstrap_resolution: None,
+            bootstrap_resolution_retry_ms: -1,
+            bootstrap_error: None,
+            bootstrap_resolver_exit: None,
         }
     }
 
@@ -404,6 +458,35 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             in_progress: None,
             metadata_attempt_start_ms: None,
             throttle_time_sensor: None,
+            bootstrap_configuration: BootstrapConfiguration::DISABLED,
+            bootstrap_deadline_ms: None,
+            pending_bootstrap_resolution: None,
+            bootstrap_resolution_retry_ms: -1,
+            bootstrap_error: None,
+            bootstrap_resolver_exit: None,
+        }
+    }
+
+    /// Wires in the bootstrap resolution settings (KIP-909), which default to
+    /// [`BootstrapConfiguration::DISABLED`]. Java passes the configuration to
+    /// the `NetworkClient` constructor; it is set after construction here, like
+    /// the clock and the throttle-time sensor below, so the many constructor
+    /// call sites that pass `DISABLED` in Java need no change.
+    ///
+    /// As Java's constructor does, an enabled configuration kicks off the
+    /// first DNS resolution at once, so it overlaps with the caller finishing
+    /// construction. The timer is deliberately not started here: `poll()`
+    /// remains the driver — it starts the timer, observes the result, records
+    /// the failure and drives retries.
+    pub fn set_bootstrap_configuration(&mut self, bootstrap_configuration: BootstrapConfiguration) {
+        self.cancel_bootstrap_resolution();
+        self.bootstrap_configuration = bootstrap_configuration;
+        // Bootstrap timer is lazily initialized on the first poll so its budget represents
+        // "time we spend on bootstrap once polling begins" — an idle gap between construction
+        // and the first poll should not eat into that budget.
+        self.bootstrap_deadline_ms = None;
+        if !self.bootstrap_configuration.is_disabled() {
+            self.start_bootstrap_resolution();
         }
     }
 
@@ -1242,7 +1325,284 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         false
     }
 
+    /// Attempts to resolve bootstrap server addresses via DNS and create an
+    /// initial bootstrap cluster. Called from [`poll`](KafkaClient::poll); it
+    /// never blocks on DNS resolution.
+    ///
+    /// DNS resolution runs off the event loop (see
+    /// [`PendingBootstrapResolution`]), so the event loop remains responsive
+    /// even if DNS lookups block or take a long time, and the bootstrap timeout
+    /// can expire while a resolution is still pending.
+    ///
+    /// When the timeout expires, a [`BootstrapResolutionError`] is recorded on
+    /// the metadata updater; it is not returned from here.
+    ///
+    /// Java first checks `Thread.interrupted()` and throws `InterruptException`;
+    /// a tokio task has no interrupt flag, so that branch has no counterpart.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#ensureBootstrapped")]
+    pub(crate) fn ensure_bootstrapped(&mut self, current_time_ms: i64) {
+        if self.bootstrap_configuration.is_disabled() || self.is_bootstrapped() {
+            return;
+        }
+
+        if self.bootstrap_error.is_some() {
+            return;
+        }
+
+        // Start the timer on the first poll so its budget represents "time we spend on
+        // bootstrap since polling began" — the caller may have created the client well before
+        // its first API call, and we don't want that idle gap to eat into the budget.
+        self.maybe_start_bootstrap_timer();
+
+        // Check if a pending resolution completed before checking the timeout, so that a
+        // result arriving at the same time as the deadline is not incorrectly rejected.
+        if self.maybe_process_bootstrap_resolution_result(current_time_ms) {
+            return;
+        }
+
+        // Record a timeout failure before possibly triggering a new resolution.
+        // maybe_start_bootstrap_resolution skips if bootstrap_error is set, so we
+        // don't kick off a fresh resolution after the failure has been recorded.
+        self.check_bootstrap_timeout(current_time_ms);
+        self.maybe_start_bootstrap_resolution(current_time_ms);
+    }
+
+    /// Java's `bootstrapTimer = time.timer(bootstrapResolveTimeoutMs)` when the
+    /// timer is still `null`.
+    fn maybe_start_bootstrap_timer(&mut self) {
+        if self.bootstrap_deadline_ms.is_none() {
+            self.bootstrap_deadline_ms = Some(
+                self.time
+                    .milliseconds()
+                    .saturating_add(self.bootstrap_configuration.bootstrap_resolve_timeout_ms),
+            );
+        }
+    }
+
+    /// Record a permanent bootstrap failure on the metadata if the timeout has
+    /// expired. The error is not returned here; callers observe it through
+    /// their metadata layer ([`Metadata::maybe_return_fatal_error`] for the
+    /// producer and consumer, `AdminMetadataManager::bootstrap_fatal_error` for
+    /// the admin client).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#checkBootstrapTimeout")]
+    fn check_bootstrap_timeout(&mut self, current_time_ms: i64) {
+        let expired = self.bootstrap_deadline_ms.is_some_and(|deadline| current_time_ms >= deadline);
+        if expired && self.bootstrap_error.is_none() {
+            self.cancel_bootstrap_resolution();
+            let error = BootstrapResolutionError::new(format!(
+                "Failed to resolve bootstrap servers after {}ms. Please check your bootstrap.servers configuration and DNS settings.",
+                self.bootstrap_configuration.bootstrap_resolve_timeout_ms
+            ));
+            self.bootstrap_error = Some(error.clone());
+            self.bootstrap_failed(Error::BootstrapResolution(error));
+        }
+    }
+
+    /// Trigger a new async DNS resolution if none is in progress and the retry
+    /// backoff has elapsed.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#maybeStartBootstrapResolution")]
+    fn maybe_start_bootstrap_resolution(&mut self, current_time_ms: i64) {
+        if self.bootstrap_error.is_some() {
+            return;
+        }
+
+        if self.pending_bootstrap_resolution.is_some() {
+            return;
+        }
+
+        if self.bootstrap_resolution_retry_ms >= 0 && current_time_ms < self.bootstrap_resolution_retry_ms {
+            return;
+        }
+
+        self.bootstrap_resolution_retry_ms = -1;
+        self.maybe_start_bootstrap_timer();
+
+        self.start_bootstrap_resolution();
+    }
+
+    /// Java's `CompletableFuture.supplyAsync(() -> ClientUtils.parseAddresses(..),
+    /// bootstrapExecutor)`, on a detached `kafka-bootstrap-dns-resolver` thread
+    /// (see [`PendingBootstrapResolution`]). If the thread cannot be spawned
+    /// the attempt counts as failed and is retried after the backoff, as a
+    /// failed `supplyAsync` task would be.
+    ///
+    /// The thread pokes the selector's wakeup primitive once the result is in,
+    /// so a poll blocked on its timeout picks it up at once rather than after
+    /// the timeout. Java has no such wake; it is a latency improvement only, and
+    /// a woken poll returning early is always allowed.
+    fn start_bootstrap_resolution(&mut self) {
+        // `enabled` always sets it; `DISABLED` never starts a resolution.
+        let Some(client_dns_lookup) = self.bootstrap_configuration.client_dns_lookup else {
+            return;
+        };
+        let urls = self.bootstrap_configuration.bootstrap_servers.clone();
+        let wakeup = self.selector.wakeup_handle();
+        let (sender, result) = tokio::sync::oneshot::channel();
+        let (exit_sender, exit) = tokio::sync::oneshot::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("kafka-bootstrap-dns-resolver".to_string())
+            .spawn(move || {
+                // Dropped when the thread ends, however it ends.
+                let _exit = exit_sender;
+                // `Thread.currentThread().isInterrupted()`: the attempt was
+                // cancelled once its result receiver is gone.
+                let servers = ClientUtils::parse_addresses(&urls, client_dns_lookup, || sender.is_closed());
+                let _ = sender.send(servers);
+                wakeup.notify_one();
+            });
+        match spawned {
+            // Detached: the `JoinHandle` is dropped, as Java never joins the
+            // executor's thread.
+            Ok(_) => self.bootstrap_resolver_exit = Some(exit),
+            Err(error) => {
+                kafka_warn!(self.log_context, "Could not start bootstrap DNS resolution: {}", error);
+            },
+        }
+        // Without a thread the sender is already gone, so the next poll sees a
+        // failed attempt and schedules the retry.
+        self.pending_bootstrap_resolution = Some(PendingBootstrapResolution { result });
+    }
+
+    /// How long `close()` waits for the resolver thread per phase: Java's
+    /// `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1,
+    /// TimeUnit.SECONDS)` (`NetworkClient.java:806`).
+    const BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Java's `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1, SECONDS)`
+    /// (`ThreadUtils.java:95-117`): wait up to 1 s for the resolver to finish,
+    /// then interrupt it (`shutdownNow()`) and wait up to 1 s more, then give up
+    /// with Java's error log. The Rust interrupt — the closed result channel —
+    /// was already delivered by `cancel_bootstrap_resolution`, which `close()`
+    /// runs first, so the two waits differ only in what is logged. The thread is
+    /// detached: giving up leaves it to finish its current lookup and exit on
+    /// its own, without blocking anything.
+    async fn shutdown_bootstrap_resolver_quietly(&mut self) {
+        let Some(mut exit) = self.bootstrap_resolver_exit.take() else {
+            return;
+        };
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_err()
+        {
+            kafka_error!(
+                self.log_context,
+                "Executor kafka-bootstrap-dns-resolver did not terminate in time"
+            );
+        }
+    }
+
+    /// Check if a pending bootstrap DNS resolution has completed and process
+    /// its result.
+    ///
+    /// Returns `true` if the client is now bootstrapped and the caller should
+    /// return early.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#maybeProcessBootstrapResolutionResult")]
+    fn maybe_process_bootstrap_resolution_result(&mut self, current_time_ms: i64) -> bool {
+        let servers = match self.pending_bootstrap_resolution.as_mut() {
+            None => return false,
+            Some(pending) => match pending.result.try_recv() {
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
+                Ok(servers) => servers,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    kafka_debug!(self.log_context, "DNS resolution failed");
+                    Vec::new()
+                },
+            },
+        };
+
+        self.pending_bootstrap_resolution = None;
+
+        if !servers.is_empty() {
+            kafka_debug!(
+                self.log_context,
+                "Bootstrap DNS resolution succeeded, {} servers resolved",
+                servers.len()
+            );
+            self.bootstrap(servers);
+            return true;
+        }
+
+        let remaining_ms = self
+            .bootstrap_deadline_ms
+            .map_or(0, |deadline| (deadline - current_time_ms).max(0));
+        kafka_debug!(
+            self.log_context,
+            "Failed to resolve bootstrap servers, will retry after {}ms. Remaining time: {}ms",
+            self.bootstrap_configuration.retry_backoff_ms,
+            remaining_ms
+        );
+        self.bootstrap_resolution_retry_ms =
+            current_time_ms.saturating_add(self.bootstrap_configuration.retry_backoff_ms);
+        false
+    }
+
+    /// Java's `cancelBootstrapResolution`.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#cancelBootstrapResolution")]
+    fn cancel_bootstrap_resolution(&mut self) {
+        // Dropping the receiver interrupts the resolver thread at its next URL.
+        self.pending_bootstrap_resolution = None;
+        self.bootstrap_resolution_retry_ms = -1;
+    }
+
+    /// Handle the case when there are no nodes available.
+    ///
+    /// If bootstrap is disabled or already complete, this is Java's
+    /// `IllegalStateException("There are no nodes in the Kafka cluster")`, kept
+    /// as the panic the existing translation of `leastLoadedNode` raises for it.
+    /// If bootstrap is enabled but not yet complete, return an empty
+    /// [`LeastLoadedNode`] so that the caller can continue polling while DNS
+    /// resolution finishes.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleEmptyNodeList")]
+    fn handle_empty_node_list(&self) -> LeastLoadedNode {
+        if self.bootstrap_configuration.is_disabled() || self.is_bootstrapped() {
+            panic!("There are no nodes in the Kafka cluster");
+        }
+
+        kafka_debug!(self.log_context, "No nodes available yet, still in bootstrap phase");
+        LeastLoadedNode::new(None, false)
+    }
+
     // --- DefaultMetadataUpdater delegation ---
+
+    /// Whether the metadata has been bootstrapped. DefaultMetadataUpdater: we
+    /// are bootstrapped if we have any nodes available (either from DNS
+    /// resolution or metadata response).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#isBootstrapped")]
+    fn is_bootstrapped(&self) -> bool {
+        if let Some(ref metadata) = self.metadata {
+            !metadata.fetch().nodes().is_empty()
+        } else if let Some(ref updater) = self.external_metadata_updater {
+            updater.is_bootstrapped()
+        } else {
+            false
+        }
+    }
+
+    /// Bootstrap the metadata cache with the given addresses.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#bootstrap")]
+    fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
+        if let Some(ref metadata) = self.metadata {
+            metadata.bootstrap(addresses);
+        } else if let Some(ref mut updater) = self.external_metadata_updater {
+            updater.bootstrap(addresses);
+        }
+    }
+
+    /// Record a permanent bootstrap DNS resolution failure.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#bootstrapFailed")]
+    fn bootstrap_failed(&mut self, error: Error) {
+        if let Some(ref metadata) = self.metadata {
+            metadata.bootstrap_fatal_error(error);
+        } else if let Some(ref mut updater) = self.external_metadata_updater {
+            updater.bootstrap_failed(error);
+        }
+    }
 
     /// Gets the current cluster nodes from metadata.
     fn fetch_nodes(&self) -> Vec<crate::common::Node> {
@@ -1303,7 +1663,10 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let least_loaded = self.least_loaded_node(now);
 
         // Rebootstrap if needed and configured.
+        // Only rebootstrap if we've already completed initial bootstrap - otherwise we're still
+        // in the initial DNS resolution phase and should let ensure_bootstrapped() handle it.
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+            && self.is_bootstrapped()
             && !least_loaded.has_node_available_or_connection_ready()
         {
             self.rebootstrap(now);
@@ -1514,6 +1877,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.last_poll_time_ms = now;
         #[cfg(test)]
         self.poll_time_store.store(now, Ordering::Relaxed);
+        self.ensure_bootstrapped(now);
 
         if !self.aborted_sends.is_empty() {
             let mut responses = Vec::new();
@@ -1579,7 +1943,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode {
         let nodes = self.fetch_nodes();
         if nodes.is_empty() {
-            panic!("There are no nodes in the Kafka cluster");
+            return self.handle_empty_node_list();
         }
 
         let mut inflight = usize::MAX;
@@ -1752,6 +2116,8 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             .compare_exchange(STATE_CLOSING, STATE_CLOSED, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            self.cancel_bootstrap_resolution();
+            self.shutdown_bootstrap_resolver_quietly().await;
             self.selector.close().await;
             if let Some(ref metadata) = self.metadata {
                 metadata.close();
@@ -1790,6 +2156,7 @@ mod tests {
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     use crate::ApiVersionsResponseData;
+    use crate::ClientDnsLookup;
     use crate::HostResolver;
     use crate::KafkaClient;
     use crate::MetadataRequestData;
@@ -1876,6 +2243,17 @@ mod tests {
         ) {
         }
 
+        /// `ManualMetadataUpdater` is designed for cases where nodes are
+        /// manually set, so we consider it bootstrapped if nodes have been
+        /// provided.
+        fn is_bootstrapped(&self) -> bool {
+            !self.nodes.is_empty()
+        }
+
+        /// `ManualMetadataUpdater` doesn't use `NetworkClient`'s bootstrap
+        /// mechanism; nodes should be set manually via the constructor.
+        fn bootstrap(&mut self, _addresses: Vec<(String, SocketAddr)>) {}
+
         fn close(&mut self) {}
     }
 
@@ -1940,6 +2318,17 @@ mod tests {
             _metadata_response: &crate::common::requests::MetadataResponse,
         ) {
         }
+
+        /// `ManualMetadataUpdater` is designed for cases where nodes are
+        /// manually set, so we consider it bootstrapped if nodes have been
+        /// provided.
+        fn is_bootstrapped(&self) -> bool {
+            !self.nodes.is_empty()
+        }
+
+        /// `ManualMetadataUpdater` doesn't use `NetworkClient`'s bootstrap
+        /// mechanism; nodes should be set manually via the constructor.
+        fn bootstrap(&mut self, _addresses: Vec<(String, SocketAddr)>) {}
 
         fn close(&mut self) {}
     }
@@ -4783,5 +5172,373 @@ mod tests {
         assert!((avg - 250.0).abs() < EPS, "avg = {avg}");
         assert!((max - 400.0).abs() < EPS, "max = {max}");
         client.close().await;
+    }
+    // ---------------------------------------------------------------------------
+    // KIP-909: asynchronous bootstrap resolution (`NetworkClientTest`, 4.4).
+    // ---------------------------------------------------------------------------
+
+    /// Java's `BOOTSTRAP_ADDRESSES`.
+    fn bootstrap_addresses() -> Vec<String> {
+        vec!["127.0.0.1:8000".to_string(), "127.0.0.2:8000".to_string()]
+    }
+
+    /// Java's `new Metadata(50, 50, 5000, new LogContext(), new ClusterResourceListeners())`.
+    fn unbootstrapped_metadata() -> Arc<Metadata> {
+        Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ))
+    }
+
+    /// The Java tests' `new NetworkClient(selector, metadata, ..., config, false)`.
+    fn create_network_client_with_bootstrap_configuration(
+        metadata: Arc<Metadata>,
+        config: BootstrapConfiguration,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let mut client = create_network_client_with_real_metadata(metadata);
+        client.set_bootstrap_configuration(config);
+        client
+    }
+
+    /// Java's `TestUtils.waitForCondition(() -> { client.poll(100, now); return
+    /// metadataUpdater.isBootstrapped(); }, "Bootstrap should complete")`: the
+    /// resolution runs on its own thread, so poll until it lands, with the
+    /// same 15 s default bound.
+    async fn poll_until_bootstrapped(client: &mut NetworkClient<MockSelector, TestHostResolver>, now: i64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !client.is_bootstrapped() {
+            assert!(std::time::Instant::now() < deadline, "Bootstrap should complete");
+            client.poll(100, now).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedSuccess`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedSuccess")]
+    async fn test_ensure_bootstrapped_success() {
+        let metadata = unbootstrapped_metadata();
+        let config =
+            BootstrapConfiguration::enabled(&bootstrap_addresses(), ClientDnsLookup::UseAllDnsIps, 5000, 100).unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Async DNS resolution: first poll starts the resolution
+        client.poll(1000, 1).await;
+
+        // Wait for async DNS resolution to complete and poll again to process result
+        poll_until_bootstrapped(&mut client, 1).await;
+
+        assert!(client.is_bootstrapped());
+        // Both bootstrap servers became bootstrap nodes, keyed by their literal hosts.
+        let cluster = metadata.fetch();
+        assert!(cluster.is_bootstrap_configured());
+        let mut hosts: Vec<&str> = cluster.nodes().iter().map(|n| n.host()).collect();
+        hosts.sort_unstable();
+        assert_eq!(hosts, ["127.0.0.1", "127.0.0.2"]);
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedPollTimeoutReturnsWithoutError`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedPollTimeoutReturnsWithoutError")]
+    async fn test_ensure_bootstrapped_poll_timeout_returns_without_error() {
+        let metadata = unbootstrapped_metadata();
+        // Use invalid addresses that cannot be resolved (using RFC 6761 reserved .invalid TLD)
+        let invalid_addresses = vec!["unresolvable.invalid:9092".to_string()];
+        let config = BootstrapConfiguration::enabled(
+            &invalid_addresses,
+            ClientDnsLookup::UseAllDnsIps,
+            5000, // Long bootstrap timeout
+            100,
+        )
+        .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Directly call ensure_bootstrapped
+        // Should return without error even though bootstrap hasn't succeeded (will retry on next poll)
+        // DNS resolution will fail but timeout hasn't been reached yet
+        client.ensure_bootstrapped(0);
+
+        // Verify that no error was recorded and metadata is still empty
+        assert_eq!(
+            0,
+            metadata.fetch().nodes().len(),
+            "Metadata should have no nodes after failed DNS resolution"
+        );
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedRetryUntilSuccess`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedRetryUntilSuccess")]
+    async fn test_ensure_bootstrapped_retry_until_success() {
+        let metadata = unbootstrapped_metadata();
+        let config =
+            BootstrapConfiguration::enabled(&bootstrap_addresses(), ClientDnsLookup::UseAllDnsIps, 5000, 100).unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Async DNS resolution: first poll starts the resolution
+        client.poll(1000, 1).await;
+
+        // Wait for async DNS resolution to complete and poll again to process result
+        poll_until_bootstrapped(&mut client, 1).await;
+        assert!(client.is_bootstrapped());
+
+        // Subsequent polls should not fail even if already bootstrapped
+        client.poll(1000, 1).await;
+        assert!(client.is_bootstrapped());
+    }
+
+    /// The timeout half of `ensureBootstrapped` (Rust-side: Java covers it only
+    /// end to end, through the producer / consumer / admin tests). Once the
+    /// budget runs out the `BootstrapResolutionException` is recorded on the
+    /// metadata with Java's exact message, it is permanent, and no new
+    /// resolution is started. The pending resolution is a host that never
+    /// resolves, and the clock is the poll's `now`, so this does not depend on
+    /// how fast the resolver answers.
+    #[tokio::test]
+    async fn test_ensure_bootstrapped_records_the_timeout_failure_once() {
+        let metadata = unbootstrapped_metadata();
+        let config = BootstrapConfiguration::enabled(
+            &["unresolvable.invalid:9092".to_string()],
+            ClientDnsLookup::UseAllDnsIps,
+            3000,
+            100,
+        )
+        .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // The timer starts on the first poll, not at construction.
+        client.poll(0, 1_000).await;
+        assert_eq!(client.bootstrap_deadline_ms, Some(4_000));
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+
+        // One millisecond short of the deadline: still retrying.
+        client.poll(0, 3_999).await;
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+
+        // At the deadline (`Timer.isExpired` is `>=`): the failure is recorded.
+        client.poll(0, 4_000).await;
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        for _ in 0..2 {
+            // Every metadata check sees it; none clears it.
+            for result in [
+                metadata.maybe_return_bootstrap_fatal_error(),
+                metadata.maybe_return_fatal_error(),
+                metadata.maybe_return_any_error(),
+                metadata.maybe_return_error_for_topic("t"),
+            ] {
+                match result {
+                    Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+                    other => panic!("expected the bootstrap failure, got {other:?}"),
+                }
+            }
+        }
+        assert!(
+            client.pending_bootstrap_resolution.is_none(),
+            "the pending resolution is cancelled"
+        );
+
+        // Later polls neither restart resolution nor bootstrap.
+        client.poll(0, 10_000).await;
+        assert!(client.pending_bootstrap_resolution.is_none());
+        assert!(!client.is_bootstrapped());
+        client.close().await;
+    }
+
+    /// Bootstrap hosts whose lookup hangs for `SLOW_TEST_HOST_DELAY` (5 s), then fails.
+    fn slow_bootstrap_hosts(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect()
+    }
+
+    /// Critic 92, Issue 2: `close()` waits for an in-flight resolution no
+    /// longer than Java does — `shutdownExecutorServiceQuietly(.., 1, SECONDS)`,
+    /// at most 1 s, then the interrupt and at most 1 s more
+    /// (`NetworkClient.java:805-806`, `ThreadUtils.java:95-117`) — however slow
+    /// the lookups are. Three 5 s lookups used to hold `close()` (and the
+    /// runtime drop behind it) for all 15 s.
+    #[tokio::test]
+    async fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        let config =
+            BootstrapConfiguration::enabled(&slow_bootstrap_hosts(3), ClientDnsLookup::UseAllDnsIps, 60_000, 100)
+                .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+        client.poll(0, 1).await;
+        assert!(client.pending_bootstrap_resolution.is_some(), "the resolution is in flight");
+
+        let started = std::time::Instant::now();
+        client.close().await;
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "close() took {elapsed:?}");
+        assert!(client.pending_bootstrap_resolution.is_none());
+    }
+
+    /// The resolver runs on a detached thread that no runtime owns: dropping
+    /// the runtime the client was polled on does not wait for it.
+    #[test]
+    fn test_runtime_drop_does_not_wait_for_a_bootstrap_resolution() {
+        let started = std::time::Instant::now();
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let config = BootstrapConfiguration::enabled(
+                    &slow_bootstrap_hosts(3),
+                    ClientDnsLookup::UseAllDnsIps,
+                    60_000,
+                    100,
+                )
+                .unwrap();
+                let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+                client.poll(0, 1).await;
+                assert!(client.pending_bootstrap_resolution.is_some());
+                // Dropped unclosed, with the lookup in flight.
+            });
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(2), "runtime drop took {elapsed:?}");
+    }
+
+    /// `handleEmptyNodeList`: before bootstrap completes `leastLoadedNode`
+    /// returns an empty node instead of throwing, so the caller keeps polling;
+    /// with bootstrap disabled an empty cluster is still Java's
+    /// `IllegalStateException` (the panic this translation has always raised).
+    #[tokio::test]
+    async fn test_least_loaded_node_while_bootstrapping() {
+        let config = BootstrapConfiguration::enabled(
+            &["unresolvable.invalid:9092".to_string()],
+            ClientDnsLookup::UseAllDnsIps,
+            5000,
+            100,
+        )
+        .unwrap();
+        let client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+        let least_loaded = client.least_loaded_node(0);
+        assert!(least_loaded.node().is_none());
+        assert!(!least_loaded.has_node_available_or_connection_ready());
+
+        let disabled = create_network_client_with_real_metadata(unbootstrapped_metadata());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| disabled.least_loaded_node(0)))
+            .expect_err("an empty cluster with bootstrap disabled must still fail");
+        assert_eq!(
+            panic.downcast_ref::<&str>().copied(),
+            Some("There are no nodes in the Kafka cluster")
+        );
+    }
+
+    /// Mode 0 is unchanged: with [`BootstrapConfiguration::DISABLED`] (every
+    /// client's default) `poll()` never starts a resolution, never starts the
+    /// timer and never records a bootstrap failure, however long it runs.
+    #[tokio::test]
+    async fn test_disabled_bootstrap_configuration_never_resolves() {
+        let metadata = unbootstrapped_metadata();
+        metadata.bootstrap(vec![("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())]);
+        let mut client = create_network_client_with_real_metadata(Arc::clone(&metadata));
+        assert!(client.bootstrap_configuration.is_disabled());
+        for now in [0, 1_000_000, i64::MAX / 2] {
+            client.poll(0, now).await;
+            assert!(client.pending_bootstrap_resolution.is_none());
+            assert_eq!(client.bootstrap_deadline_ms, None);
+            assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+        }
+    }
+
+    /// With an external `MetadataUpdater` (the admin client's), the resolved
+    /// addresses and the failure go through the updater's `bootstrap` /
+    /// `bootstrapFailed` hooks.
+    #[tokio::test]
+    async fn test_ensure_bootstrapped_through_an_external_metadata_updater() {
+        #[derive(Default)]
+        struct Recorded {
+            bootstrapped: Vec<(String, SocketAddr)>,
+            failure: Option<Error>,
+        }
+        struct RecordingUpdater(Arc<std::sync::Mutex<Recorded>>);
+        impl MetadataUpdater for RecordingUpdater {
+            fn fetch_nodes(&self) -> Vec<Node> {
+                Vec::new()
+            }
+            fn is_update_due(&self, _now: i64) -> bool {
+                false
+            }
+            fn maybe_update(&mut self, _now: i64) -> i64 {
+                i64::MAX
+            }
+            fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<Error>) {}
+            fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<Error>) {}
+            fn handle_successful_response(
+                &mut self,
+                _request_header: &crate::common::requests::RequestHeader,
+                _now: i64,
+                _metadata_response: &crate::common::requests::MetadataResponse,
+            ) {
+            }
+            fn bootstrap_failed(&mut self, error: Error) {
+                self.0.lock().unwrap().failure = Some(error);
+            }
+            fn is_bootstrapped(&self) -> bool {
+                !self.0.lock().unwrap().bootstrapped.is_empty()
+            }
+            fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
+                self.0.lock().unwrap().bootstrapped = addresses;
+            }
+            fn close(&mut self) {}
+        }
+
+        let new_client = |urls: &[&str], timeout_ms: i64| {
+            let recorded = Arc::new(std::sync::Mutex::new(Recorded::default()));
+            let mut client = NetworkClient::with_metadata_updater(
+                MockSelector::new(),
+                Box::new(RecordingUpdater(Arc::clone(&recorded))),
+                "mock",
+                usize::MAX,
+                RECONNECT_BACKOFF_MS_TEST,
+                RECONNECT_BACKOFF_MAX_MS_TEST,
+                64 * 1024,
+                64 * 1024,
+                DEFAULT_REQUEST_TIMEOUT_MS,
+                CONNECTION_SETUP_TIMEOUT_MS_TEST,
+                CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+                false,
+                Arc::new(ApiVersions::new()),
+                TestHostResolver::new(),
+                MetadataRecoveryStrategy::None,
+                LogContext::empty(),
+            );
+            client.set_mock_time();
+            let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+            client.set_bootstrap_configuration(
+                BootstrapConfiguration::enabled(&urls, ClientDnsLookup::UseAllDnsIps, timeout_ms, 100).unwrap(),
+            );
+            (client, recorded)
+        };
+
+        let (mut client, recorded) = new_client(&["127.0.0.1:8000"], 5000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !client.is_bootstrapped() {
+            assert!(std::time::Instant::now() < deadline, "Bootstrap should complete");
+            client.poll(100, 1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            recorded.lock().unwrap().bootstrapped,
+            vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]
+        );
+        assert!(recorded.lock().unwrap().failure.is_none());
+
+        let (mut client, recorded) = new_client(&["unresolvable.invalid:9092"], 10);
+        client.poll(0, 1).await;
+        client.poll(0, 11).await;
+        match recorded.lock().unwrap().failure.take() {
+            Some(Error::BootstrapResolution(e)) => assert_eq!(
+                e.message(),
+                "Failed to resolve bootstrap servers after 10ms. \
+                 Please check your bootstrap.servers configuration and DNS settings."
+            ),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
     }
 }

@@ -108,6 +108,10 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
     time: Arc<dyn Time>,
     shutdown: Arc<ShutdownSignal>,
     log_context: LogContext,
+    /// True once a permanent bootstrap failure has been observed and
+    /// [`fail_all_pending_calls`](Self::fail_all_pending_calls) was invoked for
+    /// it. Used to make sure we only fail in-flight calls once (KIP-909).
+    bootstrap_failure_handled: bool,
 }
 
 impl<C: KafkaClient> AdminClientRunnable<C> {
@@ -147,6 +151,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             time,
             shutdown,
             log_context,
+            bootstrap_failure_handled: false,
         }
     }
 
@@ -223,6 +228,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     async fn process_requests(&mut self) {
         loop {
             self.run_once().await;
+            // Java's `break` out of `processRequests` once a permanent bootstrap
+            // failure has failed every call (`KafkaAdminClient.java:1621-1629`):
+            // the I/O thread exits, and `enqueue` fails later calls with the
+            // same error.
+            if self.bootstrap_failure_handled {
+                break;
+            }
             let now = self.time.milliseconds();
             if self.should_exit(now) {
                 break;
@@ -324,6 +336,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         //    cancel-safe (consumer-threading.md §10); wake it via the selector's
         //    wakeup primitive instead of racing it in a select!.
         let responses = self.client.poll(poll_timeout.max(0), now).await;
+
+        // If bootstrap permanently failed during the poll above, fail any calls that were
+        // in flight at that moment. Calls submitted afterwards are handled by
+        // `KafkaAdminClient::submit` (Java's `enqueue`).
+        if let Some(bootstrap_error) = self.metadata_manager.bootstrap_fatal_error()
+            && !self.bootstrap_failure_handled
+        {
+            self.bootstrap_failure_handled = true;
+            self.fail_all_pending_calls(Error::BootstrapResolution(bootstrap_error), now);
+            return;
+        }
 
         // 7. Unassign calls whose target node's connection failed.
         let failed_nodes: HashSet<i32> = self
@@ -738,6 +761,15 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // Ensure the closing flag is set so fail_call routes to handle_failure.
         self.shutdown.closing.store(true, Ordering::Release);
 
+        // Java fails `newCalls` under `synchronized (this)` after setting
+        // `closing`, so no call can slip in behind the drain. The Rust
+        // counterpart is closing the channel first: every `send` after this
+        // fails on the app side (and the sender completes that call), and every
+        // call sent before it is still buffered and drained below. Without it a
+        // call accepted between this drain and the receiver's drop was destroyed
+        // with its futures never completed (CLAUDE.md §7) — reachable once
+        // KIP-909 made the task exit on its own.
+        self.admin_rx.close();
         self.drain_new_calls();
         let pending = std::mem::take(&mut self.pending_calls);
         for call in pending {
@@ -757,6 +789,31 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 .handle_failure(&Error::timeout(format!("{} Call: {}", msg, in_flight.call.call_name)));
         }
         let _ = now;
+    }
+
+    /// Fails every call the task holds — submitted-but-undrained, pending, to
+    /// send and in flight — with `cause`, through the regular
+    /// [`fail_call`](Self::fail_call) path (Java's `call.fail(now, cause)`).
+    ///
+    /// Translated from `AdminClientRunnable.failAllPendingCalls` (KIP-909).
+    fn fail_all_pending_calls(&mut self, cause: Error, now: i64) {
+        // Java's `newCalls`, under `synchronized (this)`: the calls the app
+        // side has handed over but the task has not drained yet.
+        let mut calls = Vec::new();
+        while let Ok(call) = self.admin_rx.try_recv() {
+            calls.push(call);
+        }
+        calls.append(&mut self.pending_calls);
+        for (_node_id, node_calls) in std::mem::take(&mut self.calls_to_send) {
+            calls.extend(node_calls.calls);
+        }
+        self.calls_in_flight.clear();
+        for (_correlation_id, in_flight) in std::mem::take(&mut self.correlation_id_to_calls) {
+            calls.push(in_flight.call);
+        }
+        for call in calls {
+            self.fail_call(call, now, cause.clone());
+        }
     }
 
     /// Builds the internal broker metadata refresh call.

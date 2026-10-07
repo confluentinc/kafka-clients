@@ -508,6 +508,10 @@ pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     unsent_requests: VecDeque<UnsentRequest>,
     metadata_error: Option<Error>,
     notify_metadata_errors_via_error_queue: bool,
+    /// Whether the permanent bootstrap failure (KIP-909) was already
+    /// propagated: `Metadata` returns it on every check, but it is reported to
+    /// the application task once. Java's `bootstrapErrorPropagated`.
+    bootstrap_error_propagated: bool,
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
     /// post-construction by the live consumer (M4/M5 setter precedent);
     /// tests leave it unset and the record points become no-ops.
@@ -540,6 +544,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             unsent_requests: VecDeque::new(),
             metadata_error: None,
             notify_metadata_errors_via_error_queue,
+            bootstrap_error_propagated: false,
             async_consumer_metrics: None,
         }
     }
@@ -918,16 +923,34 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// or store it locally for `get_and_clear_metadata_error`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#maybePropagateMetadataError")]
     fn maybe_propagate_metadata_error(&mut self, current_time_ms: i64) {
-        if let Err(err) = self.metadata.maybe_return_any_error() {
-            if self.notify_metadata_errors_via_error_queue {
-                // Best-effort: if the receiver was dropped (consumer
-                // closed), there is nowhere to deliver the error.
-                let _ = self
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: err }, current_time_ms);
-            } else {
-                self.metadata_error = Some(err);
-            }
+        match self.metadata.maybe_return_any_error() {
+            Ok(()) => {},
+            Err(err @ Error::BootstrapResolution(_)) => {
+                // Bootstrap failure is permanent and returned on every check by Metadata;
+                // only propagate it to the app task once to avoid flooding the event queue.
+                if self.bootstrap_error_propagated {
+                    return;
+                }
+                self.bootstrap_error_propagated = true;
+                self.propagate_metadata_error(err, current_time_ms);
+            },
+            Err(err) => self.propagate_metadata_error(err, current_time_ms),
+        }
+    }
+
+    /// Hand a metadata error to the `BackgroundEventHandler` (if
+    /// `notifyMetadataErrorsViaErrorQueue`) or store it for
+    /// `get_and_clear_metadata_error`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#propagateMetadataError")]
+    fn propagate_metadata_error(&mut self, err: Error, current_time_ms: i64) {
+        if self.notify_metadata_errors_via_error_queue {
+            // Best-effort: if the receiver was dropped (consumer
+            // closed), there is nowhere to deliver the error.
+            let _ = self
+                .background_event_handler
+                .add(BackgroundEvent::Error { error: err }, current_time_ms);
+        } else {
+            self.metadata_error = Some(err);
         }
     }
 }
@@ -1199,6 +1222,41 @@ mod tests {
             },
             other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
         }
+    }
+
+    /// Translated from
+    /// `NetworkClientDelegateTest.testBootstrapResolutionExceptionPropagatedViaErrorEventOnce`
+    /// (KIP-909): the permanent bootstrap failure becomes one
+    /// `BackgroundEvent::Error`, not one per poll, although `Metadata` keeps
+    /// returning it.
+    #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testBootstrapResolutionExceptionPropagatedViaErrorEventOnce"
+    )]
+    async fn test_bootstrap_resolution_error_propagated_via_error_event_once() {
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
+        let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
+
+        // Simulate NetworkClient recording a permanent bootstrap failure on the metadata.
+        meta.bootstrap_fatal_error(Error::BootstrapResolution(
+            crate::common::errors::BootstrapResolutionError::new("DNS resolution failed"),
+        ));
+
+        assert!(bg_rx.try_recv().is_err());
+        ncd.poll(0, time.milliseconds(), false).await;
+        let envelope = bg_rx.try_recv().expect("the bootstrap failure is delivered");
+        match envelope.event {
+            BackgroundEvent::Error { error: Error::BootstrapResolution(e) } => {
+                assert_eq!(e.message(), "DNS resolution failed");
+            },
+            other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
+        }
+
+        // Subsequent polls must NOT keep flooding the queue with duplicate ErrorEvents,
+        // even though metadata.maybe_return_any_error keeps surfacing the permanent error.
+        ncd.poll(0, time.milliseconds(), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
+        assert!(bg_rx.try_recv().is_err());
     }
 
     #[test]

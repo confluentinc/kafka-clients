@@ -152,6 +152,8 @@ pub trait Producer<K, V>: Send + Sync {
     /// Returns `Err` if:
     /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
+    /// - DNS resolution of the bootstrap servers fails within
+    ///   `bootstrap.resolve.timeout.ms` ([`BootstrapResolution`](Error::BootstrapResolution), KIP-909)
     /// - A Kafka-related error occurs
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
     fn send_with_callback(
@@ -177,6 +179,8 @@ pub trait Producer<K, V>: Send + Sync {
     ///
     /// Returns `Err` if:
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
+    /// - DNS resolution of the bootstrap servers fails within
+    ///   `bootstrap.resolve.timeout.ms` ([`BootstrapResolution`](Error::BootstrapResolution), KIP-909)
     /// - The producer has been closed
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#partitionsFor")]
     fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;

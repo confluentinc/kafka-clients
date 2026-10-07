@@ -1869,12 +1869,18 @@ where
             cluster_resource_listeners,
         ));
 
-        // Java lines 416-417 — `addresses =
-        // ClientUtils.parseAndValidateAddresses(config)`,
-        // `metadata.bootstrap(addresses)`.
-        let addresses =
-            ClientUtils::parse_and_validate_addresses(config.bootstrap_servers(), config.client_dns_lookup())?;
-        metadata.bootstrap(addresses);
+        // Java 4.4 — `ClientUtils.maybeBootstrapMetadataSynchronously(config,
+        // bootstrap.servers, metadata)` (KIP-909 / KAFKA-20939): with
+        // `bootstrap.resolve.timeout.ms=0` (the default) the addresses are
+        // resolved and the metadata bootstrapped here, so an unresolvable host
+        // fails construction; with a positive value the NetworkClient resolves
+        // them asynchronously.
+        ClientUtils::maybe_bootstrap_metadata_synchronously(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.bootstrap_servers(),
+            &metadata,
+        )?;
 
         // Java line 420 — `fetchConfig = new FetchConfig(config)`.
         let fetch_config = FetchConfig::with_consumer_config(&config)?;
@@ -1996,6 +2002,15 @@ where
             log_context.clone(),
         );
         network_client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient(config, bootstrap.servers, ...)` passes
+        // `bootstrapConfiguration(config, bootstrapServers)` to the
+        // `NetworkClient` constructor (KIP-909, `NetworkClientDelegate.java:491`).
+        network_client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.retry_backoff_ms(),
+            config.bootstrap_servers(),
+        )?);
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
@@ -2756,6 +2771,16 @@ where
     // (`testListPartitionsAfterClose` style) are listed in the commit-8
     // test-skip rationale.
     //
+    // # Bootstrap-failure behavior (deliberate Java divergence, KIP-909)
+    //
+    // Java 4.4's `acquireAndEnsureOpen()` also throws the permanent
+    // `BootstrapResolutionException` (`AsyncKafkaConsumer.java:2205`), so
+    // `assignment()`, `subscription()`, `paused()`, `groupMetadata()` and
+    // `currentLag()` throw it once asynchronous bootstrap resolution has
+    // failed. For the reason above, the Rust accessors cannot: they keep
+    // returning their current / stub value. Every `Result`-returning API
+    // returns `Error::BootstrapResolution` through `ensure_open()`.
+    //
     // # Mutable Set semantics (deliberate Java divergence)
     //
     // Java wraps the returned `Set` with `Collections.unmodifiableSet(...)`.
@@ -2772,6 +2797,10 @@ where
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`). See the module-level "Sync state-read
     /// methods" comment for rationale.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn assignment(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.assigned_partitions()
@@ -2783,6 +2812,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn subscription(&self) -> std::collections::HashSet<String> {
         let subs = self.subscriptions.lock().unwrap();
         subs.subscription()
@@ -2794,6 +2827,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn paused(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.paused_partitions()
@@ -2863,6 +2900,10 @@ where
     /// receives its first heartbeat response with a member-epoch
     /// (or until tests invoke the notifier directly), the cache is
     /// empty and this method returns a fresh stub.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
@@ -2890,6 +2931,10 @@ where
     ///
     /// **Returns `None` silently when the consumer is closed** (Java
     /// throws `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
         // The bg-task `current_lag_async` path is the one that drives the
         // event; this accessor only reads cached state and currently has
@@ -3010,12 +3055,19 @@ where
     /// Translates Java's `acquireAndEnsureOpen()` — the runtime
     /// reentrancy guard is dropped per Phase 11 PLAN.md deferral #4
     /// (Rust's `&mut self` enforces single-caller exclusivity at
-    /// compile time), so this is just the `closed` check.
+    /// compile time), so this is the `closed` check followed by
+    /// `metadata.maybeThrowBootstrapFatalException()` (KIP-909): once
+    /// asynchronous bootstrap resolution has failed, every `Result`-returning
+    /// API that acquires the consumer returns the
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
+    /// The sync accessors (`assignment`, `subscription`, `paused`,
+    /// `group_metadata`, `current_lag`) have no error channel and keep
+    /// returning their value — see the "Sync state-read methods" comment.
     fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
             return Err(Error::local_illegal_state("This consumer has already been closed."));
         }
-        Ok(())
+        self.metadata.maybe_return_bootstrap_fatal_error()
     }
 
     /// Java: `void subscribe(Collection<String>)`.
@@ -6803,6 +6855,169 @@ mod tests {
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
         );
+    }
+
+    /// Translated from
+    /// `KafkaConsumerTest.testConsumerBootstrapResolutionExceptionPropagatedToPoll`
+    /// (KIP-909), for `GroupProtocol.CONSUMER`; the `CLASSIC` case is out of
+    /// scope (consumer-threading.md §20: `KafkaConsumer::new` rejects it before
+    /// any bootstrap work). With a positive `bootstrap.resolve.timeout.ms` and
+    /// an unresolvable host the consumer is created; `poll` fails with the
+    /// `BootstrapResolutionException` once the budget runs out, and so does
+    /// every later call.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerBootstrapResolutionExceptionPropagatedToPoll"
+    )]
+    async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::KafkaConsumer;
+
+        // Use an invalid hostname that will fail DNS resolution (using RFC 6761 reserved .invalid TLD)
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            // Set a short bootstrap timeout so the test doesn't take too long
+            (
+                ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "3000".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let mut consumer = KafkaConsumer::new::<String, String>(
+            ConsumerConfig::new(&props).unwrap(),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        // Subscribe to a topic to trigger metadata fetch
+        consumer.subscribe_with_topics(vec!["test-topic".to_string()]).await.unwrap();
+
+        // Poll continuously until we get the BootstrapResolutionException
+        // The error should be returned after bootstrap.resolve.timeout.ms expires
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_millis(15000); // 15 seconds max to prevent test hanging
+        let error = loop {
+            assert!(
+                start.elapsed() < max_wait,
+                "Expected the BootstrapResolutionError within {}ms",
+                max_wait.as_millis()
+            );
+            if let Err(error @ Error::BootstrapResolution(_)) = consumer.poll(Duration::from_millis(100)).await {
+                break error;
+            }
+        };
+
+        // Verify the error message contains information about DNS resolution failure
+        assert_eq!(
+            error.message(),
+            "Failed to resolve bootstrap servers after 3000ms. \
+             Please check your bootstrap.servers configuration and DNS settings."
+        );
+
+        // After the first failure, any further API call must also fail. This guards against
+        // accidentally clearing the bootstrap error from the metadata layer.
+        let again = consumer.poll(Duration::from_millis(100)).await;
+        assert!(matches!(again, Err(Error::BootstrapResolution(_))), "got {:?}", again.err());
+        consumer.close().await.unwrap();
+    }
+
+    /// Critic 92, Issue 2: built as the C / Python bindings build it — outside
+    /// any runtime, so every resolution attempt is started from the consumer's
+    /// own `kafka-consumer-io` runtime — `close_with_options(1 s)` returns within
+    /// Java's bound (1 s, plus at most 2 s waiting on the resolver) while slow
+    /// lookups are in flight. With the resolution on that runtime's blocking pool,
+    /// three 5 s lookups held `close()` for ~15 s.
+    #[test]
+    fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        use std::collections::HashMap;
+
+        use crate::ClientUtils;
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::{CloseOptions, KafkaConsumer};
+
+        let servers: Vec<String> = (0..3)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect();
+        let props = HashMap::from([
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.join(",")),
+            (
+                ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "120000".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let mut consumer = KafkaConsumer::new::<String, String>(
+            ConsumerConfig::new(&props).unwrap(),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let elapsed = runtime.block_on(async move {
+            consumer
+                .subscribe_with_topics(vec!["topic".to_string()])
+                .await
+                .expect("subscribe");
+            consumer
+                .poll(Duration::from_millis(100))
+                .await
+                .expect("poll while bootstrapping");
+            let started = std::time::Instant::now();
+            consumer
+                .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+                .await
+                .expect("close");
+            started.elapsed()
+        });
+        assert!(elapsed < Duration::from_secs(5), "close_with_options(1 s) took {elapsed:?}");
+    }
+
+    /// Translated from
+    /// `KafkaConsumerTest.testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+    /// (KAFKA-20939), for `GroupProtocol.CONSUMER` (`CLASSIC` is out of scope,
+    /// as above): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+    /// synchronously in the constructor, so an unresolvable host fails
+    /// construction with the `ConfigException` wrapped in the constructor's
+    /// `KafkaException`, and no consumer instance is created.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+    )]
+    async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::KafkaConsumer;
+
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
+        let error =
+            KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+                .err()
+                .expect("construction must fail");
+        assert_eq!(error.message(), "Failed to construct kafka consumer");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
     }
 
     /// A config built with `ConsumerConfig::default()` and the setters skips

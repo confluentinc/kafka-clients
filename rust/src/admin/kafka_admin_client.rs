@@ -234,7 +234,8 @@ struct Shared {
     /// The `request.timeout.ms` config, used as the default transaction timeout
     /// for `fenceProducers` (mirrors `KafkaAdminClient.requestTimeoutMs`).
     request_timeout_ms: i32,
-    admin_tx: mpsc::UnboundedSender<Call>,
+    /// Every enqueue path goes through it (Java's `runnable.call`).
+    call_sender: CallSender,
     wakeup: Arc<Notify>,
     shutdown: Arc<ShutdownSignal>,
     metadata_manager: AdminMetadataManager,
@@ -332,8 +333,10 @@ impl KafkaAdminClient {
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
+        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
+        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
+        // already rejected it, so it is always `bootstrap.servers`.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
-        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -341,13 +344,19 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // bootstrap.controllers unsupported in Phase 1
+            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
             log_context.clone(),
         );
-        // Seed with the bootstrap cluster so the first metadata refresh has
-        // nodes to talk to (mirrors Java's constructor `metadataManager.update`).
-        let now = time.milliseconds();
-        metadata_manager.update(Cluster::bootstrap(&addresses), now);
+        // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
+        // metadata manager, so any DNS failure surfaces as a ConfigException and no admin
+        // client instance is created. A positive value opts in to asynchronous bootstrap
+        // resolution, where resolution is deferred to the first poll.
+        if config.bootstrap_resolve_timeout_ms() == 0 {
+            let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
+            metadata_manager.update(Cluster::bootstrap(&addresses), time.milliseconds());
+        }
+        // Otherwise, let NetworkClient::ensure_bootstrapped() handle it during the first poll
+        // after DNS resolution succeeds.
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
         // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
@@ -392,11 +401,61 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient` passes
+        // `bootstrapConfiguration(config, bootstrapAddressesToUse)` to the
+        // `NetworkClient` constructor.
+        client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.retry_backoff_ms(),
+            &bootstrap,
+        )?);
 
         crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
+    }
+
+    /// Determines which bootstrap configuration to use based on the provided
+    /// lists. Validates that exactly one of `bootstrap.servers` or
+    /// `bootstrap.controllers` is configured.
+    ///
+    /// Returns `true` if using `bootstrap.controllers`, `false` if using
+    /// `bootstrap.servers`.
+    ///
+    /// Java takes the `AdminClientConfig` and reads both lists from it; the
+    /// Rust config does not keep `bootstrap.controllers` (no client can use
+    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
+    /// parses them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if both or neither bootstrap configurations are set.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
+    pub(crate) fn determine_bootstrap_type(
+        bootstrap_servers: &[String],
+        controller_servers: &[String],
+    ) -> Result<bool, Error> {
+        if bootstrap_servers.is_empty() {
+            if controller_servers.is_empty() {
+                Err(Error::config_message(format!(
+                    "You must set either {} or {}",
+                    AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
+                    AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
+                )))
+            } else {
+                Ok(true) // Using bootstrap.controllers
+            }
+        } else if controller_servers.is_empty() {
+            Ok(false) // Using bootstrap.servers
+        } else {
+            Err(Error::config_message(format!(
+                "You cannot set both {} and {}",
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
+            )))
+        }
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -445,7 +504,12 @@ impl KafkaAdminClient {
             client_id,
             default_api_timeout_ms: config.default_api_timeout_ms(),
             request_timeout_ms: config.request_timeout_ms(),
-            admin_tx,
+            call_sender: CallSender {
+                tx: admin_tx,
+                wakeup: Arc::clone(&wakeup),
+                shutdown: Arc::clone(&shutdown),
+                metadata_manager: metadata_manager.clone(),
+            },
             wakeup,
             shutdown,
             metadata_manager,
@@ -468,52 +532,11 @@ impl KafkaAdminClient {
     }
 
     /// Submits a call to the background task, failing it immediately if the
-    /// client is closed. Mirrors `AdminClientRunnable.call` / `enqueue`.
+    /// client is closed. Mirrors `AdminClientRunnable.call` / `enqueue`; the
+    /// checks live in [`CallSender::call`], which the `AdminApiDriver` path uses
+    /// too.
     fn submit(&self, call: Call) {
-        if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) {
-            let mut call = call;
-            // `new IllegalStateException("Cannot accept new calls when AdminClient
-            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
-            // (finding 247a).
-            call.handle_failure(&Error::local_illegal_state(
-                "Cannot accept new calls when AdminClient is closing.",
-            ));
-            return;
-        }
-        // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
-        // incompatible with a `bootstrap.controllers` client (KIP-919).
-        if self.shared.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers()
-        {
-            let mut call = call;
-            // `new UnsupportedEndpointTypeException("This Admin API is not yet
-            // supported when communicating directly with the controller quorum.")`
-            // (`KafkaAdminClient.java:1591-1593`). Spelling it
-            // `Error::unsupported_version` gave it code 35, which
-            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
-            // retry instead of failing the call (finding 247b).
-            //
-            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
-            // non-retriable, non-`UnsupportedVersionException` error on a call that
-            // has not yet passed its deadline is `handleFailure(throwable)`
-            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
-            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
-                "This Admin API is not yet supported when communicating directly with the controller quorum.",
-            )));
-            return;
-        }
-        match self.shared.admin_tx.send(call) {
-            Ok(()) => self.shared.wakeup.notify_one(),
-            Err(mpsc::error::SendError(mut call)) => {
-                // `new TimeoutException("The AdminClient thread has exited.")`
-                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
-                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
-                // so the user sees exactly a `TimeoutException` — a
-                // `RetriableException`. `illegal_state` sits outside the
-                // `KafkaException` hierarchy entirely, so it answered `false` to both
-                // `is_retriable_error()` and `is_kafka_error()`.
-                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
-            },
-        }
+        self.shared.call_sender.call(call);
     }
 
     fn now(&self) -> i64 {
@@ -524,8 +547,7 @@ impl KafkaAdminClient {
     /// (mirrors the closure over `runnable` in `KafkaAdminClient.maybeSendRequests`).
     fn driver_context(&self) -> DriverContext {
         DriverContext {
-            tx: self.shared.admin_tx.clone(),
-            wakeup: Arc::clone(&self.shared.wakeup),
+            sender: self.shared.call_sender.clone(),
             time: Arc::clone(&self.shared.time),
             log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
@@ -666,14 +688,8 @@ impl KafkaAdminClient {
                     handle_list_failure,
                     Box::new(|| false),
                 );
-                match ctx.tx.send(list_call) {
-                    Ok(()) => ctx.wakeup.notify_one(),
-                    Err(mpsc::error::SendError(mut call)) => {
-                        // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`;
-                        // see `Self::submit`.
-                        call.handle_failure(&Error::timeout("The AdminClient task has exited."));
-                    },
-                }
+                // Java: `runnable.call(new Call("listGroups", ..), now)`.
+                ctx.sender.call(list_call);
             }
             HandleResult::Done
         });
@@ -790,13 +806,117 @@ impl KafkaAdminClient {
     }
 }
 
+/// The app-side handle that submits [`Call`]s to the background task: Java's
+/// `AdminClientRunnable.call` / `enqueue`, which both `KafkaAdminClient`'s RPC
+/// methods and the `AdminApiDriver` callbacks (`maybeSendRequests`) reach
+/// through `runnable`.
+///
+/// Rust-only type (DoD #7): Java's closures capture the runnable itself, while
+/// here the runnable is owned by the background task, so the channel and the
+/// state its checks read (shutdown signal, metadata manager) are bundled into a
+/// cloneable handle that every enqueue path shares, keeping Java's check order
+/// in one place.
+#[derive(Clone)]
+struct CallSender {
+    tx: mpsc::UnboundedSender<Call>,
+    wakeup: Arc<Notify>,
+    shutdown: Arc<ShutdownSignal>,
+    metadata_manager: AdminMetadataManager,
+}
+
+impl CallSender {
+    /// Hands a call to the background task, or fails it at once. Translated
+    /// from `AdminClientRunnable.call(Call, long)` and the `enqueue` it
+    /// forwards to (`KafkaAdminClient.java:1668-1717`), in Java's order:
+    /// hard shutdown → `bootstrap.controllers` endpoint check → permanent
+    /// bootstrap failure (KIP-909) → the task has exited.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#call")]
+    fn call(&self, call: Call) {
+        // Java's `call` rejects a call here only once `close()` set a hard-shutdown
+        // time (`KafkaAdminClient.java:1706-1709`). `closing` alone is not that
+        // signal: the I/O task also sets it when it exits on its own (a permanent
+        // bootstrap failure, or a panic caught in `run`). Such a call reaches
+        // Java's `enqueue`, where the bootstrap failure or the closed channel
+        // ("The AdminClient thread has exited.") answers it, below.
+        if self
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .load(std::sync::atomic::Ordering::Acquire)
+            != KafkaAdminClient::NO_HARD_SHUTDOWN
+        {
+            let mut call = call;
+            // `new IllegalStateException("Cannot accept new calls when AdminClient
+            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
+            // (finding 247a).
+            call.handle_failure(&Error::local_illegal_state(
+                "Cannot accept new calls when AdminClient is closing.",
+            ));
+            return;
+        }
+        // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
+        // incompatible with a `bootstrap.controllers` client (KIP-919).
+        if self.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers() {
+            let mut call = call;
+            // `new UnsupportedEndpointTypeException("This Admin API is not yet
+            // supported when communicating directly with the controller quorum.")`
+            // (`KafkaAdminClient.java:1591-1593`). Spelling it
+            // `Error::unsupported_version` gave it code 35, which
+            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+            // retry instead of failing the call (finding 247b).
+            //
+            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
+            // non-retriable, non-`UnsupportedVersionException` error on a call that
+            // has not yet passed its deadline is `handleFailure(throwable)`
+            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+                "This Admin API is not yet supported when communicating directly with the controller quorum.",
+            )));
+            return;
+        }
+        // Java's `enqueue`: a permanent bootstrap failure (KIP-909) fails the
+        // call with that error instead of accepting it. The I/O task has exited
+        // by then (`AdminClientRunnable::process_requests`), so without this
+        // the call would get "The AdminClient thread has exited." below.
+        // Java's `enqueue` reads `metadataManager.bootstrapFatalException()` (KIP-909).
+        if let Some(bootstrap_error) = self.metadata_manager.bootstrap_fatal_error() {
+            let mut call = call;
+            call.handle_failure(&Error::BootstrapResolution(bootstrap_error));
+            return;
+        }
+        match self.tx.send(call) {
+            Ok(()) => self.wakeup.notify_one(),
+            Err(mpsc::error::SendError(mut call)) => {
+                // `new TimeoutException("The AdminClient thread has exited.")`
+                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
+                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
+                // so the user sees exactly a `TimeoutException` — a
+                // `RetriableException`. `illegal_state` sits outside the
+                // `KafkaException` hierarchy entirely, so it answered `false` to both
+                // `is_retriable_error()` and `is_kafka_error()`.
+                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
+            },
+        }
+    }
+
+    /// A sender over `tx` with a fresh shutdown signal and metadata manager,
+    /// for tests that drive `AdminApiDriver` calls by hand.
+    #[cfg(test)]
+    fn for_test(tx: mpsc::UnboundedSender<Call>) -> Self {
+        Self {
+            tx,
+            wakeup: Arc::new(Notify::new()),
+            shutdown: Arc::new(ShutdownSignal::new()),
+            metadata_manager: AdminMetadataManager::new(100, 300_000, false, LogContext::empty()),
+        }
+    }
+}
+
 /// Shared handle used to submit `AdminApiDriver`-generated [`Call`]s onto the
 /// background task, mirroring the `runnable.call(...)` closure in
 /// `KafkaAdminClient.newCall` / `maybeSendRequests`.
 #[derive(Clone)]
 struct DriverContext {
-    tx: mpsc::UnboundedSender<Call>,
-    wakeup: Arc<Notify>,
+    sender: CallSender,
     time: Arc<dyn Time>,
     log_context: LogContext,
 }
@@ -827,14 +947,8 @@ where
     let specs = driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).poll();
     for spec in specs {
         let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
-        match ctx.tx.send(call) {
-            Ok(()) => ctx.wakeup.notify_one(),
-            Err(mpsc::error::SendError(mut call)) => {
-                // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`; see
-                // `KafkaAdminClient::submit`.
-                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
-            },
-        }
+        // Java: `runnable.call(newCall(driver, spec), now)` (`KafkaAdminClient.java:5279-5283`).
+        ctx.sender.call(call);
     }
 }
 
@@ -6896,6 +7010,193 @@ mod tests {
         assert!(cause.is_retriable_error(), "got {cause:?}");
     }
 
+    /// Translated from `KafkaAdminClientTest.testAdminBootstrapResolutionExceptionPropagated`
+    /// (KIP-909): with a positive `bootstrap.resolve.timeout.ms` and an
+    /// unresolvable bootstrap host, the client is created, calls fail with the
+    /// `BootstrapResolutionException` once the budget runs out, and every later
+    /// call fails with it too.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminBootstrapResolutionExceptionPropagated"
+    )]
+    async fn test_admin_bootstrap_resolution_error_propagated() {
+        let invalid_host = "unresolvable.invalid:9092";
+        let mut props = HashMap::new();
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            invalid_host.to_string(),
+        );
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+            "3000".to_string(),
+        );
+        let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).unwrap())
+            .expect("a positive timeout defers resolution, so creation succeeds");
+
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_millis(15000);
+        loop {
+            assert!(
+                start.elapsed() < max_wait,
+                "Expected the BootstrapResolutionError within {}ms",
+                max_wait.as_millis()
+            );
+            if let Err(Error::BootstrapResolution(e)) = admin.list_topics().names().get().await {
+                assert_eq!(e.message(), expected);
+                break;
+            }
+        }
+
+        // After the first failure, any further API call must also surface the bootstrap error.
+        match admin.list_topics().names().get().await {
+            Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
+
+        // Rust-side (Critic 92, Issue 1): the `AdminApiDriver` RPCs reach Java's
+        // `enqueue` through `runnable.call` too (`maybeSendRequests`,
+        // `KafkaAdminClient.java:5279-5283`), so they fail with the same
+        // non-retriable error — not with the retriable "thread has exited"
+        // timeout — and every future completes.
+        let groups = vec!["group".to_string()];
+        let bounded = Duration::from_secs(5);
+        let driver_results = [
+            tokio::time::timeout(bounded, admin.describe_consumer_groups(&groups).all().get())
+                .await
+                .map(|r| r.map(|_| ())),
+            tokio::time::timeout(bounded, admin.delete_consumer_groups(&groups).all().get()).await,
+            tokio::time::timeout(bounded, admin.list_transactions().all().get())
+                .await
+                .map(|r| r.map(|_| ())),
+        ];
+        for result in driver_results {
+            match result.expect("a driver-path future must complete") {
+                Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+                other => panic!("expected the bootstrap failure, got {other:?}"),
+            }
+        }
+        admin.close().await;
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testAdminConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+    /// (KAFKA-20939): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+    /// synchronously in the constructor, so an unresolvable host fails creation
+    /// with the `ConfigException` wrapped in the constructor's `KafkaException`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+    )]
+    fn test_admin_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
+        let mut props = HashMap::new();
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "unresolvable.invalid:9092".to_string(),
+        );
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
+
+        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
+    /// A [`Call`] whose failure hook records the error it was failed with.
+    fn recording_call(name: &str) -> (Call, Arc<Mutex<Option<Error>>>) {
+        let failure = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&failure);
+        let call = Call::new(
+            name,
+            i64::MAX,
+            NodeProvider::LeastLoaded,
+            Box::new(|_| Err(Error::kafka_message("not sent"))),
+            Box::new(|_, _, _| HandleResult::Done),
+            Box::new(move |error: &Error| *recorded.lock().unwrap() = Some(error.clone())),
+            Box::new(|| false),
+        );
+        (call, failure)
+    }
+
+    /// `CallSender::call` is the one enqueue path (Java's `runnable.call` →
+    /// `enqueue`): once a bootstrap failure is recorded, a call is failed with
+    /// it instead of being handed to the task, and a call reaching a task that
+    /// has exited is failed rather than dropped.
+    #[test]
+    fn test_call_sender_applies_the_enqueue_checks() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = CallSender::for_test(tx);
+
+        let (call, failure) = recording_call("accepted");
+        sender.call(call);
+        assert!(rx.try_recv().is_ok(), "accepted while nothing is recorded");
+        assert!(failure.lock().unwrap().is_none());
+
+        let mut updater = sender.metadata_manager.updater();
+        updater.bootstrap_failed(Error::BootstrapResolution(
+            crate::common::errors::BootstrapResolutionError::new("dns"),
+        ));
+        // The I/O task has exited (it sets `closing` on the way out), but no
+        // `close()` set a hard-shutdown time: the bootstrap failure wins.
+        sender.shutdown.closing.store(true, atomic::Ordering::Release);
+        let (call, failure) = recording_call("after the failure");
+        sender.call(call);
+        assert!(rx.try_recv().is_err(), "never handed to the task");
+        match failure.lock().unwrap().take() {
+            Some(Error::BootstrapResolution(e)) => assert_eq!(e.message(), "dns"),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
+
+        // After `close()` set a hard-shutdown time, Java's `call()` rejects first.
+        sender.shutdown.hard_shutdown_deadline_ms.store(0, atomic::Ordering::Release);
+        let (call, failure) = recording_call("after close");
+        sender.call(call);
+        assert_eq!(
+            failure.lock().unwrap().take().expect("failed").message(),
+            "Cannot accept new calls when AdminClient is closing."
+        );
+
+        // A task that has exited on its own without a bootstrap failure (e.g. a
+        // panic caught in `run`): `fail_all_remaining` set `closing` and closed
+        // the channel, but no `close()` set a hard-shutdown time. Java's `call()`
+        // does not reject; `enqueue` answers with its `TimeoutException`, and the
+        // call is never silently dropped (Critic 92, Issue 5).
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = CallSender::for_test(tx);
+        sender.shutdown.closing.store(true, atomic::Ordering::Release);
+        rx.close();
+        let (call, failure) = recording_call("exited");
+        sender.call(call);
+        let error = failure.lock().unwrap().take().expect("failed");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(error.message(), "The AdminClient thread has exited.");
+    }
+
+    /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
+    /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
+    #[test]
+    fn test_determine_bootstrap_type() {
+        let servers = vec!["localhost:9092".to_string()];
+        let none: Vec<String> = Vec::new();
+        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
+        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
+        assert_eq!(
+            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
+            "You must set either bootstrap.servers or bootstrap.controllers"
+        );
+        assert_eq!(
+            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
+                .unwrap_err()
+                .message(),
+            "You cannot set both bootstrap.servers and bootstrap.controllers"
+        );
+    }
+
     /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
     /// rethrows `new KafkaException("Failed to create new KafkaAdminClient", exc)`
     /// (`KafkaAdminClient.java:569-573` / `:592-595`), so a caller has one class and
@@ -8701,8 +9002,7 @@ mod tests {
         let driver = Arc::new(Mutex::new(ctx.driver));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let drv_ctx = DriverContext {
-            tx,
-            wakeup: Arc::new(Notify::new()),
+            sender: CallSender::for_test(tx),
             time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
@@ -8740,8 +9040,7 @@ mod tests {
         let driver = Arc::new(Mutex::new(driver));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let drv_ctx = DriverContext {
-            tx,
-            wakeup: Arc::new(Notify::new()),
+            sender: CallSender::for_test(tx),
             time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };

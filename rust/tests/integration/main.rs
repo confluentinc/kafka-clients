@@ -36,6 +36,7 @@ mod admin_scram_test;
 mod admin_topics_test;
 mod admin_transactions_test;
 mod base_consumer_test;
+mod bootstrap_resolution_test;
 mod client_rebootstrap_test;
 mod cluster_lifecycle_test;
 mod consumer_bounce_test;

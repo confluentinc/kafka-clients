@@ -878,8 +878,9 @@ impl<K, V> KafkaProducer<K, V> {
 
         kafka_trace!(log_context, "Starting the Kafka producer");
 
-        // 1. Parse and validate bootstrap server addresses
-        let addresses = ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers, config.client_dns_lookup)?;
+        // 1. (KIP-909) Bootstrap address resolution moved below, to
+        //    `ClientUtils::maybe_bootstrap_metadata_synchronously` right after the
+        //    metadata is created, as in Java 4.4.
 
         // 2. Validate delivery timeout configuration
         //    Translated from KafkaProducer.configureDeliveryTimeout().
@@ -904,7 +905,11 @@ impl<K, V> KafkaProducer<K, V> {
         // 4. The system clock, Java's `Time.SYSTEM`
         let time: Arc<dyn Time> = Arc::new(SystemTime);
 
-        // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
+        // 5. Create ProducerMetadata. With `bootstrap.resolve.timeout.ms=0` (the
+        //    default) bootstrap it synchronously from `bootstrap.servers`, so an
+        //    unresolvable address fails construction (`ConfigException`); with a
+        //    positive value the NetworkClient resolves them asynchronously
+        //    (KIP-909, `KafkaProducer.java:446-447`).
         let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
@@ -913,7 +918,12 @@ impl<K, V> KafkaProducer<K, V> {
             ClusterResourceListeners::new(),
             log_context.clone(),
         ));
-        metadata.bootstrap(addresses);
+        ClientUtils::maybe_bootstrap_metadata_synchronously(
+            config.bootstrap_resolve_timeout_ms,
+            config.client_dns_lookup,
+            &config.bootstrap_servers,
+            &metadata,
+        )?;
 
         // 6. Get the shared Metadata Arc from ProducerMetadata so the NetworkClient
         //    uses the same Metadata instance. This mirrors Java's inheritance where
@@ -965,6 +975,15 @@ impl<K, V> KafkaProducer<K, V> {
             config.metadata_recovery_strategy,
             log_context.clone(),
         );
+        // `ClientUtils.createNetworkClient` passes
+        // `bootstrapConfiguration(config, bootstrap.servers)` to the
+        // `NetworkClient` constructor (KIP-909).
+        client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms,
+            config.client_dns_lookup,
+            config.retry_backoff_ms,
+            &config.bootstrap_servers,
+        )?);
 
         // 8. Create the metrics registry. Java creates `this.metrics` early in
         //    the constructor (`KafkaProducer.java:357`), before the
@@ -7509,6 +7528,129 @@ mod tests {
             .expect("the cause is a crate Error");
         assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
         assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
+    }
+
+    /// Translated from `KafkaProducerTest.testProducerBootstrapResolutionExceptionPropagated`
+    /// (KIP-909): with a positive `bootstrap.resolve.timeout.ms` and an
+    /// unresolvable bootstrap host, `partitionsFor` fails with the
+    /// `BootstrapResolutionException` once the budget runs out (the metadata
+    /// wait is woken by it, not left to `max.block.ms`), and so does every later
+    /// call.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerBootstrapResolutionExceptionPropagated"
+    )]
+    async fn test_producer_bootstrap_resolution_error_propagated() {
+        let props = HashMap::from([
+            (
+                ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            (
+                ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "3000".to_string(),
+            ),
+        ]);
+        let producer = KafkaProducer::<String, String>::new(
+            ProducerConfig::new(&props).unwrap(),
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_millis(15000);
+        loop {
+            assert!(
+                start.elapsed() < max_wait,
+                "Expected the BootstrapResolutionError within {}ms",
+                max_wait.as_millis()
+            );
+            match tokio::time::timeout(max_wait, producer.partitions_for("test-topic")).await {
+                Ok(Err(Error::BootstrapResolution(e))) => {
+                    assert_eq!(e.message(), expected);
+                    break;
+                },
+                Ok(_) => {},
+                Err(_) => panic!("partitions_for must be woken by the bootstrap failure"),
+            }
+        }
+
+        // After the first failure, any further API call must also return it. This guards against
+        // accidentally clearing the bootstrap error from the metadata layer.
+        match producer.partitions_for("test-topic").await {
+            Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
+        producer.close_with_timeout(Duration::ZERO).await.unwrap();
+    }
+
+    /// Critic 92, Issue 2: the C / Python producer destroy path closes the
+    /// producer and drops the runtime it built. With a slow bootstrap lookup in
+    /// flight that now returns within Java's bound; with the lookup on that
+    /// runtime's blocking pool the drop waited for every remaining lookup.
+    #[test]
+    fn test_close_and_runtime_drop_are_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        let servers: Vec<String> = (0..3)
+            .map(|i| format!("host{i}{}:9092", crate::ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect();
+        let props = HashMap::from([
+            (ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.join(",")),
+            (
+                ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "120000".to_string(),
+            ),
+        ]);
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let producer = runtime.block_on(async {
+            KafkaProducer::<String, String>::new(
+                ProducerConfig::new(&props).unwrap(),
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+            )
+            .expect("a positive timeout defers resolution, so construction succeeds")
+        });
+        let started = std::time::Instant::now();
+        runtime.block_on(async {
+            // Let the sender poll so the resolution is surely in flight.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            producer.close_with_timeout(Duration::ZERO).await.unwrap();
+        });
+        drop(producer);
+        drop(runtime);
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(4), "close + runtime drop took {elapsed:?}");
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+    /// (KAFKA-20939): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+    /// synchronously in the constructor, so an unresolvable host fails
+    /// construction with the `ConfigException` wrapped in the constructor's
+    /// `KafkaException`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+    )]
+    fn test_producer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
+        let props = HashMap::from([(
+            ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "unresolvable.invalid:9092".to_string(),
+        )]);
+        let config = ProducerConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_resolve_timeout_ms, 0);
+        let error =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .err()
+                .expect("construction must fail");
+        assert_eq!(error.message(), "Failed to construct kafka producer");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
     }
 
     /// `doSend`'s inner `catch (KafkaException e)` around `waitOnMetadata`

@@ -17,9 +17,11 @@
 //! Corresponds to
 //! `org.apache.kafka.clients.admin.internals.AdminMetadataManager`.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::MetadataUpdater;
+use crate::common::errors::BootstrapResolutionError;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
 use crate::common::utils::internals::LogContext;
@@ -55,6 +57,39 @@ struct Inner {
     last_metadata_fetch_attempt_ms: i64,
     /// A fatal (non-retriable) error to surface from `is_ready`.
     fatal_error: Option<Error>,
+    /// If this is set, bootstrap DNS resolution permanently failed (KIP-909).
+    /// Unlike `fatal_error`, this is never cleared so all subsequent API calls
+    /// see it. Java keeps it in a `volatile` field because it is written by the
+    /// I/O thread (via the network client) and read by both the I/O thread and
+    /// the app thread (via `KafkaAdminClient#enqueue`); here the shared `Mutex`
+    /// gives the app-side `submit` the same visibility.
+    bootstrap_fatal_error: Option<BootstrapResolutionError>,
+}
+
+impl Inner {
+    /// Java's `AdminMetadataManager.update(Cluster, long)` body, shared with
+    /// [`AdminMetadataUpdater::bootstrap`].
+    fn update(&mut self, cluster: Cluster, now: i64) {
+        if cluster.is_bootstrap_configured() {
+            self.bootstrap_cluster = cluster.clone();
+        } else {
+            self.last_metadata_update_ms = now;
+        }
+        self.state = State::Quiescent;
+        self.fatal_error = None;
+        // Only update if the metadata succeeded (has nodes). If a metadata
+        // request failed we keep the previous cluster.
+        if !cluster.nodes().is_empty() {
+            self.cluster = cluster;
+        }
+    }
+
+    /// Java's `bootstrapCluster != null`. The Rust field starts as
+    /// [`Cluster::empty`] rather than `null`, and only a bootstrap-configured
+    /// cluster is ever stored in it.
+    fn is_bootstrapped(&self) -> bool {
+        self.bootstrap_cluster.is_bootstrap_configured()
+    }
 }
 
 /// The Admin analog of `ConsumerMetadata` — tracks the current [`Cluster`], the
@@ -93,6 +128,7 @@ impl AdminMetadataManager {
                 last_metadata_update_ms: 0,
                 last_metadata_fetch_attempt_ms: 0,
                 fatal_error: None,
+                bootstrap_fatal_error: None,
             })),
             refresh_backoff_ms,
             metadata_expire_ms,
@@ -195,19 +231,34 @@ impl AdminMetadataManager {
     /// Applies a successful metadata response's cluster.
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#update")]
     pub(crate) fn update(&self, cluster: Cluster, now: i64) {
-        let mut inner = self.inner.lock().unwrap();
-        if cluster.is_bootstrap_configured() {
-            inner.bootstrap_cluster = cluster.clone();
-        } else {
-            inner.last_metadata_update_ms = now;
-        }
-        inner.state = State::Quiescent;
-        inner.fatal_error = None;
-        // Only update if the metadata succeeded (has nodes). If a metadata
-        // request failed we keep the previous cluster.
-        if !cluster.nodes().is_empty() {
-            inner.cluster = cluster;
-        }
+        self.inner.lock().unwrap().update(cluster, now);
+    }
+
+    /// Whether the bootstrap cluster has been set, synchronously at
+    /// construction or by the `NetworkClient`'s asynchronous bootstrap
+    /// resolution (KIP-909).
+    ///
+    /// Java's only caller gates `KafkaAdminClient`'s rebootstrap on it
+    /// (`MetadataUpdateNodeIdProvider.provide()`, `KafkaAdminClient.java:790-797`). The Rust admin client never
+    /// rebootstraps (it runs with `MetadataRecoveryStrategy::None`), so that
+    /// gate has no counterpart and this is translated for completeness (DoD #2).
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#isBootstrapped")]
+    pub(crate) fn is_bootstrapped(&self) -> bool {
+        self.inner.lock().unwrap().is_bootstrapped()
+    }
+
+    /// The permanent bootstrap DNS resolution failure, if one was recorded
+    /// (KIP-909).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#bootstrapFatalException")]
+    pub(crate) fn bootstrap_fatal_error(&self) -> Option<BootstrapResolutionError> {
+        self.inner.lock().unwrap().bootstrap_fatal_error.clone()
+    }
+
+    /// Records the permanent bootstrap DNS resolution failure.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#recordBootstrapFatalException")]
+    fn record_bootstrap_fatal_error(inner: &Mutex<Inner>, error: BootstrapResolutionError) {
+        inner.lock().unwrap().bootstrap_fatal_error = Some(error);
     }
 
     /// Records a failed metadata update, storing a fatal exception if the error
@@ -311,5 +362,73 @@ impl MetadataUpdater for AdminMetadataUpdater {
         let _ = &self.log_context;
     }
 
+    fn bootstrap_failed(&mut self, error: Error) {
+        // Java: `if (exception instanceof BootstrapResolutionException)`.
+        if let Error::BootstrapResolution(error) = error {
+            AdminMetadataManager::record_bootstrap_fatal_error(&self.inner, error);
+        }
+    }
+
+    fn is_bootstrapped(&self) -> bool {
+        self.inner.lock().unwrap().is_bootstrapped()
+    }
+
+    fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
+        // The `now` argument is unused when the incoming cluster is bootstrap-configured
+        // (see AdminMetadataManager#update), so we pass 0 rather than plumbing a clock through
+        // the MetadataUpdater interface for a value that would be ignored.
+        self.inner.lock().unwrap().update(Cluster::bootstrap(&addresses), 0);
+    }
+
     fn close(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_manager() -> AdminMetadataManager {
+        AdminMetadataManager::new(100, 300_000, false, LogContext::empty())
+    }
+
+    fn address() -> (String, SocketAddr) {
+        ("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())
+    }
+
+    /// KIP-909: `isBootstrapped` is `bootstrapCluster != null` — false until a
+    /// bootstrap cluster is installed, synchronously through `update` or by the
+    /// `NetworkClient` through the updater's `bootstrap`.
+    #[test]
+    fn test_is_bootstrapped() {
+        let manager = new_manager();
+        assert!(!manager.is_bootstrapped());
+        manager.update(Cluster::bootstrap(&[address()]), 0);
+        assert!(manager.is_bootstrapped());
+
+        let manager = new_manager();
+        let mut updater = manager.updater();
+        assert!(!updater.is_bootstrapped());
+        updater.bootstrap(vec![address()]);
+        assert!(updater.is_bootstrapped());
+        assert!(manager.is_bootstrapped());
+        assert_eq!(updater.fetch_nodes().len(), 1);
+        assert!(manager.inner.lock().unwrap().cluster.is_bootstrap_configured());
+    }
+
+    /// KIP-909: the updater's `bootstrapFailed` records only a
+    /// `BootstrapResolutionException`, and the record is never cleared — not by
+    /// a later metadata update either.
+    #[test]
+    fn test_bootstrap_failed_records_only_the_bootstrap_resolution_error() {
+        let manager = new_manager();
+        let mut updater = manager.updater();
+        assert!(manager.bootstrap_fatal_error().is_none());
+
+        updater.bootstrap_failed(Error::kafka_message("not a bootstrap failure"));
+        assert!(manager.bootstrap_fatal_error().is_none());
+
+        updater.bootstrap_failed(Error::BootstrapResolution(BootstrapResolutionError::new("dns")));
+        manager.update(Cluster::bootstrap(&[address()]), 0);
+        assert_eq!(manager.bootstrap_fatal_error().expect("recorded").message(), "dns");
+    }
 }

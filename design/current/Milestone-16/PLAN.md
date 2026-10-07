@@ -508,6 +508,239 @@ Phase 1 completion notes (agent 91):
 - Commits covered: 507d01da42 (minus its Share/Classic files), 0df48ff5c5, 87943b2ff8, 0720ba1141.
   Recorded skip: d1c0bd82c0 (ShareConsumerImpl only).
 
+Phase 2 completion notes (agent 92):
+
+- **Commits:** b3d85ec1 (core + admin + producer), 5b2eef8d (consumer), 37617f3c (integration test),
+  c81ffa34 (lint), plus this notes commit. All four Java commits are covered: 507d01da42 (minus Share /
+  Classic), 0df48ff5c5, 87943b2ff8, 0720ba1141.
+- **What landed, in tree-diff order:**
+  - `CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG` and `DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS = 0`.
+    The `_DOC` text (with 87943b2ff8's "evolving feature" sentence) is rustdoc, following the
+    `CLIENT_DNS_LOOKUP_CONFIG` precedent: the crate has no `ConfigDef` docs.
+  - `BootstrapConfiguration` (new, crate-private): `DISABLED`, `enabled()` (validates without resolving;
+    "Invalid url" / "Invalid port" per 0720ba1141), `is_disabled()`. Java compares against `DISABLED` by
+    identity; Rust compares by value, which is equivalent because only `DISABLED` has no `client_dns_lookup`.
+  - `ClientUtils`: `resolveAddress` extracted and shared, as in Java, with its two exceptions as the
+    private `ResolveAddressError`; `parse_addresses`, `bootstrap_configuration` (with the info log) and
+    `maybe_bootstrap_metadata_synchronously`. 0720ba1141's removal of the `(AbstractConfig)` overload has no
+    Rust counterpart. Rust configs share no `AbstractConfig`, so the two new functions take the values
+    Java reads from it.
+  - `Metadata`: `bootstrap_fatal_error`, `maybe_return_bootstrap_fatal_error`. The failure is checked first
+    by `maybe_return_fatal_error` and by `clear_errors_and_maybe_return_error`, is never cleared, and wakes
+    `await_update` waiters (Java's `notifyAll`).
+  - `MetadataUpdater`: `bootstrap_failed` (default no-op), `is_bootstrapped`, `bootstrap`. The test-only
+    `ManualMetadataUpdater` / `TestMetadataUpdater` implement Java's `ManualMetadataUpdater` semantics.
+  - `NetworkClient`: `ensure_bootstrapped` and its helpers, `handle_empty_node_list`, the
+    `&& is_bootstrapped()` rebootstrap gate in `default_maybe_update`, the `DefaultMetadataUpdater`
+    `isBootstrapped` / `bootstrap` / `bootstrapFailed` delegation, and `cancel_bootstrap_resolution` on close.
+  - Admin: `AdminClientConfig` key (`atLeast(0)`) and getter; `KafkaAdminClient::determine_bootstrap_type`;
+    `AdminMetadataManager` `is_bootstrapped` / `bootstrap_fatal_error` / `record_bootstrap_fatal_error` plus
+    the updater hooks; `AdminClientRunnable::fail_all_pending_calls` and the loop exit; and the enqueue-side
+    check in `CallSender::call` (Java's `runnable.call` → `enqueue`), which `submit`, the
+    `AdminApiDriver` path and the per-broker `listGroups` sends all use (review round 1).
+  - Producer: `ProducerConfig` key; construction through `maybe_bootstrap_metadata_synchronously` and
+    `set_bootstrap_configuration`.
+  - Consumer: `ConsumerConfig` key; `AsyncKafkaConsumer` construction as for the producer; `ensure_open`
+    (Java's `acquireAndEnsureOpen`) returns the bootstrap failure from every `Result`-returning API (the
+    sync accessors cannot; see the deviations); `NetworkClientDelegate`
+    `bootstrap_error_propagated` / `propagate_metadata_error`.
+  - Rustdoc: the `@throws BootstrapResolutionException` lines on the `Consumer` trait (`poll`, `commit_sync`,
+    `committed`, `partitions_for`, `list_topics`, `offsets_for_times`) and the `Producer` trait (`send`,
+    `partitions_for`).
+  - `AdminBootstrapAddresses` has no Rust class to delete: its `fromConfig` logic lived inline in
+    `AdminClientConfig::new`, which now calls `determine_bootstrap_type`.
+- **Mode 0 is unchanged, and how that is shown:**
+  - Every client's `bootstrap.resolve.timeout.ms` defaults to 0. `bootstrap_configuration(0, ..)` returns
+    `DISABLED`, and every new `NetworkClient` path returns at once on `is_disabled()`. The two shared-path
+    edits are inert in mode 0:
+    - `handle_empty_node_list` still panics with the old message;
+    - the rebootstrap gate's `is_bootstrapped()` can only be false when the node list is empty, and then
+      `least_loaded_node` has already panicked.
+  - `maybe_bootstrap_metadata_synchronously(0, ..)` is the old `parse_and_validate_addresses` +
+    `metadata.bootstrap`, with the same error. The admin path keeps its synchronous
+    `parse_and_validate_addresses` + `update(Cluster::bootstrap)`.
+  - Tests:
+    - `test_disabled_bootstrap_configuration_never_resolves` polls a `DISABLED` client at three far-apart
+      times and asserts no resolution, no timer and no failure;
+    - `test_least_loaded_node_while_bootstrapping` asserts the mode-0 empty-cluster panic message;
+    - `test_bootstrap_configuration` and `test_maybe_bootstrap_metadata_synchronously` cover the 0 branch;
+    - the three `*ConstructorFailsWithConfigException*WhenTimeoutZero` translations (producer, consumer,
+      admin) pin the construction-failure contract;
+    - every pre-existing `NetworkClient` / client test still passes unchanged on the `DISABLED` default.
+- **Async path (mode > 0) design** (CLAUDE.md §11.6, consumer-threading §10):
+  - The resolution runs `ClientUtils::parse_addresses` on a detached OS thread named
+    `kafka-bootstrap-dns-resolver` (Java's daemon executor thread, `NetworkClient.java:399`), and its result
+    comes back over a `oneshot`. `poll()` only `try_recv`s that result, so the resolution is never awaited,
+    is never in a `select!` arm, and never holds up or races the network poll. No runtime owns the thread,
+    so no runtime drop waits for it (review round 1, Issue 2).
+  - `close()` cancels the attempt (drops the receiver; the thread's `is_interrupted` check, Java's
+    `isInterrupted()`, stops it at the next URL) and then waits for the thread as Java's
+    `shutdownExecutorServiceQuietly(.., 1, SECONDS)` does: at most 1 s, then at most 1 s more, then it logs
+    and returns.
+  - When the result lands, the thread pokes the selector's wakeup handle so a blocked poll picks it up
+    promptly. That wake is Rust-only and changes latency only.
+  - No lock is held across an `.await`: `Metadata` / `AdminMetadataManager` take their std `Mutex` briefly
+    and synchronously.
+  - The timer starts on the first poll, and an expiry at the same poll as a result loses to the result, as
+    in Java.
+- **Recorded skips:**
+  - d1c0bd82c0 and the Share / Classic hunks of 507d01da42 / 0df48ff5c5 (`ShareConsumerImpl`,
+    `KafkaShareConsumer`, `ClassicKafkaConsumer`, `KafkaShareConsumerTest`), plus the `CLASSIC` parameter of
+    the two `KafkaConsumerTest` translations: out of scope (§1.1, consumer-threading §20).
+  - Connect, core, raft, server, streams, tools and trogdor hunks of 507d01da42 / 0df48ff5c5: not client code.
+  - `MetadataUpdater.clusterId`: it comes from 0ef4a4c80e (KAFKA-20246 2/N), which Phase 4 owns. Its only
+    callers are Phase 4's.
+  - `ClientUtils.createNetworkClient(config, bootstrapServers, ..)` and the `metadata.cluster.check.enable`
+    argument: Rust has no `createNetworkClient`, since each client builds its `NetworkClient` itself, and
+    the cluster-check flag is Phase 4.
+  - `KafkaAdminClient.java:790-797` (`MetadataUpdateNodeIdProvider.provide()`), the `isBootstrapped()` gate on the admin rebootstrap: the Rust admin client
+    runs with `MetadataRecoveryStrategy::None` and has no rebootstrap path. `AdminMetadataManager::is_bootstrapped`
+    is translated (DoD #2) and tested, and is `cfg_attr(not(test), expect(dead_code))`.
+  - `KafkaProducer.awaitTopicMetadata`'s `maybeThrowBootstrapFatalException`, and
+    `KafkaProducerTest.testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated` (including
+    0720ba1141's mock tweak to it): `awaitTopicMetadata` is KIP-1319, so this is **Phase 5's**. Java's own
+    comment says `sendOffsetsToTransaction` "became metadata-aware in KIP-1319".
+  - Java's `Thread.interrupted()` → `InterruptException` branch in `ensureBootstrapped`: it tests the
+    *application* thread's interrupt flag, which a tokio task does not have. (`parseAddresses`'
+    `isInterrupted()` exit **is** translated, as the `is_interrupted` argument; review round 1 corrected an
+    earlier note that called it untranslatable.)
+  - `NetworkClientTest` fixture plumbing: the `bootstrapConfiguration` argument on every helper, the
+    `bootstrapMetadataUpdater` calls, and the extra `client.poll(0, ..)` and metadata re-update in
+    `testRebootstrap` / `testRequestTimeout` / `testDefaultRequestTimeout`. Java's tests needed these because
+    their fixtures switched to an *enabled* configuration; the Rust fixtures keep the `DISABLED` default,
+    which is what the production clients use in mode 0.
+  - `KafkaProducerTest.testConstructorFailureCloseResource` / `KafkaConsumerTest.testConstructorClose`
+    (bootstrap host and interceptor-class changes) and `doTestHeaders` (bootstrapping the injected metadata):
+    no Rust counterpart test. Reflective metric reporters and interceptor classes are not translated.
+  - `KafkaAdminClientTest.mockBootstrapCluster` (`createUnresolved`): a fixture with no Rust counterpart.
+  - `MetadataTest` (one import-line change) and `ClientUtilsTest` (unchanged): nothing to translate. New
+    Rust tests cover `parse_addresses`, `bootstrap_configuration` and `maybe_bootstrap_metadata_synchronously`.
+  - `PlaintextConsumerTest.testListTopics` now polls inside its wait. The Rust
+    `test_async_consumer_list_topics` already does.
+- **Deviations (DoD #7):**
+  - `PendingBootstrapResolution` (a `oneshot::Receiver`) replaces Java's `CompletableFuture`, and one
+    detached, named OS thread per attempt replaces the `kafka-bootstrap-dns-resolver` single-thread
+    executor (attempts never overlap, so it is one thread at a time; `bootstrap_resolver_exit` is the
+    executor's `awaitTermination`). Dropping the receiver is `cancel(true)` plus the `shutdownNow()`
+    interrupt. A `getaddrinfo` already running cannot be interrupted in either language; the thread exits
+    after it. (The first version ran on tokio's blocking pool. Critic 92 showed a running blocking task
+    holds a runtime's drop without bound — `close_with_options(1 s)` took 14 s — so that justification was
+    withdrawn.)
+  - `CallSender` (Rust-only) bundles the admin channel with the state `call` / `enqueue` read, because
+    Java's driver closures capture the runnable itself and the Rust runnable is owned by its task.
+  - The consumer's sync accessors (`assignment`, `subscription`, `paused`, `group_metadata`,
+    `current_lag`) keep returning their value after a permanent bootstrap failure, where Java's
+    `acquireAndEnsureOpen()` throws `BootstrapResolutionException`: they have no error channel
+    (consumer-threading §1), as for the existing closed-consumer divergence. Documented on each accessor.
+  - The bootstrap `Timer` is a deadline (`org.apache.kafka.common.utils.Timer` has no translation).
+  - The configuration is a setter rather than a constructor argument.
+  - `determineBootstrapType` runs inside `AdminClientConfig::new`, where the old `fromConfig` logic already
+    ran, because the Rust config does not keep `bootstrap.controllers`.
+  - `ResolveAddressError` stands for the two Java exceptions of `resolveAddress`.
+  - `CallSender::call` follows Java's order. It rejects with `IllegalState` only when `close()` has set a
+    hard-shutdown time (Java's `hardShutdownTimeMs` check in `call()`), not on `shutdown.closing`, which the
+    I/O task also sets when it exits on its own. After that come the `bootstrap.controllers` endpoint check,
+    the bootstrap failure, and finally the closed channel, which gives Java's `enqueue` `TimeoutException`.
+- **DoD #10: N/A.** The `NetworkClient`, `Metadata` and admin bootstrap paths are per poll and per
+  construction, not per record. The only addition to `poll()` in mode 0 is the `is_disabled()` comparison.
+- **For Phase 3 (consumer busy loops):** the consumer's async path works end to end
+  (`test_consumer_bootstrap_resolution_error_propagated_to_poll`, ~3 s), but Phase 2 did not audit the
+  pre-bootstrap poll-timer / `maximum_time_to_wait` behaviour that KAFKA-20854/21010/20970 fix. While
+  bootstrapping:
+  - `NetworkClient::least_loaded_node` returns an empty node instead of panicking, so request managers
+    see `None` there;
+  - the default updater's `maybe_update` returns `reconnect_backoff_ms`;
+  - the resolver's wake pokes the selector.
+  Phase 3's `AbstractFetch` / heartbeat / commit fixes plug in on top. `ensure_open` is the
+  `acquireAndEnsureOpen` hook if Phase 3 needs more call sites.
+- **For Phase 4 (shared `NetworkClient`):**
+  - Follow the `set_bootstrap_configuration` setter precedent for `metadataClusterCheckEnable`.
+  - `MetadataUpdater::cluster_id` is still to add, with Java's default `None`.
+  - `poll()` now calls `ensure_bootstrapped(now)` right after the poll-time stores, as Java does right after
+    `ensureActive()`.
+  - `least_loaded_node` goes through `handle_empty_node_list`, so the KAFKA-20393 `stickyNode` work should
+    keep that path.
+- **For Phase 12 (shared `KafkaAdminClient`):**
+  - `AdminClientRunnable` has a `bootstrap_failure_handled` flag. `run_once` returns right after
+    `fail_all_pending_calls`, and `process_requests` breaks on the flag.
+  - Every enqueue goes through `CallSender::call`, which reads `metadata_manager.bootstrap_fatal_error()`
+    once at the top; keep that order relative to the closing and controllers checks when adding
+    `unregister_controller`. Java's `enqueue` also starts with a `tries > maxRetries` check that the Rust
+    enqueue never had (a pre-existing gap, not KIP-909).
+  - `fail_all_remaining` closes the call channel before its final drain, so no accepted call is dropped.
+  - `bootstrap.controllers` is still rejected in the config, so `determine_bootstrap_type` returning `true`
+    becomes the unsupported-version error.
+- **For the producer-track merge (Phase 5):** in `KafkaProducer::new_inner` this phase touched only steps 1
+  and 5 and added the `set_bootstrap_configuration` call after the `NetworkClient` is built. In
+  `ProducerConfig` it added the field, constant, parse arm and test next to `retry.backoff.max.ms`, and the
+  `Producer` trait docs gained one line each on `send` / `partitions_for`.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts) | 20:29 | 20:45 | 16 |
+  | 1 core + NetworkClient + admin + producer, with tests (b3d85ec1) | 20:45 | 20:59 | 14 |
+  | 2 consumer, with tests (5b2eef8d) | 20:59 | 21:04 | 5 |
+  | 3 integration test (37617f3c) | 21:04 | 21:08 | 4 |
+  | 4 gates: format-check, `lint --keep-going` + fixes (c81ffa34), full `cargo test` | 21:08 | 21:18 | 10 |
+  | 5 `make -k verify` (10 min) and these notes | 21:18 | 21:30 | 12 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4336 passed, 0 failed, 10 ignored (lib 4287 / 3 ignored, plus 36, 8 and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: lint-custom reports exactly the 15 remaining §5.1 rows (Phase 5 2,
+    Phases 7/8 2, Phase 9 1, Phase 11 10), nothing new. Every other step is clean: doc-hygiene,
+    module-path-hygiene, and the default, `--all-features` and xtask clippy passes.
+  - `make -k verify` (macOS, 21:18–21:28) fails in three targets, for the same reasons as in Phase 1:
+    - `build-c`: `cmake: command not found` (environment);
+    - `lint`: the 15 §5.1 rows only;
+    - `test-rust-all-features`: the `cargo test --all-features` lib run appears twice in the log, at
+      4508 and 4514 passed. Each has 17 failed and 3 ignored, and all 17 are Docker-backed
+      `integration_tests::*`; the Docker daemon is not running (environment).
+
+    Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` / format-arity
+    (29 passed), and the soak tests (156 passed).
+  - The three broker-less `bootstrap_resolution_test` integration tests (producer, consumer, admin with an
+    unresolvable host) were run directly and pass.
+  - **Owed:** a Docker-backed run of `bootstrap_resolution_test::test_clients_bootstrap_asynchronously_with_positive_timeout`
+    and the rest of the integration suite, and a `build-c` / C-test run on a host with cmake. No C or Python
+    source changed in this phase.
+- **Review round 1 (COMMENTS.92, all moved to `COMMENTS.DONE.92.md`, 2026-10-07 22:02–22:30 IST):**
+  - **Issue 1 (Medium), fixup 20185de8:** one shared enqueue, `CallSender::call`, so the 14 driver-backed
+    RPCs fail with `BootstrapResolutionError` instead of the retriable "thread has exited" timeout. The
+    channel is closed before the final drain, so every accepted call's future completes. Tests: three
+    driver RPCs in `test_admin_bootstrap_resolution_error_propagated` (each bounded at 5 s, exact message)
+    and `test_call_sender_applies_the_enqueue_checks`.
+  - **Issue 2 (Medium), fixup 253f968d:** the detached resolver thread, the `is_interrupted` check and the
+    bounded `close()` described above. Tests:
+    - `NetworkClient` `close()` with three 5 s lookups in flight: under 3 s;
+    - a runtime drop with a lookup in flight: under 2 s;
+    - the consumer built outside any runtime, as the bindings build it, with `close_with_options(1 s)`:
+      under 5 s (the whole filtered run took 3.2 s; the Critic's probe measured 14 s before);
+    - the producer close plus runtime drop, the C / Python destroy path: under 4 s;
+    - `parse_addresses` stops once interrupted.
+
+    The slow lookups come from a `cfg(test)` host-name seam (`*.slow-dns.kafka.test`), not real DNS.
+  - **Issue 3 (Low), fixup 6b929c66:** the sync-accessor divergence is documented; the `ensure_open` doc is
+    narrowed.
+  - **Issue 4 (Low), fixup fbfe06c7 plus this file:** citations `:1621-1629` and `:790-797` re-checked at
+    4.4.0-rc4; the stale `(AbstractConfig)` sentence and the misplaced `consumer_config.rs` doc comment are
+    fixed.
+  - **Harness, bc66e31e:** `INTEGRATION_TEST_BROKER_TAG` selects the `apache/kafka` tag (default `4.2.0`).
+    Broker runs, against both the default and `4.4.0-rc4` (confirmed via `docker ps`: only
+    `apache/kafka:4.4.0-rc4` containers):
+
+    | Suite | 4.2.0 | 4.4.0-rc4 |
+    |---|---|---|
+    | `--test integration -- bootstrap_resolution_test` | 4 / 4 | 4 / 4 |
+    | `--test integration -- client_rebootstrap_test` | 4 / 4 | 4 / 4 |
+    | `--lib -- integration_tests::` | 31 / 31 | 31 / 31 |
+  - **Round 2 (Issues 5, 6):** `CallSender::call` now rejects with `IllegalState` only when a hard-shutdown
+    time is set, as Java's `call()` does. A task that exited on its own (a panic caught in `run`) therefore
+    yields Java's `TimeoutException("The AdminClient thread has exited.")` at the closed channel, and a
+    bootstrap failure is caught by the next check. Covered in `test_call_sender_applies_the_enqueue_checks`.
+    These review notes now sit inside the Phase 2 section, where they belong; they had been appended after §6.
+
 ### Phase 3 — KIP-909 consumer follow-ups (agent 93)
 
 - KAFKA-20854 (642e0a5db0): `AbstractFetch` (+61), `FetchRequestManager`, `Fetcher` (classic → skip),

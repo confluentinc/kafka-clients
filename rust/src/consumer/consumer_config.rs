@@ -136,6 +136,8 @@ pub struct ConsumerConfig {
     pub(crate) retry_backoff_ms: i64,
     /// `retry.backoff.max.ms`
     pub(crate) retry_backoff_max_ms: i64,
+    /// `bootstrap.resolve.timeout.ms` (KIP-909)
+    pub(crate) bootstrap_resolve_timeout_ms: i64,
 
     // --- Timeouts ---
     /// `request.timeout.ms`
@@ -237,6 +239,7 @@ impl Default for ConsumerConfig {
             reconnect_backoff_max_ms: 1_000,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1_000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
 
             request_timeout_ms: 30_000,
             default_api_timeout_ms: 60_000,
@@ -351,6 +354,10 @@ impl ConsumerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`.
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909). See
+    /// [`Self::bootstrap_resolve_timeout_ms`].
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
 
     /// Config key: `request.timeout.ms`.
     pub const REQUEST_TIMEOUT_MS_CONFIG: &'static str = "request.timeout.ms";
@@ -490,6 +497,19 @@ impl ConsumerConfig {
     /// `retry.backoff.max.ms`.
     pub fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
+    }
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): selects the client's bootstrap
+    /// DNS resolution mode. `0` (the default) resolves `bootstrap.servers`
+    /// synchronously when the consumer is created, and a resolution failure
+    /// fails creation with a config error. A positive value resolves
+    /// asynchronously, retrying for at most this long before every subsequent
+    /// call fails with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
+    /// the consumer must then be closed and re-created. Setting a positive
+    /// value enables an evolving feature whose compatibility may be broken in a
+    /// minor release.
+    pub fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+        self.bootstrap_resolve_timeout_ms
     }
 
     // -------- Fluent setters --------
@@ -738,6 +758,14 @@ impl ConsumerConfig {
                 },
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
                     config.retry_backoff_max_ms = parse_i64(key, value)?;
+                },
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // Java `ConsumerConfig` (`:454-459`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
                 },
                 Self::REQUEST_TIMEOUT_MS_CONFIG => {
                     config.request_timeout_ms = parse_i32(key, value)?;
@@ -1008,6 +1036,30 @@ mod tests {
             "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
              Value must be at least 0"
         );
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn test_bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 0);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        match ConsumerConfig::new(&props) {
+            Err(Error::Config(e)) => assert_eq!(
+                e.message(),
+                "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+            ),
+            other => panic!("expected a config error, got {other:?}"),
+        }
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A

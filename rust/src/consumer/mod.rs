@@ -259,12 +259,18 @@ where
     // ── Poll ──
 
     /// Translates Java's `ConsumerRecords<K, V> poll(Duration timeout)`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
     async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
 
     // ── Commit ──
 
     /// Translates Java's `void commitSync()`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
     async fn commit_sync(&mut self) -> Result<(), Error>;
 
@@ -348,6 +354,9 @@ where
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
     async fn committed(
         &mut self,
@@ -367,6 +376,9 @@ where
     // ── Metadata (async — may fetch from broker) ──
 
     /// Translates Java's `List<PartitionInfo> partitionsFor(String topic)`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
     async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
 
@@ -381,6 +393,9 @@ where
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics()`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#listTopics")]
     async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
@@ -405,6 +420,9 @@ where
     /// than present-with-null. Callers porting Java code that iterates
     /// `result.keySet()` expecting every queried key back must instead treat
     /// an absent key as "no offset". See [`OffsetAndTimestamp`].
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
     async fn offsets_for_times(
         &mut self,
