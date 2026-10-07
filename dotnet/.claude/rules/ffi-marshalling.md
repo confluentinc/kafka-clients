@@ -349,19 +349,10 @@ pump deadlock-free (the Sender runs on other worker threads).
     ordering argument that rests on `SemaphoreSlim` waiter order, or on many
     independent per-send continuations being released "in order" by one
     multi-permit `Release`.
-  - A **dedicated thread** for the submission queue's appender (the cap is two);
-    conversely, more than one appender draining that queue, which reintroduces the
-    race the queue exists to remove.
-  - ⚠ **The dual of that, and the one this rule shipped a defect on:** *zero*
-    appenders. "At most one appender" is a start/stop handshake between the enqueuing
-    caller and the exiting appender, i.e. Dekker's pattern, so **both** sides need a
-    store→load fence — an `Interlocked` operation, not a `Volatile.Write`, which is a
-    release store and orders no *later* load. A one-sided fence lets "the appender saw
-    the queue empty" and "the caller saw the token already taken" both hold, stranding
-    a submission with nothing to append it (and, where a drain predicate counts queued
-    submissions, hanging that drain out to its bound). This is the same standard as the
-    `SemaphoreSlim`-fairness warning above: an ordering claim must rest on a documented
-    guarantee, not on how a primitive happens to behave on one target.
+  - *(Superseded by M11/P3.4: the submission queue, its appender and the start/stop
+    handshake were deleted — append-first under `_gate` needs none of them. The
+    general lesson stands: a two-sided start/stop handshake needs a store→load fence
+    on both sides — an `Interlocked` operation, not a `Volatile.Write`.)*
   - A deferred submission path with **no depth bound** — the container is not the
     bound, and a correctness-only suite cannot see this: every record is still
     delivered, in order, exactly once, so the tests pass while the client bloats.
@@ -390,36 +381,38 @@ pump deadlock-free (the Sender runs on other worker threads).
   - `Dispose` drains before destroying the handle — joins the pump (Option A, §A7).
   - *(Option A only)* a long-blocked pump doesn't stop new sends being enqueued.
   - **The order records reach `send_batch` equals call order, across a saturated
-    bound.** Two parts, because the raw interleaving is a race: a *deterministic*
-    half (with a submission queued, the inline path is refused and the next send
-    lands behind it — nothing appended, nothing pinned) and a *stress* half (a
-    same-thread burst that saturates the bound, with the observed order equal to the
-    call order every iteration). The stress half must be shown to **fail** without
-    the routing rule; the deterministic half is the one that cannot flake.
-  - **A drain / `Flush` includes a send still queued for capacity.** Once a
-    submission queue sits upstream of the accumulator's chain, "empty and idle" has
-    **two** stages, and a predicate that tests only the chain lets `Flush` return
-    with records the caller's `Send` already returned for — re-opening the
-    Java-faithfulness gap the accumulator drain exists to close.
-  - **Teardown settles every queued submission exactly once**, with nothing left
-    holding an unsettled `TaskCompletionSource`, and **nothing pinned while queued**
-    (the pin belongs after the permit, §A4).
-  - **A queued submission whose token fires before it is appended cancels with the
-    caller's token and is not sent** — asserted on the core's record count, not only
-    on the awaiter's state.
+    bound.** Append-first makes this deterministic: with the batch thread held back
+    and the bound saturated, a non-awaiting same-thread burst reaches `send_batch` in
+    call order (T7 below). It must be shown to **fail** when the append is deferred
+    into the stage-1 continuation (the pre-P3.4 shape).
+  - **A drain / `Flush` includes a send whose first stage is still waiting for
+    capacity** — its record is already in the chain (append-first), so `Flush` drains
+    it and its first stage completes
+    (`PublicProducerFirstStageTests.Flush_CompletesEveryPendingFirstStage_AndEveryDelivery`,
+    `SendAccumulatorTests.Flush_IncludesASendWhoseFirstStageIsStillWaitingOnAdmission`).
+  - **Teardown settles both stages of every send exactly once**, with nothing left
+    holding an unsettled `TaskCompletionSource`; a pending first stage completes
+    **successfully** (M11/P3.5 D3). Pins are taken with the append and released by the
+    send (§A4).
+  - **A token that fires while the first stage waits ends that stage with an
+    `OperationCanceledException` carrying the caller's token, and the record is still
+    sent** — asserted on the core's record count, not only on the awaiter's state
+    (T16, T17; M11/P3.5 D2 (c)). An **already**-canceled token throws synchronously
+    and appends nothing (D4).
   - **Bounded acceptance under over-offer** (the M11/P3.3 DoD item). Flood the
-    submission path faster than it drains — with the batch thread held back — and
+    send path, with the callers **awaiting** the first stage (the bound binds only
+    them — M11/P3.5 D6) faster than it drains — with the batch thread held back — and
     assert the population of **accepted-but-not-yet-forwarded** records stays within
     its documented bound. Assert on the accumulator's own witnesses, not on a
-    behavioural proxy: the queue's depth alone is **not** the quantity of interest
-    (§A1's capping-one-container note), and a refusal-path counter can be zeroed by
-    teardown independently of the thing under test — which is why M11/P3.3's first
-    version of this test measured **0/8** and needed a second witness (the gate's own
-    `CurrentCount`). Drive it through **production's own entry points** (DoD §12), and
-    prove the mutation **in-suite** with **K=8 bursts and a fresh harness per rep**:
-    M11/P3.2 saw a guard fail **5/5 isolated** while the full suite passed **5/5**, so
-    a ratio without its regime is not evidence. Mutate fixture and production
-    **separately**.
+    behavioural proxy: the depth of any one container alone is **not** the quantity of
+    interest (§A1's capping-one-container note), and a refusal-path counter can be
+    zeroed by teardown independently of the thing under test — which is why M11/P3.3's
+    first version of this test measured **0/8** and needed a second witness (the
+    gate's own `CurrentCount`). Drive it through **production's own entry points**
+    (DoD §12), and prove the mutation **in-suite** with **K=8 bursts and a fresh
+    harness per rep**: M11/P3.2 saw a guard fail **5/5 isolated** while the full suite
+    passed **5/5**, so a ratio without its regime is not evidence. Mutate fixture and
+    production **separately**.
   - M11/P3.5 T1, T3, T4, T7, T9, T16 and T17, by name:
       - T1 `SendAccumulatorTests.Admission_SaturatedBound_ReturnsTheCallAtOnce_WithItsFirstStagePending`
       - T3 `SendAccumulatorTests.Admission_CallersThatDoNotAwaitTheFirstStage_AreNotThrottled`
