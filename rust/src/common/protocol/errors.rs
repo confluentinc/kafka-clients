@@ -1877,6 +1877,11 @@ mod tests {
         // `BufferExhaustedException`, its one subclass, has no entry in `Errors`.
         let timeout: HashSet<Errors> = [Errors::RequestTimedOut].into_iter().collect();
 
+        // UnsupportedVersionException — `UNSUPPORTED_VERSION` is its only coded
+        // member; its subclasses (`UnsupportedProtocolFieldException`, the
+        // `NoBatched*` request exceptions) have no entry in `Errors`.
+        let unsupported_version: HashSet<Errors> = [Errors::UnsupportedVersion].into_iter().collect();
+
         // Three client-side-only families: `SerializationException` and the two
         // `clients.consumer` offset classes are raised by the client, never
         // reported by a broker, so no code may answer `true`. An all-`false`
@@ -1884,11 +1889,14 @@ mod tests {
         // predicates is ever wired to a coded payload by mistake.
         let client_side_only: HashSet<Errors> = HashSet::new();
 
-        let cases: [PredicateCase; 10] = [
+        let cases: [PredicateCase; 11] = [
             ("is_kafka_error", &all_coded, |e| e.error().is_some_and(|x| x.is_kafka_error())),
             ("is_api_error", &all_coded, |e| e.error().is_some_and(|x| x.is_api_error())),
             ("is_timeout_error", &timeout, |e| {
                 e.error().is_some_and(|x| x.is_timeout_error())
+            }),
+            ("is_unsupported_version_error", &unsupported_version, |e| {
+                e.error().is_some_and(|x| x.is_unsupported_version_error())
             }),
             ("is_serialization_error", &client_side_only, |e| {
                 e.error().is_some_and(|x| x.is_serialization_error())
@@ -1947,6 +1955,12 @@ mod tests {
     fn test_hierarchy_predicates_nest() {
         for code in -1i16..=200 {
             let e = Errors::for_code(code);
+            if e.error().is_some_and(|x| x.is_unsupported_version_error()) {
+                assert!(
+                    e.error().is_some_and(|x| x.is_invalid_configuration_error()),
+                    "{e:?}: unsupported-version must be invalid-configuration"
+                );
+            }
             if e.error().is_some_and(|x| x.is_invalid_metadata_error()) {
                 assert!(
                     e.error().is_some_and(|x| x.is_refresh_retriable_error()),

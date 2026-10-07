@@ -917,6 +917,33 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error
     unsafe { error_ref(error) }.error.is_invalid_configuration_error()
 }
 
+/// Returns whether the error's Java class extends `UnsupportedVersionException` — the
+/// version-mismatch class, which Kafka 4.4 made intermediate with the crate-private
+/// `UnsupportedProtocolFieldException` (a request field the negotiated version cannot carry).
+///
+/// Mirrors `Error::is_unsupported_version_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_unsupported_version_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_unsupported_version_error()
+}
+
 /// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
 /// producer or rejoining the group.
 ///
@@ -2329,6 +2356,31 @@ mod tests {
     /// resolves to a named constant.
     const FIRST_CODE: i16 = -1;
     const LAST_CODE: i16 = Errors::MAX_CODE;
+
+    /// `kafka_common_Error_is_unsupported_version_error` answers exactly as
+    /// `Error::is_unsupported_version_error` over every error code, in both
+    /// directions, and for the crate-private `UnsupportedProtocolFieldException`.
+    #[test]
+    fn test_is_unsupported_version_error_matches_the_rust_predicate() {
+        for code in FIRST_CODE..=LAST_CODE {
+            let errors = crate::common::protocol::Errors::for_code(code);
+            if errors == crate::common::protocol::Errors::None {
+                continue;
+            }
+            let expected = errors == crate::common::protocol::Errors::UnsupportedVersion;
+            let handle = box_error(Error::new(errors));
+            assert_eq!(
+                expected,
+                unsafe { kafka_common_Error_is_unsupported_version_error(handle) },
+                "{errors:?}"
+            );
+            unsafe { kafka_common_Error_destroy(handle) };
+        }
+        let handle = box_error(crate::common::internals::UnsupportedProtocolFieldError::with_message("m"));
+        assert!(unsafe { kafka_common_Error_is_unsupported_version_error(handle) });
+        unsafe { kafka_common_Error_destroy(handle) };
+        assert!(!unsafe { kafka_common_Error_is_unsupported_version_error(std::ptr::null()) });
+    }
 
     /// The 28 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.

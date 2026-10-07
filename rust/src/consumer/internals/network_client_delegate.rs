@@ -381,8 +381,10 @@ impl FutureCompletionHandler {
             self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
             return;
         }
-        if let Some(msg) = response.version_mismatch() {
-            self.on_failure(completion_time_ms, Error::unsupported_version(msg.to_string()));
+        if let Some(version_mismatch) = response.version_mismatch() {
+            // Java: `onFailure(completionTimeMs, response.versionMismatch())` — the
+            // object, so a crate-private subclass the builder threw survives.
+            self.on_failure(completion_time_ms, Error::UnsupportedVersion(version_mismatch.clone()));
             return;
         }
         self.set_completion_time(completion_time_ms);
@@ -414,7 +416,7 @@ impl FutureCompletionHandler {
         let received_time_ms = response.received_time_ms();
         let disconnected = response.was_disconnected();
         let timed_out = response.was_timed_out();
-        let version_mismatch = response.version_mismatch().map(|s| s.to_string());
+        let version_mismatch = response.version_mismatch().cloned();
         let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
         let owned = ClientResponse::with_timed_out(
@@ -946,6 +948,41 @@ mod tests {
 
     const GROUP_ID: &str = "group";
     const REQUEST_TIMEOUT_MS: i32 = 5_000;
+
+    /// A version mismatch reaches the request's future as the object the
+    /// `ClientResponse` carries, so a crate-private subclass the builder threw
+    /// (Kafka 4.4's `UnsupportedProtocolFieldException`) survives: Java's
+    /// `onFailure(completionTimeMs, response.versionMismatch())`.
+    #[tokio::test]
+    async fn test_version_mismatch_completes_with_the_carried_error() {
+        use crate::common::internals::UnsupportedProtocolFieldError;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+
+        let Error::UnsupportedVersion(mismatch) = UnsupportedProtocolFieldError::with_message("field") else {
+            unreachable!("with_message builds the UnsupportedVersion variant");
+        };
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(0)
+                .set_client_id("c")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let (handler, rx) = FutureCompletionHandler::new();
+        handler.on_complete(ClientResponse::new(header, None, "0", 0, 0, false, Some(mismatch), None, None));
+        let Err(error) = rx.await.unwrap() else {
+            panic!("a version mismatch must fail the request");
+        };
+        assert!(
+            UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&error),
+            "{error:?}"
+        );
+        assert_eq!("field", error.message());
+    }
 
     fn mock_node() -> Node {
         Node::new(0, "localhost".to_string(), 99)

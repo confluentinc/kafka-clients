@@ -222,6 +222,18 @@ pub(crate) trait ErrorHierarchy {
         false
     }
 
+    /// Whether this error's Java class extends `UnsupportedVersionException`.
+    ///
+    /// Intermediate because Kafka 4.4's
+    /// `common.internals.UnsupportedProtocolFieldException` extends it (as the
+    /// `NoBatchedFindCoordinatorsException` / `NoBatchedOffsetFetchRequestException`
+    /// nested in the request classes already did). None of those subclasses is
+    /// public, so they share the one [`UnsupportedVersionError`] payload and only
+    /// it answers `true`.
+    fn is_unsupported_version_error(&self) -> bool {
+        false
+    }
+
     /// Whether this error's Java class extends `ApplicationRecoverableException`
     /// — the application can recover by re-initialising its producer or
     /// rejoining its group, but the current epoch / session is lost.
@@ -364,6 +376,12 @@ pub(crate) trait ErrorName {
 /// => extends: [is_kafka_error, is_api_error, is_retriable_error,
 ///              is_refresh_retriable_error, is_invalid_metadata_error]
 /// ```
+///
+/// An optional `kind: <Type>,` (after `code:`) adds a crate-private field of that
+/// type, starting at its `Default`, read with `kind()` and set with `with_kind()`.
+/// It lets one public variant stand for a Java class *and* crate-private
+/// subclasses of it that the public `Error` surface does not name — the case of
+/// `UnsupportedVersionException` and `common.internals.UnsupportedProtocolFieldException`.
 macro_rules! kafka_error_type {
     // No `code:` — the class has no entry in `Errors.java`, and walking its
     // superclasses (Java's `Errors.forException`) finds none either, so
@@ -384,6 +402,7 @@ macro_rules! kafka_error_type {
         $(#[$meta:meta])*
         $name:ident,
         code: $code:expr,
+        $(kind: $kind:ty,)?
         extends: [$($predicate:ident),* $(,)?] $(,)?
     ) => {
         $(#[$meta])*
@@ -392,7 +411,26 @@ macro_rules! kafka_error_type {
             message: String,
             /// The underlying cause, translating Java's `Throwable` `cause`.
             source: Option<Box<$crate::common::Error>>,
+            $(
+                /// Which crate-private Java subclass, if any, this value stands for.
+                kind: $kind,
+            )?
         }
+
+        $(
+            impl $name {
+                /// Which crate-private Java subclass, if any, this value stands for.
+                pub(crate) fn kind(&self) -> $kind {
+                    self.kind
+                }
+
+                /// Returns this error marked as the given crate-private subclass.
+                pub(crate) fn with_kind(mut self, kind: $kind) -> Self {
+                    self.kind = kind;
+                    self
+                }
+            }
+        )?
 
         impl $name {
             /// Create the error with the given message and no cause,
@@ -404,7 +442,11 @@ macro_rules! kafka_error_type {
             /// parameter-name intersection is `{message}` — matched exactly by
             /// `(String message)`.
             pub fn new(message: impl Into<String>) -> Self {
-                Self { message: message.into(), source: None }
+                Self {
+                    message: message.into(),
+                    source: None,
+                    $(kind: <$kind as ::core::default::Default>::default(),)?
+                }
             }
 
             /// Create the error with the given message and an underlying cause,
@@ -413,7 +455,11 @@ macro_rules! kafka_error_type {
             /// Suffixed with the one parameter beyond the `{message}`
             /// intersection (CLAUDE.md §2) — see [`new`](Self::new).
             pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
-                Self { message: message.into(), source: Some(Box::new(source)) }
+                Self {
+                    message: message.into(),
+                    source: Some(Box::new(source)),
+                    $(kind: <$kind as ::core::default::Default>::default(),)?
+                }
             }
 
             /// Create the error with the default message for its error code,
@@ -584,6 +630,9 @@ impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     }
     fn is_invalid_configuration_error(&self) -> bool {
         (**self).is_invalid_configuration_error()
+    }
+    fn is_unsupported_version_error(&self) -> bool {
+        (**self).is_unsupported_version_error()
     }
     fn is_application_recoverable_error(&self) -> bool {
         (**self).is_application_recoverable_error()
@@ -1837,6 +1886,26 @@ impl Error {
         ErrorHierarchy::is_invalid_configuration_error(self)
     }
 
+    /// Whether this error's Java class extends `UnsupportedVersionException`
+    /// (CLAUDE.md §12.4).
+    ///
+    /// Exactly the [`UnsupportedVersion`](Self::UnsupportedVersion) variant
+    /// (`Errors::UnsupportedVersion`). Java's subclasses —
+    /// `UnsupportedProtocolFieldException` (Kafka 4.4, KAFKA-18157) and the
+    /// `NoBatchedFindCoordinatorsException` / `NoBatchedOffsetFetchRequestException`
+    /// nested in `FindCoordinatorRequest` / `OffsetFetchRequest` — are none of
+    /// them public, so they are carried inside that variant rather than as
+    /// variants of their own; this predicate therefore answers `true` for them
+    /// too, as Java's `instanceof UnsupportedVersionException` does.
+    ///
+    /// Nested inside [`is_invalid_configuration_error`](Self::is_invalid_configuration_error),
+    /// because `UnsupportedVersionException extends InvalidConfigurationException`.
+    /// The set is pinned in both directions over every code by `errors.rs`'s
+    /// `test_hierarchy_predicates_match_java`.
+    pub fn is_unsupported_version_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_version_error(self)
+    }
+
     /// Whether this error's Java class extends `ApplicationRecoverableException`
     /// (CLAUDE.md §12.4) — the application can recover, but only by
     /// re-initialising its producer or rejoining its group; the current epoch or
@@ -2149,12 +2218,12 @@ mod tests {
     /// invalid_metadata, invalid_configuration, application_recoverable,
     /// invalid_offset, consumer_invalid_offset, consumer_offset_out_of_range,
     /// out_of_order_sequence, serialization, authentication, authorization,
-    /// fatal — the same order the assertion message below spells out, and the
-    /// order the `actual` array is built in.
+    /// fatal, unsupported_version — the same order the assertion message below
+    /// spells out, and the order the `actual` array is built in.
     #[test]
     fn variant_predicates_match_java_hierarchy() {
         use std::collections::HashMap;
-        let cases: &[(&str, Error, [bool; 16])] = &[
+        let cases: &[(&str, Error, [bool; 17])] = &[
             // The three concrete intermediate classes the flattened enum has to
             // carry as variants of their own: Java lets a caller `throw new
             // ApiException(msg)` / `new AuthenticationException(msg)` /
@@ -2169,7 +2238,7 @@ mod tests {
                 Error::Api(ApiError::new("generic")),
                 [
                     true, true, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // AuthenticationException -> InvalidConfigurationException -> ApiException
@@ -2179,7 +2248,7 @@ mod tests {
                 Error::Authentication(AuthenticationError::new("bad credentials")),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, true,
-                    false, true,
+                    false, true, false,
                 ],
             ),
             // AuthorizationException -> InvalidConfigurationException -> ApiException
@@ -2189,7 +2258,7 @@ mod tests {
                 Error::Authorization(AuthorizationError::new("not authorized")),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, false,
-                    true, true,
+                    true, true, false,
                 ],
             ),
             // TopicAuthorizationException -> AuthorizationException -> ApiException -> KafkaException
@@ -2198,7 +2267,7 @@ mod tests {
                 Error::topic_authorization(HashSet::new()),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, false,
-                    true, true,
+                    true, true, false,
                 ],
             ),
             // GroupAuthorizationException -> AuthorizationException -> ApiException -> KafkaException
@@ -2207,7 +2276,7 @@ mod tests {
                 Error::group_authorization("g"),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, false,
-                    true, true,
+                    true, true, false,
                 ],
             ),
             // InvalidTopicException -> ApiException -> KafkaException
@@ -2216,7 +2285,7 @@ mod tests {
                 Error::invalid_topics(HashSet::new()),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // ThrottlingQuotaExceededException -> RetriableException -> ApiException -> KafkaException
@@ -2225,7 +2294,7 @@ mod tests {
                 Error::throttling_quota_exceeded(1, "throttled"),
                 [
                     true, true, true, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // BufferExhaustedException -> TimeoutException -> RetriableException
@@ -2237,7 +2306,7 @@ mod tests {
                 Error::buffer_exhausted("full"),
                 [
                     true, true, true, false, true, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // TimeoutException -> RetriableException -> ApiException -> KafkaException
@@ -2246,7 +2315,7 @@ mod tests {
                 Error::timeout("late"),
                 [
                     true, true, true, false, true, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // RecordTooLargeException -> ApiException -> KafkaException
@@ -2255,7 +2324,7 @@ mod tests {
                 Error::record_too_large("big"),
                 [
                     true, true, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // SchemaException -> KafkaException (NOT an ApiException), like
@@ -2265,7 +2334,7 @@ mod tests {
                 Error::schema("Buffer underflow"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // CorrelationIdMismatchException -> java.lang.IllegalStateException:
@@ -2276,7 +2345,7 @@ mod tests {
                 Error::correlation_id_mismatch("ids disagree", 7, 9),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // SerializationException -> KafkaException (NOT an ApiException)
@@ -2285,7 +2354,7 @@ mod tests {
                 Error::serialization("bad"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, true, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // WakeupException -> KafkaException (NOT an ApiException)
@@ -2294,7 +2363,7 @@ mod tests {
                 Error::wakeup("woken"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // BootstrapResolutionException -> KafkaException (NOT an ApiException,
@@ -2304,7 +2373,7 @@ mod tests {
                 Error::BootstrapResolution(BootstrapResolutionError::new("unresolvable")),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // The three codes Kafka 4.4 adds are plain ApiExceptions, not fatal.
@@ -2314,7 +2383,7 @@ mod tests {
                 Error::new(Errors::GroupDeletionFailed),
                 [
                     true, true, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // StreamsTopologyDescriptionUpdateFailedException -> ApiException -> KafkaException
@@ -2323,7 +2392,7 @@ mod tests {
                 Error::new(Errors::StreamsTopologyDescriptionUpdateFailed),
                 [
                     true, true, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // ControllerIdNotRegisteredException -> ApiException -> KafkaException
@@ -2332,7 +2401,7 @@ mod tests {
                 Error::new(Errors::ControllerIdNotRegistered),
                 [
                     true, true, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // java.lang / java.util runtime exceptions: outside the hierarchy entirely.
@@ -2341,7 +2410,7 @@ mod tests {
                 Error::local_illegal_argument("bad arg"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             (
@@ -2349,7 +2418,7 @@ mod tests {
                 Error::local_illegal_state("bad state"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             (
@@ -2357,7 +2426,7 @@ mod tests {
                 Error::local_concurrent_modification("racy"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             (
@@ -2365,7 +2434,7 @@ mod tests {
                 Error::local_timeout("timed out"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // A bare `KafkaException`: inside the hierarchy, but the parent of
@@ -2376,7 +2445,7 @@ mod tests {
                 Error::kafka_message("Producer closed while send in progress"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // Consumer-package classes: `LogTruncationException extends
@@ -2388,7 +2457,7 @@ mod tests {
                 Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(HashMap::new())),
                 [
                     true, false, false, false, false, false, false, false, false, true, true, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             (
@@ -2396,7 +2465,7 @@ mod tests {
                 Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::new(HashMap::new(), HashMap::new()))),
                 [
                     true, false, false, false, false, false, false, false, false, true, true, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // `CommitFailedException extends KafkaException` — not an ApiException.
@@ -2405,7 +2474,7 @@ mod tests {
                 Error::ConsumerCommitFailed(ConsumerCommitFailedError::new("m")),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 ],
             ),
             // `Error::new(code)` resolves the code to its own class (Java's
@@ -2419,7 +2488,7 @@ mod tests {
                 Error::new(Errors::NotLeaderOrFollower),
                 [
                     true, true, true, true, false, true, false, false, false, false, false, false, false, false, false,
-                    false,
+                    false, false,
                 ],
             ),
             // SASL_AUTHENTICATION_FAILED: AuthenticationException -> ApiException, and fatal.
@@ -2428,7 +2497,28 @@ mod tests {
                 Error::new(Errors::SaslAuthenticationFailed),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, true,
-                    false, true,
+                    false, true, false,
+                ],
+            ),
+            // UNSUPPORTED_VERSION: UnsupportedVersionException -> InvalidConfigurationException
+            // -> ApiException -> KafkaException, and fatal per `RequestUtils.isFatalException`.
+            // Intermediate since Kafka 4.4's
+            // `UnsupportedProtocolFieldException` subclass; the subclass is a
+            // crate-private kind of the same variant and answers alike.
+            (
+                "UnsupportedVersion (from the code)",
+                Error::new(Errors::UnsupportedVersion),
+                [
+                    true, true, false, false, false, false, true, false, false, false, false, false, false, false,
+                    false, true, true,
+                ],
+            ),
+            (
+                "UnsupportedProtocolField (crate-private subclass)",
+                crate::common::internals::UnsupportedProtocolFieldError::with_message("m"),
+                [
+                    true, true, false, false, false, false, true, false, false, false, false, false, false, false,
+                    false, true, true,
                 ],
             ),
         ];
@@ -2451,11 +2541,12 @@ mod tests {
                 err.is_authentication_error(),
                 err.is_authorization_error(),
                 crate::common::requests::RequestUtils::is_fatal_error(err),
+                err.is_unsupported_version_error(),
             ];
             assert_eq!(
                 &actual, expected,
                 "{name}: predicate vector diverges from the Java extends chain \
-                 (order: kafka, api, retriable, refresh_retriable, timeout, invalid_metadata, invalid_configuration, application_recoverable, invalid_offset, consumer_invalid_offset, consumer_offset_out_of_range, out_of_order_sequence, serialization, authentication, authorization, fatal)"
+                 (order: kafka, api, retriable, refresh_retriable, timeout, invalid_metadata, invalid_configuration, application_recoverable, invalid_offset, consumer_invalid_offset, consumer_offset_out_of_range, out_of_order_sequence, serialization, authentication, authorization, fatal, unsupported_version)"
             );
         }
     }
@@ -2712,6 +2803,13 @@ mod tests {
             if err.is_timeout_error() {
                 // TimeoutException extends RetriableException.
                 assert!(err.is_retriable_error(), "{err}: a timeout error is retriable");
+            }
+            if err.is_unsupported_version_error() {
+                // UnsupportedVersionException extends InvalidConfigurationException.
+                assert!(
+                    err.is_invalid_configuration_error(),
+                    "{err}: an unsupported-version error is an invalid-configuration error"
+                );
             }
             if err.is_consumer_offset_out_of_range_error() {
                 // consumer OffsetOutOfRangeException extends consumer

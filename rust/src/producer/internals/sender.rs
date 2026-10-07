@@ -860,7 +860,7 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(());
         }
         if let Some(version_mismatch) = response.version_mismatch() {
-            let error = Error::unsupported_version(version_mismatch.to_string());
+            let error = Error::UnsupportedVersion(version_mismatch.clone());
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
         match response.response_body() {
@@ -2143,11 +2143,11 @@ impl<C: KafkaClient> Sender<C> {
                 "Cancelled request {} due to a version mismatch with node {}: {}",
                 response,
                 response.destination(),
-                response.version_mismatch().unwrap_or("unknown")
+                response.version_mismatch().map_or("unknown", |e| e.message())
             );
             let part_resp = PartitionResponse::with_error_message(
                 Errors::UnsupportedVersion,
-                response.version_mismatch().map(|s| s.to_string()),
+                response.version_mismatch().map(|e| e.message().to_string()),
             );
             for (tp, batch) in batches.iter_mut() {
                 let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;

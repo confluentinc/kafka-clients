@@ -342,6 +342,7 @@ pub use unsupported_endpoint_type_error::UnsupportedEndpointTypeError;
 pub use unsupported_for_message_format_error::UnsupportedForMessageFormatError;
 pub use unsupported_sasl_mechanism_error::UnsupportedSaslMechanismError;
 pub use unsupported_version_error::UnsupportedVersionError;
+pub(crate) use unsupported_version_error::UnsupportedVersionKind;
 pub use voter_not_found_error::VoterNotFoundError;
 pub use wakeup_error::WakeupError;
 
@@ -451,6 +452,7 @@ mod tests {
                 ("timeout", class.is_timeout_error()),
                 ("invalid_metadata", class.is_invalid_metadata_error()),
                 ("invalid_configuration", class.is_invalid_configuration_error()),
+                ("unsupported_version", class.is_unsupported_version_error()),
                 ("application_recoverable", class.is_application_recoverable_error()),
                 ("invalid_offset", class.is_invalid_offset_error()),
                 ("consumer_invalid_offset", class.is_consumer_invalid_offset_error()),

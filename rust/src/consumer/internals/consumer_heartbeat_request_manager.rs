@@ -23,7 +23,6 @@
 
 #![cfg_attr(test, expect(dead_code))]
 
-use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -33,6 +32,8 @@ use tokio::sync::mpsc;
 use crate::ConsumerGroupHeartbeatRequestData;
 use crate::common::Error;
 use crate::common::Uuid;
+use crate::common::errors::UnsupportedVersionError;
+use crate::common::internals::UnsupportedProtocolFieldError;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
@@ -681,9 +682,12 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Java: `handleSpecificFailure(Throwable exception)`. The Consumer
-    /// variant maps `UnsupportedVersionException` carrying the regex
-    /// resolution message to a fatal failure with the special-cased
-    /// message.
+    /// variant maps an `UnsupportedVersionException` the client raised to a
+    /// fatal failure. An `UnsupportedProtocolFieldException` (Kafka 4.4,
+    /// KAFKA-18157: the request carries a field the negotiated version cannot
+    /// express, such as a regex subscription at v0) keeps its own message;
+    /// any other `UnsupportedVersionException` is reported with
+    /// `CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`.
     ///
     /// `current_time_ms` is threaded through to
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
@@ -691,17 +695,25 @@ impl ConsumerHeartbeatRequestManager {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificFailure")]
     pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
-        use crate::common::protocol::Errors;
-        if error.error() == Errors::UnsupportedVersion {
-            let msg = error.to_string();
-            let message = if msg.contains(ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG) {
-                ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG
+        if error.is_unsupported_version_error() {
+            let error_message = error.message();
+            let message = if UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(error) {
+                log::error!(
+                    "ConsumerGroupHeartbeatRequest failed due to unsupported protocol field while sending request: \
+                     {error_message}"
+                );
+                error_message
             } else {
+                log::error!(
+                    "ConsumerGroupHeartbeatRequest failed due to unsupported version while sending request: \
+                     {error_message}"
+                );
                 AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
             };
-            log::error!("ConsumerGroupHeartbeatRequest failed due to unsupported version: {message}");
-            let fatal_err = Error::unsupported_version(message.to_string());
-            // Java (`ConsumerHeartbeatRequestManager.java:109`):
+            // Surface the parent type here: handleFatalFailure propagates this via BackgroundEvent
+            // to the user-facing API. Propagating the subclass would be a user-visible behavior change.
+            let fatal_err = Error::UnsupportedVersion(UnsupportedVersionError::with_source(message, error.clone()));
+            // Java (`ConsumerHeartbeatRequestManager.java:111`):
             // `handleFatalFailure(new UnsupportedVersionException(message, exception));`
             // i.e. emits ErrorEvent AND calls
             // `membershipManager().transitionToFatal()`. Mirror both.
@@ -1574,6 +1586,72 @@ mod tests {
             "handle_specific_failure must apply the fatal transition, as Java's \
              handleFatalFailure does"
         );
+    }
+
+    /// Translated from Java
+    /// `ConsumerHeartbeatRequestManagerTest.testUnsupportedVersionFromClient`, whose
+    /// `@MethodSource` supplies the two cases looped here: a plain
+    /// `UnsupportedVersionException` is reported with
+    /// `CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`, and an `UnsupportedProtocolFieldException`
+    /// (Kafka 4.4) keeps its own message. Either way the `ErrorEvent` carries the
+    /// parent class, as Java's `handleFatalFailure(new UnsupportedVersionException(..))` does.
+    ///
+    /// Java drives it through a response whose `versionMismatch` is the exception;
+    /// `on_failure` is where that response's failure lands (`NetworkClientDelegate`
+    /// passes `response.versionMismatch()` through unchanged).
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManagerTest#testUnsupportedVersionFromClient"
+    )]
+    async fn test_unsupported_version_from_client() {
+        let cases = [
+            (
+                crate::common::Error::unsupported_version(
+                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+                ),
+                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+            ),
+            (
+                UnsupportedProtocolFieldError::with_message(
+                    crate::common::requests::ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+                ),
+                crate::common::requests::ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+            ),
+            // Rust-side additions pinning that the dispatch is on the class, not the
+            // text (the 4.3.1 code compared messages): the parent class carrying the
+            // regex text gets the generic message, and the subclass carrying any
+            // other text keeps it.
+            (
+                crate::common::Error::unsupported_version(
+                    crate::common::requests::ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+                ),
+                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+            ),
+            (
+                UnsupportedProtocolFieldError::with_message("some other field"),
+                "some other field",
+            ),
+        ];
+        for (thrown, error_msg) in cases {
+            let (mut mgr, _coord, mm, mut beh_rx) = make_with_coord_capturing_events(None);
+            make_joining(&mm);
+            mgr.on_failure(&thrown, 12_345);
+
+            let mut events = Vec::new();
+            while let Ok(env) = beh_rx.try_recv() {
+                events.push(env);
+            }
+            assert_eq!(error_events(&events), vec![Errors::UnsupportedVersion], "{error_msg}");
+            let crate::consumer::internals::events::BackgroundEvent::Error { error } = &events[0].event else {
+                panic!("expected an ErrorEvent, got {:?}", events[0].event);
+            };
+            assert!(matches!(error, crate::common::Error::UnsupportedVersion(_)), "{error:?}");
+            assert_eq!(error_msg, error.message());
+            assert!(
+                !UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(error),
+                "the ErrorEvent surfaces the parent class, not the subclass"
+            );
+        }
     }
 
     /// Phase 12.5 (3/N) regression — response routing via the

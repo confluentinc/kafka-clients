@@ -606,7 +606,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             self.calls_in_flight.remove(&node_id_string);
 
             if let Some(version_mismatch) = response.version_mismatch() {
-                let err = Error::unsupported_version(version_mismatch.to_string());
+                let err = Error::UnsupportedVersion(version_mismatch.clone());
                 self.fail_call(call, now, err);
             } else if response.was_disconnected() {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));

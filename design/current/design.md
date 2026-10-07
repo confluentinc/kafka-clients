@@ -832,14 +832,18 @@ embeds.*
   - `is_kafka_error`, `is_api_error`, `is_retriable_error`,
     `is_refresh_retriable_error`, `is_timeout_error`
   - `is_invalid_metadata_error`, `is_invalid_configuration_error`,
-    `is_application_recoverable_error`
+    `is_unsupported_version_error`, `is_application_recoverable_error`
   - `is_invalid_offset_error`, `is_consumer_invalid_offset_error`,
     `is_consumer_offset_out_of_range_error`
   - `is_out_of_order_sequence_error`, `is_serialization_error`
   - `is_authentication_error`, `is_authorization_error`
 
   They are not complements of each other. For example, `Serialization` is a
-  `KafkaException` but not an `ApiException`. `is_transaction_abortable_error`
+  `KafkaException` but not an `ApiException`. A crate-private Java subclass with no
+  public variant is a crate-private kind on its parent's payload: Kafka 4.4's
+  `UnsupportedProtocolFieldException` is `UnsupportedVersionError` with
+  `UnsupportedVersionKind::UnsupportedProtocolField`
+  (`common/internals/unsupported_protocol_field_error.rs`). `is_transaction_abortable_error`
   (`:1650`) tests a single leaf class.
 - Fatality is **not** a predicate on `Error`, because the same class is fatal
   in one context and recoverable in another. It is

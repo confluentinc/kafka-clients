@@ -36,6 +36,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+use crate::common::errors::UnsupportedVersionError;
 use crate::common::network::NetworkSend;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
@@ -571,7 +572,10 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     // which range was asked for, what the broker supports. The bare
                     // `message()` is carried (not `Display`, which prefixes the class
                     // name and would double up when the consumer rebuilds the error).
-                    let version_mismatch = e.message().to_string();
+                    let version_mismatch = match &e {
+                        Error::UnsupportedVersion(e) => e.clone(),
+                        other => UnsupportedVersionError::new(other.message()),
+                    };
                     kafka_debug!(
                         self.log_context,
                         "Version mismatch when attempting to send {} with correlation id {} to {}",
@@ -673,12 +677,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     ) {
         // Java propagates the `UnsupportedVersionException` the builder
         // threw (`NetworkClient.java:588-595`), so the builder's own
-        // diagnostic is what the caller reads. `RequestBuilder::build`
-        // reports through `io::Error`, whose `Display` is that bare text;
-        // prefixing it with the class name here rendered
+        // diagnostic, and its class, is what the caller reads. A builder
+        // carries the error object inside the `io::Error`
+        // (`UnsupportedVersionError::into_io_error`); a serialize failure is a
+        // plain `io::Error` whose text is the message. Either way the message
+        // is not prefixed with the class name here: that rendered
         // "UnsupportedVersionError: UnsupportedVersionError: .." once
         // `Error`'s `Display` added its own (finding 232).
-        let error_msg = error.to_string();
+        let version_mismatch = UnsupportedVersionError::from_io_error(error);
         // Java builds the response header at `builder.latestAllowedVersion()`, not at
         // the version that failed (`NetworkClient.java:589`).
         let header = client_request
@@ -691,14 +697,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             now,
             now,
             false,
-            Some(error_msg.clone()),
+            Some(version_mismatch.clone()),
             None,
             None,
         );
         if !is_internal_request {
             self.aborted_sends.push(client_response);
         } else if *client_request.api_key() == ApiKeys::METADATA {
-            self.handle_failed_request(now, Some(Error::unsupported_version(error_msg)));
+            self.handle_failed_request(now, Some(Error::UnsupportedVersion(version_mismatch)));
         }
     }
 
@@ -1780,6 +1786,7 @@ impl Time for PollTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::internals::UnsupportedProtocolFieldError;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     use crate::ApiVersionsResponseData;
@@ -1879,19 +1886,26 @@ mod tests {
 
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
-        failure: Option<Error>,
+        /// Shared with the test, which cannot reach the updater once it is boxed
+        /// into the client (Java's test keeps a direct reference instead).
+        failure: Arc<std::sync::Mutex<Option<Error>>>,
     }
 
     impl TestMetadataUpdater {
         fn new(nodes: Vec<Node>) -> Self {
-            Self { nodes, failure: None }
+            Self { nodes, failure: Arc::new(std::sync::Mutex::new(None)) }
         }
 
-        /// Returns and clears the last failure.
-        #[expect(dead_code)]
-        fn get_and_clear_failure(&mut self) -> Option<Error> {
-            self.failure.take()
+        /// A handle on the recorded failure that outlives boxing the updater.
+        fn failure_handle(&self) -> Arc<std::sync::Mutex<Option<Error>>> {
+            Arc::clone(&self.failure)
         }
+    }
+
+    /// Java's `TestMetadataUpdater.getAndClearFailure`, through a
+    /// [`TestMetadataUpdater::failure_handle`].
+    fn get_and_clear_failure(handle: &std::sync::Mutex<Option<Error>>) -> Option<Error> {
+        handle.lock().unwrap().take()
     }
 
     impl MetadataUpdater for TestMetadataUpdater {
@@ -1909,13 +1923,13 @@ mod tests {
 
         fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
             if let Some(err) = maybe_auth_error {
-                self.failure = Some(err);
+                *self.failure.lock().unwrap() = Some(err);
             }
         }
 
         fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<Error>) {
             if let Some(err) = maybe_fatal_error {
-                self.failure = Some(err);
+                *self.failure.lock().unwrap() = Some(err);
             }
         }
 
@@ -1935,8 +1949,20 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
+        create_network_client_with_failure_handle(reconnect_backoff_max_ms).0
+    }
+
+    /// [`create_network_client`], also returning the metadata updater's
+    /// [`TestMetadataUpdater::failure_handle`].
+    fn create_network_client_with_failure_handle(
+        reconnect_backoff_max_ms: i64,
+    ) -> (
+        NetworkClient<MockSelector, TestHostResolver>,
+        Arc<std::sync::Mutex<Option<Error>>>,
+    ) {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
+        let failure = updater.failure_handle();
         let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
@@ -1956,7 +1982,7 @@ mod tests {
             LogContext::empty(),
         );
         client.set_mock_time();
-        client
+        (client, failure)
     }
 
     /// Creates a `NetworkClient` with static nodes (0 backoff).
@@ -2556,21 +2582,23 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testUnsupportedVersionDuringInternalMetadataRequest")]
     async fn test_unsupported_version_during_internal_metadata_request() {
-        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let (mut client, failure) = create_network_client_with_failure_handle(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        // Disabling auto topic creation for versions less than 4 is not supported.
-        // Build a metadata_request::Builder that targets version 3 only, with
-        // allow_auto_topic_creation=false, which should fail.
+        // disabling auto topic creation for versions less than 4 is not supported
         let builder =
             metadata_request::Builder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         client.send_internal_metadata_request(builder, node.id_string(), now);
 
-        // The MetadataUpdater should have recorded a failure.
-        // We can't easily access the TestMetadataUpdater through the Box<dyn MetadataUpdater>,
-        // but the send_internal_metadata_request will have triggered handle_failed_request.
-        // The best we can verify here is that no in-flight requests remain.
+        // Java: `assertEquals(UnsupportedProtocolFieldException.class,
+        // metadataUpdater.getAndClearFailure().getClass())`. The class is a
+        // crate-private kind of `UnsupportedVersion` here (PLAN D4).
+        let failure = get_and_clear_failure(&failure).expect("the metadata updater records the failure");
+        assert!(
+            UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&failure),
+            "expected the UnsupportedProtocolFieldException kind, got {failure:?}"
+        );
         assert_eq!(0, client.in_flight_request_count());
     }
 
@@ -2616,7 +2644,8 @@ mod tests {
         assert_eq!(1, responses.len(), "the failed send must surface exactly one response");
         let mismatch = responses[0]
             .version_mismatch()
-            .expect("an aborted send carries the version mismatch, not a successful response");
+            .expect("an aborted send carries the version mismatch, not a successful response")
+            .message();
         assert!(
             mismatch.contains("Attempted to write a non-default includeTopicAuthorizedOperations at version 7"),
             "got: {mismatch}"
@@ -3792,7 +3821,7 @@ mod tests {
             .find(|r| r.version_mismatch().is_some())
             .expect("the send must be aborted with a version mismatch");
         assert_eq!(
-            response.version_mismatch(),
+            response.version_mismatch().map(|e| e.message()),
             Some(expected.as_str()),
             "the caller must get Java's diagnostic verbatim, not the literal \"UnsupportedVersionError\""
         );
@@ -3824,11 +3853,18 @@ mod tests {
             .iter()
             .find(|r| r.version_mismatch().is_some())
             .expect("the send must be aborted with a version mismatch");
+        let mismatch = response.version_mismatch().unwrap();
         assert_eq!(
-            response.version_mismatch(),
-            Some("MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field"),
+            "The cluster does not support [allowAutoTopicCreation] in METADATA API version 3. Upgrade the \
+             cluster to METADATA API version >= 4 to enable [allowAutoTopicCreation].",
+            mismatch.message(),
             "no class-name prefix of our own: Display adds exactly one"
         );
+        // The object the builder raised reaches the response, so its crate-private
+        // subclass (Kafka 4.4's `UnsupportedProtocolFieldException`) survives.
+        assert!(UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(
+            &Error::UnsupportedVersion(mismatch.clone())
+        ));
     }
 
     /// Translated from `NetworkClientTest.testAuthenticationFailureWithInFlightMetadataRequest`.
