@@ -137,6 +137,7 @@ use super::internals::DescribeConsumerGroupsHandler;
 use super::internals::DescribeProducersHandler;
 use super::internals::DescribeTransactionsHandler;
 use super::internals::FenceProducersHandler;
+use super::internals::InternalDescribeFeaturesResult;
 use super::internals::ListConsumerGroupOffsetsHandler;
 use super::internals::ListOffsetsHandler;
 use super::internals::ListTransactionsHandler;
@@ -188,6 +189,7 @@ use crate::ApiVersionsResponseData;
 use crate::CreateDelegationTokenRequestData;
 use crate::ExpireDelegationTokenRequestData;
 use crate::ListPartitionReassignmentsRequestData;
+use crate::NodeApiVersions;
 use crate::RenewDelegationTokenRequestData;
 use crate::UnregisterControllerRequestData;
 use crate::UpdateFeaturesRequestData;
@@ -265,6 +267,79 @@ pub struct KafkaAdminClient {
 }
 
 impl KafkaAdminClient {
+    /// `KafkaAdminClient.describeFeatures(DescribeFeaturesOptions)` with its
+    /// concrete return type, `InternalDescribeFeaturesResult` (KAFKA-19663),
+    /// which also carries the answering node's API versions. Java's internal
+    /// tools reach it by casting the `Admin.describeFeatures` result; Rust has
+    /// no downcast, so the crate calls this instead.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#describeFeatures")]
+    pub(crate) fn describe_features_internal(
+        &self,
+        options: DescribeFeaturesOptions,
+    ) -> InternalDescribeFeaturesResult {
+        let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let node_api_versions_handle: KafkaFutureImpl<NodeApiVersions> = KafkaFutureImpl::new();
+        let node_api_versions_public = node_api_versions_handle.future();
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+
+        // Mirrors Java: a set nodeId routes to that specific broker via
+        // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
+        // broker or the active controller.
+        let node_provider = match options.node_id() {
+            Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+            None => NodeProvider::LeastLoadedBrokerOrActiveKController,
+        };
+
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            Ok(Box::new(api_versions_request::Builder::new()) as Box<dyn RequestBuilder>)
+        });
+
+        let resp_handle = handle.clone();
+        let resp_versions_handle = node_api_versions_handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
+            let ConcreteResponse::ApiVersions(api_versions) = response else {
+                return HandleResult::Retry(Error::local_illegal_state("Expected an ApiVersions response"));
+            };
+            let data = api_versions.data();
+            if data.error_code == Errors::None.code() {
+                match create_feature_metadata(data) {
+                    Ok(metadata) => resp_handle.complete(metadata),
+                    Err(e) => resp_handle.complete_with_error(e),
+                };
+                resp_versions_handle.complete(create_node_api_version(data));
+            } else {
+                // One exception completes both futures, as Java's does.
+                let error = Error::new(Errors::for_code(data.error_code));
+                resp_handle.complete_with_error(error.clone());
+                resp_versions_handle.complete_with_error(error);
+            }
+            HandleResult::Done
+        });
+
+        // 58f63f448e: a failed call (e.g. a timeout) completes the
+        // `nodeApiVersions` future too, or a caller waiting on it would hang.
+        let fail_handle = handle.clone();
+        let fail_versions_handle = node_api_versions_handle;
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
+            fail_versions_handle.complete_with_error(error.clone());
+        });
+
+        let call = Call::new(
+            "describeFeatures",
+            deadline,
+            node_provider,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        InternalDescribeFeaturesResult::new(public, node_api_versions_public)
+    }
+
     /// Returns the response error message with a fallback to the error code's
     /// default message. Mirrors Java's `ApiError.messageWithFallback`.
     pub(crate) fn message_with_fallback(code: i16, message: &Option<String>) -> String {
@@ -1230,6 +1305,18 @@ fn create_feature_metadata(data: &ApiVersionsResponseData) -> Result<FeatureMeta
         finalized_features_epoch,
         supported_features,
     ))
+}
+
+/// Builds the answering node's [`NodeApiVersions`] from an `ApiVersionsResponse`'s
+/// data, mirroring the `createNodeApiVersion` closure inside
+/// `KafkaAdminClient.describeFeatures` (KAFKA-19663).
+fn create_node_api_version(data: &ApiVersionsResponseData) -> NodeApiVersions {
+    NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
+        &data.api_keys,
+        &data.supported_features,
+        &data.finalized_features,
+        data.finalized_features_epoch,
+    )
 }
 
 /// Returns `true` if a topic name cannot be represented in an RPC (empty).
@@ -4889,56 +4976,8 @@ impl Admin for KafkaAdminClient {
     }
 
     fn describe_features_with_options(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
-        let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
-        let public = handle.future();
-        let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-
-        // Mirrors Java: a set nodeId routes to that specific broker via
-        // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
-        // broker or the active controller.
-        let node_provider = match options.node_id() {
-            Some(node_id) => NodeProvider::ConstantNodeId(node_id),
-            None => NodeProvider::LeastLoadedBrokerOrActiveKController,
-        };
-
-        let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(api_versions_request::Builder::new()) as Box<dyn RequestBuilder>)
-        });
-
-        let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
-            let ConcreteResponse::ApiVersions(api_versions) = response else {
-                return HandleResult::Retry(Error::local_illegal_state("Expected an ApiVersions response"));
-            };
-            let data = api_versions.data();
-            if data.error_code == Errors::None.code() {
-                match create_feature_metadata(data) {
-                    Ok(metadata) => resp_handle.complete(metadata),
-                    Err(e) => resp_handle.complete_with_error(e),
-                };
-            } else {
-                resp_handle.complete_with_error(Error::new(Errors::for_code(data.error_code)));
-            }
-            HandleResult::Done
-        });
-
-        let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &Error| {
-            fail_handle.complete_with_error(error.clone());
-        });
-
-        let call = Call::new(
-            "describeFeatures",
-            deadline,
-            node_provider,
-            create_request,
-            handle_response,
-            handle_failure,
-            Box::new(|| false),
-        );
-        self.submit(call);
-        DescribeFeaturesResult::new(public)
+        // Java returns the `InternalDescribeFeaturesResult` typed as its parent.
+        self.describe_features_internal(options).into()
     }
 
     fn update_features_with_options(
@@ -10057,10 +10096,14 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::None));
-        let result = admin.describe_features_with_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
+        // Java casts the result to `InternalDescribeFeaturesResult`
+        // (KAFKA-19663); the crate asks for that type directly.
+        let result = admin.describe_features_internal(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
+        let versions = result.node_api_versions().get().await.unwrap();
+        assert!(versions.api_version(&ApiKeys::API_VERSIONS).is_some());
     }
 
     /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesFailure`.
@@ -10071,10 +10114,12 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::InvalidRequest));
-        let result = admin.describe_features_with_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
+        let result = admin.describe_features_internal(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let err = result.feature_metadata().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
+        let err = result.node_api_versions().get().await.unwrap_err();
+        assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
     }
 
     /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesWithNodeSuccess` — a set
@@ -10103,12 +10148,18 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[1]);
-        let result = admin
-            .describe_features_with_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).set_node_id(0));
+        let result =
+            admin.describe_features_internal(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).set_node_id(0));
         pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
         time.sleep(2000);
         pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
-        assert!(result.feature_metadata().get().await.is_err());
+        let err = result.feature_metadata().get().await.unwrap_err();
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+        // 58f63f448e: without completing it in `handleFailure`, this future
+        // never resolves (Java's test hung until the class timeout).
+        assert!(result.node_api_versions().is_done(), "nodeApiVersions was left pending");
+        let err = result.node_api_versions().get().await.unwrap_err();
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
     }
 
     // --- unregisterController (KAFKA-20395) ----------------------------------
