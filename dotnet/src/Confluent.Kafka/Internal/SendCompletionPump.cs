@@ -318,10 +318,9 @@ internal sealed class SendCompletionPump
     /// </para>
     /// <para>
     /// <b>Ownership of <paramref name="future"/> transfers on return, and only on return.</b> If this
-    /// method throws — allocating the entry, or the queue growing, both out-of-memory only — nothing was
-    /// queued and nothing was freed, so the caller still owns the future and must destroy it. That
-    /// throw sits after the core accepted the record and before the pump could read its completion:
-    /// recorded residual 4 on <see cref="IDeliveryCallback"/>, failure between acceptance and handoff.
+    /// method throws (out of memory), nothing was queued and nothing was freed, so the caller still owns
+    /// the future and must destroy it, unread: recorded residual 4 on <see cref="IDeliveryCallback"/>,
+    /// failure between acceptance and handoff.
     /// </para>
     /// <para>
     /// <b>The gate's fault-in-place branch does NOT invoke the delivery callback</b> — recorded residual
@@ -332,7 +331,7 @@ internal sealed class SendCompletionPump
     /// </para>
     /// </remarks>
     /// <param name="future">The accepted send's future handle (ownership transfers to the pump on return).</param>
-    /// <param name="completion">The send's latch — completed exactly once, on the pump or here.</param>
+    /// <param name="completion">The send's latch — completed exactly once.</param>
     /// <param name="delivery">
     /// The user's delivery callback carrier, or <see langword="null"/> on the plain <c>Send(record)</c>
     /// path.
@@ -672,13 +671,11 @@ internal sealed class SendCompletionPump
     /// (<c>block_on</c>, deadlock-free, ffi §A1), exactly as <c>get_all</c> does for a group.
     /// </para>
     /// <para>
-    /// A throw that escapes this method — out of the blocking <c>get</c> itself (a native-side failure,
-    /// e.g. an <see cref="EntryPointNotFoundException"/> against a stale native), or out of reading what
-    /// it reported before the callback is invoked — reaches <see cref="RunLoop"/>'s <c>catch</c>, which
-    /// faults the latch with the pump-failure exception and invokes no callback: recorded residual 3
-    /// on <see cref="IDeliveryCallback"/>. On that path no completion has been turned into a result the
-    /// callback could report; why firing from the fault path is not the fix is stated under that
-    /// residual.
+    /// A throw that escapes this method before the delivery callback is invoked (for example an
+    /// <see cref="EntryPointNotFoundException"/> out of the blocking <c>get</c> against a stale native)
+    /// reaches <see cref="RunLoop"/>'s <c>catch</c>, which faults the latch with the pump-failure
+    /// exception and invokes no callback: recorded residual 3 on <see cref="IDeliveryCallback"/>. Why
+    /// firing from the fault path is not the fix is stated under that residual.
     /// </para>
     /// <para>
     /// Until <c>NativeProducer.Send</c> is switched onto this path (M11/P4.2 S3), the same
