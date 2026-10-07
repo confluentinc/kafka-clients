@@ -1581,19 +1581,25 @@ impl<K, V> KafkaProducer<K, V> {
     /// caller can subtract it from its own `max.block.ms` budget.
     ///
     /// Translated from `KafkaProducer.awaitTopicMetadata(Set<String>)`
-    /// (6208dfc014). Java's no-refresh branch also calls
-    /// `metadata.maybeThrowBootstrapFatalException()`, which belongs to KIP-909
-    /// (PLAN Phase 2) and does not exist on this branch yet.
+    /// (6208dfc014, with KIP-909's bootstrap check). Even when no refresh is
+    /// needed, a permanent bootstrap failure is surfaced so every API call sees
+    /// it; on the refresh branch `await_update` surfaces it through
+    /// `maybe_return_fatal_error`, as Java's `awaitUpdate` does through
+    /// `maybeThrowFatalException`.
     ///
     /// # Errors
     ///
     /// [`Error::Timeout`] (`"Failed to update metadata after <max.block.ms> ms."`)
-    /// if no update arrives in time, or the fatal metadata error / closed-metadata
-    /// error `await_update` reports.
+    /// if no update arrives in time, [`Error::BootstrapResolution`] once bootstrap
+    /// resolution has failed for good, or the fatal metadata error /
+    /// closed-metadata error `await_update` reports.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#awaitTopicMetadata")]
     async fn await_topic_metadata(&self, topics: &HashSet<&str>) -> Result<i64, Error> {
         let start_nanos = self.time.nanoseconds();
         let Some(version) = self.metadata.add_with_topics(topics.iter().copied(), self.now_ms()) else {
+            // Even when no metadata refresh is needed for these topics, a permanent bootstrap
+            // failure must still be surfaced so every API call sees the error.
+            self.metadata.maybe_return_bootstrap_fatal_error()?;
             return Ok(0);
         };
         self.wakeup.notify_one();
@@ -7583,6 +7589,61 @@ mod tests {
         match producer.partitions_for("test-topic").await {
             Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
             other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
+        producer.close_with_timeout(Duration::ZERO).await.unwrap();
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated`
+    /// (KIP-909 + KIP-1319, with 0720ba1141's group-metadata mock): sendOffsetsToTransaction became
+    /// metadata-aware in KIP-1319, so it can also block on bootstrap and must surface the
+    /// `BootstrapResolutionException`. The first call waits on the refresh and is woken by the
+    /// failure; the second finds the topic already tracked and hits the no-refresh branch's check.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated"
+    )]
+    async fn test_producer_send_offsets_to_transaction_bootstrap_resolution_error_propagated() {
+        let props = HashMap::from([
+            (
+                ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            (
+                ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "3000".to_string(),
+            ),
+            (ProducerConfig::TRANSACTIONAL_ID_CONFIG.to_string(), "test-tx-id".to_string()),
+        ]);
+        let producer = KafkaProducer::<String, String>::new(
+            ProducerConfig::new(&props).unwrap(),
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let group_metadata = ConsumerGroupMetadataImpl::new("test-group");
+        let offsets = || {
+            HashMap::from([(
+                TopicPartition::new("test-topic".to_string(), 0),
+                OffsetAndMetadata::new(0).expect("a non-negative offset"),
+            )])
+        };
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        for attempt in 0..2 {
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                producer.send_offsets_to_transaction(offsets(), &group_metadata),
+            )
+            .await
+            {
+                Ok(Err(Error::BootstrapResolution(e))) => assert_eq!(e.message(), expected, "attempt {attempt}"),
+                Ok(other) => panic!("attempt {attempt}: expected the bootstrap failure, got {other:?}"),
+                Err(_) => {
+                    panic!("attempt {attempt}: send_offsets_to_transaction must be woken by the bootstrap failure")
+                },
+            }
         }
         producer.close_with_timeout(Duration::ZERO).await.unwrap();
     }
