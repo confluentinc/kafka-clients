@@ -125,10 +125,11 @@ public sealed class PublicProducerSendAllocationBudgetTests
     [Fact]
     public async Task Send_FastPath_PerRecordAllocation_StaysWithinItsMeasuredBudget()
     {
-        // M11/P3.5 T21 (ii) — with a permit free, Send(record) returns a ValueTask over the delivery
-        // task itself and allocates nothing for the first stage. Measured absolutely (caller-thread
-        // bytes per Send over 64 sends, no token, no callback, best of 8), against a budget tight
-        // enough that one extra Task-sized allocation per send turns it red.
+        // M11/P3.5 T21 (ii) — with a permit free, Send(record) returns a ValueTask over the record's
+        // AsyncKafkaFuture, whose Get() is the delivery task itself, and allocates nothing for the first
+        // stage. Measured absolutely (caller-thread bytes per Send over 64 sends, no token, no callback,
+        // best of 8), against a budget tight enough that one extra Task-sized allocation per send turns
+        // it red.
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
