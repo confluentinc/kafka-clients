@@ -63,10 +63,13 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // M11/P3.5 T21 (ii) — the ABSOLUTE per-send budget of the two-stage Send's fast path. The marginal
     // budget above subtracts a constant per-send cost away, so it cannot see one: a first stage that
     // stopped being a struct over the delivery task (one more Task<T>, 72 B) passes it unchanged.
-    // MEASURED (M11/P3.5 S3): 160 B/send on BOTH net8.0 and net10.0 — the ProducerRecord, the
-    // completion source and its task. The budget is that plus 32 B, less than one more Task<T> (72 B):
-    // verified red by injecting exactly that (a Task.FromResult first stage on the fast path).
-    private const long FastPathPerSendBudgetBytes = 192;
+    // MEASURED: 160 B/send on BOTH net8.0 and net10.0 — the ProducerRecord, the completion source and
+    // its task — at M11/P3.5 S3, and again, unchanged, at M11/P3.6 S2 (3 runs per TFM) once the first
+    // stage yields an AsyncKafkaFuture<RecordMetadata>, a struct over that same task. The budget is
+    // that plus 16 B (M11/P3.6 D11 (a)), which is less than one boxed AsyncKafkaFuture<RecordMetadata>
+    // (24 B) and so less than one more Task<T> (72 B). History: P3.5's budget was that plus 32 B (192),
+    // verified red then by injecting one more Task<T> (a Task.FromResult first stage on the fast path).
+    private const long FastPathPerSendBudgetBytes = 176;
 
     // More attempts than the marginal test: an absolute figure has no matched pair to cancel a node
     // allocation within an attempt, so it needs a drain-free run among them.

@@ -553,6 +553,61 @@ public sealed class SendAccumulatorFirstStageTests
         Assert.Equal(2, harness.HistoryCount);
     }
 
+    [Theory]
+    [InlineData("fast")]
+    [InlineData("saturated")]
+    [InlineData("cancelable")]
+    public async Task Admission_FirstStage_YieldsAFutureWhoseGetIsTheDeliveryTask(string path)
+    {
+        // M11/P3.6 N6, the accumulator half — on each path SubmitAdmitted takes, the first stage
+        // yields an AsyncKafkaFuture whose Get() is the record's OWN delivery task: the task of the
+        // completion source the fixture handed in, by reference. "fast": a permit is free, so the
+        // stage is complete on return. "saturated": the bound is full and there is no token, so it
+        // is the plain pending wait, completed by the permit a drain returns. "cancelable": the bound
+        // is full and the caller's token is live, so it is the cancelable stage — and the SLOT WINS:
+        // the drain returns the permit, the token never fires.
+        //
+        // Assert.Same against completion.Task is what catches a Get() that hands back a fresh task
+        // (a wrapper or a continuation) instead of the delivery itself; Get() not throwing is what
+        // catches a branch that yields a default future. The public half, through both Send
+        // overloads, is PublicProducerFirstStageTests.Send_FirstStage_YieldsAFutureWhoseGetIsTheDeliveryTask.
+        bool saturated = path != "fast";
+        using Harness harness = new Harness(Settings(saturated ? 1 : 4));
+        using CancellationTokenSource live = new CancellationTokenSource();
+
+        // Fills the bound: a non-awaiting append takes its permit inline.
+        Task<RecordMetadata>? filled = saturated ? harness.AppendOne(0xA0) : null;
+
+        CancellationToken token = path == "cancelable" ? live.Token : CancellationToken.None;
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send =
+            harness.AppendStaged(0xA1, callback: null, token, out TaskCompletionSource<RecordMetadata> completion);
+        if (saturated)
+        {
+            Assert.False(send.IsCompleted, "the first stage completed although the bound was full");
+        }
+        else
+        {
+            Assert.True(send.IsCompletedSuccessfully, "the first stage was not complete on return although a permit was free");
+        }
+
+        Task<AsyncKafkaFuture<RecordMetadata>> stage = send.AsTask();
+        harness.DrainNow();
+
+        AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage, s_prompt);
+        Assert.Same(completion.Task, future.Get());
+        Assert.Same(future.Get(), future.Get());
+
+        await TestTimeout.Run(() => completion.Task, s_deadline);
+        if (filled is not null)
+        {
+            Task<RecordMetadata> fill = filled;
+            await TestTimeout.Run(() => fill, s_deadline);
+        }
+
+        Assert.Equal(saturated ? 2 : 1, harness.HistoryCount);
+        Assert.False(live.IsCancellationRequested);
+    }
+
 #if NET8_0_OR_GREATER
     // GC.GetAllocatedBytesForCurrentThread has no net462 equivalent (net462 is build-verified only),
     // the PublicProducerSendAllocationBudgetTests precedent.
@@ -566,8 +621,12 @@ public sealed class SendAccumulatorFirstStageTests
     // Regression CEILINGS for the two saturated paths' own cost over the fast path, per send:
     // the larger of the net8.0 / net10.0 measurements (+680 / +688 B cancelable, +536 / +544 B
     // plain; the fast path itself is 128 B on both — the record's bytes, its completion source and
-    // that source's task) plus 32 B, which is less than one more Task<T> (72 B). So a new
-    // Task-sized allocation on either saturated path turns them red; the 8 B TFM difference does not.
+    // that source's task), measured at M11/P3.5 S3 and again, unchanged, at M11/P3.6 S2 (3 runs per
+    // TFM) once the first stage yields an AsyncKafkaFuture<RecordMetadata>. Each ceiling is that plus
+    // 16 B (M11/P3.6 D11 (a); P3.5 added 32 B: 720 and 576), which is less than one boxed
+    // AsyncKafkaFuture<RecordMetadata> (24 B) and so less than one more Task<T> (72 B). The ceiling
+    // follows the higher, net10.0, figure, so net8.0's 8 B lower figure leaves it 24 B of headroom:
+    // a 24 B box exceeds the ceiling on net10.0 only, a new Task-sized allocation on both TFMs.
     //
     // ⚠ The cancelable figure is for a caller token whose source ALREADY HAS A RECYCLED
     // REGISTRATION NODE. On .NET Core a CancellationTokenSource keeps the node a disposed
@@ -577,29 +636,32 @@ public sealed class SendAccumulatorFirstStageTests
     // the registration costs 0 B in this figure — by construction, not by chance. Two other
     // caller-token states pay more and are guarded separately below: a source with no free node,
     // and a new source per send.
-    private const long CancelableStageMarginalCeilingBytes = 720;
+    private const long CancelableStageMarginalCeilingBytes = 704;
 
-    private const long PlainWaitMarginalCeilingBytes = 576;
+    private const long PlainWaitMarginalCeilingBytes = 560;
 
     // The same regression ceiling for the cancelable path when the caller's source has already
     // registered once, so its one-time registration table exists, but has NO free registration
     // node, so every Register allocates one. One long-lived token with more saturated sends
     // pending on it than it has freed nodes is in that state. Measured +760 B on net8.0 and +768 B
-    // on net10.0: the recycled figures above plus the 80 B node. The ceiling is the larger plus
-    // 32 B, again less than one more Task<T> (72 B), so a new Task-sized allocation on this path
-    // turns it red too. ⚠ This is NOT the cost of a new CancellationTokenSource per send (a
-    // per-request timeout, say): that caller never reaches this state, because each of its sends
-    // is the first Register on its source. It is guarded by the next ceiling.
-    private const long FreshNodeCancelableStageMarginalCeilingBytes = 800;
+    // on net10.0 (M11/P3.5 S3, and again, unchanged, at M11/P3.6 S2): the recycled figures above
+    // plus the 80 B node. The ceiling is the larger plus 16 B (M11/P3.6 D11 (a); P3.5 added 32 B:
+    // 800), again less than one boxed AsyncKafkaFuture<RecordMetadata> (24 B) and so less than one
+    // more Task<T> (72 B), with the same net8.0 headroom of 24 B as above. ⚠ This is NOT the cost
+    // of a new CancellationTokenSource per send (a per-request timeout, say): that caller never
+    // reaches this state, because each of its sends is the first Register on its source. It is
+    // guarded by the next ceiling.
+    private const long FreshNodeCancelableStageMarginalCeilingBytes = 784;
 
     // The same regression ceiling for the cancelable path when every send brings a NEW
     // CancellationTokenSource (a per-request timeout, say), so every Register is the first on its
     // source. On .NET Core that first Register allocates the source's 64 B registration table as
     // well as the 80 B node, so this caller pays the fresh-node figure above plus 64 B on every
-    // saturated send. Measured +824 B on net8.0 and +832 B on net10.0. The ceiling is the larger
-    // plus 32 B, again less than one more Task<T> (72 B), so a new Task-sized allocation on this
-    // path turns it red too.
-    private const long NewSourcePerSendCancelableStageMarginalCeilingBytes = 864;
+    // saturated send. Measured +824 B on net8.0 and +832 B on net10.0 (M11/P3.5 S3, and again,
+    // unchanged, at M11/P3.6 S2). The ceiling is the larger plus 16 B (M11/P3.6 D11 (a); P3.5 added
+    // 32 B: 864), again less than one boxed AsyncKafkaFuture<RecordMetadata> (24 B) and so less than
+    // one more Task<T> (72 B), with the same net8.0 headroom of 24 B as above.
+    private const long NewSourcePerSendCancelableStageMarginalCeilingBytes = 848;
 
     [Fact]
     public async Task Admission_SaturatedFirstStage_PerSendAllocation_IsMeasured_AndStaysUnderItsCeiling()

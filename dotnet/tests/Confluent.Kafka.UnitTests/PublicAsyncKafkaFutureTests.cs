@@ -25,8 +25,9 @@ namespace Confluent.Kafka.UnitTests;
 /// The public <see cref="AsyncKafkaFuture{T}"/> on its own (M11/P3.6 S1, PLAN §7 N1–N5), built through
 /// its <c>internal</c> constructor: the D3 default-value guard, <see cref="AsyncKafkaFuture{T}.Get"/>'s
 /// same-instance contract, <c>ConfigureAwait</c> on the task, D4's reference-identity equality, and the
-/// approved member set (D4 in, D5/D6 out). Everything here is available on the netstandard2.0 floor, so
-/// it also compiles on net462.
+/// approved member set (D4 in, D5/D6 out); and (S2, N7) the same guard reached through a default
+/// <c>ValueTask</c> of the type <c>Send</c> returns. Everything here is available on the netstandard2.0
+/// floor, so it also compiles on net462.
 /// </summary>
 public sealed class PublicAsyncKafkaFutureTests
 {
@@ -42,6 +43,20 @@ public sealed class PublicAsyncKafkaFutureTests
 
         AssertGetThrowsSynchronously(viaDefault);
         AssertGetThrowsSynchronously(viaNew);
+    }
+
+    [Fact]
+    public async Task DefaultValueTask_AwaitedFuture_GetThrows()
+    {
+        // M11/P3.6 N7 — the default of the type IAsyncProducer.Send returns. A default ValueTask is
+        // already complete, with a default AsyncKafkaFuture as its result, so a caller that awaits an
+        // unassigned send gets N1's guard from Get(), with D3's message, not a null task.
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = default(ValueTask<AsyncKafkaFuture<RecordMetadata>>);
+        Assert.True(send.IsCompletedSuccessfully);
+
+        AsyncKafkaFuture<RecordMetadata> future = await send;
+
+        AssertGetThrowsSynchronously(future);
     }
 
     [Theory]

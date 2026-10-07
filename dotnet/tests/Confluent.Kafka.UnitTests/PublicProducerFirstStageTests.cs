@@ -304,6 +304,85 @@ public sealed class PublicProducerFirstStageTests
     }
 
     [Theory]
+    [InlineData("fast", false)]
+    [InlineData("fast", true)]
+    [InlineData("saturated", false)]
+    [InlineData("saturated", true)]
+    [InlineData("cancelable", false)]
+    [InlineData("cancelable", true)]
+    public async Task Send_FirstStage_YieldsAFutureWhoseGetIsTheDeliveryTask(string path, bool withCallback)
+    {
+        // M11/P3.6 N6, the public half — through both Send overloads, on each first-stage path:
+        // "fast" (a permit is free, so the ValueTask is complete on return), "saturated" (the bound is
+        // full and there is no token: the plain pending wait) and "cancelable" (the bound is full and
+        // the caller's token is live: the cancelable stage, where the SLOT WINS — the drain returns
+        // the permit and the token never fires). On each, the awaited AsyncKafkaFuture's Get() must
+        // not throw (a branch that yields a default future throws here), must return the same
+        // instance on every call, must be the record's own delivery task (its pending slot, by
+        // reference), and must complete with the metadata the mock reports for that record.
+        //
+        // AsyncMockProducer only: like T17's, this file's fixture is the async mock (see the class
+        // remarks); the accumulator half is SendAccumulatorFirstStageTests' test of the same name.
+        const int Bound = 2;
+        bool saturated = path != "fast";
+        int index = saturated ? Bound : 0;
+
+        using AccumulatorEnvironment environment = new AccumulatorEnvironment(Bound);
+        using AsyncMockProducer<byte[], byte[]> producer =
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using CancellationTokenSource live = new CancellationTokenSource();
+        CountingCallback callback = new CountingCallback();
+
+        // Fills the bound: a send whose first stage is not awaited takes its permit inline.
+        Task<RecordMetadata>[] fillers = new Task<RecordMetadata>[index];
+        for (int i = 0; i < index; i++)
+        {
+            fillers[i] = producer.Send(Record(i)).Delivery();
+        }
+
+        CancellationToken token = path == "cancelable" ? live.Token : CancellationToken.None;
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = withCallback
+            ? producer.Send(Record(index), callback, token)
+            : producer.Send(Record(index), token);
+        if (saturated)
+        {
+            Assert.False(send.IsCompleted, "the first stage completed although the bound was full");
+        }
+        else
+        {
+            Assert.True(send.IsCompletedSuccessfully, "the first stage was not complete on return although a permit was free");
+        }
+
+        Task<AsyncKafkaFuture<RecordMetadata>> stage = send.AsTask();
+        Task<RecordMetadata> delivery = DeliveriesOf(producer, index + 1)[index];
+
+        // The drain hands every record to the core and returns the permits.
+        producer.WaitForSendsToReachCore(s_deadline);
+
+        AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage, s_prompt);
+        Task<RecordMetadata> got = future.Get();
+        Assert.Same(got, future.Get());
+        Assert.Same(delivery, got);
+
+        RecordMetadata metadata = await TestTimeout.Run(() => got, s_deadline);
+        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(0, metadata.Partition);
+        Assert.Equal(index, metadata.Offset);
+
+        await TestTimeout.Run(() => Task.WhenAll(fillers), s_deadline);
+        Assert.Equal(index + 1, producer.HistoryCount());
+        if (withCallback)
+        {
+            await WaitUntil(() => callback.Count > 0, s_prompt);
+            Assert.Equal(1, callback.Count);
+            Assert.Null(callback.LastException);
+            Assert.Equal(index, callback.LastMetadata!.Offset);
+        }
+
+        Assert.False(live.IsCancellationRequested);
+    }
+
+    [Theory]
     [InlineData("Close")]
     [InlineData("Dispose")]
     [InlineData("DisposeAsync")]

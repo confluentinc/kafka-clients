@@ -102,10 +102,13 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     // budget above can see a constant per-send regression shared by both overloads: the 512 B
     // ceiling is generous by design, and the 64 B one is a plain-to-callback DELTA, from which a cost
     // both overloads pay (one more Task<T> for the first stage, 72 B) cancels out.
-    // MEASURED (M11/P3.5 S3): 200 B/send on BOTH net8.0 and net10.0 — the plain path's 160 B plus the
-    // 40 B DeliveryRegistration. The budget is that plus 32 B, less than one more Task<T> (72 B): verified
-    // red by injecting exactly that (a Task.FromResult first stage on the fast path).
-    private const long CallbackFastPathPerSendBudgetBytes = 232;
+    // MEASURED: 200 B/send on BOTH net8.0 and net10.0 — the plain path's 160 B plus the 40 B
+    // DeliveryRegistration — at M11/P3.5 S3, and again, unchanged, at M11/P3.6 S2 (3 runs per TFM) once
+    // the first stage yields an AsyncKafkaFuture<RecordMetadata>. The budget is that plus 16 B
+    // (M11/P3.6 D11 (a)), which is less than one boxed AsyncKafkaFuture<RecordMetadata> (24 B) and so
+    // less than one more Task<T> (72 B). History: P3.5's budget was that plus 32 B (232), verified red
+    // then by injecting one more Task<T> (a Task.FromResult first stage on the fast path).
+    private const long CallbackFastPathPerSendBudgetBytes = 216;
 
     // More attempts than the paired tests: an absolute figure has no matched pair to cancel a node
     // allocation within an attempt, so it needs a drain-free run among them.
