@@ -14,19 +14,23 @@
 // limitations under the License.
 
 {
-  "apiKey": 89,
-  "type": "request",
-  "listeners": ["broker"],
-  "name": "StreamsGroupDescribeRequest",
-  // Version 1 adds IncludeTopologyDescription (KIP-1331).
-  "validVersions": "0-1",
-  "flexibleVersions": "0+",
+  "type": "data",
+  "name": "AbortedTxn",
+  "validVersions": "0",
+  "flexibleVersions": "none",
   "fields": [
-    { "name": "GroupIds", "type": "[]string", "versions": "0+", "entityType": "groupId",
-      "about": "The ids of the groups to describe" },
-    { "name": "IncludeAuthorizedOperations", "type": "bool", "versions": "0+",
-      "about": "Whether to include authorized operations." },
-    { "name": "IncludeTopologyDescription", "type": "bool", "versions": "1+", "default": "false",
-      "about": "Whether to include the full topology description from the topology description plugin in the response." }
+    { "name": "ProducerId", "type": "int64", "versions": "0+",
+      "about": "The producer id associated with the aborted transaction"
+    },
+    { "name": "FirstOffset", "type": "int64", "versions": "0+",
+      "about": "The first offset in the aborted transaction"
+    },
+    { "name": "LastOffset", "type": "int64", "versions": "0+",
+      "about": "The last offset in the aborted transaction"
+    },
+    { "name": "LastStableOffset", "type": "int64", "versions": "0+",
+      "about": "The last stable offset at the time the transaction was aborted"
+    }
+    // Note: adding new fields may require TransactionIndex to be refactored to read version-per-record.
   ]
 }

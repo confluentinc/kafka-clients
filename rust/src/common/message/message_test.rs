@@ -637,10 +637,14 @@ fn test_message_versions() {
     use crate::StreamsGroupDescribeResponseData;
     use crate::StreamsGroupHeartbeatRequestData;
     use crate::StreamsGroupHeartbeatResponseData;
+    use crate::StreamsGroupTopologyDescriptionUpdateRequestData;
+    use crate::StreamsGroupTopologyDescriptionUpdateResponseData;
     use crate::SyncGroupResponseData;
     use crate::TxnOffsetCommitResponseData;
     use crate::UnregisterBrokerRequestData;
     use crate::UnregisterBrokerResponseData;
+    use crate::UnregisterControllerRequestData;
+    use crate::UnregisterControllerResponseData;
     use crate::UpdateFeaturesRequestData;
     use crate::UpdateFeaturesResponseData;
     use crate::UpdateRaftVoterRequestData;
@@ -955,6 +959,16 @@ fn test_message_versions() {
         ApiKeys::DELETE_SHARE_GROUP_OFFSETS,
         DeleteShareGroupOffsetsRequestData,
         DeleteShareGroupOffsetsResponseData
+    );
+    assert_message_version!(
+        ApiKeys::STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE,
+        StreamsGroupTopologyDescriptionUpdateRequestData,
+        StreamsGroupTopologyDescriptionUpdateResponseData
+    );
+    assert_message_version!(
+        ApiKeys::UNREGISTER_CONTROLLER,
+        UnregisterControllerRequestData,
+        UnregisterControllerResponseData
     );
 }
 
