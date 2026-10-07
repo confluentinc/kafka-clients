@@ -38,7 +38,6 @@ mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::{BuiltInPartitioner, KeyHasher};
-#[expect(unused_imports, reason = "used by MemoryRecordsBuilder from the next commit on")]
 pub(crate) use chunked_byte_buffer_output_stream::ChunkedByteBufferOutputStream;
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;

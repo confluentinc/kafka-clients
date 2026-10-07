@@ -813,7 +813,7 @@ impl ProducerBatch {
     // stopped leaking this type through a `pub` signature.
     #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#buffer")]
-    pub fn buffer(&self) -> &Vec<u8> {
+    pub fn buffer(&mut self) -> Result<&[u8], Error> {
         self.records_builder.buffer()
     }
 
