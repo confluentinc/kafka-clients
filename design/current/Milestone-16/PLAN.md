@@ -340,9 +340,10 @@ Phase 1 completion notes (agent 91):
   `kind:`). Java's class is `common::internals::UnsupportedProtocolFieldError`: its two constructors
   (`with_options`, with an Options builder per §2's three-parameter cap, and `with_message`) and Java's
   `instanceof` (`is_unsupported_protocol_field_error`).
-  - **Throw sites ported (13):** CreateTopics ×2, ConsumerGroupHeartbeat, ElectLeaders, FindCoordinator,
-    ListGroups ×2, Metadata ×3, OffsetCommit, OffsetFetch. ListTransactions ×2 is new code: its 4.3.1
-    `DurationFilter` / `TransactionalIdPattern` checks had never been ported.
+  - **Throw sites ported (14 of Java's 20):** CreateTopics ×2, ConsumerGroupHeartbeat, ElectLeaders,
+    FindCoordinator, ListGroups ×2, Metadata ×3, OffsetCommit, OffsetFetch, plus ListTransactions ×2. The
+    ListTransactions pair is new code: its 4.3.1 `DurationFilter` / `TransactionalIdPattern` checks had
+    never been ported. The 6 skipped sites are listed under the skips below.
   - **Plumbing.** For `instanceof` to work, the error object has to travel as it does in Java. A builder
     carries it inside its `io::Error` (`UnsupportedVersionError::into_io_error` / `from_io_error`, the
     `CorrelationIdMismatchError` precedent). `ClientResponse.version_mismatch` holds an
@@ -374,8 +375,10 @@ Phase 1 completion notes (agent 91):
   dispatch, delegates for the 33 types whose Java class overrides the method. For the other 19 it
   computes the schema default (`throttle_time_ms` present at the version). Those 19 lose their per-type
   methods: the five Java removed and fourteen Rust stand-ins for the old inherited `false`.
-  ConsumerGroupHeartbeat, OffsetsForLeaderEpoch, UpdateFeatures, DescribeCluster and the quota and
-  transaction describes now throttle as Java 4.4 does. The 5 §5.1 rows are gone.
+  The ones that change from `false` to `true` are ConsumerGroupHeartbeat, ConsumerGroupDescribe,
+  OffsetsForLeaderEpoch (v2+), UpdateFeatures, Describe/AlterClientQuotas, DescribeProducers,
+  DescribeTransactions and ListTransactions; all match Java 4.4. (DescribeCluster already answered
+  `true`, which matches its schema.) The 5 §5.1 rows are gone.
   - Test: `RequestResponseTest.testClientThrottlesResponsesWithThrottleTime` over every `ConcreteResponse`
     type and version (each parsed from its default data). It found a **pre-existing divergence**:
     `DeleteTopicsResponse` throttled from v1, Java from v2 (`DeleteTopicsResponse.java`, unchanged since
@@ -424,6 +427,30 @@ Phase 1 completion notes (agent 91):
     - `increment` returns `LocalIllegalArgument` where Java throws `IndexOutOfBoundsException`, the
       crate's precedent for that class (`MockAdminClient`);
     - the comparator's offset/length overload is the slice method called with sub-slices.
+- **Review round 1 fixes (COMMENTS.91, all moved to `COMMENTS.DONE.91.md`):**
+  - **B1:** `generator/test-messages/SimpleKeyedArraysMessage.json` was git-ignored (`*.json`) and never
+    committed. It is now force-added, as its siblings are. No other Phase 1 file is ignored.
+    Re-verified from a clean `git archive HEAD rust` export with a fresh `CARGO_TARGET_DIR`:
+    `cargo test --lib` builds and passes there (4261 passed, 0 failed, 3 ignored).
+  - **L1:** a produce batch failed by a version mismatch now gets Java's message-less
+    `PartitionResponse(UNSUPPORTED_VERSION)` (`Sender.java:599`), so the callback sees the default text.
+    `testUnsupportedVersionInProduceRequest` asserts it.
+  - **L2:** all 15 generated "zero-fill then `read_bytes`" sites now go through `read_array`, which checks
+    the remaining bytes before it allocates. Compact string readers gain Java's `> 0x7fff` guard
+    ("string field <camelCaseName>[ element] had invalid length <n>", Java's order). There is no new
+    allocation (DoD #10): one allocation and one copy where there used to be an allocation, a memset and
+    a copy. Covered by a generator test and two runtime tests.
+  - **L3:** the stale `utils.ProducerIdAndEpoch` / `common/utils/byte_utils.rs` references are fixed in
+    `python/admin.py`, `admin_service.proto`, `status.md` and an integration-test comment. All are
+    hand-written; none is generated.
+  - **Manager (a):** b69c07c816 is reclassified to Consumer/P (partial) and added to Phase 10, not
+    implemented.
+  - **Manager (b):** `cargo xtask lint --keep-going` runs every lint step even after one fails, reports
+    every failure, and fails at the end if any step did. Its first run on Phase 1 found 3
+    `module_path_hygiene` findings: literal `stats::avg::Avg` type paths in the `KafkaMetric` `Display`
+    doc and tests. They are fixed. With `--keep-going` the result is: lint-custom fails with exactly the
+    15 remaining §5.1 rows; doc-hygiene, module-path-hygiene and all three clippy passes are clean.
+    **Later phases should gate on `cargo xtask lint --keep-going`.**
 - **Timing log** (2026-10-07, IST):
 
   | Step | Start | End | Minutes |
