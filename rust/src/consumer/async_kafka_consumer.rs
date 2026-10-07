@@ -2168,6 +2168,13 @@ where
         if let Some(commit_arc) = commit.as_ref() {
             commit_arc.set_completion_notify(Arc::clone(&event_notify));
         }
+        // Likewise when the FindCoordinator forwarder applies a response: the
+        // coordinator manager reports `i64::MAX` while its request is in flight
+        // (KAFKA-20253), so without this wake the newly discovered coordinator
+        // would sit unused until the network poll timed out.
+        if let Some(coord_arc) = coordinator.as_ref() {
+            coord_arc.set_completion_notify(Arc::clone(&event_notify));
+        }
         if let (Some(coord_arc), Some(commit_arc)) = (coordinator.as_ref(), commit.as_ref()) {
             commit_arc.set_coordinator(Arc::clone(coord_arc));
         }
