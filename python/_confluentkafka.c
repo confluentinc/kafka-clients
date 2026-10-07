@@ -3403,6 +3403,16 @@ static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObjec
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
+// Mock: Java's `MockAdminClient.Builder.usingRaftController(boolean)`; returns
+// the error handle as an int.
+static PyObject* py_MockAdminClient_set_using_raft_controller(PyObject* self, PyObject* args) {
+    unsigned long long h; int using_raft_controller;
+    if (!PyArg_ParseTuple(args, "Kp", &h, &using_raft_controller)) return NULL;
+    kafka_common_Error_t* e = kafka_admin_MockAdminClient_set_using_raft_controller(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, using_raft_controller != 0);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+}
+
 // Mock: seed beginning/end offsets. `spec` is a sequence of
 // (topic:str, partition:int, offset:int); returns the error handle as an int.
 static PyObject* mock_update_offsets(PyObject* args,
@@ -6789,6 +6799,16 @@ static PyObject* py_Admin_abort_transaction_async(PyObject* self, PyObject* args
     Py_RETURN_NONE;
 }
 
+static PyObject* py_Admin_unregister_controller_async(PyObject* self, PyObject* args) {
+    unsigned long long h; int controller_id; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KiiO", &h, &controller_id, &timeout_ms, &cb)) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_unregister_controller_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, (int32_t)controller_id, timeout_ms,
+        admin_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
 static PyObject* py_Admin_force_terminate_transaction_async(PyObject* self, PyObject* args) {
     unsigned long long h; const char* transactional_id; int timeout_ms; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KsiO", &h, &transactional_id, &timeout_ms, &cb)) return NULL;
@@ -7152,6 +7172,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
     {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
+    {"MockAdminClient_set_using_raft_controller", py_MockAdminClient_set_using_raft_controller,
+     METH_VARARGS, "Mock: set usingRaftController; returns error_int"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets,
      METH_VARARGS, "Mock: seed beginning offsets; returns error_int"},
     {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS,
@@ -7307,6 +7329,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async listTransactions; cb(result_int, error_int)"},
     {"Admin_abort_transaction_async", py_Admin_abort_transaction_async, METH_VARARGS,
      "Async abortTransaction; cb(error_int) -- Java's result carries no value"},
+    {"Admin_unregister_controller_async", py_Admin_unregister_controller_async, METH_VARARGS,
+     "Async unregisterController; cb(error_int) -- Java's result carries no value"},
     {"Admin_force_terminate_transaction_async", py_Admin_force_terminate_transaction_async,
      METH_VARARGS,
      "Async forceTerminateTransaction; cb(error_int) -- Java's result carries no value"},
