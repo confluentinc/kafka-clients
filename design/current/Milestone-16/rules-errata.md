@@ -386,3 +386,28 @@ Named Java classes, packages and version stamps in the rules, checked against 4.
 ## Draft rules notes for later phases
 
 Reserved for the PLAN §2.3 KIP-1332 note (the `ChunkedProducerBatch` fold into `ProducerBatch`, so Critics do not flag the missing type) and any other rule amendments later Milestone-16 phases draft. Phase 0 adds none.
+
+### Phase 5 (agent 95): `producer-transactions.md` §2/§3 — the manager → `Metadata` lock edge (KIP-1319)
+
+Drafted amendment, from Critic 95's review (COMMENTS.95 Q3). For a human to apply; `.claude/rules/` is not edited.
+
+- **What changed.** `TransactionManager` now holds `Arc<Metadata>` (Java's new constructor parameter,
+  `TransactionManager.java:106`) and reads `metadata.topic_ids()` under the manager's lock, from
+  `txn_offset_commit_handler`. Java has the same edge: `synchronized sendOffsetsToTransaction`
+  (`:430`) reaches `metadata.topicIds()` (`:1253`).
+- **Why the rules should say it.** §2 lists what lives behind the manager's lock and §3 fixes the
+  deque → manager order, but neither mentions a lock taken *while* the manager's is held. `Metadata`
+  is not a leaf: `Metadata::update` runs `ProducerMetadata`'s retain and request-builder closures and
+  the `ClusterResourceListeners` under its own lock. The order is safe only because none of those
+  callbacks takes the manager's lock.
+- **Suggested text** (append to §2's "How to apply"):
+  "`TransactionManager` holds `Arc<Metadata>` (KIP-1319) and reads `topic_ids()` under the manager's
+  lock, so the order is manager → `Metadata`. `Metadata` runs `ProducerMetadata`'s closures and
+  `ClusterResourceListeners` under its own lock, so none of them may take the manager's lock or
+  `pending_requests`."
+- **Suggested anti-pattern** (§2/§3 list): a `Metadata` callback, retain closure or cluster listener
+  that locks the `TransactionManager` or `pending_requests`.
+- **Related (from the same review):** rules-errata content items 1-3 above (KIP-1319 vs §10/§11/§12)
+  are now implemented as suggested. The §11 "known cases" addition can cite the enforcement sites
+  `TxnOffsetCommitRequest.java:100-118` and `rust/src/common/requests/txn_offset_commit_request.rs`
+  `Builder::build_version`.

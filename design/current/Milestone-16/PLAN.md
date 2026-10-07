@@ -587,8 +587,11 @@ Phase 5 completion notes (agent 95):
   where Java walks the caller's map (rules-errata item 1). The response is now read in wire order, as
   Java does; the old sorted flattening (`errors()`) is gone.
 - **§1-§4.** No new transition call site: the handler's arms reuse `abortable_error` / `fatal_error`. The
-  manager gains `metadata: Arc<Metadata>`. `Metadata` locks internally and never calls out, so the read
-  under the manager's lock is a leaf acquisition; the field doc records this. `send_offsets_to_transaction`
+  manager gains `metadata: Arc<Metadata>`, read under the manager's lock (manager → `Metadata`, as in
+  Java). `Metadata::update` does call out under its own lock (`ProducerMetadata`'s closures,
+  `ClusterResourceListeners`), but none of those callbacks takes the manager's lock or
+  `pending_requests`, so the order cannot invert; the field doc records this invariant (corrected
+  after review, COMMENTS.95 L2). `send_offsets_to_transaction`
   awaits the metadata refresh before it takes `pending_requests` and the manager lock.
 - **What landed, per class:**
   - `TxnOffsetCommitRequest`: the private constructor plus the two factories (7340eefc48, 2342c80dca);
