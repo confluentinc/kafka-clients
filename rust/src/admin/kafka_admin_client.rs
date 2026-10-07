@@ -5053,12 +5053,16 @@ impl Admin for KafkaAdminClient {
                 },
             }
         }
-        self.shared.shutdown.closing.store(true, std::sync::atomic::Ordering::Release);
+        // Java's `close()` publishes only `hardShutdownTimeMs`; the runnable's
+        // `closing` flag is set by the I/O task itself once its loop exits
+        // (`KafkaAdminClient.java:1474`), so calls keep being retried during the
+        // grace period.
+        //
         // Java calls `client.wakeup()` from inside the successful CAS arm. Here
-        // the wakeup follows the `closing` store so the woken I/O task is
-        // guaranteed to observe both, and it is issued on the
-        // already-earlier-deadline path too (where it is a harmless no-op: the
-        // `close()` that installed that deadline has already woken the task).
+        // the wakeup follows the CAS, so the woken I/O task is guaranteed to
+        // observe the deadline, and it is issued on the already-earlier-deadline
+        // path too (where it is a harmless no-op: the `close()` that installed
+        // that deadline has already woken the task).
         self.shared.wakeup.notify_one();
 
         // Java ends with a *timed* join (`KafkaAdminClient.close`):
@@ -5215,10 +5219,6 @@ struct DescribeTopicPartitionsState {
     /// Java's `partiallyFinishedTopicDescription`: the cursor topic of the
     /// previous page, whose partitions continue in the next one.
     partially_finished_topic_description: Option<TopicDescription>,
-    /// Whether `handleUnsupportedVersionException` has issued the Metadata-API
-    /// fallback. The failure hook may leave the futures to that call only once it
-    /// has been issued; see the failure hook for why it can be missing.
-    metadata_fallback_issued: bool,
 }
 
 /// Builds the paginated `describeTopicPartitions` [`Call`] for
@@ -5256,7 +5256,6 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
     let state = Arc::new(Mutex::new(DescribeTopicPartitionsState {
         topics_requests: topic_names_list.iter().cloned().collect(),
         partially_finished_topic_description: None,
-        metadata_fallback_issued: false,
     }));
 
     let req_state = Arc::clone(&state);
@@ -5379,47 +5378,18 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
-    // `handleUnsupportedVersionException`'s body (`KafkaAdminClient.java:2312-2316`):
-    // issue the Metadata-API call through `runnable.call`, and record that it was.
-    let issue_metadata_fallback = {
-        let state = Arc::clone(&state);
-        let topic_futures = Arc::clone(&topic_futures);
-        move || {
-            state.lock().unwrap().metadata_fallback_issued = true;
-            let now = ctx.time.milliseconds();
-            ctx.call(get_describe_topics_by_names_call(
-                Arc::clone(&topic_futures),
-                topic_names_list.clone(),
-                include_authorized_operations,
-                calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
-            ));
-        }
-    };
-    let issue_metadata_fallback = Arc::new(issue_metadata_fallback);
-
-    let fail_state = Arc::clone(&state);
     let fail_futures = Arc::clone(&topic_futures);
-    let fail_issue_metadata_fallback = Arc::clone(&issue_metadata_fallback);
     let handle_failure = Box::new(move |error: &Error| {
         // An UnsupportedVersionException is not the user's failure: the
         // Metadata-API call issued by the hook below completes the futures
         // (`KafkaAdminClient.java:2319-2323`). Detected by code, because
         // `Error::unsupported_version` builds the generic code-35 error, as
-        // `AdminClientRunnable::fail_call` does.
+        // `AdminClientRunnable::fail_call` does. As in Java, this failure is only
+        // reached after `handleUnsupportedVersionException` issued the fallback:
+        // `fail_call` skips that hook only once `ShutdownSignal::closing` is set,
+        // which happens when the I/O task exits and no response is handled any
+        // more.
         if error.error() == Errors::UnsupportedVersion {
-            // In Java this failure is only reached after
-            // `handleUnsupportedVersionException` issued the fallback: `Call.fail`
-            // skips that hook only once `runnable.closing` is set, which happens
-            // when the I/O thread exits and no response is handled any more. Rust
-            // sets `ShutdownSignal::closing` as soon as `close()` starts, so during
-            // the close grace period `fail_call` comes straight here.
-            // Issue the fallback then, as Java's hook would have: the closing gate
-            // rejects it with "Cannot accept new calls when AdminClient is
-            // closing.", which fails every future instead of leaving them pending.
-            let issued = fail_state.lock().unwrap().metadata_fallback_issued;
-            if !issued {
-                fail_issue_metadata_fallback();
-            }
             return;
         }
         for future in fail_futures.values() {
@@ -5427,8 +5397,16 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
+    // `handleUnsupportedVersionException` (`KafkaAdminClient.java:2311-2316`):
+    // issue the Metadata-API call through `runnable.call`, and return `false`.
     let handle_uv = Box::new(move || {
-        issue_metadata_fallback();
+        let now = ctx.time.milliseconds();
+        ctx.call(get_describe_topics_by_names_call(
+            Arc::clone(&topic_futures),
+            topic_names_list.clone(),
+            include_authorized_operations,
+            calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
+        ));
         false
     });
 
@@ -8039,9 +8017,8 @@ mod tests {
     /// because the hard-shutdown deadline is set, and every topic future fails
     /// with `IllegalStateException("Cannot accept new calls when AdminClient is
     /// closing.")` (`KafkaAdminClient.java:904-920`, `:2311-2323`, `:1598-1601`).
-    /// Rust's `fail_call` skips the hook while closing, so the
-    /// failure hook issues the fallback itself; before that it swallowed the
-    /// code-35 error and the futures never completed.
+    /// Rust's `fail_call` does the same, since `close()` publishes only the
+    /// deadline and `ShutdownSignal::closing` is set when the loop exits.
     #[tokio::test]
     async fn an_unsupported_version_during_close_fails_the_by_name_describe() {
         let (admin, mut runnable, _time, nodes) = env();
@@ -8053,7 +8030,7 @@ mod tests {
         assert!(!future.is_done());
 
         // `close(30s)` with describeTopicPartitions queued. No task was spawned,
-        // so this only publishes the deadline and the closing flag.
+        // so this only publishes the deadline.
         admin.close_with_timeout(Duration::from_secs(30)).await;
         // The broker does not support DescribeTopicPartitions.
         runnable.client_mut().prepare_unsupported_version_response();
@@ -14410,7 +14387,6 @@ mod tests {
         );
 
         // Java's no-argument `Admin.close()`: no reachable hard deadline.
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -14421,6 +14397,60 @@ mod tests {
             runnable.should_exit_for_test(time.milliseconds()),
             "close() must not wait on an internal call: the I/O task has to exit at once"
         );
+    }
+
+    /// A retriable failure during the `close(timeout)` grace period is retried.
+    ///
+    /// Java's `close()` only publishes `hardShutdownTimeMs`
+    /// (`KafkaAdminClient.java:670-696`); `Call.fail` refuses to retry only once
+    /// `runnable.closing` is set (`:904-912`), and that happens in the I/O
+    /// thread's `finally`, after `processRequests` has returned (`:1469-1474`).
+    /// So a `createTopics` whose first attempt is disconnected after `close(30s)`
+    /// is retried and succeeds, and the loop then exits because no external call
+    /// is left (`threadShouldExit`, `:1455-1466`).
+    #[tokio::test]
+    async fn a_retriable_error_during_close_is_retried_within_the_grace_period() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
+        // The first attempt is in flight when `close(30s)` is called.
+        pump_until_request_queued(&mut runnable).await;
+        assert!(runnable.has_active_external_calls_for_test());
+
+        // `close(30s)`. No task was spawned, so this only publishes the deadline;
+        // the loop is stepped below exactly as `process_requests` steps it.
+        admin.close_with_timeout(Duration::from_secs(30)).await;
+
+        // The in-flight attempt is disconnected; the retry succeeds.
+        runnable.client_mut().respond_disconnected(create_response(vec![]), true);
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+
+        let mut exited = false;
+        for _ in 0..40 {
+            if runnable.should_exit_for_test(time.milliseconds()) {
+                exited = true;
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert!(exited, "the loop exits once the retried call completes");
+        assert!(
+            time.milliseconds() < 1_000 + 30_000,
+            "the loop exited before the hard-shutdown deadline"
+        );
+        let future = result.values()["myTopic"].clone();
+        assert!(future.is_done(), "the call completed before the loop exited");
+        future.get().await.expect("the disconnected attempt is retried during close");
+        assert_eq!(result.topic_id("myTopic").get().await.unwrap(), Uuid::new(0, 7));
     }
 
     /// The other half of the contract: an **external** call does hold the loop
@@ -14437,7 +14467,6 @@ mod tests {
         );
 
         let now = time.milliseconds();
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -14693,7 +14722,6 @@ mod tests {
         // `close(Duration::from_millis(100))`.
         let now = time.milliseconds();
         let hard_deadline = now + 100;
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -15080,7 +15108,7 @@ mod tests {
         pump_until_request_queued(&mut runnable).await;
 
         // `close(30s)` with the createTopics request in flight. No task was
-        // spawned, so this only publishes the deadline and the closing flag.
+        // spawned, so this only publishes the deadline.
         admin.close_with_timeout(Duration::from_secs(30)).await;
         // The controller answers with a quota violation, which asks for a retry.
         runnable.client_mut().respond(create_response_throttled(
