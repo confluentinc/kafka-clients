@@ -468,14 +468,13 @@ public sealed class PublicSyncProducerKafkaFutureTests
         // releases a fresh producer's first Send and its Dispose together; the skew spreads the
         // interleavings across iterations.
         const int Iterations = 200;
-        string safeHandleClosed = SafeHandleClosedMessage();
 
-        // The P/Invoke marshaller's own refusal of the released SafeProducerHandle that Send passes to
-        // Producer_send: on net8.0 and net10.0 it names the handle's type, and it is not DangerousAddRef's
-        // message above (observed by mutating EnsurePump's re-check away, M11/P4.2 S4m). DangerousAddRef's
-        // stays accepted because this project also builds for net462, where the marshaller was not measured.
-        string releasedHandle = new ObjectDisposedException(
-            typeof(Confluent.Kafka.Internal.Interop.SafeProducerHandle).FullName).Message;
+        // A Dispose that releases the producer's handle after EnsurePump's re-check but before Producer_send:
+        // Send passes the SafeProducerHandle to Producer_send as a SafeHandle parameter, whose call-scoped
+        // reference the marshaller takes with DangerousAddRef (ffi §A2), so the send is refused with
+        // DangerousAddRef's ObjectDisposedException. The expected text is read from a released
+        // SafeProducerHandle on the runtime under test, not written out for any one TFM.
+        string releasedHandle = ReleasedSafeProducerHandleMessage();
         int sent = 0;
         int disposed = 0;
         int coreClosed = 0;
@@ -504,11 +503,10 @@ public sealed class PublicSyncProducerKafkaFutureTests
                     }
                     catch (ObjectDisposedException exception)
                     {
-                        // The closed check (NativeProducer) or the handle's own guard (released handle).
+                        // The closed check (NativeProducer) or the marshaller's refusal of the released handle.
                         Assert.True(
                             exception.Message == new ObjectDisposedException(nameof(NativeProducer)).Message
-                                || exception.Message == releasedHandle
-                                || exception.Message == safeHandleClosed,
+                                || exception.Message == releasedHandle,
                             $"unexpected ObjectDisposedException message: {exception.Message}");
                         return "disposed";
                     }
@@ -669,23 +667,48 @@ public sealed class PublicSyncProducerKafkaFutureTests
         throw new XunitException("expected the call to throw");
     }
 
-    /// <summary>The runtime's own message for a SafeHandle used after release.</summary>
-    private static string SafeHandleClosedMessage()
+    /// <summary>
+    /// The <see cref="ObjectDisposedException"/> message that
+    /// <see cref="System.Runtime.InteropServices.SafeHandle.DangerousAddRef"/> throws on this runtime for a
+    /// released <c>SafeProducerHandle</c>, the handle type <c>Send</c> passes to <c>Producer_send</c>.
+    /// </summary>
+    /// <remarks>
+    /// No native call is made. The probe is created through the handle's private constructor, which leaves
+    /// it at <see cref="IntPtr.Zero"/>, so <c>IsInvalid</c> is <see langword="true"/> and <c>Dispose</c>
+    /// closes it without calling <c>ReleaseHandle</c>, and so without <c>Producer_destroy</c>. The
+    /// <c>IsInvalid</c> check below keeps that true: a valid probe is retired with
+    /// <c>SetHandleAsInvalid</c>, which also skips <c>ReleaseHandle</c>, before the helper fails.
+    /// </remarks>
+    private static string ReleasedSafeProducerHandleMessage()
     {
-        using Microsoft.Win32.SafeHandles.SafeWaitHandle handle =
-            new Microsoft.Win32.SafeHandles.SafeWaitHandle(IntPtr.Zero, ownsHandle: false);
+        System.Runtime.InteropServices.SafeHandle handle = (System.Runtime.InteropServices.SafeHandle)Activator.CreateInstance(
+            typeof(Confluent.Kafka.Internal.Interop.SafeProducerHandle),
+            nonPublic: true)!;
+        if (!handle.IsInvalid)
+        {
+            handle.SetHandleAsInvalid();
+            throw new InvalidOperationException("the probe SafeProducerHandle was created valid");
+        }
+
         handle.Dispose();
+        bool added = false;
         try
         {
-            bool added = false;
             handle.DangerousAddRef(ref added);
         }
         catch (ObjectDisposedException exception)
         {
             return exception.Message;
         }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
 
-        throw new InvalidOperationException("a released SafeHandle accepted DangerousAddRef");
+        throw new InvalidOperationException("a released SafeProducerHandle accepted DangerousAddRef");
     }
 
     // ---- Fixtures ----
