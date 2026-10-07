@@ -1996,11 +1996,11 @@ impl RecordAccumulator {
         self.mock_random = Some(mock_random);
     }
 
-    /// Runs `f` on `topic`'s built-in partitioner. Test-only translation of Java's
-    /// visible-for-testing `getBuiltInPartitioner(topic)`; a closure because the
-    /// partitioner sits behind the topic's lock.
+    /// Runs `f` on `topic`'s built-in partitioner. Test-only stand-in for Java's
+    /// visible-for-testing `getBuiltInPartitioner(topic)`: a closure rather than a
+    /// returned reference because the partitioner sits behind the topic's lock, so it
+    /// is a Rust-only helper and carries no Java marker.
     #[cfg(test)]
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#getBuiltInPartitioner")]
     pub(crate) fn with_built_in_partitioner_for_test<R>(
         &self,
         topic: &str,
