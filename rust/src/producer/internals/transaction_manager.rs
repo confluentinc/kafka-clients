@@ -1111,10 +1111,15 @@ pub(crate) struct TransactionManager {
     /// [`Self::txn_offset_commit_handler`] for the topic ids that let a
     /// `TxnOffsetCommit` negotiate v6.
     ///
-    /// `Metadata` guards its state with its own internal lock, taken and released
-    /// inside each call and never held while calling out, so reading it with the
-    /// manager's lock held is a leaf acquisition: no path takes the metadata lock
-    /// and then the manager's (`producer-transactions.md` §2-§3).
+    /// Lock order is manager → `Metadata`, as in Java (`synchronized
+    /// sendOffsetsToTransaction` reaches `metadata.topicIds()`). `topic_ids()` takes
+    /// only `Metadata`'s internal lock. `Metadata` does call out while holding that
+    /// lock — `Metadata::update` runs `ProducerMetadata`'s retain and request-builder
+    /// closures and the `ClusterResourceListeners` under it — but none of those
+    /// callbacks takes the manager's lock or `pending_requests` (they reach only
+    /// `ProducerMetadata`'s own lock or user listeners), so the order cannot invert
+    /// (`producer-transactions.md` §2-§3). A callback added to `Metadata` must keep
+    /// it that way.
     metadata: Arc<Metadata>,
 
     txn_partition_map: TxnPartitionMap,
@@ -1124,12 +1129,15 @@ pub(crate) struct TransactionManager {
     /// Filled by [`Self::txn_offset_commit_handler`] (Java 1226) and drained
     /// per-partition by [`Self::handle_txn_offset_commit_response`] (Java 1930).
     ///
-    /// The handler builds its request from *this* map rather than from the offsets it
-    /// was handed, so each construction picks up whatever is still outstanding — but
-    /// a *retry* of an already-built handler re-sends that construction's snapshot,
-    /// not a shrunken one. See
-    /// [`Self::handle_txn_offset_commit_response`] for why, and for why narrowing the
-    /// retry would be a wire-level divergence.
+    /// In 4.4 (KIP-1319, `TransactionManager.java:1258-1290`) each handler's request
+    /// is built once, from the offsets passed to *that* call; this map is only
+    /// written there, never read to build a request. It tracks what is still
+    /// unacknowledged: it drives the response tail's three-way choice and
+    /// [`Self::has_pending_offset_commits`], and a leftover is never re-sent by a
+    /// later handler. A *retry* of an already-built handler re-sends that handler's
+    /// own snapshot, not a shrunken one — see
+    /// [`Self::handle_txn_offset_commit_response`] for why narrowing the retry
+    /// would be a wire-level divergence.
     pending_txn_offset_commits: HashMap<TopicPartition, CommittedOffset>,
 
     // If a batch bound for a partition expired locally after being sent at least once, the partition is considered
@@ -4566,10 +4574,11 @@ impl TransactionManager {
     /// nothing between the two touches `builder.data`. So a retry re-sends the **full
     /// original** offset list, including partitions that already returned `NONE`.
     ///
-    /// What the map governs is (a) the tail's three-way choice above, and (b) the
-    /// contents of the *next* [`Self::txn_offset_commit_handler`] construction — e.g.
-    /// a subsequent `sendOffsetsToTransaction`, which is where leftovers are folded
-    /// in.
+    /// What the map governs is the tail's three-way choice above (and
+    /// [`Self::has_pending_offset_commits`]). It does **not** feed the next
+    /// [`Self::txn_offset_commit_handler`]: since 4.4 (`TransactionManager.java:1258-1290`)
+    /// a later `sendOffsetsToTransaction` sends only the offsets it is given, so a
+    /// leftover is never folded into another request.
     ///
     /// **Do not "fix" this by rebuilding the builder before `retry`.** It would send
     /// a reduced request where Java sends the full one — a wire-level divergence
@@ -5671,6 +5680,36 @@ mod tests {
         manager
             .begin_commit(pending_requests)
             .expect_err("committing after an abortable error must be refused");
+        assert!(manager.has_error());
+
+        manager
+            .begin_abort(pending_requests, Caller::App)
+            .expect("an abort clears an abortable error");
+        assert!(!manager.has_error());
+    }
+
+    /// Mirrors `assertAbortableError(CommitFailedException.class)` (Java 4590-4602):
+    /// `beginCommit()` is refused with a `KafkaException` whose cause is the
+    /// `CommitFailedException`, and `beginAbort()` then clears the error.
+    ///
+    /// [`assert_abortable_error`] keys on a wire code, and `CommitFailedException`
+    /// has none (it is [`Error::ConsumerCommitFailed`]), so this variant checks the
+    /// refusal's `source()` instead.
+    fn assert_abortable_commit_failed_error(manager: &mut TransactionManager, pending_requests: &mut PendingRequests) {
+        let refusal = manager
+            .begin_commit(pending_requests)
+            .expect_err("committing after an abortable error must be refused");
+        assert_eq!(
+            refusal.message(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+        let cause = std::error::Error::source(&refusal)
+            .and_then(|source| source.downcast_ref::<Error>())
+            .expect("the refusal carries the recorded error as its cause");
+        assert!(
+            matches!(cause, Error::ConsumerCommitFailed(_)),
+            "expected a ConsumerCommitFailed cause, got {cause:?}"
+        );
         assert!(manager.has_error());
 
         manager
@@ -7444,6 +7483,7 @@ mod tests {
                 expected_message
             );
             assert!(manager.has_abortable_error());
+            assert_abortable_commit_failed_error(&mut manager, &mut pending);
         }
     }
 
@@ -7504,6 +7544,7 @@ mod tests {
             let result_error = send_offsets_result.error().expect("the result carries an error");
             assert!(matches!(result_error, Error::ConsumerCommitFailed(_)), "{result_error:?}");
             assert!(manager.has_abortable_error());
+            assert_abortable_commit_failed_error(&mut manager, &mut pending);
         }
     }
 
