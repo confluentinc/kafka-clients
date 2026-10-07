@@ -140,7 +140,7 @@ impl std::fmt::Display for KafkaMetric {
     ///
     /// Java's `toString()` names the provider's Java class
     /// (`org.apache.kafka.common.metrics.stats.Avg`); the Rust type name is the
-    /// Rust path (`confluent_kafka::common::metrics::stats::avg::Avg`).
+    /// Rust type path [`std::any::type_name`] reports for the provider.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#toString")]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.metric_value_provider.type_name() {
@@ -363,12 +363,17 @@ mod tests {
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );
+        // Java names the Java class; Rust names the type path `type_name` reports.
+        let avg_type = std::any::type_name::<Avg>();
+        assert!(avg_type.starts_with("confluent_kafka::common::metrics::stats::") && avg_type.ends_with("::Avg"));
         assert_eq!(
-            "KafkaMetric [metricName=MetricName [name=request-latency-avg, \
-             group=consumer-fetch-manager-metrics, \
-             description=The average request latency in ms, \
-             tags={client-id=consumer-1}], \
-             metricValueProvider=confluent_kafka::common::metrics::stats::avg::Avg]",
+            format!(
+                "KafkaMetric [metricName=MetricName [name=request-latency-avg, \
+                 group=consumer-fetch-manager-metrics, \
+                 description=The average request latency in ms, \
+                 tags={{client-id=consumer-1}}], \
+                 metricValueProvider={avg_type}]"
+            ),
             metric.to_string()
         );
     }
@@ -383,11 +388,7 @@ mod tests {
             .add_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
             .unwrap();
         let metric = metrics.metric(&metrics.metric_name("m", "g")).unwrap();
-        assert!(
-            metric
-                .to_string()
-                .ends_with("metricValueProvider=confluent_kafka::common::metrics::stats::avg::Avg]"),
-            "{metric}"
-        );
+        let expected_suffix = format!("metricValueProvider={}]", std::any::type_name::<Avg>());
+        assert!(metric.to_string().ends_with(&expected_suffix), "{metric}");
     }
 }
