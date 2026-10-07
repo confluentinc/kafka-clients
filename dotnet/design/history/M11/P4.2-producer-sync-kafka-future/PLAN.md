@@ -792,3 +792,37 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
     - C11 plus the seam test, run 3× per TFM: 2/2 each time;
     - Mode A is unchanged.
   - **Critic re-review: no findings. Pass 2 closed; `COMMENTS.93.md` has 0 open items** (C93-2 and C93-3 are in `COMMENTS.DONE.93.md`).
+- **S5 is split into two spawns** (a resilience call, not a ruling): S5a for the public narrative docs and S5b for the internal docs plus the §12 rows. That gives two commits instead of one.
+  - **S5a** `507ff98e` `docs(dotnet): KafkaFuture in the producer docs and binding rules (M11/P4.2 S5)` is docs only (0 non-`///` lines changed).
+    - **IProducer:**
+      - D4 and D5 (supersedes M11/P4 #1);
+      - the D12 migration line;
+      - S-3 in one paragraph;
+      - D1 head-of-line;
+      - D8, including `Get` after `Flush`;
+      - D7, no timed `Get`;
+      - the D13 single-thread mock pattern and its deviation;
+      - R6/FU-3, no teardown from a callback on either surface;
+      - D3 serialized callbacks;
+      - D9.
+    - **KafkaProducer:** class remarks and the callback thread.
+    - **MockProducer:** the class, `autoComplete`, `CompleteNext`, `ErrorNext`.
+    - **IDeliveryCallback:**
+      - invocation thread, obligation and D9;
+      - teardown from a callback unsupported on **both** surfaces (the user-safety item);
+      - ordering;
+      - "Recorded residuals" re-walked from the code.
+    - **Residual walk (5 sites, numbering 1–4 kept, no new class):**
+      - 1 = `EnqueueEntry` closed gate (async: the send-batch thread; sync: the caller, so `Send` returns and `Get` throws);
+      - 2 = `DrainAndFaultRemaining` (the tearing-down thread);
+      - 3 = RunLoop catch (the pump, both surfaces);
+      - 4 async = `SendAccumulator.FaultNode` on accepted indices (send-batch thread);
+      - 4 sync = the `NativeProducer.Send` catch around `EnqueueSingle` (the caller);
+      - none fires a callback.
+      - Noted for S5b: the async residual-4 site note `SendAccumulator.cs:1524-1531` cites "recorded residuals 1–3" and does not name its own number.
+    - **Gates:**
+      - build 0W/0E;
+      - Release XML 0 `cref="!:"` on netstandard2.0, net8.0 and net10.0;
+      - test-dotnet unit 3010/TFM, soak 165/TFM, format clean;
+      - Mode A unchanged.
+    - The Actor's rule-text proposals 1–5 are already covered by the approved E/F rows. S5b applies the rows **verbatim** and not the proposals.
