@@ -2145,10 +2145,10 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination(),
                 response.version_mismatch().map_or("unknown", |e| e.message())
             );
-            let part_resp = PartitionResponse::with_error_message(
-                Errors::UnsupportedVersion,
-                response.version_mismatch().map(|e| e.message().to_string()),
-            );
+            // Java: `new PartitionResponse(Errors.UNSUPPORTED_VERSION)` (`Sender.java:599`),
+            // with no message, so the batch fails with the code's default text; the
+            // mismatch diagnostic goes to the log line above only.
+            let part_resp = PartitionResponse::new(Errors::UnsupportedVersion);
             for (tp, batch) in batches.iter_mut() {
                 let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
                 deferred_actions.push((tp.clone(), action));
@@ -8063,7 +8063,11 @@ mod tests {
         let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.client_mut().prepare_unsupported_version_response();
         ctx.sender.run_once().await.expect("run_once");
-        assert_eq!(future.get().await.expect_err("failed").error(), Errors::UnsupportedVersion);
+        let error = future.get().await.expect_err("failed");
+        assert_eq!(error.error(), Errors::UnsupportedVersion);
+        // Java fails the batch with a message-less `PartitionResponse`, so the
+        // callback sees the code's default text, not the mismatch diagnostic.
+        assert_eq!("The version of API is not supported.", error.message());
 
         // Unsupported version errors are fatal, so later sends keep seeing them.
         assert!(ctx.transaction_manager().lock().unwrap().has_fatal_error());
