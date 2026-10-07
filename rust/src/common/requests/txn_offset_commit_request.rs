@@ -1034,7 +1034,6 @@ mod tests {
     /// and `TopicId` (v6+) are both ignorable, so each is dropped at the versions
     /// that lack it.
     #[test]
-    #[doc(alias = "org.apache.kafka.common.requests.RequestResponseTest#testSerialization")]
     fn test_request_response_serialization_all_versions() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             let request = create_txn_offset_commit_request(version);
@@ -1076,7 +1075,6 @@ mod tests {
     /// `forTopicNames(data, false).build()` builds at the builder's latest allowed
     /// version, which without Transaction V2 is v4 — group metadata included.
     #[test]
-    #[doc(alias = "org.apache.kafka.common.requests.RequestResponseTest#testSerialization")]
     fn test_create_txn_offset_commit_request_with_auto_downgrade() {
         let offsets = HashMap::from([
             (tp("topic", 73), CommittedOffset::new(100, None, None)),
