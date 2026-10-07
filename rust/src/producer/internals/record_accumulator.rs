@@ -2182,6 +2182,25 @@ impl RecordAccumulator {
 
 #[cfg(test)]
 mod tests {
+    /// The `Metadata` handed to a test's `TransactionManager` (Java passes the
+    /// test's shared `metadata`, 4.4 KIP-1319).
+    ///
+    /// The manager reads it only for the topic ids of a `TxnOffsetCommit`
+    /// (`txn_offset_commit_handler`). None of these fixtures' tests seeds a topic id
+    /// for an offset-commit topic, and Java's metadata carries none for them either
+    /// (`RequestTestUtils.metadataUpdateWith` sets no ids), so a separate empty
+    /// instance yields the same v0-5, name-keyed request Java's shared one does.
+    fn txn_manager_metadata() -> Arc<crate::Metadata> {
+        crate::producer::internals::ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            i64::MAX,
+            crate::common::internals::ClusterResourceListeners::new(),
+        )
+        .metadata_arc()
+    }
+
     use super::*;
     use crate::common::Node;
     use crate::common::compress::Compression;
@@ -2275,6 +2294,7 @@ mod tests {
             60_000,
             100,
             Arc::new(crate::ApiVersions::new()),
+            txn_manager_metadata(),
             false,
         );
 
@@ -4260,6 +4280,7 @@ mod tests {
             60_000,
             100,
             Arc::new(crate::ApiVersions::new()),
+            txn_manager_metadata(),
             false,
         )));
         assert!(!transaction_manager.lock().unwrap().has_producer_id());

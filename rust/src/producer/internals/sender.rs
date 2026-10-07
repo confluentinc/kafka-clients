@@ -2882,6 +2882,25 @@ struct RequestBatchInfo {
 
 #[cfg(test)]
 mod tests {
+    /// The `Metadata` handed to a test's `TransactionManager` (Java passes the
+    /// test's shared `metadata`, 4.4 KIP-1319).
+    ///
+    /// The manager reads it only for the topic ids of a `TxnOffsetCommit`
+    /// (`txn_offset_commit_handler`). None of these fixtures' tests seeds a topic id
+    /// for an offset-commit topic, and Java's metadata carries none for them either
+    /// (`RequestTestUtils.metadataUpdateWith` sets no ids), so a separate empty
+    /// instance yields the same v0-5, name-keyed request Java's shared one does.
+    fn txn_manager_metadata() -> Arc<crate::Metadata> {
+        crate::producer::internals::ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            i64::MAX,
+            crate::common::internals::ClusterResourceListeners::new(),
+        )
+        .metadata_arc()
+    }
+
     use super::*;
     use crate::MockClient;
     use crate::ProduceResponseData;
@@ -2956,6 +2975,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             RETRY_BACKOFF_MS,
             Arc::new(crate::ApiVersions::new()),
+            txn_manager_metadata(),
             false,
         )))
     }
@@ -2994,6 +3014,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             RETRY_BACKOFF_MS,
             api_versions,
+            txn_manager_metadata(),
             false,
         )))
     }
@@ -9254,6 +9275,7 @@ mod tests {
             60000,
             100,
             api_versions,
+            txn_manager_metadata(),
             false,
         )))
     }
@@ -10654,6 +10676,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             TXN_MGR_DEFAULT_RETRY_BACKOFF_MS,
             api_versions,
+            txn_manager_metadata(),
             false,
         )))
     }
@@ -11076,6 +11099,19 @@ mod tests {
             let AbstractRequest::TxnOffsetCommit(request) = request else {
                 panic!("expected a TxnOffsetCommit request, got {request}");
             };
+            // `assertTxnOffsetCommitRequestUsesTopicNames` (KIP-1319, 83976543fe).
+            assert!(
+                request.version() < 6,
+                "Expected TxnOffsetCommit request at version < 6, got {}",
+                request.version()
+            );
+            for topic in &request.data().topics {
+                assert!(
+                    !topic.name.is_empty(),
+                    "Expected every request topic to carry a non-empty name at version {}",
+                    request.version()
+                );
+            }
             assert_eq!(request.data().group_id, consumer_group_id);
             assert_eq!(request.data().producer_id, producer_id);
             assert_eq!(request.data().producer_epoch, producer_epoch);
@@ -14384,6 +14420,7 @@ mod tests {
             60000,
             manager_retry_backoff_ms,
             api_versions,
+            txn_manager_metadata(),
             false,
         )));
         SenderTestContext::with_transaction_state(

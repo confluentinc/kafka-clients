@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 
 use crate::ClientUtils;
 use crate::KafkaClient;
+use crate::Metadata;
 use crate::NetworkClient;
 use crate::common::Cluster;
 use crate::common::Error;
@@ -973,7 +974,8 @@ impl<K, V> KafkaProducer<K, V> {
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
         //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
-        let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
+        let transaction_manager =
+            Self::configure_transaction_state(&config, &api_versions, &metadata.metadata_arc(), &log_context);
 
         // 9b. Resolve and configure the partitioner. Translated from
         //     `KafkaProducer.java:381-388`: Java reflectively instantiates
@@ -1089,6 +1091,7 @@ impl<K, V> KafkaProducer<K, V> {
     fn configure_transaction_state(
         config: &ProducerConfig,
         api_versions: &Arc<ApiVersions>,
+        metadata: &Arc<Metadata>,
         log_context: &LogContext,
     ) -> Option<Arc<Mutex<TransactionManager>>> {
         if !config.enable_idempotence {
@@ -1101,6 +1104,7 @@ impl<K, V> KafkaProducer<K, V> {
             config.transaction_timeout_ms,
             config.retry_backoff_ms,
             Arc::clone(api_versions),
+            Arc::clone(metadata),
             config.two_phase_commit_enable,
         );
 
@@ -4734,6 +4738,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_allocations_do_not_grow_when_idempotence_is_enabled() {
         async fn steady_state_send_allocations(with_transaction_manager: bool) -> usize {
+            let metadata = create_metadata_with_topic(TOPIC, 1);
             let transaction_manager = if with_transaction_manager {
                 let manager = TransactionManager::new(
                     LogContext::empty(),
@@ -4741,13 +4746,13 @@ mod tests {
                     60_000,
                     100,
                     Arc::new(ApiVersions::new()),
+                    metadata.metadata_arc(),
                     false,
                 );
                 Some(Arc::new(Mutex::new(manager)))
             } else {
                 None
             };
-            let metadata = create_metadata_with_topic(TOPIC, 1);
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
@@ -4997,11 +5002,8 @@ mod tests {
                 seed_transaction_version(&api_versions, 2);
             }
 
-            let transaction_manager =
-                KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
-                    .expect("these tests always enable idempotence");
-            let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
-
+            // The metadata comes first: the transaction manager reads its topic ids
+            // (KIP-1319), as Java's constructor now builds it ahead of the manager.
             let metadata = Arc::new(ProducerMetadata::with_log_context(
                 config.reconnect_backoff_ms,
                 config.reconnect_backoff_max_ms,
@@ -5010,6 +5012,15 @@ mod tests {
                 ClusterResourceListeners::new(),
                 log_context.clone(),
             ));
+            let transaction_manager = KafkaProducer::<String, String>::configure_transaction_state(
+                &config,
+                &api_versions,
+                &metadata.metadata_arc(),
+                &log_context,
+            )
+            .expect("these tests always enable idempotence");
+            let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
+
             metadata.add(TOPIC, time.milliseconds());
             // `metadata_update_with_ids` rather than `metadata_update_with`: the produce
             // path stamps the topic id from metadata onto the request, so a response has
@@ -6604,10 +6615,6 @@ mod tests {
         let time = mock_time(1_000);
         let api_versions = Arc::new(ApiVersions::new());
 
-        let transaction_manager =
-            KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
-                .expect("these tests always enable idempotence");
-
         let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
@@ -6616,6 +6623,13 @@ mod tests {
             ClusterResourceListeners::new(),
             log_context.clone(),
         ));
+        let transaction_manager = KafkaProducer::<String, String>::configure_transaction_state(
+            &config,
+            &api_versions,
+            &metadata.metadata_arc(),
+            &log_context,
+        )
+        .expect("these tests always enable idempotence");
         metadata.add(TOPIC, time.milliseconds());
         let update = crate::common::requests::RequestTestUtils::metadata_update_with(
             1,
