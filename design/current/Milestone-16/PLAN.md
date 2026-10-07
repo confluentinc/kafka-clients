@@ -267,8 +267,8 @@ Phase 0 completion notes (agent 90):
     corpus sync landed the `ApiVersionsRequest.json` / `ApiVersionsResponse.json` parts of all three
     KAFKA-20246 commits: ede01b871e (v5 with the `ClusterId` / `NodeId` fields, marked unstable, 1/N),
     0ef4a4c80e (the fields' "provide both" docs, 2/N) and 7be741d08b (v5 marked stable, 3/N). What Phase 4 still owes
-    from them is the Java code only: the request setters and `isValid` check (0ef4a4c80e), and
-    `GroupCoordinatorNode` / the protected `Node` overload / NetworkClient wiring (7be741d08b, ede01b871e).
+    from them is the Java code only, exactly as listed in the Phase 4 section below; Phase 0 applied
+    none of it.
 - **Skips:**
   - Streams-only spec content (StreamsGroupDescribe/Heartbeat v1, the topology description RPC) is
     synced but has no wrapper: out of scope (§1.1).
