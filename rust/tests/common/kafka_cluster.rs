@@ -85,8 +85,20 @@ use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, CopyToContainer, Image, ImageExt};
 
-/// Kafka image tag to use for integration tests.
-const KAFKA_TAG: &str = "4.2.0";
+/// Default `apache/kafka` image tag for the integration tests.
+const DEFAULT_KAFKA_TAG: &str = "4.2.0";
+
+/// `apache/kafka` image tag for the integration tests: the
+/// `INTEGRATION_TEST_BROKER_TAG` environment variable (trimmed) when set and
+/// non-empty, [`DEFAULT_KAFKA_TAG`] otherwise. Read once per test-binary
+/// process, like `INTEGRATION_TEST_PROTOCOL`, so every cluster in a run uses the
+/// same broker version — e.g. `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4` runs the
+/// suite against a newer broker without a code change.
+static KAFKA_TAG: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| match std::env::var("INTEGRATION_TEST_BROKER_TAG") {
+        Ok(tag) if !tag.trim().is_empty() => tag.trim().to_string(),
+        _ => DEFAULT_KAFKA_TAG.to_string(),
+    });
 
 /// Container port for the PLAINTEXT listener.
 const PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9092);
@@ -805,7 +817,7 @@ impl Image for KafkaAllProtocols {
     }
 
     fn tag(&self) -> &str {
-        KAFKA_TAG
+        &KAFKA_TAG
     }
 
     fn ready_conditions(&self) -> Vec<WaitFor> {
@@ -1772,7 +1784,7 @@ mod tests {
     async fn reap_removes_created_containers_and_network() {
         let suffix = random_suffix(8);
         let network = attempt_network_name(&suffix);
-        let image = format!("apache/kafka:{KAFKA_TAG}");
+        let image = format!("apache/kafka:{}", *KAFKA_TAG);
         // Pull up front, without `DOCKER_CLI_TIMEOUT`: a cold pull can take
         // longer than 30 s. The creates below then use `--pull never`, so
         // none of the bounded calls can turn into a pull.
