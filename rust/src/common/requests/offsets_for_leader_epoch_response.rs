@@ -95,12 +95,6 @@ impl OffsetsForLeaderEpochResponse {
         counts
     }
 
-    /// Returns `false` — `OffsetsForLeaderEpoch` does not signal
-    /// client-side throttling (Java `AbstractResponse` default).
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Parses an `OffsetsForLeaderEpochResponse` from a readable buffer at
     /// the given version.
     ///

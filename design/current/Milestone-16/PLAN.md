@@ -582,15 +582,10 @@ produced were pure relocations and were fixed in Phase 0.
 - Each phase deletes its rows here in the commit that fixes them.
 - Phase 13 requires this table to be empty and `cargo xtask lint` fully green.
 
-Count by owner: Phase 1 30 (25 D2 moves + 5 throttle), Phase 5 2, Phases 7/8 2, Phase 9 1, Phase 11 10.
+Count by owner: Phase 5 2, Phases 7/8 2, Phase 9 1, Phase 11 10. (Phase 1 cleared its 30: 25 D2 moves + 5 throttle.)
 
 | Rust item | Java marker | Cause | Owner |
 |---|---|---|---|
-| `rust/src/common/requests/alter_partition_reassignments_response.rs` `should_client_throttle` | `common.requests.AlterPartitionReassignmentsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
-| `rust/src/common/requests/alter_user_scram_credentials_response.rs` `should_client_throttle` | `common.requests.AlterUserScramCredentialsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
-| `rust/src/common/requests/describe_user_scram_credentials_response.rs` `should_client_throttle` | `common.requests.DescribeUserScramCredentialsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
-| `rust/src/common/requests/elect_leaders_response.rs` `should_client_throttle` | `common.requests.ElectLeadersResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
-| `rust/src/common/requests/list_partition_reassignments_response.rs` `should_client_throttle` | `common.requests.ListPartitionReassignmentsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
 | `rust/src/common/requests/txn_offset_commit_request.rs` `get_error_response_topics` | `common.requests.TxnOffsetCommitRequest#getErrorResponseTopics` | Removed by KIP-1319 (baa064e422); TxnOffsetCommit held back by §2.2 | Phase 5 |
 | `rust/src/common/requests/txn_offset_commit_response.rs` `errors` | `common.requests.TxnOffsetCommitResponse#errors` | Removed by KIP-1319 (89f3888c87); TxnOffsetCommit held back by §2.2 | Phase 5 |
 | `rust/src/producer/internals/producer_batch.rs` `is_writable` | `clients.producer.internals.ProducerBatch#isWritable` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |

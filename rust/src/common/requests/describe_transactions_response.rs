@@ -68,14 +68,6 @@ impl DescribeTransactionsResponse {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
-    /// Whether the client should throttle on this response.
-    ///
-    /// `DescribeTransactionsResponse` does not override `shouldClientThrottle`
-    /// in Java, so it inherits `AbstractResponse`'s default of `false`.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Returns the error counts aggregated across all transaction states.
     ///
     /// Mirrors `DescribeTransactionsResponse.errorCounts`.
