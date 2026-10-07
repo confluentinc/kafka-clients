@@ -30,8 +30,8 @@ namespace Confluent.Kafka.GrpcServer;
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET port
 /// of <c>grpc_server.py</c>'s <c>ProducerService</c> half (M12/P1). Each RPC resolves a
 /// server-local <c>producer_id</c>, calls the matching sync binding method on the gRPC
-/// handler thread (Python's model — the blocking <c>Send</c> parks the handler thread; no
-/// <c>Task.Run</c>), and maps the result into the proto response, translating any operational
+/// handler thread (Python's model — the blocking <c>Get()</c> on the future <c>Send</c> returns parks
+/// the handler thread; no <c>Task.Run</c>), and maps the result into the proto response, translating any operational
 /// <see cref="KafkaException"/> via <see cref="Translate"/>. Bridging through
 /// <c>&lt;byte[], byte[]&gt;</c> + <see cref="Serdes.ByteArray"/> exercises the shipped generic
 /// serialize path end-to-end over the wire.

@@ -50,7 +50,7 @@ public sealed class PublicSyncProducerSendTests
 
     private const string Topic = "sync-send-topic";
 
-    // ---- Auto-complete: Send blocks briefly and returns the metadata directly ----
+    // ---- Auto-complete: Send returns the future at once; Get returns the metadata ----
 
     [Fact]
     public void Send_OnAutoCompleteMock_ReturnsMetadata()

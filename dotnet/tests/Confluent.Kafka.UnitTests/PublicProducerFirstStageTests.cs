@@ -52,8 +52,9 @@ public sealed class AccumulatorEnvironmentCollection
 /// <b>Async flavor only, deliberately.</b> ffi §A6's "both flavors" rule is applied through the
 /// <c>PublicProducerDeliveryCallbackTests.Flavor</c> seam (sync <see cref="MockProducer{TKey, TValue}"/>
 /// vs async <see cref="AsyncMockProducer{TKey, TValue}"/>), and its sync side has nothing here to run
-/// on: the synchronous <c>Send</c> returns the <see cref="RecordMetadata"/> itself, so it has no first
-/// stage, takes no token, and never reaches the admission bound — the COMMENTS.DONE.72 precedent.
+/// on: the synchronous <c>Send</c> returns a <see cref="KafkaFuture{T}"/> once the core has accepted the
+/// record, so it has no first stage, takes no token, and never reaches the admission bound — the
+/// COMMENTS.DONE.72 precedent.
 /// Within the async flavor every test covers both <c>Send</c> overloads (with and without an
 /// <see cref="IDeliveryCallback"/>), and the flood tests both kinds of pending first stage (a
 /// cancelable token, and none).

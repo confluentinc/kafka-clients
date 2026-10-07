@@ -18,9 +18,12 @@ namespace Confluent.Kafka;
 
 /// <summary>
 /// The metadata for a record that has been acknowledged by the cluster — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.producer.RecordMetadata</c>, returned by
-/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/> /
-/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue})"/> — and delivered to an
+/// Java's <c>org.apache.kafka.clients.producer.RecordMetadata</c>, yielded by the delivery future a
+/// <c>Send</c> hands back: the <c>Task</c> from <see cref="AsyncKafkaFuture{T}.Get()"/> on the
+/// <see cref="AsyncKafkaFuture{T}"/> that
+/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>'s
+/// <c>ValueTask</c> yields, and <see cref="KafkaFuture{T}.Get()"/> on the <see cref="KafkaFuture{T}"/> that
+/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue})"/> returns — and delivered to an
 /// <see cref="IDeliveryCallback"/>, where on the failure path it is Java's <c>-1</c> placeholder.
 /// Non-generic — it carries no key/value (only topic / partition / offset / timestamp), so it is
 /// <b>not</b> parameterized (PLAN §3.2).

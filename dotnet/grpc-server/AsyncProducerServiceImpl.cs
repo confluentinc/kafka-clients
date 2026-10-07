@@ -39,11 +39,11 @@ namespace Confluent.Kafka.GrpcServer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Value over the sync backend.</b> The sync <see cref="ProducerServiceImpl"/> blocks on the
-/// binding's <c>RecordMetadata Send(record)</c>. This async servicer drives the .NET completion
-/// bridge end-to-end — the <c>TaskCompletionSource</c>-backed <c>Task&lt;RecordMetadata&gt;</c>
-/// completed by the send pump (ffi-marshalling.md §A7) — the exact machinery the sync path never
-/// covers.
+/// <b>Value over the sync backend.</b> The sync <see cref="ProducerServiceImpl"/> blocks in the
+/// binding's <c>Send(record).Get()</c>. Both servicers' futures are resolved by the same send-completion
+/// pump, but only this async servicer drives the rest of the .NET completion bridge end-to-end — the
+/// send accumulator and the <c>TaskCompletionSource</c>-backed <c>Task&lt;RecordMetadata&gt;</c> the
+/// pump completes (ffi-marshalling.md §A7) — the machinery the sync path never covers.
 /// </para>
 /// <para>
 /// <b>No per-id gate (PLAN §4 — divergence from the consumer).</b> The producer is thread-safe:
