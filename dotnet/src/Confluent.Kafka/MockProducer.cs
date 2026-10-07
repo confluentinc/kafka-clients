@@ -46,16 +46,19 @@ namespace Confluent.Kafka;
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback)"/> shares the real client's
 /// plumbing, and Java's own <c>MockProducer</c> keeps the per-record callbacks and fires them from
 /// <c>completeNext()</c> / <c>errorNext()</c> — which is behaviourally what
-/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> do here, through the core. No mock-specific
-/// callback helper is added.
+/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> do here, through the core, with the timing
+/// deviation recorded below. No mock-specific callback helper is added.
 /// </para>
 /// <para>
-/// <b>Manual (<c>autoComplete: false</c>) sends need a second thread.</b> Because sync
-/// <c>Send</c> <b>blocks</b> until the send resolves (decision #1), a manual mock's
-/// <c>Send</c> blocks the calling thread until <see cref="CompleteNext"/> /
-/// <see cref="ErrorNext"/> is called from <b>another</b> thread (the single-owner "another thread
-/// completes" pattern — the sync analog of the async mock's pending-send drive). With
-/// <c>autoComplete: true</c> (the default) each <c>Send</c> resolves without blocking.
+/// <b>Manual (<c>autoComplete: false</c>) sends take one thread (M11/P4.2 decision D13).</b>
+/// <c>Send</c> returns once the mock has accepted the record, and the returned future's
+/// <see cref="KafkaFuture{T}.Get"/> blocks until <see cref="CompleteNext"/> / <see cref="ErrorNext"/>
+/// resolves the send, so <c>var f = mock.Send(r); mock.CompleteNext(); f.Get();</c> works on one
+/// thread. ⚠ Recorded deviation: Java's <c>completeNext</c> fires the callback and completes the
+/// future before it returns; here both follow on the producer's send-completion pump a moment after
+/// <see cref="CompleteNext"/> returns, as on <see cref="AsyncMockProducer{TKey, TValue}"/>. So call
+/// <c>Get()</c> before asserting on a callback: the callback has run by the time <c>Get()</c>
+/// returns. With <c>autoComplete: true</c> (the default) each send resolves on its own.
 /// </para>
 /// <para>
 /// <b>Honest reachability caveat — <see cref="PartitionsFor"/> returns an EMPTY list.</b> The only
@@ -80,11 +83,11 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
-    /// When <see langword="true"/> (the default), the mock resolves each <c>Send</c>
-    /// automatically (it returns without blocking). When <see langword="false"/>, a
-    /// <c>Send</c> blocks the calling thread until <see cref="CompleteNext"/> /
-    /// <see cref="ErrorNext"/> resolves it from another thread. Flush / close on a mock resolve
-    /// broker-free regardless of this flag.
+    /// When <see langword="true"/> (the default), the mock resolves each send automatically. When
+    /// <see langword="false"/>, <c>Send</c> still returns at once, and the returned future's
+    /// <see cref="KafkaFuture{T}.Get"/> blocks until <see cref="CompleteNext"/> /
+    /// <see cref="ErrorNext"/> resolves the send — which the sending thread may itself call first
+    /// (M11/P4.2 decision D13). Flush / close on a mock resolve broker-free regardless of this flag.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
@@ -182,10 +185,12 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <summary>
     /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
-    /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Unblocks a
-    /// manual send's blocking <c>Send</c> (call it from a different thread than the one blocked
-    /// in <c>Send</c>). Inherent on the concrete mock (not on <see cref="IProducer{TKey, TValue}"/>),
-    /// mirroring the consumer's mock-only helpers.
+    /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. The send's
+    /// callback and its future's completion follow on the producer's send-completion pump a moment
+    /// after this returns, whereas Java's <c>completeNext</c> does both before returning (M11/P4.2
+    /// decision D13), so call the future's <see cref="KafkaFuture{T}.Get"/> before asserting on a
+    /// callback. The thread that sent may call this itself. Inherent on the concrete mock (not on
+    /// <see cref="IProducer{TKey, TValue}"/>), mirroring the consumer's mock-only helpers.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
@@ -194,10 +199,12 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <summary>
     /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
     /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
-    /// Faults a manual send's blocking <c>Send</c> with a <see cref="KafkaException"/> carrying
-    /// <paramref name="code"/> and <paramref name="message"/> (or the default message for the code
-    /// when <paramref name="message"/> is <see langword="null"/>). Call it from a different thread
-    /// than the one blocked in <c>Send</c>.
+    /// The send's future's <see cref="KafkaFuture{T}.Get"/> then throws a <see cref="KafkaException"/>
+    /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for the
+    /// code when <paramref name="message"/> is <see langword="null"/>). As with
+    /// <see cref="CompleteNext"/>, the callback and the future's completion follow on the pump a
+    /// moment after this returns, and the thread that sent may call this itself (M11/P4.2 decision
+    /// D13).
     /// </summary>
     /// <param name="code">The Kafka error code to complete the send with.</param>
     /// <param name="message">The error message, or <see langword="null"/> for the code's default message.</param>

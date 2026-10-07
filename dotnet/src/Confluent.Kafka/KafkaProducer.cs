@@ -30,25 +30,27 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Blocking, direct sync C ABI (inherited from <see cref="NativeProducer"/>).</b> Each operation
-/// calls the synchronous C ABI directly; the core's blocking call parks the caller thread inside the
-/// Rust multi-thread runtime (deadlock-free, ffi §A1) — not sync-over-async. The sync producer starts
-/// <b>no</b> completion pump (only the async
-/// <see cref="AsyncKafkaProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>
-/// does), so a sync-only producer spins no background thread.
+/// <b>Direct sync C ABI (inherited from <see cref="NativeProducer"/>).</b> Each operation calls the
+/// synchronous C ABI directly; the core's blocking call parks the calling thread inside the Rust
+/// multi-thread runtime (deadlock-free, ffi §A1) — not sync-over-async. <c>Send</c> returns once the
+/// core has accepted the record, and the producer's send-completion pump then reads its outcome and
+/// completes the returned <see cref="KafkaFuture{T}"/>. The sync producer starts that pump, and no
+/// other background thread, lazily on its first <c>Send</c>, and joins it at teardown (M11/P4.2
+/// decision D4); it never starts the async send-batch thread.
 /// </para>
 /// <para>
 /// <b>Serialize above the bytes core (M11/P5, CLAUDE.md §11).</b> <c>Send</c> serializes the
 /// record's key / value to bytes on the caller's thread (before the P/Invoke) and forwards the
-/// internal bytes carrier to the blocking
+/// internal bytes carrier to
 /// <see cref="NativeProducer.Send(Internal.SerializedProducerRecord, Internal.DeliveryRegistration)"/>.
 /// A serializer throw is wrapped in a <see cref="SerializationException"/> (Java-faithful).
 /// </para>
 /// <para>
 /// <b>Both of Java's <c>send</c> signatures (M14/P1).</b>
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback)"/> adds Java's
-/// <c>send(record, Callback)</c>; on this synchronous surface the callback runs <b>inline on the
-/// calling thread</b>, before <c>Send</c> returns or throws. See <see cref="IDeliveryCallback"/>.
+/// <c>send(record, Callback)</c>; the callback runs on the producer's send-completion pump thread,
+/// before the returned future's <see cref="KafkaFuture{T}.Get"/> returns or throws (M11/P4.2 decision
+/// D3). See <see cref="IDeliveryCallback"/>.
 /// </para>
 /// <para>
 /// <b>Concurrent <c>Send</c> is supported — do NOT add your own lock (M11/P8, Minor 13).</b>
