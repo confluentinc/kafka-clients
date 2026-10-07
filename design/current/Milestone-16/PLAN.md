@@ -196,6 +196,95 @@ Every phase works the same way:
   c274a7348f (spec + error portion), 8ba75d04cb, 04c3c00f25, 89ccd6a126 / 6be48c6e54 / 70dfc4236c
   (spec-only syncs).
 
+Phase 0 completion notes (agent 90):
+
+- **Submodule:** `kafka/` gitlink moved to `4.4.0-rc4` (`1156b2752a`).
+- **Spec sync:** 16 of the 18 differing specs copied into `rust/generator/messages/`; the corpus now
+  differs from 4.4.0-rc4 only in `TxnOffsetCommitRequest.json` / `TxnOffsetCommitResponse.json`, held
+  back for Phase 5 (§2.2).
+  - **No hand-written compile fallout.** The Rust generator emits every collection as a `Vec` (it parses
+    `mapKey` into `StructSpec::has_keys` but never emits a keyed collection), so the
+    `DescribeProducersRequest` `mapKey` change does not alter the generated shape and
+    `DescribeProducersHandler` is untouched. Java's handler change there is the `CollectionUtils`
+    removal (a1c155ee28), a refactor the Rust `HashMap` grouping already matches.
+  - **New APIs:** `UnregisterController` (94) and `StreamsGroupTopologyDescriptionUpdate` (93) get the
+    wiring the untranslated Streams/Share/broker APIs already have: `ApiKeys` constants
+    (`UNREGISTER_CONTROLLER` is `forwardable`, per `ApiKeys.java:142`), entries in `ApiKeys::ALL`, and
+    `assert_message_version!` rows in `message_test.rs`. No `ConcreteRequest`/`ConcreteResponse`
+    variant: both fall through to the existing "not currently handled" arm, as `STREAMS_GROUP_HEARTBEAT`
+    does. **Phase 12** adds the UnregisterController variants and wrappers.
+  - `AbortedTxn` is a broker-side data spec; the generated `AbortedTxnData` has no client caller.
+  - **Byte-level tests** (DoD #3): ApiVersions request v5 (defaults, both fields set, v4 drops them,
+    v5 parse), response v4 == v5; DeleteGroups request v3 == v2, response v3 (message set, null, and
+    dropped at v2). Also translated `RequestResponseTest.testDeleteGroupsResponseV3PreservesErrorMessage`.
+- **Errors:** 134 `GroupDeletionFailedError`, 135 `StreamsTopologyDescriptionUpdateFailedError`,
+  136 `ControllerIdNotRegisteredError` (all `extends ApiException`, not retriable, not fatal) and the
+  non-wire `BootstrapResolutionError` (`extends KafkaException`, so only `is_kafka_error`). Each has its
+  own file and an `Error` variant. `FENCED_STATE_EPOCH` now carries Java's generic text (8ba75d04cb).
+  No new intermediate Java class, so no new hierarchy predicate.
+  - **Tests:** every full-code walk now covers `-1..=136` (138 constants), and the FFI tables cover 166
+    codes. `test_errors_added_or_reworded_in_kafka_4_4` pins the exact messages.
+  - **Bindings:** `kafka_common_ErrorCode_t` gains 134-136 and `BOOTSTRAP_RESOLUTION = -29`, appended at
+    the most-negative end because the negatives are ABI. `python/_error_code.py` and
+    `rust/tests/common/error_code.rs` are regenerated from it, and the multilanguage decoder maps -29.
+- **Docs:** `CLAUDE.md` Source Reference line and `rust/README.md` now say 4.4.0. The repository-root
+  `README.md` names no Kafka version, so it has nothing to change.
+- **Rules errata:** `design/current/Milestone-16/rules-errata.md`. 46 citations: 36 drifted, 10
+  unchanged, and none whose rule claim breaks. It also lists 4.4 changes to code the rules reason about
+  without a line cite: KIP-1319 vs producer-transactions §10-§12 (relevant to **Phase 5**), the
+  MockAdminClient move and its new in-memory methods vs admin-client §9 (**Phase 12**), and KIP-909
+  AdminMetadataManager state vs admin-client §3 (**Phase 2**). It reserves a section for the §2.3
+  KIP-1332 note (**Phases 7/8**).
+- **Unplanned fallout of the submodule bump: the custom lint.** `cargo xtask lint-custom` resolves every
+  `#[doc(alias = "org.apache.kafka...")]` marker against the `kafka/` working tree, so the bump produced
+  158 findings. Phase 0 fixed the 113 that are pure relocations, each true at 4.4 on its own:
+  - 101 `KafkaAdminClientTest` markers re-pointed to the per-domain classes of 1a443b2d23. **Phase 12:**
+    the mapping is done.
+  - xtask now also indexes `clients/src/testFixtures` (3b6c8385ca moved `MockTime` and
+    `MockAdminClient` there).
+  - `Node`'s public constructors are marked with explicit overloads. 7be741d08b added a protected
+    `idString` overload; translating it is **Phase 4** work.
+  - `SubscriptionState::has_partitions_needing_validation` is removed, mirroring 455cbdfea2.
+
+  **45 findings remain**, each tied to a behavioural or module change that a later phase owns:
+
+  | Findings | Change | Owner |
+  |---|---|---|
+  | 25 | utils → `utils.internals` moves: `ByteUtils`, `ExponentialBackoff` (+ its test), `LogContext`, `ProducerIdAndEpoch` (D2) | Phase 1 |
+  | 5 | `shouldClientThrottle` overrides removed (KAFKA-20828) | Phase 1 |
+  | 2 | `TxnOffsetCommitRequest.getErrorResponseTopics` and `TxnOffsetCommitResponse.errors` removed (baa064e422), held back by §2.2 | Phase 5 |
+  | 2 | `ProducerBatch.isWritable` and `RecordAccumulator.recordsBuilder` (KAFKA-20578) | Phases 7/8 |
+  | 1 | `ConsumerMembershipManager.onHeartbeatSuccess` (KAFKA-20681) | Phase 9 |
+  | 10 | `SensorBuilder` → `consumer.internals.metrics` (KAFKA-19542) | Phase 11 |
+
+  So `cargo xtask lint`, and with it `make verify`, cannot pass at the end of Phase 0 without pulling
+  in other phases' work, which for the TxnOffsetCommit pair §2.2 forbids. Each owning phase must clear
+  its rows. Until a Manager/human decides how to gate the phases in between, "lint passes" means "no
+  finding beyond this table".
+  - The `ApiVersionsRequest` changes that go with v5 (`setClusterId`/`setNodeId` and the both-or-neither
+    check in `isValid`, 7be741d08b) are left to **Phase 4**. Until then the client sends v5 with the
+    defaults (`null` / -1), which the check accepts.
+- **Skips:**
+  - Streams-only spec content (StreamsGroupDescribe/Heartbeat v1, the topology description RPC) is
+    synced but has no wrapper: out of scope (§1.1).
+  - Java `MessageTest` / `RequestResponseTest` deltas for TxnOffsetCommit v6 (**Phase 5**), the
+    tagged-field/array caps (**Phase 1**), `shouldClientThrottle` (**Phase 1**), and UnregisterController
+    / Streams fixtures (**Phase 12** / out of scope) are left to their phases.
+- **Verification:**
+  - **Passing:** `cargo build`; `cargo test` (4285 passed, 0 failed, 10 ignored); `cargo xtask
+    format-check`; `check-generated`; the three clippy passes and `doc-hygiene`, run one by one because
+    `xtask lint` stops at the custom lint.
+  - **`make -k verify`** (2026-10-07, macOS):
+    - `build-c` fails with `cmake: command not found` (host limitation).
+    - `lint` fails with exactly the 45 findings in the table above.
+    - `test-rust-all-features`: 4462 passed, 17 failed. All 17 are Docker-backed `integration_tests::*`
+      (the Docker daemon was not running), and cargo then skipped the remaining test targets.
+    - Python unit tests: 363 passed, 2 skipped. `check-bindings` / format-arity: 29 passed. Soak tests:
+      156 passed.
+  - **Owed:** a real-broker run of the integration suite, in particular `api_versions_test` /
+    `connection_test`, which now negotiate ApiVersions v5 (a pre-4.4 broker answers v5 with
+    UNSUPPORTED_VERSION and the client retries at the broker's highest version).
+
 ### Phase 1 — Common and wire foundations (agent 91)
 
 - **D2 module moves:** `common::utils::{byte_utils, exponential_backoff, log_context, producer_id_and_epoch}`
