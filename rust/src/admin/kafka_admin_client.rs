@@ -332,8 +332,10 @@ impl KafkaAdminClient {
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
+        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
+        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
+        // already rejected it, so it is always `bootstrap.servers`.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
-        let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -341,13 +343,19 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // bootstrap.controllers unsupported in Phase 1
+            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
             log_context.clone(),
         );
-        // Seed with the bootstrap cluster so the first metadata refresh has
-        // nodes to talk to (mirrors Java's constructor `metadataManager.update`).
-        let now = time.milliseconds();
-        metadata_manager.update(Cluster::bootstrap(&addresses), now);
+        // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
+        // metadata manager, so any DNS failure surfaces as a ConfigException and no admin
+        // client instance is created. A positive value opts in to asynchronous bootstrap
+        // resolution, where resolution is deferred to the first poll.
+        if config.bootstrap_resolve_timeout_ms() == 0 {
+            let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
+            metadata_manager.update(Cluster::bootstrap(&addresses), time.milliseconds());
+        }
+        // Otherwise, let NetworkClient::ensure_bootstrapped() handle it during the first poll
+        // after DNS resolution succeeds.
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
         // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
@@ -392,11 +400,61 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient` passes
+        // `bootstrapConfiguration(config, bootstrapAddressesToUse)` to the
+        // `NetworkClient` constructor.
+        client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.retry_backoff_ms(),
+            &bootstrap,
+        )?);
 
         crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
+    }
+
+    /// Determines which bootstrap configuration to use based on the provided
+    /// lists. Validates that exactly one of `bootstrap.servers` or
+    /// `bootstrap.controllers` is configured.
+    ///
+    /// Returns `true` if using `bootstrap.controllers`, `false` if using
+    /// `bootstrap.servers`.
+    ///
+    /// Java takes the `AdminClientConfig` and reads both lists from it; the
+    /// Rust config does not keep `bootstrap.controllers` (no client can use
+    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
+    /// parses them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if both or neither bootstrap configurations are set.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
+    pub(crate) fn determine_bootstrap_type(
+        bootstrap_servers: &[String],
+        controller_servers: &[String],
+    ) -> Result<bool, Error> {
+        if bootstrap_servers.is_empty() {
+            if controller_servers.is_empty() {
+                Err(Error::config_message(format!(
+                    "You must set either {} or {}",
+                    AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
+                    AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
+                )))
+            } else {
+                Ok(true) // Using bootstrap.controllers
+            }
+        } else if controller_servers.is_empty() {
+            Ok(false) // Using bootstrap.servers
+        } else {
+            Err(Error::config_message(format!(
+                "You cannot set both {} and {}",
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
+            )))
+        }
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -470,7 +528,20 @@ impl KafkaAdminClient {
     /// Submits a call to the background task, failing it immediately if the
     /// client is closed. Mirrors `AdminClientRunnable.call` / `enqueue`.
     fn submit(&self, call: Call) {
-        if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) {
+        // Java's `enqueue` reads `metadataManager.bootstrapFatalException()` (KIP-909).
+        let bootstrap_error = self.shared.metadata_manager.bootstrap_fatal_error();
+        // Java's `call` rejects a call here only once `close()` set a hard-shutdown
+        // time. `closing` is also set when the I/O task exits on its own, which a
+        // permanent bootstrap failure makes it do; such a call reaches Java's
+        // `enqueue`, where the bootstrap failure wins (below).
+        let exited_on_bootstrap_failure = bootstrap_error.is_some()
+            && self
+                .shared
+                .shutdown
+                .hard_shutdown_deadline_ms
+                .load(std::sync::atomic::Ordering::Acquire)
+                == Self::NO_HARD_SHUTDOWN;
+        if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) && !exited_on_bootstrap_failure {
             let mut call = call;
             // `new IllegalStateException("Cannot accept new calls when AdminClient
             // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
@@ -499,6 +570,15 @@ impl KafkaAdminClient {
             call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
                 "This Admin API is not yet supported when communicating directly with the controller quorum.",
             )));
+            return;
+        }
+        // Java's `enqueue`: a permanent bootstrap failure (KIP-909) fails the
+        // call with that error instead of accepting it. The I/O task has exited
+        // by then (`AdminClientRunnable::process_requests`), so without this
+        // the call would get "The AdminClient thread has exited." below.
+        if let Some(bootstrap_error) = bootstrap_error {
+            let mut call = call;
+            call.handle_failure(&Error::BootstrapResolution(bootstrap_error));
             return;
         }
         match self.shared.admin_tx.send(call) {
@@ -6894,6 +6974,100 @@ mod tests {
         // `DisconnectException extends RetriableException`, so retriability is
         // unchanged relative to the old `NetworkError` — the class is the fix.
         assert!(cause.is_retriable_error(), "got {cause:?}");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testAdminBootstrapResolutionExceptionPropagated`
+    /// (KIP-909): with a positive `bootstrap.resolve.timeout.ms` and an
+    /// unresolvable bootstrap host, the client is created, calls fail with the
+    /// `BootstrapResolutionException` once the budget runs out, and every later
+    /// call fails with it too.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminBootstrapResolutionExceptionPropagated"
+    )]
+    async fn test_admin_bootstrap_resolution_exception_propagated() {
+        let invalid_host = "unresolvable.invalid:9092";
+        let mut props = HashMap::new();
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            invalid_host.to_string(),
+        );
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+            "3000".to_string(),
+        );
+        let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).unwrap())
+            .expect("a positive timeout defers resolution, so creation succeeds");
+
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_millis(15000);
+        loop {
+            assert!(
+                start.elapsed() < max_wait,
+                "Expected BootstrapResolutionException to be thrown within {}ms",
+                max_wait.as_millis()
+            );
+            if let Err(Error::BootstrapResolution(e)) = admin.list_topics().names().get().await {
+                assert_eq!(e.message(), expected);
+                break;
+            }
+        }
+
+        // After the first failure, any further API call must also surface the bootstrap error.
+        match admin.list_topics().names().get().await {
+            Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
+        admin.close().await;
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testAdminConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+    /// (KAFKA-20939): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+    /// synchronously in the constructor, so an unresolvable host fails creation
+    /// with the `ConfigException` wrapped in the constructor's `KafkaException`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+    )]
+    fn test_admin_constructor_fails_with_config_exception_on_unresolvable_bootstrap_when_timeout_zero() {
+        let mut props = HashMap::new();
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "unresolvable.invalid:9092".to_string(),
+        );
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
+
+        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
+    /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
+    /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
+    #[test]
+    fn test_determine_bootstrap_type() {
+        let servers = vec!["localhost:9092".to_string()];
+        let none: Vec<String> = Vec::new();
+        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
+        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
+        assert_eq!(
+            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
+            "You must set either bootstrap.servers or bootstrap.controllers"
+        );
+        assert_eq!(
+            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
+                .unwrap_err()
+                .message(),
+            "You cannot set both bootstrap.servers and bootstrap.controllers"
+        );
     }
 
     /// Java wraps the admin-client constructor in `catch (Throwable exc)` and

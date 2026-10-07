@@ -48,6 +48,33 @@ impl CommonClientConfigs {
     /// [`crate::ClientDnsLookup`].)
     pub const CLIENT_DNS_LOOKUP_CONFIG: &str = "client.dns.lookup";
 
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909)
+    ///
+    /// Selects the client's bootstrap DNS resolution mode. When set to `0`
+    /// (the default), DNS is resolved synchronously during client
+    /// construction; any failure surfaces as `ConfigException` and no client
+    /// instance is created. When set to a positive value, DNS is resolved
+    /// asynchronously and this is the maximum amount of time the client will
+    /// spend retrying resolution before failing with an unrecoverable
+    /// `BootstrapResolutionException` from subsequent API calls (the client
+    /// must then be closed and re-created after fixing the underlying DNS or
+    /// `bootstrap.servers` configuration issue). Setting this config to a
+    /// positive value enables an evolving feature whose compatibility may be
+    /// broken in a minor release.
+    ///
+    /// (Text of Java's `CommonClientConfigs.BOOTSTRAP_RESOLVE_TIMEOUT_MS_DOC`,
+    /// carried as rustdoc for the reason given on
+    /// [`Self::CLIENT_DNS_LOOKUP_CONFIG`]. In this crate `ConfigException` is
+    /// [`Error::Config`](crate::common::Error::Config) and
+    /// `BootstrapResolutionException` is
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).)
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &str = "bootstrap.resolve.timeout.ms";
+
+    /// The default `bootstrap.resolve.timeout.ms`: `0`, synchronous resolution
+    /// at construction (KAFKA-20939 restored this default; KIP-909 first
+    /// shipped `2 * 60 * 1000`).
+    pub const DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS: i64 = 0;
+
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 

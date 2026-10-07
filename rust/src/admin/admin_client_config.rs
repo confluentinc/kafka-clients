@@ -39,6 +39,7 @@ pub struct AdminClientConfig {
     retries: i32,
     retry_backoff_ms: i64,
     retry_backoff_max_ms: i64,
+    bootstrap_resolve_timeout_ms: i64,
     reconnect_backoff_ms: i64,
     reconnect_backoff_max_ms: i64,
     connections_max_idle_ms: i64,
@@ -79,6 +80,10 @@ impl AdminClientConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// `bootstrap.resolve.timeout.ms` (KIP-909). See
+    /// [`Self::bootstrap_resolve_timeout_ms`].
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
     pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = "reconnect.backoff.ms";
     /// `reconnect.backoff.max.ms`
@@ -102,7 +107,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::Config`] if `bootstrap.servers` is missing or empty, and
     /// an error if a value fails to parse or validate. Following Java's
-    /// `AdminBootstrapAddresses.fromConfig`, setting both `bootstrap.servers`
+    /// `KafkaAdminClient.determineBootstrapType`, setting both `bootstrap.servers`
     /// and `bootstrap.controllers` is an [`Error::Config`]. Setting only
     /// `bootstrap.controllers` returns an `UNSUPPORTED_VERSION` error
     /// ([`Error::unsupported_version`]): Java
@@ -134,6 +139,14 @@ impl AdminClientConfig {
                 Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,
                 Self::RETRY_BACKOFF_MS_CONFIG => config.retry_backoff_ms = parse_i64(key, value)?,
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => config.retry_backoff_max_ms = parse_i64(key, value)?,
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:207-212`, KAFKA-20939).
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
+                },
                 Self::RECONNECT_BACKOFF_MS_CONFIG => config.reconnect_backoff_ms = parse_i64(key, value)?,
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => config.reconnect_backoff_max_ms = parse_i64(key, value)?,
                 Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => config.connections_max_idle_ms = parse_i64(key, value)?,
@@ -168,34 +181,21 @@ impl AdminClientConfig {
             }
         }
 
-        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-79`),
-        // in Java's branch order.
-        match (config.bootstrap_servers.is_empty(), bootstrap_controllers.is_empty()) {
-            (true, true) => {
-                return Err(Error::config_message(format!(
-                    "You must set either {} or {}",
-                    Self::BOOTSTRAP_SERVERS_CONFIG,
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
-                )));
-            },
+        // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
+        // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
+        // `createInternal`; this crate has always run the check here, when the
+        // config is built, because the config does not keep
+        // `bootstrap.controllers` (no client can use it, see below).
+        if crate::admin::KafkaAdminClient::determine_bootstrap_type(&config.bootstrap_servers, &bootstrap_controllers)?
+        {
             // Java bootstraps through the controllers here
             // (`usingBootstrapControllers = true`); that path is not
             // implemented, so fail explicitly rather than drop the key.
-            (true, false) => {
-                return Err(Error::unsupported_version(format!(
-                    "{} is not supported by this client; set {} instead",
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG,
-                    Self::BOOTSTRAP_SERVERS_CONFIG
-                )));
-            },
-            (false, false) => {
-                return Err(Error::config_message(format!(
-                    "You cannot set both {} and {}",
-                    Self::BOOTSTRAP_SERVERS_CONFIG,
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
-                )));
-            },
-            (false, true) => {},
+            return Err(Error::unsupported_version(format!(
+                "{} is not supported by this client; set {} instead",
+                Self::BOOTSTRAP_CONTROLLERS_CONFIG,
+                Self::BOOTSTRAP_SERVERS_CONFIG
+            )));
         }
         config
             .client_dns_lookup
@@ -241,6 +241,20 @@ impl AdminClientConfig {
     /// `retry.backoff.max.ms`.
     pub fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): selects the client's bootstrap
+    /// DNS resolution mode. `0` (the default) resolves `bootstrap.servers`
+    /// synchronously when the client is created, and a resolution failure fails
+    /// creation with a config error. A positive value resolves asynchronously,
+    /// retrying for at most this long before every subsequent call fails with an
+    /// unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
+    /// the client must then be closed and re-created. Setting a positive value
+    /// enables an evolving feature whose compatibility may be broken in a minor
+    /// release.
+    pub fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+        self.bootstrap_resolve_timeout_ms
     }
 
     /// `reconnect.backoff.ms`.
@@ -296,6 +310,7 @@ impl Default for AdminClientConfig {
             retries: i32::MAX,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1_000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             reconnect_backoff_ms: 50,
             reconnect_backoff_max_ms: 1_000,
             connections_max_idle_ms: 300_000,
@@ -332,6 +347,28 @@ mod tests {
         assert_eq!(config.security_protocol(), SecurityProtocol::Plaintext);
     }
 
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 0);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+        );
+    }
+
     #[test]
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
@@ -339,7 +376,7 @@ mod tests {
         assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
     }
 
-    /// `AdminBootstrapAddresses.fromConfig`'s branches for
+    /// `KafkaAdminClient.determineBootstrapType`'s branches for
     /// `bootstrap.controllers`: only controllers is an explicit unsupported
     /// error (never silently dropped), both is Java's `ConfigException`, and
     /// an empty controllers list counts as unset.
@@ -542,7 +579,7 @@ mod tests {
             "Configuration 'bootstrap.servers' values must not be empty."
         );
         // Admin allows an empty list (`isEmptyAllowed = true`), so the
-        // ValidList message never appears; `AdminBootstrapAddresses.fromConfig`'s
+        // ValidList message never appears; `KafkaAdminClient.determineBootstrapType`'s
         // check reports it instead.
         for value in ["", "  "] {
             assert_eq!(
