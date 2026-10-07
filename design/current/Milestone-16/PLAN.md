@@ -934,6 +934,56 @@ Phase 5 completion notes (agent 95):
     offsets' topics have ids. Also a `build-c` / C-test run on a host with cmake (this phase changed no C
     surface).
 
+Merge of Phase 2 (agent 95, 2026-10-07/08):
+
+- **Merge.** `4b1d6f54` merges exactly `ed2e3ce3` (Phase 2, reviewed clean), not the
+  `milestone-16-ak-4.4` tip, into `milestone-16-producer` with `--no-ff`.
+  - **The one textual conflict** was in `rust/src/common_client_configs.rs`: Phase 6's `CLIENT_RACK_CONFIG` /
+    `DEFAULT_CLIENT_RACK` and Phase 2's `BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG` /
+    `DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS` were added at the same spot. Both are kept.
+  - **`KafkaProducer` construction auto-merged.** Phase 2's `maybe_bootstrap_metadata_synchronously`
+    follows the `ProducerMetadata` creation, and `set_bootstrap_configuration` follows the `NetworkClient`,
+    where Java has them. Phase 5's `configure_transaction_state(.., &metadata.metadata_arc(), ..)` and
+    Phase 6's `build_accumulator` / partitioner-close structure are unchanged.
+  - **`PLAN.md` auto-merged.**
+- **Follow-up `335c0b67`** (the Phase 5 merge item):
+  - `await_topic_metadata`'s no-refresh branch now calls `Metadata::maybe_return_bootstrap_fatal_error`.
+    The refresh branch already surfaces the error through Phase 2's `maybe_return_fatal_error` inside
+    `await_update`.
+  - `KafkaProducerTest.testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated` is
+    translated (Phase 2 had left it to Phase 5), with the exact message asserted.
+  - Teeth-checked: without the check, the second call fails with
+    "Cannot send offsets if a transaction is not in progress" instead.
+- **Gates after the merge:**
+  - `cargo test`: 4376 passed, 0 failed, 10 ignored (lib 4327).
+  - `cargo xtask format-check` passes.
+  - `cargo xtask lint --keep-going`: exactly the 13 §5.1 rows.
+- **Broker suites** (`producer_transactions_test`, `transactions_bounce_test`, `admin_transactions_test`,
+  `bootstrap_resolution_test`; 56 tests in one parallel run per tag):
+  - **4.2.0 (default):** 51 passed, 5 failed (`producer_transactions_test`). All 5 failed with
+    load-shaped timeouts: "Timed out waiting for a node assignment" (createTopics / listOffsets) and an
+    EndTxn commit timeout.
+    - Run alone, serially: 4 passed, and the fifth then hit `TopicExists` on its own create (a retried
+      create). That fifth test, run alone twice more, passed both times.
+  - **4.4.0-rc4** (`INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`): 44 passed, 12 failed, all
+    `producer_transactions_test`, with the same timeout shapes plus consequent assertion failures.
+    - Rerun serially: all 12 passed (16 matched by the filters).
+  - In both tags `admin_transactions_test` (11), `transactions_bounce_test` (1) and
+    `bootstrap_resolution_test` (4) passed in the parallel run.
+  - **Note for the Critic:** Critic 95 saw the 4.2.0 suite pass whole before the merge. The parallel-run
+    failures appear only with Phase 2 merged and under load. Several admin logs say "Metadata is not ready
+    because it contains bootstrap nodes", so a load interaction with KIP-909's lazy bootstrap is not ruled
+    out; serial runs are clean.
+- **TxnOffsetCommit on the wire** (`RUST_LOG=confluent_kafka::network_client=debug`, request headers):
+  - **4.2.0:** 44 sent at v5, 2 at v4 (TV1), none at v6. The request data carries topic ids, since every
+    topic resolved one, but the broker caps the negotiation at v5, so `Name` is what is written.
+  - **4.4.0-rc4:** 40 sent at v6 and 2 at v4 (TV1) in the parallel run; 15 at v6 in the serial rerun. A
+    v6 request carries `topic_id` for each topic.
+  - **v6 responses** (`transaction_manager=debug`, two tests): all 14 `TxnOffsetCommit` responses are
+    keyed by id alone (`name: ""`) and resolved through the build-time snapshot, with no "unknown topic id"
+    warning. Partition codes: 29 × `NONE`, 24 × `CONCURRENT_TRANSACTIONS` (51, retriable, retried to
+    success). Both tests passed.
+
 ### Phase 6 — Producer: rack-aware partitioning (agent 96)
 
 - KAFKA-19193 (a3f17327de, 88b48794ea, 165d7ec933, fc18c47efd docs):
