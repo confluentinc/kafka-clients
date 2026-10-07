@@ -4371,7 +4371,6 @@ where
     /// read takes and drops the lock, as each Java `synchronized` call does,
     /// and the buffer's lock is never taken while it is held. No `.await` is
     /// held across either guard (§16).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#pollForFetches")]
     fn poll_for_fetches_timeout_ms(&self, remaining_ms: i64) -> i64 {
         let poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining_ms);
         if poll_timeout_ms <= self.retry_backoff_ms {
@@ -12289,9 +12288,6 @@ mod tests {
     /// [`AsyncKafkaConsumer::poll_for_fetches_timeout_ms`]'s value, asserted
     /// here directly.
     #[tokio::test]
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testPollWithManualAssignmentDoesNotBusyLoop"
-    )]
     async fn test_poll_with_manual_assignment_does_not_busy_loop() {
         use crate::consumer::internals::CompletedFetch;
         use crate::fetch_response_data::PartitionData;
