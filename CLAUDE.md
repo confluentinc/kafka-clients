@@ -141,13 +141,13 @@ translate javadoc to rustdoc. Never change the contract of public API.
        sit beside it. Java's `KafkaException` base class maps to the `KafkaError`
        struct (error code + optional message), embedded in each specific error
        struct.
-    4. Because the hierarchy is flattened, every **intermediate** (non-leaf) class in
+    4. Because the hierarchy is flattened, every class in
        Java's error hierarchy MUST be recoverable as a predicate on `Error`, named
        `is_` + the class name snake_cased with the Exception suffix replaced by
        `Error` (§2). The `_error` suffix is applied uniformly — no exceptions, so
        the name is derivable from the Java class without judgement:
 
-       | Java intermediate class     | predicate                      |
+       | Java class                  | predicate                      |
        |-----------------------------|--------------------------------|
        | `KafkaException`            | `is_kafka_error()`             |
        | `ApiException`              | `is_api_error()`               |
@@ -158,7 +158,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
        | `AuthorizationException`    | `is_authorization_error()`     |
 
        These predicates encode Java's `extends` chain, so the family contains
-       ONLY Java classes. A Java *static* that classifies an exception is
+       all Java subclasses. A Java *static* that classifies an exception is
        NOT a predicate on `Error` and MUST NOT be added to this trait — it is
        translated as a free function in the module matching its Java home, taking
        `&Error`. The one such case is fatality: `RequestUtils.isFatalException`
@@ -191,7 +191,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
        against one instance of every class. The crate's own code may still match
        variants internally.
 
-       Each intermediate predicate additionally MUST:
+       Each predicate additionally MUST:
          - document the exact set of variants it covers and cite the Java class it
            translates, because a flattened enum gives the reader no other way to
            see the hierarchy;
