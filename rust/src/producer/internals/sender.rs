@@ -84,8 +84,8 @@ use crate::ProduceRequestData;
 use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
-use crate::common::utils::LogContext;
 use crate::common::utils::Time;
+use crate::common::utils::internals::LogContext;
 
 use super::Caller;
 use super::InFlightBatchPool;
@@ -2899,7 +2899,7 @@ mod tests {
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
     use crate::common::utils::MockTime;
-    use crate::common::utils::ProducerIdAndEpoch;
+    use crate::common::utils::internals::ProducerIdAndEpoch;
     use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
     use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
     use crate::producer::internals::BufferPool;

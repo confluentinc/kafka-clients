@@ -32,7 +32,10 @@ use crate::admin::KafkaAdminClient;
 use crate::common::errors::{DisconnectError, TimeoutError};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
-use crate::common::utils::{ExponentialBackoff, LogContext, Time};
+use crate::common::utils::{
+    Time,
+    internals::{ExponentialBackoff, LogContext},
+};
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 

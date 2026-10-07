@@ -44,8 +44,8 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::metadata_request;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
-use crate::common::utils::ExponentialBackoff;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::ExponentialBackoff;
+use crate::common::utils::internals::LogContext;
 
 use super::CommonClientConfigs;
 use super::MetadataSnapshot;

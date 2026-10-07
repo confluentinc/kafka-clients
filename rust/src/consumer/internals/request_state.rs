@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::internals::ExponentialBackoff;
 
 /// Per-manager exponential-backoff bookkeeping shared across all
 /// `RequestManager` implementations.

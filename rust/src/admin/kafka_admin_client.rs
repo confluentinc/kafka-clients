@@ -103,7 +103,10 @@ use crate::common::requests::{
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::{ExponentialBackoff, LogContext, SystemTime, Time};
+use crate::common::utils::{
+    SystemTime, Time,
+    internals::{ExponentialBackoff, LogContext},
+};
 use crate::common::{
     Cluster, Error, GroupState, GroupType, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };

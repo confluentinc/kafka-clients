@@ -61,7 +61,7 @@ use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use super::{InFlightRequest, InFlightRequests};
 use crate::common::Error;
 use crate::common::errors::AuthenticationError;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 
 /// Internal state enum for the client lifecycle.

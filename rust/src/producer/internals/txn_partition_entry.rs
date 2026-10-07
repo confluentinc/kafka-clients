@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::record::internal::DefaultRecordBatch;
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::producer::internals::ProducerBatch;
 
 /// Ordering key for an in-flight batch: `(producer_id, producer_epoch,

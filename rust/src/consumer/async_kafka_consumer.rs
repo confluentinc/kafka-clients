@@ -63,8 +63,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
-use crate::common::utils::LogContext;
 use crate::common::utils::Time;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRebalanceListener;

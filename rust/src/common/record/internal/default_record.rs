@@ -48,7 +48,7 @@ use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::RecordBatch;
-use crate::common::utils::ByteUtils;
+use crate::common::utils::internals::ByteUtils;
 
 /// The default (v2) record format for Kafka.
 ///

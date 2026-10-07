@@ -28,8 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::Cluster;
-use crate::common::utils::LogContext;
 use crate::common::utils::Utils;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_trace;
 
 /// Hash function used to map a serialized record key to a partition.

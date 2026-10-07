@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::utils::{LogContext, ProducerIdAndEpoch};
+use crate::common::utils::internals::{LogContext, ProducerIdAndEpoch};
 use crate::producer::internals::ProducerBatch;
 use crate::producer::internals::{InFlightBatchKey, TxnPartitionEntry};
 use crate::{kafka_debug, kafka_trace};

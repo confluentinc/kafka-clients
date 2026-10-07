@@ -37,7 +37,7 @@ use crate::common::requests::{
     add_partitions_to_txn_request, end_txn_request, find_coordinator_request, init_producer_id_request,
     txn_offset_commit_request,
 };
-use crate::common::utils::{LogContext, ProducerIdAndEpoch};
+use crate::common::utils::internals::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
 use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
 use crate::producer::internals::{

@@ -27,7 +27,7 @@ use crate::admin::internals::AdminUtils;
 use crate::admin::{ClassicGroupDescription, MemberAssignment, MemberDescription};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, describe_groups_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{ClassicGroupState, Error, Node, TopicPartition};
 use crate::consumer::internals::ConsumerProtocol;
 use crate::{kafka_debug, kafka_error};

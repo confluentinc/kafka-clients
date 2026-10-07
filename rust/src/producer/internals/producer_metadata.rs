@@ -29,7 +29,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::metadata_request;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
 /// Producer-specific inner state, protected by its own mutex.

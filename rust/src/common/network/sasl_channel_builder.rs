@@ -34,7 +34,7 @@ use crate::common::config::SaslConfigs;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::authenticator::SaslClientAuthenticator;
 use crate::common::security::ssl::SslFactory;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 
 use std::io;
 use std::sync::Arc;

@@ -53,7 +53,7 @@ use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};

@@ -72,7 +72,7 @@ use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::common::{Error, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
 use crate::common::{GroupState, GroupType};
 use crate::consumer::OffsetAndMetadata;

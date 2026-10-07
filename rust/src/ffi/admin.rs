@@ -167,7 +167,7 @@ use crate::common::requests::ListOffsetsRequest;
 use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::common::{
     ElectionType, Error, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection, TopicPartition,
     TopicPartitionInfo, TopicPartitionReplica, Uuid,

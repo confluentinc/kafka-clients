@@ -50,7 +50,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::{kafka_debug, kafka_error, kafka_trace};
 

@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use crate::MetadataUpdater;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Cluster, Error, Node, Uuid};
 use crate::kafka_warn;
 use std::collections::HashMap;

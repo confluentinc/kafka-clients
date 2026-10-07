@@ -20,7 +20,7 @@ use crate::common::record::internal::RecordBatch;
 
 /// A producer ID and epoch pair, identifying a producer session to the broker.
 ///
-/// Translated from `org.apache.kafka.common.utils.ProducerIdAndEpoch`.
+/// Translated from `org.apache.kafka.common.utils.internals.ProducerIdAndEpoch`.
 ///
 /// `producer_id` is `i64` (Java `long`) rather than `u64`: it is compared
 /// against the `RecordBatch::NO_PRODUCER_ID` sentinel (`-1`), and signed
@@ -30,7 +30,7 @@ use crate::common::record::internal::RecordBatch;
 /// allocates an object here, but there is nothing to own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-#[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch")]
+#[doc(alias = "org.apache.kafka.common.utils.internals.ProducerIdAndEpoch")]
 pub struct ProducerIdAndEpoch {
     /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
     pub(crate) producer_id: i64,
@@ -45,7 +45,7 @@ impl ProducerIdAndEpoch {
     pub const NONE: Self = Self { producer_id: RecordBatch::NO_PRODUCER_ID, epoch: RecordBatch::NO_PRODUCER_EPOCH };
 
     /// Creates a new producer ID and epoch pair.
-    #[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch#ProducerIdAndEpoch")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ProducerIdAndEpoch#ProducerIdAndEpoch")]
     pub const fn new(producer_id: i64, epoch: i16) -> Self {
         Self { producer_id, epoch }
     }
@@ -55,7 +55,7 @@ impl ProducerIdAndEpoch {
     /// Note this compares `<` against the sentinel rather than testing
     /// inequality with [`Self::NONE`], matching Java's `isValid()`: any
     /// producer ID above `NO_PRODUCER_ID` is valid regardless of epoch.
-    #[doc(alias = "org.apache.kafka.common.utils.ProducerIdAndEpoch#isValid")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ProducerIdAndEpoch#isValid")]
     pub fn is_valid(&self) -> bool {
         RecordBatch::NO_PRODUCER_ID < self.producer_id
     }

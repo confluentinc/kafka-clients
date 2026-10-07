@@ -14,7 +14,7 @@
 
 //! Provides contextual log message prefixes for Kafka client components.
 //!
-//! Translated from `org.apache.kafka.common.utils.LogContext`.
+//! Translated from `org.apache.kafka.common.utils.internals.LogContext`.
 //!
 //! This class provides a way to instrument loggers with a common context which
 //! can be used to automatically enrich log messages. For example, in the
@@ -29,9 +29,9 @@
 /// The prefix is prepended to every log message automatically via
 /// the `kafka_*` logging macros.
 ///
-/// Translated from `org.apache.kafka.common.utils.LogContext`.
+/// Translated from `org.apache.kafka.common.utils.internals.LogContext`.
 #[derive(Clone, Debug)]
-#[doc(alias = "org.apache.kafka.common.utils.LogContext")]
+#[doc(alias = "org.apache.kafka.common.utils.internals.LogContext")]
 pub struct LogContext {
     prefix: String,
 }
@@ -49,12 +49,12 @@ impl LogContext {
     /// crate cannot name it.
     ///
     /// ```ignore
-    /// use confluent_kafka::common::utils::LogContext;
+    /// use confluent_kafka::common::utils::internals::LogContext;
     ///
     /// let ctx = LogContext::new(format!("[Producer clientId={}] ", "my-producer"));
     /// assert_eq!(ctx.prefix(), "[Producer clientId=my-producer] ");
     /// ```
-    #[doc(alias = "org.apache.kafka.common.utils.LogContext#LogContext")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.LogContext#LogContext")]
     pub fn new(prefix: impl Into<String>) -> Self {
         Self { prefix: prefix.into() }
     }

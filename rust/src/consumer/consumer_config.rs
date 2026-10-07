@@ -1199,7 +1199,7 @@ mod tests {
     #[test]
     fn test_builder_selection() {
         use crate::common::network::ChannelBuilders;
-        use crate::common::utils::LogContext;
+        use crate::common::utils::internals::LogContext;
 
         // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
         let mut props = base_props();
