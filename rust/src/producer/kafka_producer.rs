@@ -7171,7 +7171,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerBootstrapResolutionExceptionPropagated"
     )]
-    async fn test_producer_bootstrap_resolution_exception_propagated() {
+    async fn test_producer_bootstrap_resolution_error_propagated() {
         let props = HashMap::from([
             (
                 ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
@@ -7196,7 +7196,7 @@ mod tests {
         loop {
             assert!(
                 start.elapsed() < max_wait,
-                "Expected BootstrapResolutionException to be thrown within {}ms",
+                "Expected the BootstrapResolutionError within {}ms",
                 max_wait.as_millis()
             );
             match tokio::time::timeout(max_wait, producer.partitions_for("test-topic")).await {
@@ -7228,7 +7228,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
     )]
-    fn test_producer_constructor_fails_with_config_exception_on_unresolvable_bootstrap_when_timeout_zero() {
+    fn test_producer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
         let props = HashMap::from([(
             ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
             "unresolvable.invalid:9092".to_string(),

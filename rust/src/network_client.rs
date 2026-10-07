@@ -471,7 +471,6 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// remains the driver — it starts the timer, observes the result, records
     /// the failure and drives retries. Outside a tokio runtime the first
     /// resolution starts on the first `poll()` instead.
-    #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
     pub fn set_bootstrap_configuration(&mut self, bootstrap_configuration: BootstrapConfiguration) {
         self.cancel_bootstrap_resolution();
         self.bootstrap_configuration = bootstrap_configuration;

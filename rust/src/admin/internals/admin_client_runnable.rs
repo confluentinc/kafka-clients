@@ -785,7 +785,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Fails every call the task holds — submitted-but-undrained, pending, to
     /// send and in flight — with `cause`, through the regular
     /// [`fail_call`](Self::fail_call) path (Java's `call.fail(now, cause)`).
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#failAllPendingCalls")]
+    ///
+    /// Translated from `AdminClientRunnable.failAllPendingCalls` (KIP-909).
     fn fail_all_pending_calls(&mut self, cause: Error, now: i64) {
         // Java's `newCalls`, under `synchronized (this)`: the calls the app
         // side has handed over but the task has not drained yet.

@@ -6836,7 +6836,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerBootstrapResolutionExceptionPropagatedToPoll"
     )]
-    async fn test_consumer_bootstrap_resolution_exception_propagated_to_poll() {
+    async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
         use std::collections::HashMap;
 
         use crate::common::serialization::StringDeserializer;
@@ -6873,7 +6873,7 @@ mod tests {
         let error = loop {
             assert!(
                 start.elapsed() < max_wait,
-                "Expected BootstrapResolutionException to be thrown within {}ms",
+                "Expected the BootstrapResolutionError within {}ms",
                 max_wait.as_millis()
             );
             if let Err(error @ Error::BootstrapResolution(_)) = consumer.poll(Duration::from_millis(100)).await {
@@ -6906,7 +6906,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
     )]
-    async fn test_consumer_constructor_fails_with_config_exception_on_unresolvable_bootstrap_when_timeout_zero() {
+    async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
         use std::collections::HashMap;
 
         use crate::common::serialization::StringDeserializer;

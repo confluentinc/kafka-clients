@@ -6985,7 +6985,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminBootstrapResolutionExceptionPropagated"
     )]
-    async fn test_admin_bootstrap_resolution_exception_propagated() {
+    async fn test_admin_bootstrap_resolution_error_propagated() {
         let invalid_host = "unresolvable.invalid:9092";
         let mut props = HashMap::new();
         props.insert(
@@ -7006,7 +7006,7 @@ mod tests {
         loop {
             assert!(
                 start.elapsed() < max_wait,
-                "Expected BootstrapResolutionException to be thrown within {}ms",
+                "Expected the BootstrapResolutionError within {}ms",
                 max_wait.as_millis()
             );
             if let Err(Error::BootstrapResolution(e)) = admin.list_topics().names().get().await {
@@ -7032,7 +7032,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
     )]
-    fn test_admin_constructor_fails_with_config_exception_on_unresolvable_bootstrap_when_timeout_zero() {
+    fn test_admin_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
         let mut props = HashMap::new();
         props.insert(
             AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),

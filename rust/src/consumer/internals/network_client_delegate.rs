@@ -1233,7 +1233,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testBootstrapResolutionExceptionPropagatedViaErrorEventOnce"
     )]
-    async fn test_bootstrap_resolution_exception_propagated_via_error_event_once() {
+    async fn test_bootstrap_resolution_error_propagated_via_error_event_once() {
         let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
         let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
 
