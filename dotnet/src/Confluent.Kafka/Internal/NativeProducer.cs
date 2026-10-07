@@ -889,9 +889,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// Returns the send-completion pump, starting it on first use (D4: the sync <see cref="Send"/>
     /// starts it lazily, so a send-less producer spins no thread). Refuses to start once the producer
     /// is closing, with the same lock and latch ordering as <see cref="EnsureAccumulator"/>: both
-    /// create the pump only through <see cref="EnsurePumpLocked"/>.
+    /// create the pump only through <see cref="EnsurePumpLocked"/>. Internal rather than private only
+    /// so a unit test can call it after the close latch is won: <see cref="Send"/>'s own leading
+    /// <see cref="ThrowIfClosed"/> hides this method's re-check from every test that goes through it.
     /// </summary>
-    private SendCompletionPump EnsurePump()
+    internal SendCompletionPump EnsurePump()
     {
         SendCompletionPump? pump = Volatile.Read(ref _pump);
         if (pump is not null)

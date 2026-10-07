@@ -436,6 +436,28 @@ public sealed class PublicSyncProducerKafkaFutureTests
         Assert.Equal(0, callback.Count);
     }
 
+    // ---- C10 (seam): the pump's creation path itself refuses once the close latch is won ----
+
+    [Fact]
+    public void EnsurePump_AfterTheCloseLatch_Throws_AndStartsNoPump()
+    {
+        // C10 cannot see EnsurePump's re-check under _pumpLock, because Send's leading ThrowIfClosed throws
+        // first; C11 sees it only when a Dispose lands between the two checks, which it does not do in every
+        // run. Calling the creation path directly on a producer that never sent and is already disposed makes
+        // a creation path that skips the re-check start a pump here, every time.
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        NativeProducer native = NativeOf(producer);
+
+        TestTimeout.Run(producer.Dispose, s_deadline);
+
+        ObjectDisposedException refused = Assert.Throws<ObjectDisposedException>(() => native.EnsurePump());
+
+        Assert.Equal(new ObjectDisposedException(nameof(NativeProducer)).Message, refused.Message);
+        Assert.Equal(nameof(NativeProducer), refused.ObjectName);
+        Assert.Null(native.StartedPumpThread);
+        Assert.False(native.AccumulatorStarted);
+    }
+
     // ---- C11: a first Send racing Dispose never leaves a running pump ----
 
     [Fact]
@@ -447,6 +469,13 @@ public sealed class PublicSyncProducerKafkaFutureTests
         // interleavings across iterations.
         const int Iterations = 200;
         string safeHandleClosed = SafeHandleClosedMessage();
+
+        // The P/Invoke marshaller's own refusal of the released SafeProducerHandle that Send passes to
+        // Producer_send: on net8.0 and net10.0 it names the handle's type, and it is not DangerousAddRef's
+        // message above (observed by mutating EnsurePump's re-check away, M11/P4.2 S4m). DangerousAddRef's
+        // stays accepted because this project also builds for net462, where the marshaller was not measured.
+        string releasedHandle = new ObjectDisposedException(
+            typeof(Confluent.Kafka.Internal.Interop.SafeProducerHandle).FullName).Message;
         int sent = 0;
         int disposed = 0;
         int coreClosed = 0;
@@ -478,6 +507,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
                         // The closed check (NativeProducer) or the handle's own guard (released handle).
                         Assert.True(
                             exception.Message == new ObjectDisposedException(nameof(NativeProducer)).Message
+                                || exception.Message == releasedHandle
                                 || exception.Message == safeHandleClosed,
                             $"unexpected ObjectDisposedException message: {exception.Message}");
                         return "disposed";
