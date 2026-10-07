@@ -2280,9 +2280,10 @@ internal static partial class NativeMethods
     //   * COMPLETION side (BOTH flavors) — UNCHANGED. On the ASYNC flavor that is ffi §A7's
     //     pull pump: a single SendCompletionPump thread per NativeProducer drains a batched
     //     KafkaFuture_RecordMetadata_get_all and frees the futures with
-    //     KafkaFuture_RecordMetadata_destroy_all. The SYNC flavor has NO pump at all (verified
-    //     NativeProducer.cs:504) — it completes on the caller's own thread via the blocking
-    //     KafkaFuture_RecordMetadata_get (:603). Neither is touched: this phase does NOT reopen
+    //     KafkaFuture_RecordMetadata_destroy_all. ⚠ The SYNC flavor had NO pump until M11/P4.2:
+    //     it completed on the caller's own thread via the blocking KafkaFuture_RecordMetadata_get.
+    //     Since M11/P4.2 (D4) its single future is read by the same pump — see the section comment
+    //     above FutureRecordMetadataGet. M11/P3.1 touched neither: that phase does NOT reopen
     //     pull-vs-push, and it moves only the SEND submission side of the async flavor.
     //
     // Why the reversal is on the record rather than silent: Option A was analysed and NOT

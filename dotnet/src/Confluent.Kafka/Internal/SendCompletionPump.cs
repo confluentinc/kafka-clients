@@ -49,7 +49,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>One queue for both entry kinds (M11/P4.2 decision D11 (a)).</b> Each producer object owns its
 /// own pump, and a producer exposes either the sync or the async surface (decision S-4), so in
 /// practice a pump holds singles or groups, never both. They share one queue anyway, under a common
-/// <see cref="PendingEntry"/> base, so one ordering and one set of teardown paths — the enqueue gate
+/// <see cref="PendingEntry"/> base, so one ordering and one set of fault paths — the enqueue gate
 /// (<see cref="EnqueueEntry"/>), the terminal drain (<see cref="DrainAndFaultRemaining"/>) and
 /// <see cref="RunLoop"/>'s <c>catch</c> — cover both. <see cref="RunLoop"/> dispatches on the
 /// entry's kind: <see cref="ProcessSingle"/> for a single, <see cref="ProcessGroup"/> for a group,
@@ -190,7 +190,7 @@ internal sealed class SendCompletionPump
 
     // One entry per send_batch CALL (M11/P3.2 §3B.1), not per record: the anchor's completion unit —
     // or, on the sync surface, one entry per sync send (M11/P4.2 S2, D11 (a): the same queue, so one
-    // ordering and one set of teardown paths cover both entry kinds).
+    // ordering and one set of fault paths cover both entry kinds).
     private readonly ConcurrentQueue<PendingEntry> _queue = new ConcurrentQueue<PendingEntry>();
 
     // D9 (M11/P4.2): the pump, if any, whose loop runs on the calling thread. RunLoop sets it once, on
