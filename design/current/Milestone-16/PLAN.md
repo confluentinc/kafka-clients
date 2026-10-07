@@ -660,7 +660,7 @@ Phase 2 completion notes (agent 92):
   | 2 consumer, with tests (5b2eef8d) | 20:59 | 21:04 | 5 |
   | 3 integration test (37617f3c) | 21:04 | 21:08 | 4 |
   | 4 gates: format-check, `lint --keep-going` + fixes (c81ffa34), full `cargo test` | 21:08 | 21:18 | 10 |
-  | 5 `make -k verify` (~15 min of it), then these notes | 21:18 | 21:36 | 18 |
+  | 5 `make -k verify`, then these notes | 21:18 | 21:21 | 3 |
 
 - **Verification:**
   - `cargo build` passes. `cargo xtask format-check` passes.
@@ -668,7 +668,7 @@ Phase 2 completion notes (agent 92):
   - `cargo xtask lint --keep-going`: lint-custom reports exactly the 15 remaining §5.1 rows (Phase 5 2,
     Phases 7/8 2, Phase 9 1, Phase 11 10), nothing new. Every other step is clean: doc-hygiene,
     module-path-hygiene, and the default, `--all-features` and xtask clippy passes.
-  - `make -k verify` (macOS, 21:18–21:33) fails in three targets, for the same reasons as in Phase 1:
+  - `make -k verify` (macOS, started 21:18) fails in three targets, for the same reasons as in Phase 1:
     - `build-c`: `cmake: command not found` (environment);
     - `lint`: the 15 §5.1 rows only;
     - `test-rust-all-features`: 4508 passed, 17 failed, 3 ignored. All 17 are Docker-backed
