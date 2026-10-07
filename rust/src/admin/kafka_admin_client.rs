@@ -940,7 +940,7 @@ impl CallSender {
         {
             let mut call = call;
             // `new IllegalStateException("Cannot accept new calls when AdminClient
-            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
+            // is closing.")` (`KafkaAdminClient.java:1709`) — Java's text verbatim
             // (finding 247a).
             call.handle_failure(&Error::local_illegal_state(
                 "Cannot accept new calls when AdminClient is closing.",
@@ -953,7 +953,7 @@ impl CallSender {
             let mut call = call;
             // `new UnsupportedEndpointTypeException("This Admin API is not yet
             // supported when communicating directly with the controller quorum.")`
-            // (`KafkaAdminClient.java:1591-1593`). Spelling it
+            // (`KafkaAdminClient.java:1711-1713`). Spelling it
             // `Error::unsupported_version` gave it code 35, which
             // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
             // retry instead of failing the call (finding 247b).
@@ -961,7 +961,7 @@ impl CallSender {
             // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
             // non-retriable, non-`UnsupportedVersionException` error on a call that
             // has not yet passed its deadline is `handleFailure(throwable)`
-            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+            // (`KafkaAdminClient.java:1002-1008`) — what is invoked here.
             call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
                 "This Admin API is not yet supported when communicating directly with the controller quorum.",
             )));
@@ -992,8 +992,8 @@ impl CallSender {
             Ok(()) => self.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
                 // `new TimeoutException("The AdminClient thread has exited.")`
-                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
-                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
+                // (`KafkaAdminClient.java:1693-1694`). `handleTimeoutFailure`
+                // short-circuits on `cause instanceof TimeoutException` (`:1040-1042`),
                 // so the user sees exactly a `TimeoutException` — a
                 // `RetriableException`. `illegal_state` sits outside the
                 // `KafkaException` hierarchy entirely, so it answered `false` to both
@@ -7065,10 +7065,10 @@ mod tests {
         assert_eq!(err3.error(), Errors::UnknownTopicId);
     }
 
-    /// `KafkaAdminClient.java:1573-1574` fails a call submitted after the I/O
+    /// `KafkaAdminClient.java:1693-1694` fails a call submitted after the I/O
     /// thread is gone with `new TimeoutException("The AdminClient thread has
     /// exited.")`, and `handleTimeoutFailure` short-circuits on
-    /// `cause instanceof TimeoutException` (`:959-961`) so the user sees exactly a
+    /// `cause instanceof TimeoutException` (`:1040-1042`) so the user sees exactly a
     /// `TimeoutException` — i.e. a `RetriableException`.
     ///
     /// This used to be `Error::local_illegal_state`, whose `ErrorHierarchy` is empty, so
@@ -7112,7 +7112,7 @@ mod tests {
     /// ```
     ///
     /// The Rust message used to gain an invented `"Aborted due to timeout: "`
-    /// prefix, drop the `Call(...)` rendering of `this` (`:1001-1004`), and append
+    /// prefix, drop the `Call(...)` rendering of `this` (`:1082-1085`), and append
     /// the cause as text — leaving `Error::source()` empty where Java's
     /// `getCause()` is populated.
     #[tokio::test]
@@ -14008,7 +14008,7 @@ mod tests {
     /// Regression for finding 247(a). Java rejects a call submitted once the
     /// client is closing with
     /// `new IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")` (`KafkaAdminClient.java:1589`). The Rust text had drifted to
+    /// closing.")` (`KafkaAdminClient.java:1709`). The Rust text had drifted to
     /// "The AdminClient is closed.", which is not the sanctioned
     /// "exception"->"error" rewording.
     #[tokio::test]

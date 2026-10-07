@@ -228,7 +228,7 @@ pub(crate) struct Call {
 }
 
 impl std::fmt::Display for Call {
-    /// `Call.toString()` (`KafkaAdminClient.java:1001-1004`):
+    /// `Call.toString()` (`KafkaAdminClient.java:1082-1085`):
     ///
     /// ```java
     /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
@@ -358,8 +358,8 @@ impl Call {
             cause
         } else {
             // `new TimeoutException(this + " timed out at " + now + " after " + tries
-            // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
-            // renders through `Call.toString()` (`:1001-1004`).
+            // + " attempt(s)", cause)` (`KafkaAdminClient.java:1043-1044`), where `this`
+            // renders through `Call.toString()` (`:1082-1085`).
             //
             // The message used to gain an invented `"Aborted due to timeout: "`
             // prefix (a string that appears nowhere in the Kafka tree), drop the
