@@ -7218,6 +7218,43 @@ mod tests {
         producer.close_with_timeout(Duration::ZERO).await.unwrap();
     }
 
+    /// Critic 92, Issue 2: the C / Python producer destroy path closes the
+    /// producer and drops the runtime it built. With a slow bootstrap lookup in
+    /// flight that now returns within Java's bound; with the lookup on that
+    /// runtime's blocking pool the drop waited for every remaining lookup.
+    #[test]
+    fn test_close_and_runtime_drop_are_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        let servers: Vec<String> = (0..3)
+            .map(|i| format!("host{i}{}:9092", crate::ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect();
+        let props = HashMap::from([
+            (ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.join(",")),
+            (
+                ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "120000".to_string(),
+            ),
+        ]);
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let producer = runtime.block_on(async {
+            KafkaProducer::<String, String>::new(
+                ProducerConfig::new(&props).unwrap(),
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+            )
+            .expect("a positive timeout defers resolution, so construction succeeds")
+        });
+        let started = std::time::Instant::now();
+        runtime.block_on(async {
+            // Let the sender poll so the resolution is surely in flight.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            producer.close_with_timeout(Duration::ZERO).await.unwrap();
+        });
+        drop(producer);
+        drop(runtime);
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(4), "close + runtime drop took {elapsed:?}");
+    }
+
     /// Translated from
     /// `KafkaProducerTest.testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
     /// (KAFKA-20939): the default `bootstrap.resolve.timeout.ms=0` resolves DNS

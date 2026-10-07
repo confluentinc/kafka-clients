@@ -191,6 +191,14 @@ impl ClientUtils {
     /// `InetSocketAddress` resolution, as [`Self::parse_and_validate_addresses`]
     /// and [`Self::parse_addresses`] use it.
     fn system_resolve_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        // Test seam: a lookup that hangs like an unreachable DNS server, then
+        // fails, so tests can exercise a slow bootstrap resolution through the
+        // production clients without real DNS.
+        #[cfg(test)]
+        if host.ends_with(Self::SLOW_TEST_HOST_SUFFIX) {
+            std::thread::sleep(Self::SLOW_TEST_HOST_DELAY);
+            return Err(io::Error::new(io::ErrorKind::TimedOut, host.to_string()));
+        }
         // `InetAddress.getAllByName("")` (and so `new InetSocketAddress("", port)`)
         // is the loopback address with no lookup; `getaddrinfo("")` fails.
         if host.is_empty() {
@@ -198,6 +206,14 @@ impl ClientUtils {
         }
         (host, port).to_socket_addrs().map(Iterator::collect)
     }
+
+    /// Host-name suffix whose lookup takes [`Self::SLOW_TEST_HOST_DELAY`] and
+    /// then fails (test-only).
+    #[cfg(test)]
+    pub(crate) const SLOW_TEST_HOST_SUFFIX: &str = ".slow-dns.kafka.test";
+    /// How long a [`Self::SLOW_TEST_HOST_SUFFIX`] lookup hangs.
+    #[cfg(test)]
+    pub(crate) const SLOW_TEST_HOST_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Resolves bootstrap URLs without validating them, ignoring any URL whose
     /// host cannot be resolved.
@@ -209,36 +225,53 @@ impl ClientUtils {
     /// expires. The URLs were validated up front by
     /// [`BootstrapConfiguration::enabled`](crate::BootstrapConfiguration::enabled).
     ///
-    /// Java's `Thread.currentThread().isInterrupted()` early exit has no
-    /// counterpart: Rust threads are not interruptible. A cancelled resolution
-    /// still runs to completion; its result is dropped (see
-    /// `NetworkClient::cancel_bootstrap_resolution`).
+    /// `is_interrupted` is Java's `Thread.currentThread().isInterrupted()`,
+    /// checked before each URL (`ClientUtils.java:105-107`): once it answers
+    /// `true` the loop stops and returns what it has. `NetworkClient` passes
+    /// "the result receiver was dropped", which is how it cancels a resolution
+    /// (Java's `shutdownNow()` interrupt on `close()`).
     ///
     /// An out-of-range port is not "Unknown host": Java's `InetSocketAddress`
     /// constructor throws `IllegalArgumentException`, which `parseAddresses`
     /// does not catch, so the whole attempt fails and `NetworkClient` treats it
     /// as an unresolved attempt. That is what the empty result here means too.
     #[doc(alias = "org.apache.kafka.clients.ClientUtils#parseAddresses")]
-    pub(crate) fn parse_addresses(urls: &[String], client_dns_lookup: ClientDnsLookup) -> Vec<(String, SocketAddr)> {
-        Self::parse_addresses_with_lookup(urls, client_dns_lookup, Self::system_resolve_all, |address| {
-            address.to_string()
-        })
+    pub(crate) fn parse_addresses<I>(
+        urls: &[String],
+        client_dns_lookup: ClientDnsLookup,
+        is_interrupted: I,
+    ) -> Vec<(String, SocketAddr)>
+    where
+        I: Fn() -> bool,
+    {
+        Self::parse_addresses_with_lookup(
+            urls,
+            client_dns_lookup,
+            is_interrupted,
+            Self::system_resolve_all,
+            |address| address.to_string(),
+        )
     }
 
     /// Body of [`Self::parse_addresses`] with its name-service calls injected,
     /// as for [`Self::parse_and_validate_addresses_with_lookup`].
-    fn parse_addresses_with_lookup<R, C>(
+    fn parse_addresses_with_lookup<I, R, C>(
         urls: &[String],
         client_dns_lookup: ClientDnsLookup,
+        is_interrupted: I,
         resolve_all: R,
         canonical_host_name: C,
     ) -> Vec<(String, SocketAddr)>
     where
+        I: Fn() -> bool,
         R: Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
         C: Fn(IpAddr) -> String,
     {
         let mut addresses = Vec::new();
         for url in urls {
+            if is_interrupted() {
+                break;
+            }
             // `getHost(url)` / `getPort(url)` returning `null` cannot happen
             // here (`BootstrapConfiguration.enabled` rejected such URLs); skip
             // one anyway rather than abort, as no address can come from it.
@@ -1170,10 +1203,10 @@ mod tests {
             ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
         ] {
             assert_eq!(
-                ClientUtils::parse_addresses(&urls(&["127.0.0.1:8000"]), mode),
+                ClientUtils::parse_addresses(&urls(&["127.0.0.1:8000"]), mode, || false),
                 vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]
             );
-            assert!(ClientUtils::parse_addresses(&[], mode).is_empty());
+            assert!(ClientUtils::parse_addresses(&[], mode, || false).is_empty());
         }
 
         // An unknown host: skipped in both modes (canonical mode's
@@ -1187,14 +1220,20 @@ mod tests {
         };
         let both = urls(&["unknown:9092", "known:9092"]);
         assert_eq!(
-            ClientUtils::parse_addresses_with_lookup(&both, ClientDnsLookup::UseAllDnsIps, resolve_all, |a| a
-                .to_string()),
+            ClientUtils::parse_addresses_with_lookup(
+                &both,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            ),
             vec![("known".to_string(), "10.0.0.1:9092".parse().unwrap())]
         );
         assert_eq!(
             ClientUtils::parse_addresses_with_lookup(
                 &both,
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+                || false,
                 resolve_all,
                 |a| a.to_string()
             ),
@@ -1202,8 +1241,13 @@ mod tests {
         );
         let unresolvable = urls(&["unknown:9092"]);
         assert!(
-            ClientUtils::parse_addresses_with_lookup(&unresolvable, ClientDnsLookup::UseAllDnsIps, resolve_all, |a| a
-                .to_string())
+            ClientUtils::parse_addresses_with_lookup(
+                &unresolvable,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            )
             .is_empty()
         );
 
@@ -1211,10 +1255,39 @@ mod tests {
         // the whole attempt fails, even with a good URL beside it.
         let bad_port = urls(&["known:9092", "known:70000"]);
         assert!(
-            ClientUtils::parse_addresses_with_lookup(&bad_port, ClientDnsLookup::UseAllDnsIps, resolve_all, |a| a
-                .to_string())
+            ClientUtils::parse_addresses_with_lookup(
+                &bad_port,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            )
             .is_empty()
         );
+    }
+
+    /// `parseAddresses` checks `isInterrupted()` before each URL and stops
+    /// there (`ClientUtils.java:105-107`); the addresses resolved so far are
+    /// returned and no further lookup runs.
+    #[test]
+    fn test_parse_addresses_stops_once_interrupted() {
+        let lookups = std::sync::atomic::AtomicUsize::new(0);
+        let interrupted = std::sync::atomic::AtomicBool::new(false);
+        let urls: Vec<String> = ["a:9092", "b:9092", "c:9092"].iter().map(|u| u.to_string()).collect();
+        let addresses = ClientUtils::parse_addresses_with_lookup(
+            &urls,
+            ClientDnsLookup::UseAllDnsIps,
+            || interrupted.load(std::sync::atomic::Ordering::SeqCst),
+            |_host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+                lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Interrupted while the first lookup is in progress.
+                interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)])
+            },
+            |a| a.to_string(),
+        );
+        assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(addresses, vec![("a".to_string(), "127.0.0.1:9092".parse().unwrap())]);
     }
 
     /// `bootstrapConfiguration` (KIP-909): `0` is `DISABLED`, a positive value

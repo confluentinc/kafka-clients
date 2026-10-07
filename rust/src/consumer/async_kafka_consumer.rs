@@ -6895,6 +6895,59 @@ mod tests {
         consumer.close().await.unwrap();
     }
 
+    /// Critic 92, Issue 2: built as the C / Python bindings build it — outside
+    /// any runtime, so every resolution attempt is started from the consumer's
+    /// own `kafka-consumer-io` runtime — `close_with_options(1 s)` returns within
+    /// Java's bound (1 s, plus at most 2 s waiting on the resolver) while slow
+    /// lookups are in flight. With the resolution on that runtime's blocking pool,
+    /// three 5 s lookups held `close()` for ~15 s.
+    #[test]
+    fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        use std::collections::HashMap;
+
+        use crate::ClientUtils;
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::{CloseOptions, KafkaConsumer};
+
+        let servers: Vec<String> = (0..3)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect();
+        let props = HashMap::from([
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.join(",")),
+            (
+                ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "120000".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let mut consumer = KafkaConsumer::new::<String, String>(
+            ConsumerConfig::new(&props).unwrap(),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let elapsed = runtime.block_on(async move {
+            consumer
+                .subscribe_with_topics(vec!["topic".to_string()])
+                .await
+                .expect("subscribe");
+            consumer
+                .poll(Duration::from_millis(100))
+                .await
+                .expect("poll while bootstrapping");
+            let started = std::time::Instant::now();
+            consumer
+                .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+                .await
+                .expect("close");
+            started.elapsed()
+        });
+        assert!(elapsed < Duration::from_secs(5), "close_with_options(1 s) took {elapsed:?}");
+    }
+
     /// Translated from
     /// `KafkaConsumerTest.testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
     /// (KAFKA-20939), for `GroupProtocol.CONSUMER` (`CLASSIC` is out of scope,

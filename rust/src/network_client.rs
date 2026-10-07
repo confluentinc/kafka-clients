@@ -75,22 +75,24 @@ const STATE_CLOSED: u8 = 2;
 /// An asynchronous bootstrap DNS resolution in progress (KIP-909).
 ///
 /// Java's `CompletableFuture<List<InetSocketAddress>> pendingBootstrapResolution`,
-/// run on the `kafka-bootstrap-dns-resolver` single-thread executor. Rust runs
-/// [`ClientUtils::parse_addresses`] — a blocking `getaddrinfo` — on tokio's
-/// blocking pool instead (`spawn_blocking`), which plays the executor's part
-/// without a dedicated thread per client (DoD #7). The event loop never awaits
-/// it: `poll()` only `try_recv`s the result, so the resolution can never sit in
-/// a `select!` arm or hold up the network poll (CLAUDE.md §11.6,
-/// consumer-threading.md §10).
+/// run on the `kafka-bootstrap-dns-resolver` daemon thread of a single-thread
+/// executor. Rust runs [`ClientUtils::parse_addresses`] — a blocking
+/// `getaddrinfo` loop — on a detached OS thread of the same name, one per
+/// attempt (attempts never overlap, so this is the executor's one thread at a
+/// time). No tokio runtime owns that thread, so it can never hold up a runtime's
+/// shutdown (a `spawn_blocking` task would: dropping a runtime waits for its
+/// running blocking tasks without bound), and, as a Java daemon thread, it does
+/// not keep the process alive (DoD #7).
+///
+/// The event loop never awaits the result: `poll()` only `try_recv`s it, so the
+/// resolution can never sit in a `select!` arm or hold up the network poll
+/// (CLAUDE.md §11.6, consumer-threading.md §10).
 struct PendingBootstrapResolution {
-    /// Java's `isDone()` / `getNow()`. Closed without a value when the task
-    /// failed, Java's `CompletionException`.
+    /// Java's `isDone()` / `getNow()`. Closed without a value when the thread
+    /// failed, Java's `CompletionException`. Dropping it is Java's
+    /// `cancel(true)` plus the `shutdownNow()` interrupt: the thread's
+    /// `is_interrupted` check sees the closed channel and stops at the next URL.
     result: tokio::sync::oneshot::Receiver<Vec<(String, SocketAddr)>>,
-    /// Java's `cancel(true)`: aborting stops a resolution that has not started
-    /// yet. One already running cannot be interrupted (`getaddrinfo` is not
-    /// interruptible, and Rust threads have no interrupt); its result is
-    /// dropped with the receiver.
-    task: tokio::task::JoinHandle<()>,
 }
 
 /// Data for an in-progress metadata request.
@@ -198,6 +200,10 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// Java's `bootstrapException`: set once the timeout expired; never
     /// cleared.
     bootstrap_error: Option<BootstrapResolutionError>,
+    /// Closed when the latest resolver thread exits: what `close()` waits on
+    /// in place of Java's `bootstrapExecutor.awaitTermination`. Kept after the
+    /// attempt is cancelled, as Java's executor still runs a cancelled task.
+    bootstrap_resolver_exit: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Names one concrete instantiation of [`NetworkClient`] so its
@@ -373,6 +379,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             pending_bootstrap_resolution: None,
             bootstrap_resolution_retry_ms: -1,
             bootstrap_error: None,
+            bootstrap_resolver_exit: None,
         }
     }
 
@@ -456,6 +463,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             pending_bootstrap_resolution: None,
             bootstrap_resolution_retry_ms: -1,
             bootstrap_error: None,
+            bootstrap_resolver_exit: None,
         }
     }
 
@@ -469,8 +477,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// first DNS resolution at once, so it overlaps with the caller finishing
     /// construction. The timer is deliberately not started here: `poll()`
     /// remains the driver — it starts the timer, observes the result, records
-    /// the failure and drives retries. Outside a tokio runtime the first
-    /// resolution starts on the first `poll()` instead.
+    /// the failure and drives retries.
     pub fn set_bootstrap_configuration(&mut self, bootstrap_configuration: BootstrapConfiguration) {
         self.cancel_bootstrap_resolution();
         self.bootstrap_configuration = bootstrap_configuration;
@@ -479,7 +486,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         // and the first poll should not eat into that budget.
         self.bootstrap_deadline_ms = None;
         if !self.bootstrap_configuration.is_disabled() {
-            self.pending_bootstrap_resolution = self.start_bootstrap_resolution();
+            self.start_bootstrap_resolution();
         }
     }
 
@@ -1410,31 +1417,84 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.bootstrap_resolution_retry_ms = -1;
         self.maybe_start_bootstrap_timer();
 
-        self.pending_bootstrap_resolution = self.start_bootstrap_resolution();
+        self.start_bootstrap_resolution();
     }
 
     /// Java's `CompletableFuture.supplyAsync(() -> ClientUtils.parseAddresses(..),
-    /// bootstrapExecutor)`. `None` outside a tokio runtime, which only the
-    /// constructor-time start can meet (see
-    /// [`set_bootstrap_configuration`](Self::set_bootstrap_configuration));
-    /// `poll()` then starts it.
+    /// bootstrapExecutor)`, on a detached `kafka-bootstrap-dns-resolver` thread
+    /// (see [`PendingBootstrapResolution`]). If the thread cannot be spawned
+    /// the attempt counts as failed and is retried after the backoff, as a
+    /// failed `supplyAsync` task would be.
     ///
-    /// The task pokes the selector's wakeup primitive once the result is in, so
-    /// a poll blocked on its timeout picks it up at once rather than after the
-    /// timeout. Java has no such wake; it is a latency improvement only, and a
-    /// woken poll returning early is always allowed.
-    fn start_bootstrap_resolution(&self) -> Option<PendingBootstrapResolution> {
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let urls = self.bootstrap_configuration.bootstrap_servers.clone();
+    /// The thread pokes the selector's wakeup primitive once the result is in,
+    /// so a poll blocked on its timeout picks it up at once rather than after
+    /// the timeout. Java has no such wake; it is a latency improvement only, and
+    /// a woken poll returning early is always allowed.
+    fn start_bootstrap_resolution(&mut self) {
         // `enabled` always sets it; `DISABLED` never starts a resolution.
-        let client_dns_lookup = self.bootstrap_configuration.client_dns_lookup?;
+        let Some(client_dns_lookup) = self.bootstrap_configuration.client_dns_lookup else {
+            return;
+        };
+        let urls = self.bootstrap_configuration.bootstrap_servers.clone();
         let wakeup = self.selector.wakeup_handle();
         let (sender, result) = tokio::sync::oneshot::channel();
-        let task = runtime.spawn_blocking(move || {
-            let _ = sender.send(ClientUtils::parse_addresses(&urls, client_dns_lookup));
-            wakeup.notify_one();
-        });
-        Some(PendingBootstrapResolution { result, task })
+        let (exit_sender, exit) = tokio::sync::oneshot::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("kafka-bootstrap-dns-resolver".to_string())
+            .spawn(move || {
+                // Dropped when the thread ends, however it ends.
+                let _exit = exit_sender;
+                // `Thread.currentThread().isInterrupted()`: the attempt was
+                // cancelled once its result receiver is gone.
+                let servers = ClientUtils::parse_addresses(&urls, client_dns_lookup, || sender.is_closed());
+                let _ = sender.send(servers);
+                wakeup.notify_one();
+            });
+        match spawned {
+            // Detached: the `JoinHandle` is dropped, as Java never joins the
+            // executor's thread.
+            Ok(_) => self.bootstrap_resolver_exit = Some(exit),
+            Err(error) => {
+                kafka_warn!(self.log_context, "Could not start bootstrap DNS resolution: {}", error);
+            },
+        }
+        // Without a thread the sender is already gone, so the next poll sees a
+        // failed attempt and schedules the retry.
+        self.pending_bootstrap_resolution = Some(PendingBootstrapResolution { result });
+    }
+
+    /// How long `close()` waits for the resolver thread per phase: Java's
+    /// `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1,
+    /// TimeUnit.SECONDS)` (`NetworkClient.java:806`).
+    const BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Java's `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1, SECONDS)`
+    /// (`ThreadUtils.java:95-117`): wait up to 1 s for the resolver to finish,
+    /// then interrupt it (`shutdownNow()`) and wait up to 1 s more, then give up
+    /// with Java's error log. The Rust interrupt — the closed result channel —
+    /// was already delivered by `cancel_bootstrap_resolution`, which `close()`
+    /// runs first, so the two waits differ only in what is logged. The thread is
+    /// detached: giving up leaves it to finish its current lookup and exit on
+    /// its own, without blocking anything.
+    async fn shutdown_bootstrap_resolver_quietly(&mut self) {
+        let Some(mut exit) = self.bootstrap_resolver_exit.take() else {
+            return;
+        };
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_err()
+        {
+            kafka_error!(
+                self.log_context,
+                "Executor kafka-bootstrap-dns-resolver did not terminate in time"
+            );
+        }
     }
 
     /// Check if a pending bootstrap DNS resolution has completed and process
@@ -1485,9 +1545,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Java's `cancelBootstrapResolution`.
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#cancelBootstrapResolution")]
     fn cancel_bootstrap_resolution(&mut self) {
-        if let Some(pending) = self.pending_bootstrap_resolution.take() {
-            pending.task.abort();
-        }
+        // Dropping the receiver interrupts the resolver thread at its next URL.
+        self.pending_bootstrap_resolution = None;
         self.bootstrap_resolution_retry_ms = -1;
     }
 
@@ -2057,9 +2116,8 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             .compare_exchange(STATE_CLOSING, STATE_CLOSED, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            // Java also shuts the `bootstrapExecutor` down here; the blocking
-            // pool is tokio's, so cancelling the resolution is all there is.
             self.cancel_bootstrap_resolution();
+            self.shutdown_bootstrap_resolver_quietly().await;
             self.selector.close().await;
             if let Some(ref metadata) = self.metadata {
                 metadata.close();
@@ -5288,6 +5346,60 @@ mod tests {
         assert!(client.pending_bootstrap_resolution.is_none());
         assert!(!client.is_bootstrapped());
         client.close().await;
+    }
+
+    /// Bootstrap hosts whose lookup hangs for `SLOW_TEST_HOST_DELAY` (5 s), then fails.
+    fn slow_bootstrap_hosts(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect()
+    }
+
+    /// Critic 92, Issue 2: `close()` waits for an in-flight resolution no
+    /// longer than Java does — `shutdownExecutorServiceQuietly(.., 1, SECONDS)`,
+    /// at most 1 s, then the interrupt and at most 1 s more
+    /// (`NetworkClient.java:805-806`, `ThreadUtils.java:95-117`) — however slow
+    /// the lookups are. Three 5 s lookups used to hold `close()` (and the
+    /// runtime drop behind it) for all 15 s.
+    #[tokio::test]
+    async fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        let config =
+            BootstrapConfiguration::enabled(&slow_bootstrap_hosts(3), ClientDnsLookup::UseAllDnsIps, 60_000, 100)
+                .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+        client.poll(0, 1).await;
+        assert!(client.pending_bootstrap_resolution.is_some(), "the resolution is in flight");
+
+        let started = std::time::Instant::now();
+        client.close().await;
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "close() took {elapsed:?}");
+        assert!(client.pending_bootstrap_resolution.is_none());
+    }
+
+    /// The resolver runs on a detached thread that no runtime owns: dropping
+    /// the runtime the client was polled on does not wait for it.
+    #[test]
+    fn test_runtime_drop_does_not_wait_for_a_bootstrap_resolution() {
+        let started = std::time::Instant::now();
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let config = BootstrapConfiguration::enabled(
+                    &slow_bootstrap_hosts(3),
+                    ClientDnsLookup::UseAllDnsIps,
+                    60_000,
+                    100,
+                )
+                .unwrap();
+                let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+                client.poll(0, 1).await;
+                assert!(client.pending_bootstrap_resolution.is_some());
+                // Dropped unclosed, with the lookup in flight.
+            });
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(2), "runtime drop took {elapsed:?}");
     }
 
     /// `handleEmptyNodeList`: before bootstrap completes `leastLoadedNode`
