@@ -677,3 +677,23 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
 - **S2** `b838e120` `feat(dotnet): single-future path through the send-completion pump (M11/P4.2 S2)` — private `PendingEntry` base (`Count`/`Fault`/`DestroyFutures`) of the unchanged `PendingSendBatch` and the new `PendingSyncSend` (`Count => 1`); one `ConcurrentQueue<PendingEntry>`; `Enqueue` and `EnqueueSingle` share one private gate `EnqueueEntry` under `_stopLock`; `DequeueGroup` counts `entry.Count` into `_drainedSends`; `RunLoop` dispatches `PendingSyncSend` → `ProcessSingle` (singular get → copy-out → `Fire` → `TrySet*`; destroy in the outer `finally`), else `ProcessGroup` unchanged; drain / RunLoop catch fault via `entry.Fault`. D9: `[ThreadStatic] s_currentPump` set at the top of `RunLoop`; `SyncCompletion(SendCompletionPump? owner = null)` throws the D9 message inside the locked wait only when not done and the owner is the current pump; `internal bool IsDone` added as a test probe. Tests T1–T7, T9–T12 (11/TFM). **T8 not written: no RunLoop-catch fault seam exists, none invented → Critic structural check (and M9 likewise).** Gates: build 0W/0E; unit **2994/TFM**, soak 165/TFM, format clean; perf-unit 39/TFM; async suites `git diff --stat 742b1911..HEAD` over Gate/PreStopDrain/Grouping/DrainCap/`SendAccumulator*Tests` empty; Mode A unchanged. Not wired (S3).
   - **Manager decision M-1 (internal shape, not a ruling):** PLAN §3 makes `PendingEntry` private, so `PendingSyncSend` is private too (CS0060) and `EnqueueSingle` allocates the entry itself — so in S3 the **entry** is allocated after `Producer_send`, inside the enqueue, while the **completion** is still allocated before it. Accepted: the extra allocation is OOM-only and sits inside the residual-4 window that the enqueue already has (`ConcurrentQueue` segment growth); pre-allocating the entry would need a mutable future field. §3's "allocate the completion and the entry before `Producer_send`" is read as "the completion before; the entry within the enqueue". M15 (completion after `Producer_send`) is unaffected.
   - Noted for Critic pass 1: the batch `Enqueue` now builds its `PendingSendBatch` before the gate (also on the stopped branch); pre-existing pump comments asserting "ONLY" free sites (`:609`) may now be stale.
+- **S2m** (Actor 93; production byte-identical to HEAD afterwards; net10.0 unless noted):
+
+  | Row | Mutation | Target | Regime | Result |
+  |---|---|---|---|---|
+  | M1 | default `Get` returns `default!` | N1 | det ×3 | red 3/3 |
+  | M2 | `PulseAll` before the stores (same `lock`) | N6, N2 | timing K=8, both TFMs | **equivalent** (0/8 ×4): a woken waiter cannot re-acquire the lock before both stores |
+  | M2′ | `_done = true` before `_value` (lock-free fast path) | N6 | timing K=8, both TFMs | **survived the original N6** (net10.0 1/8, net8.0 5/8) → N6 strengthened in `b2657cb9`; then **8/8 red on both TFMs**, restored tree 8/8 green |
+  | M3 | `Pulse` for `PulseAll` | N4 | timing K=8 | red 8/8 (30 s Join bound) |
+  | M4a/b | second `TrySet*` overwrites | N5 | det ×3 | red 3/3 each (also T10) |
+  | M5a/b | `AggregateException` / fresh copy | N3 | det ×3 | red 3/3 each |
+  | M6 | — | — | — | removed with D7 |
+  | M7 | gate skips `_stopped` for singles | T5 | det ×3 | red 3/3 |
+  | M8 | drain skips `PendingSyncSend` | T6 | det ×3 | red 3/3 |
+  | M9 | RunLoop catch faults batches only | — | — | **structural** (no seam): catch must call `FaultGroupCompletions` on the untyped `PendingEntry`, `PendingSyncSend.Fault` must reach `TrySetException`, loop continues |
+  | M10 | `TrySet*` before `Fire` (3 sites) | T2 | det ×3 | red 3/3 (also T1, T10); the CopyOut-catch site's order is structural |
+  | M11 | drop `FutureRecordMetadataDestroy` | — | 1 run, both TFMs | **structural**: all green — a native leak no managed assertion sees |
+  | M12 | D9 keyed on any pump | T12 | det ×3 | red 3/3 |
+
+  Fixup `b2657cb9` `fixup! feat(dotnet): KafkaFuture<T>, …(M11/P4.2 S1)` (tests only): N6 gains a 20,000-latch lockstep phase (read-at-once and spin-on-`IsDone` shapes; also catches `_done` before `_error`); N6 ≈ 46 → 100 ms (net10.0), 265 ms (net8.0). Restore gate: build 0W/0E; test-dotnet unit 2994/TFM, soak 165/TFM, format clean.
+  Actor proposal held for the user (not applied — rule file): an ffi-marshalling.md test note that a lock-free fast-path store-reorder mutant needs a measured dedicated race.
