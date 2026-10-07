@@ -1175,6 +1175,9 @@ mod tests {
     use super::*;
     use crate::common::protocol::{Message, ObjectSerializationCache};
 
+    /// Builds the serialized default data of one response type at a version.
+    type DefaultBytes = fn(i16) -> Vec<u8>;
+
     /// Serializes the default (all-fields-default) data of a response at `version`.
     fn serialize_default<M: Message>(mut data: M, version: i16) -> Vec<u8> {
         let mut cache = ObjectSerializationCache::new();
@@ -1236,11 +1239,11 @@ mod tests {
         macro_rules! default_responses {
             ($(($key:ident, $data:ty)),* $(,)?) => {
                 vec![$(
-                    (&ApiKeys::$key, (|version| serialize_default(<$data>::new(), version)) as fn(i16) -> Vec<u8>)
+                    (&ApiKeys::$key, (|version| serialize_default(<$data>::new(), version)) as DefaultBytes)
                 ),*]
             };
         }
-        let responses: Vec<(&ApiKeys, fn(i16) -> Vec<u8>)> = default_responses![
+        let responses: Vec<(&ApiKeys, DefaultBytes)> = default_responses![
             (API_VERSIONS, crate::ApiVersionsResponseData),
             (METADATA, crate::MetadataResponseData),
             (PRODUCE, crate::ProduceResponseData),
