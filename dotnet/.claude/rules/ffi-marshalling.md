@@ -297,9 +297,11 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     any wait, so ordering needs no queue or submitter; the M11/P3.2 machinery was
     deleted.
   - **The bound must throttle a caller that awaits admission — so admission must be
-    awaitable.** `IAsyncProducer.Send` returns `ValueTask<Task<RecordMetadata>>`: the
-    outer stage completes on admission (never parking a thread), the inner `Task` is
-    delivery. An async wait behind a *single-stage* `Task` throttles nobody (measured
+    awaitable.** `IAsyncProducer.Send` returns
+    `ValueTask<AsyncKafkaFuture<RecordMetadata>>`: the outer stage completes on
+    admission (never parking a thread), the inner `AsyncKafkaFuture` is delivery (its
+    `Get()` is the delivery `Task`, M11/P3.6).
+    An async wait behind a *single-stage* `Task` throttles nobody (measured
     twice: M11/P6 63.5k/3.0 GB; M11/P3.2 2.04 GiB). A caller that does not await the
     outer stage — or whose own token ends it early (M11/P3.5 D2 (c); the record is
     still sent) — is deliberately not throttled (Python parity, M11/P3.5 D6), and that
@@ -376,6 +378,11 @@ pump deadlock-free (the Sender runs on other worker threads).
     continuation that can run on the batch or pump thread; a stage 1 that faults or
     cancels at teardown; a `SendViaPump` / `SubmitAdmitted` that is `async` or can
     throw after the append.
+  - Wrapping the stage at the public boundary (an `async` adapter or a `ContinueWith`
+    from an internal `ValueTask<Task<…>>`) instead of building the `AsyncKafkaFuture`
+    where the stage completes (`SubmitAdmitted` / `CancellableFirstStage`), and boxing
+    it (passing it as an `object` `state`): either one is a per-send allocation on the
+    send path (M11/P3.6).
 
 **Tests required:**
 
@@ -654,8 +661,12 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     hold; only *which* call moved. The **sync** path is unchanged and stays `fixed`.
     ⚠ **Consequence on the public surface:** a deferred send **borrows** the caller's
     buffers past `Send`'s return, so a mutation before the drain IS visible on the wire.
-    **Acceptance is not release:** the `ValueTask` stage completing does not end the
-    borrow — a buffer may be reused only after the delivery `Task` completes.
+    **Acceptance is not release:** the `ValueTask` stage completing (yielding the
+    `AsyncKafkaFuture`) does not end the borrow — a buffer may be reused only after the
+    delivery `Task` (`future.Get()`) completes **without being canceled**, after the
+    record's delivery callback fires, or after a later `Flush` completes successfully. A
+    cancellation from either stage does not end it, and neither does `Close` / `Dispose`
+    returning, whose wait for the send-batch thread is bounded (M11/P3.5 91.11).
     Document that on the **async** surface only — the sync send has no such window, and
     telling sync users to defend against it states a constraint that does not exist.
   - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
@@ -1072,7 +1083,9 @@ with its own measured cost, independent of this surface.
 
 **Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
 `Task<RecordMetadata>`, completed by **one** background pump. `Send` appends
-and returns a `ValueTask<Task<RecordMetadata>>` whose inner `Task` is TCS-backed; the pump blocks
+and returns a `ValueTask<AsyncKafkaFuture<RecordMetadata>>` whose
+`AsyncKafkaFuture` wraps the TCS-backed delivery `Task` (`Get()`);
+the pump blocks
 on the batched `get_all` and completes each TCS. Mirrors the Python binding's
 `poll_futures_thread` (python-ffi.md §6).
 
@@ -1083,7 +1096,7 @@ Send():                          loop:
   pin key/value (call-scoped, §A4)      drain a batch of (future, tcs)
   Producer_send() → future handle       get_all(futures[])   ← BLOCKS
   new TaskCompletionSource (tcs)        tcs[i].SetResult / SetException
-  append; return ValueTask<Task>        destroy_all(futures)
+  append; return ValueTask<Future>      destroy_all(futures)
 Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pending, exit
 ```
 
