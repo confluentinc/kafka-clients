@@ -22,7 +22,10 @@
 //!
 //! Based on Kafka's ByteUtils.java implementation.
 
+use std::cmp::Ordering;
 use std::io::{self, Write};
+
+use crate::common::Error;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.utils.internals.ByteUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -32,6 +35,43 @@ use std::io::{self, Write};
 pub struct ByteUtils;
 
 impl ByteUtils {
+    /// A byte array comparator based on lexicographic ordering.
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils#BYTES_LEXICO_COMPARATOR")]
+    pub const BYTES_LEXICO_COMPARATOR: LexicographicByteArrayComparator = LexicographicByteArrayComparator;
+
+    /// Increment the underlying byte array by adding 1.
+    ///
+    /// Java's argument and result are `Bytes`, a wrapper over a `byte[]`, which has
+    /// no Rust counterpart: a slice in, a new `Vec<u8>` out (Java returns "a new
+    /// copy of the incremented byte array" too). `Vec<u8>`'s `Ord` is the unsigned
+    /// lexicographic order Java's `Bytes.compareTo` uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] if incrementing causes the
+    /// underlying input byte array to overflow, where Java throws
+    /// `IndexOutOfBoundsException` (with no message). Rust has no index-out-of-
+    /// bounds error class; illegal-argument is the precedent this crate uses for
+    /// it (`MockAdminClient`'s builder).
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils#increment")]
+    pub fn increment(input: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut ret = vec![0u8; input.len()];
+        let mut carry = 1u8;
+        for i in (0..input.len()).rev() {
+            if input[i] == 0xFF && carry == 1 {
+                ret[i] = 0x00;
+            } else {
+                ret[i] = input[i].wrapping_add(carry);
+                carry = 0;
+            }
+        }
+        if carry == 0 {
+            Ok(ret)
+        } else {
+            Err(Error::local_illegal_argument("Incrementing the byte array overflowed it"))
+        }
+    }
+
     /// Read an unsigned varint from a byte slice, returning (value, bytes_consumed).
     ///
     /// This uses Protocol Buffers unsigned encoding.
@@ -426,9 +466,137 @@ impl ByteUtils {
     }
 }
 
+/// A comparator over byte arrays.
+///
+/// Java's `ByteUtils.ByteArrayComparator extends Comparator<byte[]>` adds a
+/// `compare(byte[] buffer1, int offset1, int length1, byte[] buffer2, int
+/// offset2, int length2)` overload. A Rust slice carries its own offset and
+/// length, so that overload is this one method called with sub-slices
+/// (`&buffer1[offset1..offset1 + length1]`), as the `ByteBuffer` / `byte[]`
+/// overloads collapse elsewhere in the crate.
+#[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils$ByteArrayComparator")]
+pub trait ByteArrayComparator {
+    /// Compares two byte arrays (Java's `Comparator<byte[]>.compare`).
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils$ByteArrayComparator#compare")]
+    fn compare(&self, buffer1: &[u8], buffer2: &[u8]) -> Ordering;
+}
+
+/// Orders byte arrays lexicographically, comparing bytes as unsigned values.
+#[derive(Clone, Copy, Debug, Default)]
+#[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils$LexicographicByteArrayComparator")]
+pub struct LexicographicByteArrayComparator;
+
+impl ByteArrayComparator for LexicographicByteArrayComparator {
+    /// Java's `Arrays.compareUnsigned` over the two ranges, after short-circuiting
+    /// the case where both name the same range of the same array.
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtils$LexicographicByteArrayComparator#compare")]
+    fn compare(&self, buffer1: &[u8], buffer2: &[u8]) -> Ordering {
+        // short circuit equal case
+        if std::ptr::eq(buffer1, buffer2) {
+            return Ordering::Equal;
+        }
+        // `u8`'s ordering is unsigned, as `Arrays.compareUnsigned` is.
+        buffer1.cmp(buffer2)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtilsTest#testIncrement")]
+    fn test_increment() {
+        let input = [0xAB, 0xCD, 0xFF];
+        let expected = [0xAB, 0xCE, 0x00];
+        let output = ByteUtils::increment(&input).unwrap();
+        assert_eq!(expected.as_slice(), output.as_slice());
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtilsTest#testIncrementUpperBoundary")]
+    fn test_increment_upper_boundary() {
+        let input = [0xFF, 0xFF, 0xFF];
+        let error = ByteUtils::increment(&input).unwrap_err();
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!("Incrementing the byte array overflowed it", error.message());
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtilsTest#testIncrementWithSubmap")]
+    fn test_increment_with_submap() {
+        let mut map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let key1 = vec![0xAA];
+        let val = vec![0x00];
+        map.insert(key1.clone(), val.clone());
+
+        let key2 = vec![0xAA, 0xAA];
+        map.insert(key2.clone(), val.clone());
+
+        let key3 = vec![0xAA, 0x00, 0xFF, 0xFF, 0xFF];
+        map.insert(key3.clone(), val.clone());
+
+        let key4 = vec![0xAB, 0x00];
+        map.insert(key4, val.clone());
+
+        let key5 = vec![0x00, 0x00, 0x00, 0x01];
+        map.insert(key5, val.clone());
+
+        let prefix = key1.clone();
+        let prefix_end = ByteUtils::increment(&prefix).unwrap();
+
+        // A `BTreeMap` has no custom comparator, so Java's
+        // `comparator == null ? prefix.compareTo(prefixEnd) : ..` is the natural order.
+        let sub_map_results: Vec<&Vec<u8>> = if prefix > prefix_end {
+            // Prefix increment would cause a wrap-around. Get the submap from toKey to the end of the map
+            map.range(prefix.clone()..).map(|(k, _)| k).collect()
+        } else {
+            map.range(prefix.clone()..prefix_end).map(|(k, _)| k).collect()
+        };
+
+        let sub_map_expected = [&key1, &key3, &key2];
+        assert_eq!(sub_map_expected.as_slice(), sub_map_results.as_slice());
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ByteUtilsTest#testBytesLexicographicCases")]
+    fn test_bytes_lexicographic_cases() {
+        assert_eq!(Ordering::Equal, cmp("", ""));
+        assert!(cmp("", "aaa").is_lt());
+        assert!(cmp("aaa", "").is_gt());
+
+        assert_eq!(Ordering::Equal, cmp("aaa", "aaa"));
+        assert!(cmp("aaa", "bbb").is_lt());
+        assert!(cmp("bbb", "aaa").is_gt());
+
+        assert!(cmp("aaaaaa", "bbb").is_lt());
+        assert!(cmp("aaa", "bbbbbb").is_lt());
+        assert!(cmp("bbbbbb", "aaa").is_gt());
+        assert!(cmp("bbb", "aaaaaa").is_gt());
+
+        assert!(cmp("common_prefix_aaa", "common_prefix_bbb").is_lt());
+        assert!(cmp("common_prefix_bbb", "common_prefix_aaa").is_gt());
+
+        assert!(cmp("common_prefix_aaaaaa", "common_prefix_bbb").is_lt());
+        assert!(cmp("common_prefix_aaa", "common_prefix_bbbbbb").is_lt());
+        assert!(cmp("common_prefix_bbbbbb", "common_prefix_aaa").is_gt());
+        assert!(cmp("common_prefix_bbb", "common_prefix_aaaaaa").is_gt());
+
+        assert!(cmp("common_prefix", "common_prefix_aaa").is_lt());
+        assert!(cmp("common_prefix_aaa", "common_prefix").is_gt());
+    }
+
+    fn cmp(l: &str, r: &str) -> Ordering {
+        ByteUtils::BYTES_LEXICO_COMPARATOR.compare(l.as_bytes(), r.as_bytes())
+    }
+
+    /// The comparison is unsigned (`Arrays.compareUnsigned`): `0xFF` sorts after
+    /// `0x01`, where a signed `byte` comparison would put it first.
+    #[test]
+    fn test_lexicographic_comparator_is_unsigned() {
+        assert!(ByteUtils::BYTES_LEXICO_COMPARATOR.compare(&[0xFF], &[0x01]).is_gt());
+    }
 
     #[test]
     fn test_unsigned_varint_single_byte() {
