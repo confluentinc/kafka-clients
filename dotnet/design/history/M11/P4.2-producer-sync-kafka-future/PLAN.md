@@ -842,3 +842,11 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
       - Release XML 0 `cref="!:"` on all three TFMs;
       - test-dotnet: unit 3010/TFM, soak 165/TFM, format clean;
       - Mode A unchanged.
+- **Critic 93 pass 3** (two spawns; no code modified):
+  - **(a) S5a:** an independent residual walk from the code matches `IDeliveryCallback`'s five sites, numbered 1–4. Every site note follows round 5. All rulings are stated correctly. The teardown-from-callback warning covers sync users (sync `Dispose` → `StopPump` → `pump.Stop()` joins its own thread and never returns). The twin re-grep is clean and the crefs show 0 `!:`.
+    - **C93-4 [low]:** `IDeliveryCallback.cs:245-248` (sync residual 4), and its pre-S5a async twin at `:231-234`, list trigger sources "(the queue entry, or the pump's queue growing)". The list omits the closed-gate branch's own throws, which also reach the `Send` catch. Fix: drop the parenthetical or generalise it.
+    - **Wording note for the user (approved §3 text, not numbered):** "`Send` blocks only while `buffer.memory` is full" appears at `KafkaFuture.cs:31-32`, `IProducer.cs:58-59` and `:163-164`, and `IDeliveryCallback.cs:85-86`. It omits the metadata wait: `Producer_send` also blocks up to `max.block.ms` while metadata is unavailable (Java's `doSend` → `waitOnMetadata`), and the ABI notes that it holds the producer mutex while doing so (`rust/src/ffi/producer.rs:50-55`).
+  - **(b) S5b:** the mechanical verbatim check passes for all of **E1–E9 and F1–F8**. The user rows E2, E5 and F4 equal the base line plus the insertion, byte for byte; F8 is an insert only. X1, X2 and E10 were not applied. Every row is true against the code. Part A is true except for the two findings below.
+    - **C93-5 [low]:** `NativeMethods.cs:2283-2285` (the M11/P3.1 send-path block) still says "The SYNC flavor has NO pump at all … completes on the caller's own thread". That contradicts S5b's own text at `:2422-2433`.
+    - **C93-6 [low]:** `SendCompletionPump.cs:51-54`, the new D11 paragraph, calls the RunLoop catch a "teardown path". The canonical enumeration says it is *not* one (`IDeliveryCallback.cs:196`, `:269`). Fix: change "teardown paths" to "fault paths".
+    - Not filed (pre-P4.2): `CLAUDE.md:195` "declared IDENTICALLY" has been false since P3.5.
