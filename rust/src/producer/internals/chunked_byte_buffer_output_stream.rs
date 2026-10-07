@@ -962,6 +962,22 @@ mod tests {
         assert_eq!(2 * chunk_size, stream.attached_capacity().unwrap());
     }
 
+    /// A position exactly on a chunk boundary stays in the full chunk (Java's walk,
+    /// `ChunkedByteBufferOutputStream.java:274-289`, advances only while bytes remain), so
+    /// `close()` releases the chunk after it as never written.
+    #[test]
+    fn test_set_position_on_chunk_boundary_stays_in_the_full_chunk() {
+        let chunk_size = 4;
+        let p = pool(32, chunk_size);
+        let mut stream = stream(&p, chunk_size, 2);
+        stream.set_position(4).unwrap();
+        assert_eq!(24, p.available_memory());
+        stream.close();
+        assert_eq!(28, p.available_memory(), "the untouched second chunk is released at close");
+        stream.deallocate();
+        assert_eq!(32, p.available_memory());
+    }
+
     /// `rewrite_buffer` writes into the cached flattened buffer: the first call costs exactly the
     /// flatten, later `buffer()` calls see the rewrite, and a rewrite while an earlier view is
     /// still shared leaves that view untouched.
