@@ -275,7 +275,9 @@ struct BatchCursor {
 /// record). Compressed batches are decompressed once into an owned buffer.
 #[derive(Debug)]
 enum RecordSource {
-    /// No batch loaded yet (or iteration finished).
+    /// No record bytes held: no batch loaded yet, the current batch was
+    /// exhausted and released by [`CompletedFetch::maybe_close_record_stream`],
+    /// or iteration finished.
     None,
     /// Uncompressed: record bytes are `memory_records.buffer()[range]`.
     Borrowed(std::ops::Range<usize>),
@@ -810,6 +812,23 @@ impl CompletedFetch {
         Ok(())
     }
 
+    /// Releases the current batch's record bytes once the batch is exhausted:
+    /// Java's `maybeCloseRecordStream()` (`CompletedFetch.java:175-180`), which
+    /// `nextFetchedRecord` calls before it takes the next batch (`:185`).
+    ///
+    /// For a compressed batch this drops the cursor's reference to the
+    /// inflated buffer before the next batch is inflated, so a fetch holds one
+    /// inflated batch at a time, not two. Records a zero-copy deserializer
+    /// sliced from that buffer keep their own reference, so for them the buffer
+    /// lives on until they are dropped. `drain()`, Java's other caller, drops
+    /// the whole cursor instead.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeCloseRecordStream")]
+    fn maybe_close_record_stream(&mut self) {
+        if let Some(cursor) = self.cursor.as_mut() {
+            cursor.record_source = RecordSource::None;
+        }
+    }
+
     /// Advances the cursor to the next record that should be returned
     /// to the user, skipping out-of-range, aborted-transaction, and
     /// control batches per READ_COMMITTED semantics.
@@ -845,6 +864,7 @@ impl CompletedFetch {
                 // byte offset against the (already-known) record section
                 // length, with no re-walk or copy.
                 self.ensure_current_batch_fully_consumed()?;
+                self.maybe_close_record_stream();
                 if !self.load_next_batch(config)? {
                     // No more batches. Advance to the next-after-last-batch
                     // offset (mirrors Java's `nextFetchOffset = currentBatch.nextOffset()`).
@@ -966,7 +986,7 @@ impl CompletedFetch {
     /// For an uncompressed batch this is the whole `MemoryRecords` buffer (the
     /// borrowed record slice is a subslice of it); for a compressed batch it is
     /// the decompressed buffer. Clones are O(1) refcount bumps. Returns `None`
-    /// when no batch is loaded.
+    /// when no batch's record bytes are held.
     fn current_record_source_bytes(&self) -> Option<bytes::Bytes> {
         let cursor = self.cursor.as_ref()?;
         match &cursor.record_source {
@@ -2998,6 +3018,55 @@ mod tests {
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the aborted batch is skipped, not inflated");
         assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+    }
+
+    /// The cursor lets go of an exhausted batch before it inflates the next, as
+    /// Java closes a batch's record stream before taking the next batch
+    /// (`maybeCloseRecordStream()`, `CompletedFetch.java:175-180, 185`), so a
+    /// fetch never holds two inflated batches at once. The test keeps its own
+    /// reference to the first batch's inflated buffer and makes the second batch
+    /// fail to inflate: once that inflate has run, the test's reference must be
+    /// the only one left. Releasing the first batch only when the second is
+    /// installed would fail this, since a failed inflate installs nothing.
+    #[test]
+    fn test_exhausted_inflated_batch_is_released_before_the_next_is_inflated() {
+        for check_crcs in [false, true] {
+            let mut buf = new_multi_batch_records(0, 2, 2, Compression::gzip().build());
+            let length = RecordBatch::LENGTH_OFFSET;
+            let second = AbstractRecords::LOG_OVERHEAD
+                + i32::from_be_bytes(buf[length..length + 4].try_into().unwrap()) as usize;
+            garble_as_compressed(&mut buf[second..]);
+            if check_crcs {
+                recompute_crc(&mut buf[second..]);
+            }
+            let mut cf = new_completed_fetch(0, buf);
+            let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
+
+            // Exactly the first batch's two records, so the cursor stops at the
+            // end of that batch without reading the second.
+            let first = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 2)
+                .expect("the first batch's records are returned");
+            assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+            let first_batch = cf
+                .current_record_source_bytes()
+                .expect("the exhausted first batch is still the cursor's current one");
+            assert!(!first_batch.is_unique(), "the cursor shares the first batch's inflated buffer");
+
+            let err = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .expect_err("the second batch fails to inflate");
+            assert_eq!(SEEK_PAST_MESSAGE, err.message());
+            assert!(
+                cause(&err).message().contains("Failed to decompress record stream"),
+                "{:?}",
+                cause(&err)
+            );
+            assert!(
+                first_batch.is_unique(),
+                "the cursor still held the first inflated batch while inflating the second"
+            );
+        }
     }
 
     /// Declares a batch's first record 63 bytes long where 13 remain, by
