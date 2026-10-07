@@ -16,6 +16,7 @@
 
 pub(crate) mod buffer_pool;
 pub(crate) mod built_in_partitioner;
+mod chunked_byte_buffer_output_stream;
 mod future_record_metadata;
 mod incomplete_batches;
 mod kafka_producer_metrics;
@@ -37,6 +38,8 @@ mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::{BuiltInPartitioner, KeyHasher};
+#[expect(unused_imports, reason = "used by MemoryRecordsBuilder from the next commit on")]
+pub(crate) use chunked_byte_buffer_output_stream::ChunkedByteBufferOutputStream;
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use kafka_producer_metrics::KafkaProducerMetrics;
