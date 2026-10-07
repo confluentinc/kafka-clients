@@ -824,11 +824,11 @@ embeds.*
   `{ error: Errors, custom_message: Option<String>, source: Option<Box<Error>> }`.
   Every payload embeds one.
 - The ambassador-delegated traits forward to that embedded base: `ErrorCode`
-  (`error.rs:318`), `ErrorName` (`:344`), `ErrorMessage` (`:509`) and
-  `ErrorSource` (`:531`).
-- The crate-private `ErrorHierarchy` trait (`error.rs:160`) encodes Java's
+  (`error.rs:319`), `ErrorName` (`:345`), `ErrorMessage` (`:510`) and
+  `ErrorSource` (`:532`).
+- The crate-private `ErrorHierarchy` trait (`error.rs:161`) encodes Java's
   `extends` chain. Each intermediate Java class is a predicate on `Error`,
-  with public forms from `error.rs:1702`:
+  with public forms from `error.rs:1711`:
   - `is_kafka_error`, `is_api_error`, `is_retriable_error`,
     `is_refresh_retriable_error`, `is_timeout_error`
   - `is_invalid_metadata_error`, `is_invalid_configuration_error`,
