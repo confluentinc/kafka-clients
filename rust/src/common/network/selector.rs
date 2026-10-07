@@ -1362,6 +1362,25 @@ impl Selectable for Selector {
         let mut process_all = deadline.is_none();
 
         loop {
+            // Pick up every fire recorded since the last drain before choosing
+            // what pass-1 processes. The WAIT below is not the only place a
+            // fire can be waiting: a `ChannelWaker` fires whenever the reactor
+            // runs, and the WAIT's `select!` is `biased` towards the wakeup
+            // `Notify`, so a poll entered with a wakeup permit already stored
+            // returns without ever polling `readiness_wait` — the drain inside
+            // it never runs. A fire left in the queue keeps its channel's
+            // armed flag set, so the channel is neither re-armed nor processed
+            // until some later WAIT happens to drain it; if every poll starts
+            // with a permit, that is never (the next response on that socket
+            // then sits until the request times out). Draining here is cheap
+            // — one uncontended lock and an empty `Vec` take in the steady
+            // state — and safe: it only moves `(token, direction)` entries
+            // into the selector-owned ready set. (Milestone 16 Phase 3: seen
+            // as a JOINING heartbeat stuck for the 30 s request timeout once
+            // the consumer's application task stopped busy-looping and began
+            // poking the background task every `retry.backoff.ms`.)
+            self.drain_fired_queue(&mut ready_ids);
+
             // Process channels with buffered data (reads only)
             if data_in_buffers {
                 let buffered_ids: Vec<Arc<str>> = self.channels_with_buffered_read.drain().collect();
@@ -3653,6 +3672,62 @@ mod tests {
         })
         .await
         .expect("(unmute) data sent while muted was not delivered after unmute within 5s");
+
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// A read fire must not be stranded when every poll starts with a wakeup
+    /// permit already stored. The WAIT's `select!` is `biased` towards the
+    /// wakeup `Notify`, so such a poll returns without polling the
+    /// fired-queue drain inside `readiness_wait`; unless the loop drains the
+    /// queue itself, the fired channel keeps its armed flag, is neither
+    /// re-armed nor processed, and its response is never delivered. Milestone
+    /// 16 Phase 3 made this reachable: the consumer's application task stopped
+    /// busy-looping and pokes the background task once per
+    /// `retry.backoff.ms`.
+    ///
+    /// Mutation check: removing the `drain_fired_queue` call at the top of the
+    /// poll loop makes the delivery `timeout` below fail.
+    #[tokio::test]
+    async fn test_fire_not_stranded_when_every_poll_starts_woken() {
+        use std::time::Duration;
+
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+        let resp = blocking_request(&mut selector, "0", "warmup").await;
+        assert_eq!(resp, "warmup");
+
+        // Send, and write it with ONE non-blocking poll: it writes and arms the
+        // channel for the echo, then returns without waiting (a blocking poll
+        // would stay in its WAIT and drain the echo's fire itself).
+        selector.send(create_send("0", "echo-me")).unwrap();
+        selector.poll(0).await.unwrap();
+        assert_eq!(1, selector.completed_sends().len(), "the request is written by the first poll");
+        assert!(
+            selector.completed_receives().iter().all(|r| r.source() != "0"),
+            "the echo cannot have been read before the peer saw the request"
+        );
+
+        // From here on every poll starts with a stored wakeup permit. The sleep
+        // lets the reactor run, so the echo's readiness fires the channel's
+        // waker between polls.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                selector.wakeup();
+                selector.poll(5_000).await.unwrap();
+            }
+        })
+        .await
+        .expect("a fired channel was stranded: the echo was not delivered while every poll started woken");
 
         selector.close_channel("0").await;
         selector.poll(0).await.unwrap();
