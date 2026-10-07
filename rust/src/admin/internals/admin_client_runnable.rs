@@ -761,6 +761,15 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // Ensure the closing flag is set so fail_call routes to handle_failure.
         self.shutdown.closing.store(true, Ordering::Release);
 
+        // Java fails `newCalls` under `synchronized (this)` after setting
+        // `closing`, so no call can slip in behind the drain. The Rust
+        // counterpart is closing the channel first: every `send` after this
+        // fails on the app side (and the sender completes that call), and every
+        // call sent before it is still buffered and drained below. Without it a
+        // call accepted between this drain and the receiver's drop was destroyed
+        // with its futures never completed (CLAUDE.md §7) — reachable once
+        // KIP-909 made the task exit on its own.
+        self.admin_rx.close();
         self.drain_new_calls();
         let pending = std::mem::take(&mut self.pending_calls);
         for call in pending {
