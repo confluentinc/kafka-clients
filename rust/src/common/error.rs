@@ -327,7 +327,7 @@ pub(crate) trait ErrorCode {
 /// `getClass().getName()`.
 ///
 /// **Mechanism, not API**, like [`ErrorMessage`]: it exists so
-/// [`Errors::error_name`] can answer without matching on 135 codes a second
+/// [`Errors::error_name`] can answer without matching on 138 codes a second
 /// time. Callers use [`Errors::error_name`], which translates
 /// `Errors.exceptionName()` (`protocol/Errors.java:470`).
 ///
@@ -663,7 +663,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 ///     outside the repository (CLAUDE.md §1) — hence the macro's name. A
 ///     null-message constructor and a cause-only constructor would be public API
 ///     with no caller and no Kafka contract behind them (DoD #7).
-///   - [`kafka_error_type`] cannot follow suit: it declares 141 classes from one
+///   - [`kafka_error_type`] cannot follow suit: it declares 145 classes from one
 ///     body, and only ~19 of their Java counterparts have a no-arg constructor.
 ///     Were `new` to mean the no-arg form here and the message form there,
 ///     `SomeError::new("msg")` would compile or not depending on which macro

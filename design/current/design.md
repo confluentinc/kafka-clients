@@ -805,9 +805,9 @@ variant per Java exception. Java's intermediate classes survive as `is_*_error`
 predicates, and `KafkaException` is the `KafkaError` struct that every variant
 embeds.*
 
-- `Error` (`common/error.rs:863`) is the single error type that every fallible
+- `Error` (`common/error.rs:864`) is the single error type that every fallible
   API returns.
-  - It is a `#[non_exhaustive]` flat enum with **162 variants**, one per Java
+  - It is a `#[non_exhaustive]` flat enum with **166 variants**, one per Java
     exception class. Examples: `TopicAuthorization`,
     `ProducerBufferExhausted`, `ConsumerOffsetOutOfRange`,
     `CorrelationIdMismatch`.
@@ -846,8 +846,8 @@ embeds.*
   `RequestUtils::is_fatal_error(&Error)` (`common/requests/request_utils.rs:63`),
   crate-private like its Java home.
 - `Errors` (`common/protocol/errors.rs:37`) is the crate-private wire-code
-  enum. It has **135 variants** covering codes `-1..=133`. `Errors::error()`
-  (`errors.rs:583`) builds the `Error` variant for a code.
+  enum. It has **138 variants** covering codes `-1..=136`. `Errors::error()`
+  (`errors.rs:613`) builds the `Error` variant for a code.
 
 ---
 

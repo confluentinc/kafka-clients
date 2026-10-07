@@ -173,7 +173,7 @@ things to read.*
 ```
 rust/src/common/
 ├── protocol/       # Readable, Writable, ByteBufferAccessor, Message,
-│                   # ApiMessage, varint, api_keys.rs, errors.rs (135 codes),
+│                   # ApiMessage, varint, api_keys.rs, errors.rs (138 codes),
 │                   # message_size_accumulator.rs, object_serialization_cache.rs,
 │                   # message_util.rs
 ├── requests/       # 117 files: RequestBuilder trait, AbstractRequest /
@@ -207,7 +207,7 @@ rust/src/common/
 ├── internals/      # KafkaFutureImpl, Topic, PartitionStates,
 │                   # ClusterResourceListeners
 ├── feature/, header/, memory/, utils/
-├── error.rs        # Error enum (162 variants) + ErrorHierarchy predicates
+├── error.rs        # Error enum (166 variants) + ErrorHierarchy predicates
 ├── kafka_error.rs  # KafkaError struct (Java's KafkaException)
 ├── local_{illegal_argument,illegal_state,concurrent_modification,
 │   timeout}_error.rs, invalid_record_error.rs
