@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::ClientResponse;
 use crate::KafkaClient;
+use crate::MetadataRecoveryStrategy;
 use crate::admin::KafkaAdminClient;
 use crate::common::errors::{DisconnectError, TimeoutError, UnsupportedEndpointTypeError};
 use crate::common::protocol::Errors;
@@ -174,6 +175,10 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
     retry_backoff_ms: i64,
     max_retries: i32,
     request_timeout_ms: i32,
+    /// Java: `KafkaAdminClient`'s `private final MetadataRecoveryStrategy
+    /// metadataRecoveryStrategy` (`KafkaAdminClient.java:411`), read by
+    /// `MetadataUpdateNodeIdProvider`.
+    metadata_recovery_strategy: MetadataRecoveryStrategy,
     /// Java: `KafkaAdminClient`'s `private final Time time`.
     time: Arc<dyn Time>,
     shutdown: Arc<ShutdownSignal>,
@@ -197,6 +202,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         retry_backoff_ms: i64,
         max_retries: i32,
         request_timeout_ms: i32,
+        metadata_recovery_strategy: MetadataRecoveryStrategy,
         time: Arc<dyn Time>,
         shutdown: Arc<ShutdownSignal>,
         log_context: LogContext,
@@ -214,6 +220,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             retry_backoff_ms,
             max_retries,
             request_timeout_ms,
+            metadata_recovery_strategy,
             time,
             shutdown,
             log_context,
@@ -558,7 +565,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     ///
     /// Translated from `maybeDrainPendingCall`.
     fn maybe_drain_pending_call(&mut self, mut call: Call, now: i64, still_pending: &mut Vec<Call>) {
-        match call.node_provider.provide(&self.metadata_manager, &self.client, now) {
+        match call
+            .node_provider
+            .provide(&self.metadata_manager, &self.client, self.metadata_recovery_strategy, now)
+        {
             Ok(Some(node)) => {
                 kafka_trace!(self.log_context, "Assigned {} to node {}", call.call_name, node);
                 call.cur_node = Some(node.clone());
@@ -953,7 +963,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         "Expected a Metadata response for the internal metadata call",
                     ));
                 };
-                mm_ok.update(metadata_response.build_cluster(), now);
+                // KIP-1102 (`KafkaAdminClient.java:1684-1687`): the broker asks the
+                // client to rebootstrap instead of handing it metadata.
+                if metadata_response.top_level_error() == Errors::RebootstrapRequired {
+                    mm_ok.initiate_rebootstrap();
+                } else {
+                    mm_ok.update(metadata_response.build_cluster(), now);
+                }
                 HandleResult::Done
             }),
             Box::new(move |error| {

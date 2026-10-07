@@ -70,7 +70,6 @@ use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
-use crate::MetadataRecoveryStrategy;
 use crate::MetadataUpdater;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
@@ -400,6 +399,11 @@ impl KafkaAdminClient {
     /// does not change what is sent; it matters to `least_loaded_node` and
     /// `ready`, which treat a node with an in-flight request as busy only when the
     /// connection cannot take another one.
+    ///
+    /// `createNetworkClient` also passes `metadata.recovery.rebootstrap.trigger.ms`
+    /// and `metadata.recovery.strategy` (`ClientUtils.java:223-224`), which drive
+    /// the `NetworkClient`'s trigger-based rebootstrap through the admin
+    /// metadata updater.
     pub(crate) fn create_network_client<S: Selectable, H: HostResolver>(
         config: &AdminClientConfig,
         selector: S,
@@ -409,7 +413,7 @@ impl KafkaAdminClient {
         host_resolver: H,
         log_context: LogContext,
     ) -> NetworkClient<S, H> {
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             selector,
             metadata_updater,
             client_id,
@@ -424,9 +428,11 @@ impl KafkaAdminClient {
             true, // discover_broker_versions
             api_versions,
             host_resolver,
-            MetadataRecoveryStrategy::None,
+            config.metadata_recovery_strategy(),
             log_context,
-        )
+        );
+        client.set_rebootstrap_trigger_ms(config.metadata_recovery_rebootstrap_trigger_ms());
+        client
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -466,6 +472,7 @@ impl KafkaAdminClient {
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
+            config.metadata_recovery_strategy(),
             Arc::clone(&time),
             Arc::clone(&shutdown),
             log_context.clone(),
@@ -14355,6 +14362,260 @@ mod tests {
             handle_not_controller_error(&without_controllers, &not_leader).is_none(),
             "the NOT_LEADER_OR_FOLLOWER arm is gated on usingBootstrapControllers"
         );
+    }
+
+    // --- rebootstrap (KIP-899 / KIP-1102) ------------------------------------
+
+    use crate::MetadataRecoveryStrategy;
+
+    /// The bootstrap cluster `new_inner` seeds the manager with, for
+    /// `bootstrap.servers=localhost:9092` (node id -1).
+    fn bootstrap_cluster() -> Cluster {
+        Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())])
+    }
+
+    /// The node ids the manager hands the `NetworkClient` (`fetchNodes`), sorted.
+    fn fetched_node_ids(manager: &AdminMetadataManager) -> Vec<i32> {
+        let mut ids: Vec<i32> = manager.updater().fetch_nodes().iter().map(Node::id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Like [`env_with_props`], but the manager is seeded the way production
+    /// seeds it: first with the bootstrap cluster (`createInternal`'s
+    /// `metadataManager.update(Cluster.bootstrap(..), now)`), then with the
+    /// discovered three-broker cluster, so it has a bootstrap cluster to go back to.
+    fn rebootstrap_env(
+        extra: &[(&str, &str)],
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, bootstrap_cluster(), &config, Arc::clone(&time) as Arc<dyn Time>);
+        admin.shared.metadata_manager.update(cluster, time.milliseconds());
+        (admin, runnable, time, nodes)
+    }
+
+    /// `MetadataUpdateNodeIdProvider.provide` (`KafkaAdminClient.java:724-733`):
+    /// under the default `metadata.recovery.strategy=rebootstrap`, when no node is
+    /// available or connection-ready, the metadata call rebootstraps the manager
+    /// with the bootstrap cluster. With `none` it does not.
+    #[tokio::test]
+    async fn the_metadata_call_rebootstraps_when_no_node_is_available() {
+        for (strategy, rebootstraps) in [(None, true), (Some("rebootstrap"), true), (Some("none"), false)] {
+            let extra: Vec<(&str, &str)> = strategy.map(|s| ("metadata.recovery.strategy", s)).into_iter().collect();
+            let (admin, mut runnable, _time, nodes) = rebootstrap_env(&extra);
+            let manager = admin.shared.metadata_manager.clone();
+            assert_eq!(fetched_node_ids(&manager), vec![0, 1, 2]);
+            assert!(manager.is_ready().unwrap());
+
+            // Every broker is backing off, so `leastLoadedNode` has no node to offer.
+            for node in &nodes {
+                runnable.client_mut().backoff(node, 10_000);
+            }
+            manager.request_update();
+            pump(&mut runnable, 2).await;
+
+            if rebootstraps {
+                assert_eq!(
+                    fetched_node_ids(&manager),
+                    vec![-1],
+                    "strategy {strategy:?}: the manager is back on the bootstrap cluster"
+                );
+                assert!(
+                    !manager.is_ready().unwrap(),
+                    "strategy {strategy:?}: bootstrap metadata is not ready"
+                );
+            } else {
+                assert_eq!(fetched_node_ids(&manager), vec![0, 1, 2], "strategy none: no rebootstrap");
+                assert!(manager.is_ready().unwrap());
+            }
+        }
+    }
+
+    /// Translated from `KafkaAdminClientTest.verifyUnreachableBootstrapServer`: the
+    /// bootstrap server is unreachable for a short while, which prevents the admin
+    /// client from sending the initial metadata request; once it is reachable the
+    /// metadata and createTopics requests go through. Under `rebootstrap` the
+    /// unreachable bootstrap node makes the metadata call rebootstrap, which
+    /// returns the manager to `QUIESCENT` and so lets a second metadata call be
+    /// made, hence the second prepared response (as in Java, it need not be used).
+    ///
+    /// Java runs on `Time.SYSTEM`; the mock clock starts at a wall-clock-sized
+    /// value so `delayBeforeNextExpireMs` sees the same large `now`, and is
+    /// advanced by hand.
+    async fn verify_unreachable_bootstrap_server(metadata_recovery_strategy: MetadataRecoveryStrategy) {
+        let time = mock_time(1_700_000_000_000);
+        let bootstrap = Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:8121".parse().unwrap())]);
+        let bootstrap_node = bootstrap.nodes()[0].clone();
+        let mut client =
+            MockClient::with_static_nodes(vec![bootstrap_node.clone()], Arc::clone(&time) as Arc<dyn Time>);
+        client.set_unreachable(&bootstrap_node, 200);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:8121".to_string());
+        props.insert(
+            "metadata.recovery.strategy".to_string(),
+            metadata_recovery_strategy.name().to_string(),
+        );
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, bootstrap, &config, Arc::clone(&time) as Arc<dyn Time>);
+
+        let (discovered_cluster, discovered_nodes) = mock_cluster(3, 0);
+        let metadata_matcher =
+            || -> crate::RequestMatcher { Box::new(|body| matches!(body, AbstractRequest::Metadata(_))) };
+        let metadata_response = || {
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &discovered_nodes,
+                discovered_cluster.cluster_resource().cluster_id(),
+                1,
+                Vec::new(),
+            ))
+        };
+        runnable
+            .client_mut()
+            .prepare_response_matcher(metadata_matcher(), metadata_response());
+        if metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap {
+            // Bound to the bootstrap node, which is where the second metadata call
+            // goes. After the first metadata response, that call (to the bootstrap
+            // node) and createTopics (to controller 1) are sent in the same
+            // iteration, in `callsToSend` order. Java's `HashMap<Node, ..>` order
+            // is fixed by `Node.hashCode` and sends the metadata call first; the
+            // Rust map's order is random, so an unbound response would make the
+            // test order-dependent.
+            runnable.client_mut().prepare_response_from_matcher(
+                metadata_matcher(),
+                metadata_response(),
+                &bootstrap_node,
+            );
+        }
+        runnable.client_mut().prepare_response_matcher(
+            Box::new(|body| matches!(body, AbstractRequest::CreateTopics(_))),
+            create_response(vec![create_result("myTopic", Errors::None, None)]),
+        );
+
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_replicas_assignments(
+                "myTopic",
+                std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+            )],
+            CreateTopicsOptions::new().set_timeout_ms(Some(10_000)),
+        );
+        let all = result.all();
+        for _ in 0..200 {
+            if all.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(10);
+        }
+        all.get().await.unwrap();
+    }
+
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServer`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnreachableBootstrapServer")]
+    async fn test_unreachable_bootstrap_server() {
+        verify_unreachable_bootstrap_server(MetadataRecoveryStrategy::Rebootstrap).await;
+    }
+
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServerNoRebootstrap`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testUnreachableBootstrapServerNoRebootstrap")]
+    async fn test_unreachable_bootstrap_server_no_rebootstrap() {
+        verify_unreachable_bootstrap_server(MetadataRecoveryStrategy::None).await;
+    }
+
+    /// `makeBrokerMetadataCall.handleResponse` (`KafkaAdminClient.java:1684-1687`,
+    /// KIP-1102): a `REBOOTSTRAP_REQUIRED` top-level error calls
+    /// `metadataManager.initiateRebootstrap()` instead of `update(..)`, so the
+    /// manager asks the `NetworkClient` to rebootstrap at once
+    /// (`needsRebootstrap` is true for any trigger) and the response's brokers are
+    /// not applied.
+    #[tokio::test]
+    async fn a_rebootstrap_required_metadata_response_initiates_rebootstrap() {
+        let (admin, mut runnable, time, _nodes) = rebootstrap_env(&[]);
+        let manager = admin.shared.metadata_manager.clone();
+
+        let other_brokers: Vec<Node> = (10..12).map(|i| Node::new(i, "other".to_string(), 9092)).collect();
+        let mut response = RequestTestUtils::metadata_response(&other_brokers, Some("mock-cluster"), 10, Vec::new());
+        response.data_mut().set_error_code(Errors::RebootstrapRequired.code());
+        runnable.client_mut().prepare_response(ConcreteResponse::Metadata(response));
+
+        manager.request_update();
+        pump(&mut runnable, 2).await;
+        assert!(!runnable.client_mut().has_pending_responses(), "the metadata call was answered");
+
+        let now = time.milliseconds();
+        // The metadata attempt started at `now`; only an attempt start of 0 makes
+        // a trigger of `now - 1` fire.
+        assert!(
+            manager.updater().needs_rebootstrap(now, now - 1),
+            "initiateRebootstrap sets the attempt start to 0"
+        );
+        assert_eq!(
+            fetched_node_ids(&manager),
+            vec![0, 1, 2],
+            "the response's brokers are not applied"
+        );
+        assert_eq!(
+            manager.metadata_fetch_delay_ms(now),
+            i64::MAX,
+            "update(..) was not called, so the manager stays UPDATE_PENDING until the rebootstrap"
+        );
+    }
+
+    /// `ClientUtils.createNetworkClient` passes `metadata.recovery.strategy` and
+    /// `metadata.recovery.rebootstrap.trigger.ms` to the admin `NetworkClient`, whose
+    /// `handleRebootstrap` (`NetworkClient.java:1118-1127`) asks the admin updater
+    /// `needsRebootstrap(now, triggerMs)`: once a metadata attempt has gone
+    /// unanswered for longer than the trigger, the manager is rebootstrapped. With
+    /// `none` it is not.
+    #[tokio::test]
+    async fn the_network_client_rebootstraps_after_the_trigger_without_metadata() {
+        for (strategy, rebootstraps) in [("rebootstrap", true), ("none", false)] {
+            let time = mock_time(1000);
+            let mut props = HashMap::new();
+            props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+            props.insert("metadata.recovery.strategy".to_string(), strategy.to_string());
+            props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "1000".to_string());
+            let config = AdminClientConfig::new(&props).unwrap();
+
+            let manager = AdminMetadataManager::new(100, 300_000, false, LogContext::empty());
+            manager.update(bootstrap_cluster(), time.milliseconds());
+            manager.update(mock_cluster(3, 0).0, time.milliseconds());
+            let mut client = KafkaAdminClient::create_network_client(
+                &config,
+                crate::common::network::MockSelector::new(),
+                manager.updater(),
+                "admin",
+                Arc::new(ApiVersions::new()),
+                DefaultHostResolver::new(),
+                LogContext::empty(),
+            );
+            client.set_time(Arc::clone(&time) as Arc<dyn Time>);
+
+            // A metadata attempt starts and gets no answer.
+            manager.transition_to_update_pending(time.milliseconds());
+            time.sleep(1000);
+            client.poll(0, time.milliseconds()).await;
+            assert_eq!(fetched_node_ids(&manager), vec![0, 1, 2], "not past the trigger yet");
+
+            time.sleep(1);
+            client.poll(0, time.milliseconds()).await;
+            if rebootstraps {
+                assert_eq!(fetched_node_ids(&manager), vec![-1], "rebootstrapped after the trigger");
+            } else {
+                assert_eq!(fetched_node_ids(&manager), vec![0, 1, 2], "strategy none: no rebootstrap");
+            }
+        }
     }
 
     // --- shutdown ------------------------------------------------------------
