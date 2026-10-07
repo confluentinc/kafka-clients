@@ -48,6 +48,7 @@ use confluent_kafka::common::errors::ApiError;
 use confluent_kafka::common::errors::AuthenticationError;
 use confluent_kafka::common::errors::AuthorizationError;
 use confluent_kafka::common::errors::AuthorizerNotReadyError;
+use confluent_kafka::common::errors::BootstrapResolutionError;
 use confluent_kafka::common::errors::DisconnectError;
 use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
@@ -474,6 +475,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         },
         INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
+        BOOTSTRAP_RESOLUTION => Error::BootstrapResolution(BootstrapResolutionError::new(p.message)),
 
         // Everything else is a class that owns its protocol code, which is
         // exactly what the generated `error_with_message` table (a copy of

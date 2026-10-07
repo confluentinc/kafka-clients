@@ -31,10 +31,12 @@ mod api_error;
 mod authentication_error;
 mod authorization_error;
 mod authorizer_not_ready_error;
+mod bootstrap_resolution_error;
 mod broker_id_not_registered_error;
 mod broker_not_available_error;
 mod cluster_authorization_error;
 mod concurrent_transactions_error;
+mod controller_id_not_registered_error;
 mod controller_moved_error;
 mod coordinator_load_in_progress_error;
 mod coordinator_not_available_error;
@@ -59,6 +61,7 @@ mod fenced_state_epoch_error;
 mod fetch_session_id_not_found_error;
 mod fetch_session_topic_id_error;
 mod group_authorization_error;
+mod group_deletion_failed_error;
 mod group_id_not_found_error;
 mod group_max_size_reached_error;
 mod group_not_empty_error;
@@ -140,6 +143,7 @@ mod stale_broker_epoch_error;
 mod stale_member_epoch_error;
 mod streams_invalid_topology_epoch_error;
 mod streams_invalid_topology_error;
+mod streams_topology_description_update_failed_error;
 mod streams_topology_fenced_error;
 mod telemetry_too_large_error;
 mod throttling_quota_exceeded_error;
@@ -195,10 +199,12 @@ pub use api_error::ApiError;
 pub use authentication_error::AuthenticationError;
 pub use authorization_error::AuthorizationError;
 pub use authorizer_not_ready_error::AuthorizerNotReadyError;
+pub use bootstrap_resolution_error::BootstrapResolutionError;
 pub use broker_id_not_registered_error::BrokerIdNotRegisteredError;
 pub use broker_not_available_error::BrokerNotAvailableError;
 pub use cluster_authorization_error::ClusterAuthorizationError;
 pub use concurrent_transactions_error::ConcurrentTransactionsError;
+pub use controller_id_not_registered_error::ControllerIdNotRegisteredError;
 pub use controller_moved_error::ControllerMovedError;
 pub use coordinator_load_in_progress_error::CoordinatorLoadInProgressError;
 pub use coordinator_not_available_error::CoordinatorNotAvailableError;
@@ -223,6 +229,7 @@ pub use fenced_state_epoch_error::FencedStateEpochError;
 pub use fetch_session_id_not_found_error::FetchSessionIdNotFoundError;
 pub use fetch_session_topic_id_error::FetchSessionTopicIdError;
 pub use group_authorization_error::GroupAuthorizationError;
+pub use group_deletion_failed_error::GroupDeletionFailedError;
 pub use group_id_not_found_error::GroupIdNotFoundError;
 pub use group_max_size_reached_error::GroupMaxSizeReachedError;
 pub use group_not_empty_error::GroupNotEmptyError;
@@ -304,6 +311,7 @@ pub use stale_broker_epoch_error::StaleBrokerEpochError;
 pub use stale_member_epoch_error::StaleMemberEpochError;
 pub use streams_invalid_topology_epoch_error::StreamsInvalidTopologyEpochError;
 pub use streams_invalid_topology_error::StreamsInvalidTopologyError;
+pub use streams_topology_description_update_failed_error::StreamsTopologyDescriptionUpdateFailedError;
 pub use streams_topology_fenced_error::StreamsTopologyFencedError;
 pub use telemetry_too_large_error::TelemetryTooLargeError;
 pub use throttling_quota_exceeded_error::ThrottlingQuotaExceededError;
@@ -355,7 +363,7 @@ mod tests {
         assert_eq!(ErrorCode::error(&e), Errors::RequestTimedOut);
     }
 
-    /// The 12 classes with no entry in `Errors`: raised client-side, or concrete
+    /// The 13 classes with no entry in `Errors`: raised client-side, or concrete
     /// bases whose coded subclasses carry the code instead. Nothing in `Errors`
     /// can express their ancestry, so it is asserted directly here.
     ///
@@ -369,6 +377,12 @@ mod tests {
     fn codeless_classes_state_their_own_ancestry() {
         let cases: Vec<(&str, Box<dyn ErrorHierarchy>, &[&str])> = vec![
             ("ApiError", Box::new(ApiError::new("m")), &["kafka", "api"]),
+            // `BootstrapResolutionException extends KafkaException` (KIP-909).
+            (
+                "BootstrapResolutionError",
+                Box::new(BootstrapResolutionError::new("m")),
+                &["kafka"],
+            ),
             (
                 "AuthenticationError",
                 Box::new(AuthenticationError::new("m")),

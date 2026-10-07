@@ -61,24 +61,25 @@ use crate::common::LocalIllegalStateError;
 use crate::common::LocalTimeoutError;
 use crate::common::config::ConfigError;
 use crate::common::errors::{
-    ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BrokerIdNotRegisteredError,
-    BrokerNotAvailableError, ClusterAuthorizationError, ConcurrentTransactionsError, ControllerMovedError,
-    CoordinatorLoadInProgressError, CoordinatorNotAvailableError, CorruptRecordError,
-    DelegationTokenAuthorizationError, DelegationTokenDisabledError, DelegationTokenExpiredError,
+    ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
+    BrokerIdNotRegisteredError, BrokerNotAvailableError, ClusterAuthorizationError, ConcurrentTransactionsError,
+    ControllerIdNotRegisteredError, ControllerMovedError, CoordinatorLoadInProgressError, CoordinatorNotAvailableError,
+    CorruptRecordError, DelegationTokenAuthorizationError, DelegationTokenDisabledError, DelegationTokenExpiredError,
     DelegationTokenNotFoundError, DelegationTokenOwnerMismatchError, DisconnectError, DuplicateBrokerRegistrationError,
     DuplicateResourceError, DuplicateSequenceError, DuplicateVoterError, ElectionNotNeededError,
     EligibleLeadersNotAvailableError, FeatureUpdateFailedError, FencedInstanceIdError, FencedLeaderEpochError,
     FencedMemberEpochError, FencedStateEpochError, FetchSessionIdNotFoundError, FetchSessionTopicIdError,
-    GroupAuthorizationError, GroupIdNotFoundError, GroupMaxSizeReachedError, GroupNotEmptyError,
-    GroupSubscribedToTopicError, IllegalGenerationError, IllegalSaslStateError, InconsistentClusterIdError,
-    InconsistentGroupProtocolError, InconsistentTopicIdError, InconsistentVoterSetError, IneligibleReplicaError,
-    InterruptError, InvalidCommitOffsetSizeError, InvalidConfigurationError, InvalidFetchSessionEpochError,
-    InvalidFetchSizeError, InvalidGroupIdError, InvalidOffsetError, InvalidPartitionsError, InvalidPidMappingError,
-    InvalidPrincipalTypeError, InvalidProducerEpochError, InvalidRecordStateError, InvalidRegistrationError,
-    InvalidRegularExpression, InvalidReplicaAssignmentError, InvalidReplicationFactorError, InvalidRequestError,
-    InvalidRequiredAcksError, InvalidSessionTimeoutError, InvalidShareSessionEpochError, InvalidTimestampError,
-    InvalidTopicError, InvalidTxnStateError, InvalidTxnTimeoutError, InvalidUpdateVersionError, InvalidVoterKeyError,
-    KafkaStorageError, LeaderNotAvailableError, ListenerNotFoundError, LogDirNotFoundError, MemberIdRequiredError,
+    GroupAuthorizationError, GroupDeletionFailedError, GroupIdNotFoundError, GroupMaxSizeReachedError,
+    GroupNotEmptyError, GroupSubscribedToTopicError, IllegalGenerationError, IllegalSaslStateError,
+    InconsistentClusterIdError, InconsistentGroupProtocolError, InconsistentTopicIdError, InconsistentVoterSetError,
+    IneligibleReplicaError, InterruptError, InvalidCommitOffsetSizeError, InvalidConfigurationError,
+    InvalidFetchSessionEpochError, InvalidFetchSizeError, InvalidGroupIdError, InvalidOffsetError,
+    InvalidPartitionsError, InvalidPidMappingError, InvalidPrincipalTypeError, InvalidProducerEpochError,
+    InvalidRecordStateError, InvalidRegistrationError, InvalidRegularExpression, InvalidReplicaAssignmentError,
+    InvalidReplicationFactorError, InvalidRequestError, InvalidRequiredAcksError, InvalidSessionTimeoutError,
+    InvalidShareSessionEpochError, InvalidTimestampError, InvalidTopicError, InvalidTxnStateError,
+    InvalidTxnTimeoutError, InvalidUpdateVersionError, InvalidVoterKeyError, KafkaStorageError,
+    LeaderNotAvailableError, ListenerNotFoundError, LogDirNotFoundError, MemberIdRequiredError,
     MismatchedEndpointTypeError, NetworkError, NewLeaderElectedError, NoReassignmentInProgressError,
     NotControllerError, NotCoordinatorError, NotEnoughReplicasAfterAppendError, NotEnoughReplicasError,
     NotLeaderOrFollowerError, OffsetMetadataTooLarge, OffsetMovedToTieredStorageError, OffsetNotAvailableError,
@@ -88,16 +89,16 @@ use crate::common::errors::{
     RecordDeserializationError, RecordTooLargeError, ReplicaNotAvailableError, ResourceNotFoundError,
     SaslAuthenticationError, SecurityDisabledError, SerializationError, ShareSessionLimitReachedError,
     ShareSessionNotFoundError, SnapshotNotFoundError, SslAuthenticationError, StaleBrokerEpochError,
-    StaleMemberEpochError, StreamsInvalidTopologyEpochError, StreamsInvalidTopologyError, StreamsTopologyFencedError,
-    TelemetryTooLargeError, ThrottlingQuotaExceededError, TimeoutError, TopicAuthorizationError,
-    TopicDeletionDisabledError, TopicExistsError, TransactionAbortableError, TransactionAbortedError,
-    TransactionCoordinatorFencedError, TransactionalIdAuthorizationError, TransactionalIdNotFoundError,
-    UnacceptableCredentialError, UnknownControllerIdError, UnknownLeaderEpochError, UnknownMemberIdError,
-    UnknownProducerIdError, UnknownServerError, UnknownSubscriptionIdError, UnknownTopicIdError,
-    UnknownTopicOrPartitionError, UnreleasedInstanceIdError, UnstableOffsetCommitError, UnsupportedAssignorError,
-    UnsupportedByAuthenticationError, UnsupportedCompressionTypeError, UnsupportedEndpointTypeError,
-    UnsupportedForMessageFormatError, UnsupportedSaslMechanismError, UnsupportedVersionError, VoterNotFoundError,
-    WakeupError,
+    StaleMemberEpochError, StreamsInvalidTopologyEpochError, StreamsInvalidTopologyError,
+    StreamsTopologyDescriptionUpdateFailedError, StreamsTopologyFencedError, TelemetryTooLargeError,
+    ThrottlingQuotaExceededError, TimeoutError, TopicAuthorizationError, TopicDeletionDisabledError, TopicExistsError,
+    TransactionAbortableError, TransactionAbortedError, TransactionCoordinatorFencedError,
+    TransactionalIdAuthorizationError, TransactionalIdNotFoundError, UnacceptableCredentialError,
+    UnknownControllerIdError, UnknownLeaderEpochError, UnknownMemberIdError, UnknownProducerIdError,
+    UnknownServerError, UnknownSubscriptionIdError, UnknownTopicIdError, UnknownTopicOrPartitionError,
+    UnreleasedInstanceIdError, UnstableOffsetCommitError, UnsupportedAssignorError, UnsupportedByAuthenticationError,
+    UnsupportedCompressionTypeError, UnsupportedEndpointTypeError, UnsupportedForMessageFormatError,
+    UnsupportedSaslMechanismError, UnsupportedVersionError, VoterNotFoundError, WakeupError,
 };
 use crate::common::metrics::QuotaViolationError;
 use crate::common::network::InvalidReceiveError;
@@ -904,6 +905,8 @@ pub enum Error {
     Authorization(AuthorizationError),
     /// See [`AuthorizerNotReadyError`](crate::common::errors::AuthorizerNotReadyError).
     AuthorizerNotReady(AuthorizerNotReadyError),
+    /// See [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
+    BootstrapResolution(BootstrapResolutionError),
     /// See [`BrokerIdNotRegisteredError`](crate::common::errors::BrokerIdNotRegisteredError).
     BrokerIdNotRegistered(BrokerIdNotRegisteredError),
     /// See [`BrokerNotAvailableError`](crate::common::errors::BrokerNotAvailableError).
@@ -914,6 +917,8 @@ pub enum Error {
     ClusterAuthorization(ClusterAuthorizationError),
     /// See [`ConcurrentTransactionsError`](crate::common::errors::ConcurrentTransactionsError).
     ConcurrentTransactions(ConcurrentTransactionsError),
+    /// See [`ControllerIdNotRegisteredError`](crate::common::errors::ControllerIdNotRegisteredError).
+    ControllerIdNotRegistered(ControllerIdNotRegisteredError),
     /// See [`ControllerMovedError`](crate::common::errors::ControllerMovedError).
     ControllerMoved(ControllerMovedError),
     /// See [`CoordinatorLoadInProgressError`](crate::common::errors::CoordinatorLoadInProgressError).
@@ -969,6 +974,8 @@ pub enum Error {
     FetchSessionTopicId(FetchSessionTopicIdError),
     /// See [`GroupAuthorizationError`](crate::common::errors::GroupAuthorizationError).
     GroupAuthorization(GroupAuthorizationError),
+    /// See [`GroupDeletionFailedError`](crate::common::errors::GroupDeletionFailedError).
+    GroupDeletionFailed(GroupDeletionFailedError),
     /// See [`GroupIdNotFoundError`](crate::common::errors::GroupIdNotFoundError).
     GroupIdNotFound(GroupIdNotFoundError),
     /// See [`GroupMaxSizeReachedError`](crate::common::errors::GroupMaxSizeReachedError).
@@ -1167,6 +1174,8 @@ pub enum Error {
     StreamsInvalidTopology(StreamsInvalidTopologyError),
     /// See [`StreamsInvalidTopologyEpochError`](crate::common::errors::StreamsInvalidTopologyEpochError).
     StreamsInvalidTopologyEpoch(StreamsInvalidTopologyEpochError),
+    /// See [`StreamsTopologyDescriptionUpdateFailedError`](crate::common::errors::StreamsTopologyDescriptionUpdateFailedError).
+    StreamsTopologyDescriptionUpdateFailed(StreamsTopologyDescriptionUpdateFailedError),
     /// See [`StreamsTopologyFencedError`](crate::common::errors::StreamsTopologyFencedError).
     StreamsTopologyFenced(StreamsTopologyFencedError),
     /// See [`TelemetryTooLargeError`](crate::common::errors::TelemetryTooLargeError).
@@ -2285,6 +2294,44 @@ mod tests {
                 Error::wakeup("woken"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // BootstrapResolutionException -> KafkaException (NOT an ApiException,
+            // KIP-909): non-wire, so it answers only `is_kafka_error`.
+            (
+                "BootstrapResolution",
+                Error::BootstrapResolution(BootstrapResolutionError::new("unresolvable")),
+                [
+                    true, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // The three codes Kafka 4.4 adds are plain ApiExceptions, not fatal.
+            // GroupDeletionFailedException -> ApiException -> KafkaException
+            (
+                "GroupDeletionFailed (from the code)",
+                Error::new(Errors::GroupDeletionFailed),
+                [
+                    true, true, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // StreamsTopologyDescriptionUpdateFailedException -> ApiException -> KafkaException
+            (
+                "StreamsTopologyDescriptionUpdateFailed (from the code)",
+                Error::new(Errors::StreamsTopologyDescriptionUpdateFailed),
+                [
+                    true, true, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // ControllerIdNotRegisteredException -> ApiException -> KafkaException
+            (
+                "ControllerIdNotRegistered (from the code)",
+                Error::new(Errors::ControllerIdNotRegistered),
+                [
+                    true, true, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,
                 ],
             ),

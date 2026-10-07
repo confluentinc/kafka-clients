@@ -195,7 +195,7 @@ that file has been removed — see the document inventory note at the end.)
 - **TopicPartition** (`common/topic_partition.rs`): Topic/partition identifier
 - **Cluster** (`common/cluster.rs`): Cluster metadata with node collection
 - **ApiKeys** (`common/protocol/api_keys.rs`): Enum of all Kafka API request types
-- **Errors** (`common/protocol/errors.rs:30`): Kafka error codes with retriable/fatal classification — **135** variants today (codes `-1..=133`, ending at `ShareSessionLimitReached`); this line said 134 when written
+- **Errors** (`common/protocol/errors.rs:30`): Kafka error codes with retriable/fatal classification — **138** variants today (codes `-1..=136`, ending at `ControllerIdNotRegistered`, Kafka 4.4); this line said 134 when written
 
 ### Layer 2 — Wire Protocol (5 classes) ✓
 - **Readable** (`common/protocol/readable.rs`): Trait for reading wire protocol data
