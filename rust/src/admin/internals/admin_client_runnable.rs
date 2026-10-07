@@ -229,7 +229,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         loop {
             self.run_once().await;
             // Java's `break` out of `processRequests` once a permanent bootstrap
-            // failure has failed every call (`KafkaAdminClient.java:1607-1614`):
+            // failure has failed every call (`KafkaAdminClient.java:1621-1629`):
             // the I/O thread exits, and `enqueue` fails later calls with the
             // same error.
             if self.bootstrap_failure_handled {

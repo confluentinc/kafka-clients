@@ -239,7 +239,7 @@ impl AdminMetadataManager {
     /// resolution (KIP-909).
     ///
     /// Java's only caller gates `KafkaAdminClient`'s rebootstrap on it
-    /// (`KafkaAdminClient.java:777-782`). The Rust admin client never
+    /// (`MetadataUpdateNodeIdProvider.provide()`, `KafkaAdminClient.java:790-797`). The Rust admin client never
     /// rebootstraps (it runs with `MetadataRecoveryStrategy::None`), so that
     /// gate has no counterpart and this is translated for completeness (DoD #2).
     #[cfg_attr(not(test), expect(dead_code))]

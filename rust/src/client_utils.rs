@@ -107,9 +107,7 @@ impl ClientUtils {
     /// Java's `ConfigException` behavior.
     ///
     /// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
-    /// The `(AbstractConfig)` overload is covered by callers passing their
-    /// config's `bootstrap.servers` and typed `client.dns.lookup`; the
-    /// `(List<String>, String)` overload is [`ClientDnsLookup::for_config`]
+    /// The `(List<String>, String)` overload is [`ClientDnsLookup::for_config`]
     /// followed by this method.
     ///
     /// Each returned pair is the host string the client connects to (Java's

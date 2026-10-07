@@ -1038,8 +1038,6 @@ mod tests {
         );
     }
 
-    /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A
-    /// negative value is rejected with a message asserting the bound.
     /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
     /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
     #[test]
@@ -1064,6 +1062,8 @@ mod tests {
         }
     }
 
+    /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A
+    /// negative value is rejected with a message asserting the bound.
     #[test]
     fn test_metrics_sample_window_ms_validator() {
         // Valid: >= 0 (0 is allowed).

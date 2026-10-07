@@ -5204,7 +5204,7 @@ mod tests {
 
     /// Java's `TestUtils.waitForCondition(() -> { client.poll(100, now); return
     /// metadataUpdater.isBootstrapped(); }, "Bootstrap should complete")`: the
-    /// resolution runs on the blocking pool, so poll until it lands, with the
+    /// resolution runs on its own thread, so poll until it lands, with the
     /// same 15 s default bound.
     async fn poll_until_bootstrapped(client: &mut NetworkClient<MockSelector, TestHostResolver>, now: i64) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
