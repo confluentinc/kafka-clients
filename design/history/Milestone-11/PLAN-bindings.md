@@ -274,7 +274,12 @@ Java as possible."* That resolves D1–D3.
   priority.) Bare name = sync (`block_on`, joining all per-key futures — the C
   equivalent of Java's `result.all().get()`); `_async` = callback-based.
 - **D2 — Results: one flattened result handle per RPC, with accessors mirroring
-  the Java result type.** One opaque `kafka_admin_*Result_t` per RPC, delivered
+  the Java result type.** *Superseded on 2026-10-08 by the C FFI conventions
+  refactor (CLAUDE.md §4; plan "C FFI conventions: audit of the new rules",
+  decision D6): admin results become Java-faithful per-key
+  `kafka_common_KafkaFuture_t` handles exposed through `values()` / `all()` and
+  the typed refinements. The flattened accessor tables below describe the
+  surface being replaced.* One opaque `kafka_admin_*Result_t` per RPC, delivered
   through one callback and freed with `_destroy`. The *rest* of the accessor
   set follows whatever the Java result actually carries — do not assume a
   keyed shape:
