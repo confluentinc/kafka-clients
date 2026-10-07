@@ -800,6 +800,10 @@ Phase 6 completion notes (agent 96):
     is reshaped.
   - `#[cfg(test)]` fields `mock_random` on `RecordAccumulator` and `BuiltInPartitioner` must be kept in
     any new struct-literal constructor.
+  - `KafkaProducer::new_inner` closes a configured custom partitioner when `build_accumulator` fails
+    (KAFKA-2121, Critic 96 F1). Put any new fallible constructor step that follows the partitioner's
+    `configure` inside `build_accumulator`, e.g. KIP-1332's "does not support compression yet"
+    `ConfigException` (`KafkaProducer.java:475-480`), so it is covered.
 - **Timing log** (2026-10-07, IST):
 
   | Step | Start | End | Minutes |
@@ -918,6 +922,7 @@ Phase 6 completion notes (agent 96):
   `ApplicationEventHandlerTest`, `ConsumerNetworkThreadTest`, and the `AsyncKafkaConsumerTest` /
   `KafkaConsumerTest` / `FetchRequestManagerTest` hunks.
 - DoD #10 applies (`CompletedFetch` / `FetchCollector` are on the per-record receive path; §27).
+- Also: Critic 96 F3: trim consumer `client.rack` (Java trims Type.STRING) and add `ConsumerConfig::DEFAULT_CLIENT_RACK` (`ConsumerConfig.java:267`).
 
 ### Phase 11 — Consumer metrics: sensor lifecycle (agent 101)
 
