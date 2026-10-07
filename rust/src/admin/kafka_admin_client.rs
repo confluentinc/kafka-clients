@@ -1175,9 +1175,11 @@ where
         // Re-running the lookup enqueues new calls via `CallSender::call`, which
         // are rejected during close ("Cannot accept new calls when AdminClient is
         // closing."). Leaving the call in pending calls preserves the normal
-        // `close(timeout)` handling, so it can still be retried (or assigned,
-        // should the broker reappear) within the shutdown grace period instead of
-        // failing immediately. Java tests `hardShutdownTimeMs`, not `closing`.
+        // `close(timeout)` handling, so it can still be assigned, should the broker
+        // reappear, within the shutdown grace period instead of failing
+        // immediately. (Java would also retry a send that then fails; the Rust
+        // close path sets `closing` at once, so it does not — Critic 102 Issue 1,
+        // deferred to the human.) Java tests `hardShutdownTimeMs`, not `closing`.
         if hnu_ctx
             .sender
             .shutdown
