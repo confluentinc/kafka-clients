@@ -2771,6 +2771,16 @@ where
     // (`testListPartitionsAfterClose` style) are listed in the commit-8
     // test-skip rationale.
     //
+    // # Bootstrap-failure behavior (deliberate Java divergence, KIP-909)
+    //
+    // Java 4.4's `acquireAndEnsureOpen()` also throws the permanent
+    // `BootstrapResolutionException` (`AsyncKafkaConsumer.java:2205`), so
+    // `assignment()`, `subscription()`, `paused()`, `groupMetadata()` and
+    // `currentLag()` throw it once asynchronous bootstrap resolution has
+    // failed. For the reason above, the Rust accessors cannot: they keep
+    // returning their current / stub value. Every `Result`-returning API
+    // returns `Error::BootstrapResolution` through `ensure_open()`.
+    //
     // # Mutable Set semantics (deliberate Java divergence)
     //
     // Java wraps the returned `Set` with `Collections.unmodifiableSet(...)`.
@@ -2787,6 +2797,10 @@ where
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`). See the module-level "Sync state-read
     /// methods" comment for rationale.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn assignment(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.assigned_partitions()
@@ -2798,6 +2812,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn subscription(&self) -> std::collections::HashSet<String> {
         let subs = self.subscriptions.lock().unwrap();
         subs.subscription()
@@ -2809,6 +2827,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn paused(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.paused_partitions()
@@ -2878,6 +2900,10 @@ where
     /// receives its first heartbeat response with a member-epoch
     /// (or until tests invoke the notifier directly), the cache is
     /// empty and this method returns a fresh stub.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
@@ -2905,6 +2931,10 @@ where
     ///
     /// **Returns `None` silently when the consumer is closed** (Java
     /// throws `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
         // The bg-task `current_lag_async` path is the one that drives the
         // event; this accessor only reads cached state and currently has
@@ -3027,9 +3057,12 @@ where
     /// (Rust's `&mut self` enforces single-caller exclusivity at
     /// compile time), so this is the `closed` check followed by
     /// `metadata.maybeThrowBootstrapFatalException()` (KIP-909): once
-    /// asynchronous bootstrap resolution has failed, every API call that
-    /// acquires the consumer returns the
+    /// asynchronous bootstrap resolution has failed, every `Result`-returning
+    /// API that acquires the consumer returns the
     /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
+    /// The sync accessors (`assignment`, `subscription`, `paused`,
+    /// `group_metadata`, `current_lag`) have no error channel and keep
+    /// returning their value — see the "Sync state-read methods" comment.
     fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
             return Err(Error::local_illegal_state("This consumer has already been closed."));
