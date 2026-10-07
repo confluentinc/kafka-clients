@@ -140,7 +140,7 @@ mod sasl_handshake_response;
 mod send_builder;
 mod transaction_result;
 pub mod txn_offset_commit_request;
-mod txn_offset_commit_response;
+pub mod txn_offset_commit_response;
 
 pub use abstract_request::{AbstractRequest, RequestBuilder};
 pub use abstract_response::{AbstractResponse, ConcreteResponse};

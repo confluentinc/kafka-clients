@@ -4495,12 +4495,11 @@ impl TransactionManager {
     /// # What `pendingTxnOffsetCommits` does **not** do: shrink the retry
     ///
     /// Both builders snapshot the topic collection at construction — Java's
-    /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
-    /// and
-    /// [`txn_offset_commit_request::Builder::with_options`]
-    /// takes the map by reference and
-    /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
-    /// since the handler outlives the call). `reenqueue()` (Java 1394) and
+    /// `txnOffsetCommitHandler` builds the `TxnOffsetCommitRequestData` once and
+    /// hands it to the builder, and [`Self::txn_offset_commit_handler`] does the
+    /// same (the builder owns its data; it cannot borrow
+    /// `self.pending_txn_offset_commits`, since the handler outlives the call).
+    /// `reenqueue()` (Java 1394) and
     /// [`Self::retry`] both re-enqueue the *same handler with the same builder*, and
     /// nothing between the two touches `builder.data`. So a retry re-sends the **full
     /// original** offset list, including partitions that already returned `NONE`.
@@ -4534,71 +4533,81 @@ impl TransactionManager {
         };
         let group_id = builder.data().group_id.clone();
         let mut coordinator_reloaded = false;
-        let errors = txn_offset_commit_response.errors();
 
         kafka_debug!(
             self.log_context,
-            "Received TxnOffsetCommit response for consumer group {}: {}",
+            "Received TxnOffsetCommit response for consumer group {}: {:?}",
             group_id,
-            format_partition_errors(&errors)
+            txn_offset_commit_response.data().topics
         );
 
-        // Java iterates a `HashMap`; sorted here so which error wins a `break` is
-        // reproducible (see [`sorted_partition_errors`]).
-        for (topic_partition, error) in sorted_partition_errors(&errors) {
-            if error == Errors::None {
-                self.pending_txn_offset_commits.remove(topic_partition);
-            } else if error == Errors::CoordinatorNotAvailable
-                || error == Errors::NotCoordinator
-                || error == Errors::RequestTimedOut
-            {
-                if !coordinator_reloaded {
-                    coordinator_reloaded = true;
-                    self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Group, &group_id)?;
+        // Iterated in the response's own topic and partition order, as Java does
+        // (89f3888c87): which error wins a `break` follows the wire.
+        for response_topic in &txn_offset_commit_response.data().topics {
+            let topic_name = &response_topic.name;
+            for response_partition in &response_topic.partitions {
+                let topic_partition = TopicPartition::new(topic_name.clone(), response_partition.partition_index);
+                let error = Errors::for_code(response_partition.error_code);
+                if error == Errors::None {
+                    self.pending_txn_offset_commits.remove(&topic_partition);
+                } else if error == Errors::CoordinatorNotAvailable
+                    || error == Errors::NotCoordinator
+                    || error == Errors::RequestTimedOut
+                {
+                    if !coordinator_reloaded {
+                        coordinator_reloaded = true;
+                        self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Group, &group_id)?;
+                    }
+                } else if error.error().is_some_and(|e| e.is_retriable_error()) {
+                    // The topic is unknown, the coordinator is loading, or it is another retriable error;
+                    // retry with the current coordinator.
+                } else if error == Errors::GroupAuthorizationFailed {
+                    // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
+                    self.abortable_error(&handler, Error::group_authorization(group_id.clone()))?;
+                    break;
+                } else if error == Errors::FencedInstanceId || error == Errors::TransactionAbortable {
+                    self.abortable_error(&handler, Error::new(error))?;
+                    break;
+                } else if error == Errors::UnknownMemberId || error == Errors::IllegalGeneration {
+                    // Java: `new CommitFailedException("Transaction offset Commit
+                    // failed due to consumer group metadata mismatch: " + ..)`.
+                    // `CommitFailedException extends KafkaException` directly, so it is a
+                    // `KafkaException` that is NOT an `ApiException` — exactly what
+                    // `ConsumerCommitFailedError` encodes. (A code-resolved
+                    // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
+                    self.abortable_error(
+                        &handler,
+                        Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
+                            "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
+                            error.message()
+                        ))),
+                    )?;
+                    break;
+                } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
+                    // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
+                    // just treat it the same as PRODUCE_FENCED.
+                    self.fatal_error(&handler, Error::new(Errors::ProducerFenced))?;
+                    break;
+                } else if error == Errors::TransactionalIdAuthorizationFailed
+                    || error == Errors::UnsupportedForMessageFormat
+                {
+                    self.fatal_error(&handler, Error::new(error))?;
+                    break;
+                } else {
+                    // Java: `new KafkaException("Unexpected error in
+                    // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
+                    self.fatal_error(
+                        &handler,
+                        Error::kafka_message(format!(
+                            "Unexpected error in TxnOffsetCommitResponse: {}",
+                            error.message()
+                        )),
+                    )?;
+                    break;
                 }
-            } else if error.error().is_some_and(|e| e.is_retriable_error()) {
-                // If the topic is unknown, the coordinator is loading, or is another retriable error, retry with the
-                // current coordinator
-                continue;
-            } else if error == Errors::GroupAuthorizationFailed {
-                // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
-                self.abortable_error(&handler, Error::group_authorization(group_id.clone()))?;
-                break;
-            } else if error == Errors::FencedInstanceId || error == Errors::TransactionAbortable {
-                self.abortable_error(&handler, Error::new(error))?;
-                break;
-            } else if error == Errors::UnknownMemberId || error == Errors::IllegalGeneration {
-                // Java 1923: `new CommitFailedException("Transaction offset Commit
-                // failed due to consumer group metadata mismatch: " + ..)`.
-                // `CommitFailedException extends KafkaException` directly, so it is a
-                // `KafkaException` that is NOT an `ApiException` — exactly what
-                // `ConsumerCommitFailedError` encodes. (A code-resolved
-                // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
-                self.abortable_error(
-                    &handler,
-                    Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
-                        "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
-                        error.message()
-                    ))),
-                )?;
-                break;
-            } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
-                // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
-                // just treat it the same as PRODUCE_FENCED.
-                self.fatal_error(&handler, Error::new(Errors::ProducerFenced))?;
-                break;
-            } else if error == Errors::TransactionalIdAuthorizationFailed
-                || error == Errors::UnsupportedForMessageFormat
-            {
-                self.fatal_error(&handler, Error::new(error))?;
-                break;
-            } else {
-                // Java 1937: `new KafkaException("Unexpected error in
-                // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
-                self.fatal_error(
-                    &handler,
-                    Error::kafka_message(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
-                )?;
+            }
+            // Stop processing further topics once the transaction has reached a terminal state.
+            if handler.result.is_completed() {
                 break;
             }
         }
