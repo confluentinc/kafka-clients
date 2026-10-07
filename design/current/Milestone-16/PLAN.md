@@ -252,18 +252,23 @@ Phase 0 completion notes (agent 90):
   |---|---|---|
   | 25 | utils → `utils.internals` moves: `ByteUtils`, `ExponentialBackoff` (+ its test), `LogContext`, `ProducerIdAndEpoch` (D2) | Phase 1 |
   | 5 | `shouldClientThrottle` overrides removed (KAFKA-20828) | Phase 1 |
-  | 2 | `TxnOffsetCommitRequest.getErrorResponseTopics` and `TxnOffsetCommitResponse.errors` removed (baa064e422), held back by §2.2 | Phase 5 |
+  | 2 | `TxnOffsetCommitRequest.getErrorResponseTopics` (baa064e422) and `TxnOffsetCommitResponse.errors` (89f3888c87) removed, held back by §2.2 | Phase 5 |
   | 2 | `ProducerBatch.isWritable` and `RecordAccumulator.recordsBuilder` (KAFKA-20578) | Phases 7/8 |
   | 1 | `ConsumerMembershipManager.onHeartbeatSuccess` (KAFKA-20681) | Phase 9 |
   | 10 | `SensorBuilder` → `consumer.internals.metrics` (KAFKA-19542) | Phase 11 |
 
   So `cargo xtask lint`, and with it `make verify`, cannot pass at the end of Phase 0 without pulling
   in other phases' work, which for the TxnOffsetCommit pair §2.2 forbids. Each owning phase must clear
-  its rows. Until a Manager/human decides how to gate the phases in between, "lint passes" means "no
-  finding beyond this table".
+  its rows. The user's gate decision and the per-finding table are in §5.1.
   - The `ApiVersionsRequest` changes that go with v5 (`setClusterId`/`setNodeId` and the both-or-neither
-    check in `isValid`, 7be741d08b) are left to **Phase 4**. Until then the client sends v5 with the
+    check in `isValid`, 0ef4a4c80e) are left to **Phase 4**. Until then the client sends v5 with the
     defaults (`null` / -1), which the check accepts.
+  - **Spec portions already applied (Phase 4 Critic, Phase 13 audit: do not count as missing).** The
+    corpus sync landed the `ApiVersionsRequest.json` / `ApiVersionsResponse.json` parts of all three
+    KAFKA-20246 commits: ede01b871e (v5 with the `ClusterId` / `NodeId` fields, marked unstable, 1/N),
+    0ef4a4c80e (the fields' "provide both" docs, 2/N) and 7be741d08b (v5 marked stable, 3/N). What Phase 4 still owes
+    from them is the Java code only: the request setters and `isValid` check (0ef4a4c80e), and
+    `GroupCoordinatorNode` / the protected `Node` overload / NetworkClient wiring (7be741d08b, ede01b871e).
 - **Skips:**
   - Streams-only spec content (StreamsGroupDescribe/Heartbeat v1, the topology description RPC) is
     synced but has no wrapper: out of scope (§1.1).
@@ -562,6 +567,70 @@ Phase 0 completion notes (agent 90):
   `KafkaShareConsumerTest`, `ConsumerCoordinatorTest`, `AbstractCoordinatorTest`, `OffsetFetcherTest`
   (classic), `RaftVoterEndpointTest`, the Streams admin tests, and the 1a443b2d23 test-class split
   (a reorganisation).
+
+### 5.1 Known lint findings from the 4.4 submodule bump
+
+`cargo xtask lint-custom` (`check-java-name`) resolves every `#[doc(alias = "org.apache.kafka...")]`
+marker against the `kafka/` working tree. Phase 0's bump to 4.4.0-rc4 left the 45 findings below. Each
+names a Java class or method that 4.4 moved or deleted as part of a change a later phase ports, so none
+can be fixed in Phase 0 (the TxnOffsetCommit pair is barred by §2.2). The other 113 findings the bump
+produced were pure relocations and were fixed in Phase 0.
+
+**Gate rule (user decision, 2026-10-07; no tooling change):**
+- A phase passes lint if `cargo xtask lint` reports nothing outside this table **and** that phase's own
+  rows are gone.
+- Each phase deletes its rows here in the commit that fixes them.
+- Phase 13 requires this table to be empty and `cargo xtask lint` fully green.
+
+Count by owner: Phase 1 30 (25 D2 moves + 5 throttle), Phase 5 2, Phases 7/8 2, Phase 9 1, Phase 11 10.
+
+| Rust item | Java marker | Cause | Owner |
+|---|---|---|---|
+| `rust/src/common/requests/alter_partition_reassignments_response.rs` `should_client_throttle` | `common.requests.AlterPartitionReassignmentsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
+| `rust/src/common/requests/alter_user_scram_credentials_response.rs` `should_client_throttle` | `common.requests.AlterUserScramCredentialsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
+| `rust/src/common/requests/describe_user_scram_credentials_response.rs` `should_client_throttle` | `common.requests.DescribeUserScramCredentialsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
+| `rust/src/common/requests/elect_leaders_response.rs` `should_client_throttle` | `common.requests.ElectLeadersResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
+| `rust/src/common/requests/list_partition_reassignments_response.rs` `should_client_throttle` | `common.requests.ListPartitionReassignmentsResponse#shouldClientThrottle` | Java removed the per-response override; throttling is derived from the response schema (KAFKA-20828, 63f445aaa9) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `ByteUtils` | `common.utils.ByteUtils` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `read_unsigned_varint` | `common.utils.ByteUtils#readUnsignedVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `write_unsigned_varint` | `common.utils.ByteUtils#writeUnsignedVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `read_varint` | `common.utils.ByteUtils#readVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `write_varint` | `common.utils.ByteUtils#writeVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `read_unsigned_varlong` | `common.utils.ByteUtils#readUnsignedVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `read_varlong` | `common.utils.ByteUtils#readVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `write_unsigned_varlong` | `common.utils.ByteUtils#writeUnsignedVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `write_varlong` | `common.utils.ByteUtils#writeVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `size_of_unsigned_varint` | `common.utils.ByteUtils#sizeOfUnsignedVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `size_of_varint` | `common.utils.ByteUtils#sizeOfVarint` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `size_of_unsigned_varlong` | `common.utils.ByteUtils#sizeOfUnsignedVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/byte_utils.rs` `size_of_varlong` | `common.utils.ByteUtils#sizeOfVarlong` | Moved to `common.utils.internals` (KAFKA-20297, b347f4bd2e); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `ExponentialBackoff` | `common.utils.ExponentialBackoff` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `new` | `common.utils.ExponentialBackoff#ExponentialBackoff` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `initial_interval` | `common.utils.ExponentialBackoff#initialInterval` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `backoff` | `common.utils.ExponentialBackoff#backoff` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `test_exponential_backoff` | `common.utils.ExponentialBackoffTest#testExponentialBackoff` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `test_exponential_backoff_without_jitter` | `common.utils.ExponentialBackoffTest#testExponentialBackoffWithoutJitter` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/exponential_backoff.rs` `test_exponential_backoff_with_invalid_jitter` | `common.utils.ExponentialBackoffTest#testExponentialBackoffWithInvalidJitter` | Moved to `common.utils.internals` (KAFKA-20297, b4c977544f); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/log_context.rs` `LogContext` | `common.utils.LogContext` | Moved to `common.utils.internals` (KAFKA-20297, 10805c9782); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/log_context.rs` `new` | `common.utils.LogContext#LogContext` | Moved to `common.utils.internals` (KAFKA-20297, 10805c9782); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/producer_id_and_epoch.rs` `ProducerIdAndEpoch` | `common.utils.ProducerIdAndEpoch` | Moved to `common.utils.internals` (KAFKA-20297, d85d257c99); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/producer_id_and_epoch.rs` `new` | `common.utils.ProducerIdAndEpoch#ProducerIdAndEpoch` | Moved to `common.utils.internals` (KAFKA-20297, d85d257c99); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/utils/producer_id_and_epoch.rs` `is_valid` | `common.utils.ProducerIdAndEpoch#isValid` | Moved to `common.utils.internals` (KAFKA-20297, d85d257c99); mirror the module move (D2) | Phase 1 |
+| `rust/src/common/requests/txn_offset_commit_request.rs` `get_error_response_topics` | `common.requests.TxnOffsetCommitRequest#getErrorResponseTopics` | Removed by KIP-1319 (baa064e422); TxnOffsetCommit held back by §2.2 | Phase 5 |
+| `rust/src/common/requests/txn_offset_commit_response.rs` `errors` | `common.requests.TxnOffsetCommitResponse#errors` | Removed by KIP-1319 (89f3888c87); TxnOffsetCommit held back by §2.2 | Phase 5 |
+| `rust/src/producer/internals/producer_batch.rs` `is_writable` | `clients.producer.internals.ProducerBatch#isWritable` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
+| `rust/src/producer/internals/record_accumulator.rs` `records_builder` | `clients.producer.internals.RecordAccumulator#recordsBuilder` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
+| `rust/src/consumer/internals/consumer_membership_manager.rs` `on_heartbeat_success` | `clients.consumer.internals.ConsumerMembershipManager#onHeartbeatSuccess` | Consolidated into `AbstractMembershipManager` (KAFKA-20681, 6a6b536fbc) | Phase 9 |
+| `rust/src/consumer/internals/sensor_builder.rs` `SensorBuilder` | `clients.consumer.internals.SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `new` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_tags` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_avg` | `clients.consumer.internals.SensorBuilder#withAvg` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_min` | `clients.consumer.internals.SensorBuilder#withMin` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_max` | `clients.consumer.internals.SensorBuilder#withMax` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_value` | `clients.consumer.internals.SensorBuilder#withValue` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_meter` | `clients.consumer.internals.SensorBuilder#withMeter` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `with_meter_stat` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
+| `rust/src/consumer/internals/sensor_builder.rs` `build` | `clients.consumer.internals.SensorBuilder#build` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
 
 ## 6. Commit classification (input to the Phase 13 audit)
 
