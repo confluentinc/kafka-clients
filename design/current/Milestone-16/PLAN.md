@@ -563,6 +563,141 @@ Phase 1 completion notes (agent 91):
   `TransactionManagerTest` (+157), `KafkaProducerTest` (+160, incl. the 930ebc5608 deflake), `SenderTest`,
   `MessageTest`. Byte-level v6 encoding test.
 
+Phase 5 completion notes (agent 95):
+
+- **Specs (7562044781, b9945c8e84).** `TxnOffsetCommitRequest.json` / `TxnOffsetCommitResponse.json` synced:
+  `rust/generator/messages/` now matches `kafka/` 4.4.0-rc4 exactly. Both files were already tracked, so
+  the `*.json` ignore rule did not apply; no new file was added in this phase.
+- **How v6 is kept from going out without topic ids.** Three layers, all Java's:
+  1. `txn_offset_commit_request::Builder::for_topic_names` caps at v5 (v4 without TV2); only
+     `for_topic_ids_or_names` reaches v6.
+  2. `TransactionManager::txn_offset_commit_handler` picks `for_topic_ids_or_names` only when every topic
+     resolved to a non-zero id in `metadata.topic_ids()` (`TransactionManager.java:1295-1297`).
+  3. `build_version` rejects a v6 topic with the zero id ("... does require usage of topic ids.") and a
+     v0-5 topic with an empty name ("... does require usage of topic names."). This is where Java enforces
+     the two `ignorable` fields, which the generated writer drops silently (producer-transactions §11).
+  Step 1 committed the spec together with the reshaped builder and switched the manager to
+  `for_topic_names`, so no intermediate commit could negotiate v6.
+- **§12.** `for_topic_names` translates Java's constants (`(short) 5`, `LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`);
+  `for_topic_ids_or_names` translates Java's deliberate `ApiKeys.TXN_OFFSET_COMMIT.latestVersion()`
+  (`TxnOffsetCommitRequest.java:94`) as `latest_version()`, marked at the site. v6 is stable, so both
+  accessors return 6; a test pins that. The 4.3.1 `build()` clamp is gone, as in Java.
+- **§10.** `get_topics` / `get_topics_with_topic_ids` and the response's map constructor sort by topic, then
+  partition. `txn_offset_commit_handler` sorts the caller's offsets the same way before its single pass,
+  where Java walks the caller's map (rules-errata item 1). The response is now read in wire order, as
+  Java does; the old sorted flattening (`errors()`) is gone.
+- **§1-§4.** No new transition call site: the handler's arms reuse `abortable_error` / `fatal_error`. The
+  manager gains `metadata: Arc<Metadata>`. `Metadata` locks internally and never calls out, so the read
+  under the manager's lock is a leaf acquisition; the field doc records this. `send_offsets_to_transaction`
+  awaits the metadata refresh before it takes `pending_requests` and the manager lock.
+- **What landed, per class:**
+  - `TxnOffsetCommitRequest`: the private constructor plus the two factories (7340eefc48, 2342c80dca);
+    `supports_group_id_not_found_error` / `supports_stale_member_epoch_error` (723847904b);
+    `get_topics_with_topic_ids`; and the static `getErrorResponse(data, errors)` as
+    `get_error_response_with_request`, which carries topic id and name (baa064e422). The Rust-only
+    `TxnOffsetCommitRequestBuilderOptions` / `...OptionsBuilder` are deleted with the constructors they served.
+  - `TxnOffsetCommitResponse`: `use_topic_ids` (319dd61cb3's only client hunk), `new_builder` and the
+    builder surface (20c2450e5b, baa064e422); `errors()` removed (89f3888c87). Module
+    `txn_offset_commit_response` is now `pub`, so the nested builder is `txn_offset_commit_response::Builder`.
+  - `TransactionManager` (83976543fe, 7f5861817d): topic ids, the id -> name snapshot, the unknown-id skip
+    with Java's warning, `GROUP_ID_NOT_FOUND` / `STALE_MEMBER_EPOCH` as `CommitFailed`, the per-topic
+    "stop once completed" break. The request is now built from the offsets **passed in**, not from all of
+    `pendingTxnOffsetCommits` (a 4.4 behaviour change, tested).
+  - `ProducerMetadata::add_with_topics` and `KafkaProducer::await_topic_metadata` (6208dfc014);
+    `configure_transaction_state` passes the metadata (83976543fe).
+- **Tests.**
+  - `TxnOffsetCommitRequestTest`: all 9 cases, including the 4.4 override of `testGetErrorResponse`, which
+    was previously skipped as broker-only.
+  - `TxnOffsetCommitResponseTest`: all 8 cases, each builder case over both builder flavours.
+  - `RequestResponseTest`: the `createTxnOffsetCommitRequest(version)` /
+    `...WithAutoDowngrade` arms, as two tests.
+  - `MessageTest`: both TxnOffsetCommit cases, per version.
+  - `TransactionManagerTest`: `testGroupMetadataMismatchErrorInTxnOffsetCommit` (both codes, exact
+    messages) and the three v6 tests. Both `prepareTxnOffsetCommitResponse` translations (TM and Sender)
+    gain `assertTxnOffsetCommitRequestUsesTopicNames`.
+  - `KafkaProducerTest`: both 6208dfc014 tests, with 930ebc5608's frozen `MockTime`.
+  - `SenderTest`: its hunks are only the extra constructor argument.
+  - Byte-level (DoD #3): request v6 (16-byte id, no name) and v5 (compact name, no id), response v6 and v5,
+    each derived field by field from the spec in declaration order.
+  - Rust-only additions: the unknown-id skip, offsets-passed-in-only with sorting, the metadata-wait
+    timeout (asserting `"Failed to update metadata after 100 ms."`), `use_topic_ids` / `supports_*`
+    thresholds, and the group-metadata-check-first ordering.
+  - Teeth check: making `send_offsets_to_transaction` skip the metadata wait fails all three new
+    `KafkaProducer` tests.
+- **Recorded skips and deviations:**
+  - `awaitTopicMetadata`'s no-refresh branch calls `metadata.maybeThrowBootstrapFatalException()` (KIP-909).
+    That method does not exist on this branch: **Phase 2 owns it, and the merge must add the call** in
+    `KafkaProducer::await_topic_metadata` (the rustdoc says so).
+  - Java's `TxnOffsetCommitResponse.Builder` / `TopicIdBuilder` / `TopicNameBuilder` are one Rust `Builder`
+    over a private `TopicIndex` enum (DoD #7, documented on the type): the subclasses differ only in the
+    lookup key. The nullable `Uuid` / `String` parameters are `Option`s, and Java's
+    `IllegalArgumentException("TopicId cannot be null." / "TopicName cannot be null.")` is
+    `LocalIllegalArgument` with the same text. `merge` into an empty builder adopts the data without
+    indexing it, exactly as Java does.
+  - The static `getErrorResponse` is `get_error_response_with_request` (CLAUDE.md §2: it shares the Java
+    name with the instance method; `request` is its discriminating parameter).
+  - This crate's `MockClient` has no metadata updater (Java's `MockClient.poll` applies
+    `prepareMetadataUpdate` / `updateWithCurrentMetadata`). The `KafkaProducer` tests run a small
+    responder beside the operation that does that. The `TransactionManager` tests are manager-level, so a
+    helper negotiates the version the way `NetworkClient` does (`latest_usable_version_in_range` against
+    node 0).
+  - The Sender / RecordAccumulator test fixtures build their `TransactionManager` before the context's
+    metadata exists, so each gets a separate empty `Metadata` (`txn_manager_metadata()`, documented). None
+    of those tests seeds an id for an offset-commit topic, and Java's shared metadata carries none either,
+    so the request is the same v0-5 one.
+  - Not Phase 5: the other 4.4 `ProducerMetadata` changes (36a69b49c5 `Timer` `awaitUpdate`, 9f15f3c540
+    lock-free `add` fast path and `retainTopic` CAS, the constructor losing `Time`) are classified N in
+    §6 and were not touched.
+  - Pre-existing, out of scope: `KafkaProducerMetrics::record_send_offsets` has no call site in Rust
+    (the module carries an `expect(dead_code)` for the transactional sensors). Java records it after the
+    send-offsets wait; 6208dfc014 did not change that line.
+  - `testMeasureTransactionDurations`' new `metadata.add("topic", ...)` hunk is already what Rust's
+    `TxnProducerContext` does by default, so nothing changed there.
+- **DoD #10:** N/A: transactional control requests, not the per-record path.
+- **For Phases 6-8 (same track):**
+  - `TransactionManager::new` now takes `metadata: Arc<Metadata>` (7 parameters), and
+    `KafkaProducer::configure_transaction_state` takes `&Arc<Metadata>`. Test fixtures: TM tests use
+    `test_metadata()` / `manager_with_metadata(..)`; Sender and RecordAccumulator tests use
+    `txn_manager_metadata()`.
+  - `TxnProducerContext::with_metadata_seed(extra, n, tv2, track_topic, with_topic_ids)` and the
+    `topic_metadata_update` helper exist in `kafka_producer.rs` tests.
+  - Phase 6 (rack-aware) touches `RecordAccumulator::PartitionerConfig` and `KafkaProducer` construction.
+    This phase changed only the `configure_transaction_state` call there (one argument).
+  - Gate on `cargo xtask lint --keep-going`. `check-java-name` rejects a test whose `#[doc(alias)]` names a
+    Java test it is not named after, so a test that translates only part of a Java test should carry no alias.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, errata, Java diffs) | 20:29 | 20:35 | 6 |
+  | 1 specs + `TxnOffsetCommitRequest` + MessageTest | 20:35 | 20:43 | 8 |
+  | 2 `TxnOffsetCommitResponse` + response by topic | 20:43 | 20:49 | 6 |
+  | 3 `TransactionManager` topic ids + new errors + tests | 20:49 | 20:58 | 9 |
+  | 4 `KafkaProducer` / `ProducerMetadata` refresh + tests | 20:58 | 21:03 | 5 |
+  | 5 gates (format-check, lint + fixup, full `cargo test`) | 21:03 | 21:08 | 5 |
+  | 6 `make -k verify` (twice, see below), completion notes | 21:08 | 21:29 | 21 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4330 passed, 0 failed, 10 ignored (lib 4281 / 3 ignored, plus 36, 8 and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: lint-custom reports exactly the 13 remaining §5.1 rows (Phases 7/8 2,
+    Phase 9 1, Phase 11 10), nothing new. Every other step passes: the other custom lints, doc-hygiene,
+    module-path-hygiene, and all three clippy passes. A first run found two of this phase's test aliases
+    (`RequestResponseTest#testSerialization` on differently named tests); fixed in a fixup.
+  - `make -k verify` (macOS, 21:19-21:27) fails in three targets, none of them this phase's:
+    - `build-c`: `cmake: command not found`. Environment: cmake is not installed on this host.
+    - `lint`: the 13 remaining §5.1 rows only. Expected under the §5.1 gate rule.
+    - `test-rust-all-features`: 4508 passed, 17 failed, 3 ignored. All 17 are Docker-backed
+      `integration_tests::*` ("failed to list networks": the Docker daemon is not running).
+    Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` / format-arity
+    (29 passed), and the soak tests (156 passed).
+    The first `make -k verify` run (21:08) is discarded: its log file was shared with the parallel Phase 2
+    agent and holds that worktree's output.
+  - **Owed:** a Docker-backed run of the integration suite, in particular
+    `producer_transactions_test` against a 4.4 broker, which now negotiates TxnOffsetCommit v6 when the
+    offsets' topics have ids. Also a `build-c` / C-test run on a host with cmake (this phase changed no C
+    surface).
+
 ### Phase 6 — Producer: rack-aware partitioning (agent 96)
 
 - KAFKA-19193 (a3f17327de, 88b48794ea, 165d7ec933, fc18c47efd docs):
