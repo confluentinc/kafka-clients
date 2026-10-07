@@ -151,8 +151,8 @@ use crate::admin::{
     NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
     ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
-    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
+    TransactionDescription, TransactionListing, TransactionState, UnregisterControllerOptions, UpdateFeaturesOptions,
+    UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
     UserScramCredentialsDescription,
 };
 use crate::common::acl::{
@@ -14319,6 +14319,36 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     }
 }
 
+/// Sets whether the mock runs a KRaft (Raft) controller quorum, which decides
+/// whether its `unregisterController` succeeds (`true`) or fails with
+/// `UNSUPPORTED_VERSION` (`false`, the default).
+///
+/// Mirrors `MockAdminClient.Builder.usingRaftController(boolean)`, a Java
+/// construction-time option the Rust mock exposes as a setter. Mock-only
+/// configuration, not a translated `Admin` method.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle if `admin` does not wrap a mock
+/// (free it with `kafka_common_Error_destroy`).
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_using_raft_controller(
+    admin: *const kafka_admin_AdminClient_t,
+    using_raft_controller: bool,
+) -> *mut kafka_common_Error_t {
+    match unsafe { mock_ref(admin) } {
+        Ok(mock) => {
+            mock.set_using_raft_controller(using_raft_controller);
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
+    }
+}
+
 /// Seeds the feature levels the mock's `describeFeatures` reports and
 /// `updateFeatures` validates against.
 ///
@@ -17337,6 +17367,11 @@ fn abort_transaction_options(timeout_ms: i32) -> AbortTransactionOptions {
     AbortTransactionOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
+/// Builds [`UnregisterControllerOptions`] from the C arguments.
+fn unregister_controller_options(timeout_ms: i32) -> UnregisterControllerOptions {
+    UnregisterControllerOptions::new().set_timeout_ms(option_timeout(timeout_ms))
+}
+
 /// Builds [`TerminateTransactionOptions`] from the C arguments.
 fn terminate_transaction_options(timeout_ms: i32) -> TerminateTransactionOptions {
     TerminateTransactionOptions::new().set_timeout_ms(option_timeout(timeout_ms))
@@ -17453,6 +17488,15 @@ fn submit_abort_transaction(
     options: AbortTransactionOptions,
 ) -> KafkaFuture<()> {
     admin.abort_transaction_with_options(spec, options).all()
+}
+
+/// Submits `unregisterController` and returns its single `all()` future.
+fn submit_unregister_controller(
+    admin: &dyn Admin,
+    controller_id: i32,
+    options: UnregisterControllerOptions,
+) -> KafkaFuture<()> {
+    admin.unregister_controller_with_options(controller_id, options).all()
 }
 
 /// Submits `forceTerminateTransaction` and returns its single `result()` future.
@@ -18882,6 +18926,99 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
 }
 
 // ---------------------------------------------------------------------------
+// unregisterController (KAFKA-20395, Kafka 4.4)
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_unregister_controller_async`].
+///
+/// There is **no result handle**: Java's `UnregisterControllerResult` exposes
+/// only `all() -> KafkaFuture<Void>`, so success carries no data (the same D2
+/// row as `abortTransaction`). `error` is null on success; when it is non-null
+/// the callback owns it and must free it with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_unregister_controller_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_Error_t, *mut c_void);
+
+/// Unregisters a controller, blocking until the operation has completed
+/// (synchronous).
+///
+/// This is `unregisterController(int, UnregisterControllerOptions)`
+/// (`@InterfaceStability.Unstable` in Java). Returns null on success, or a
+/// non-null error handle (free it with `kafka_common_Error_destroy`). There is
+/// no result handle to free. Anticipated errors, by code: `REQUEST_TIMED_OUT`
+/// (the request timed out before the operation could finish),
+/// `UNSUPPORTED_VERSION` (the software is too old to support the API),
+/// `CONTROLLER_ID_NOT_REGISTERED` (the id is not currently registered),
+/// `NOT_CONTROLLER` (the request did not arrive at the active controller) and
+/// `INVALID_REQUEST` (the id is the current active controller's).
+///
+/// # Parameters
+///
+/// - `controller_id`: the controller id to unregister.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_unregister_controller(
+    admin: *const kafka_admin_AdminClient_t,
+    controller_id: i32,
+    timeout_ms: i32,
+) -> *mut kafka_common_Error_t {
+    let options = unregister_controller_options(timeout_ms);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_unregister_controller(a, controller_id, options))) };
+    match outcome {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Unregisters a controller asynchronously. See
+/// [`kafka_admin_AdminClient_unregister_controller`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_unregister_controller_async(
+    admin: *const kafka_admin_AdminClient_t,
+    controller_id: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_unregister_controller_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = unregister_controller_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_unregister_controller(a, controller_id, options)),
+            move |outcome, ud| {
+                let error = match outcome {
+                    Ok(()) => std::ptr::null_mut(),
+                    Err(e) => box_error(e),
+                };
+                callback(error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
 // forceTerminateTransaction
 // ---------------------------------------------------------------------------
 
@@ -19266,6 +19403,57 @@ mod tests {
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
         unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    // -- unregisterController (KAFKA-20395) ---------------------------------
+
+    /// The sync entry point over Java's mock: `UnsupportedVersionException("")`
+    /// without a Raft controller, success (a null error) with one.
+    #[test]
+    fn unregister_controller_follows_the_mock_raft_controller_setting() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        unsafe {
+            let error = kafka_admin_AdminClient_unregister_controller(admin, 1, -1);
+            assert!(!error.is_null(), "a non-Raft mock rejects the call");
+            assert_eq!(
+                common::kafka_common_Error_code(error) as i32,
+                Errors::UnsupportedVersion.code() as i32
+            );
+            assert_eq!(CStr::from_ptr(common::kafka_common_Error_message(error)).to_str(), Ok(""));
+            common::kafka_common_Error_destroy(error);
+
+            assert!(kafka_admin_MockAdminClient_set_using_raft_controller(admin, true).is_null());
+            assert!(kafka_admin_AdminClient_unregister_controller(admin, 1, 5_000).is_null());
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    unsafe extern "C" fn record_unregister_controller(error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<Option<i32>>) };
+        let code = (!error.is_null()).then(|| unsafe { common::kafka_common_Error_code(error) as i32 });
+        if !error.is_null() {
+            unsafe { common::kafka_common_Error_destroy(error) };
+        }
+        tx.send(code).expect("the test is waiting");
+    }
+
+    /// The async entry point fires its callback once per call, with the same
+    /// outcome as the sync one.
+    #[test]
+    fn unregister_controller_async_reports_through_the_callback() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        let (tx, rx) = std::sync::mpsc::channel::<Option<i32>>();
+        let user_data = &tx as *const std::sync::mpsc::Sender<Option<i32>> as *mut c_void;
+        let wait = std::time::Duration::from_secs(10);
+        unsafe {
+            kafka_admin_AdminClient_unregister_controller_async(admin, 3, -1, record_unregister_controller, user_data);
+            assert_eq!(rx.recv_timeout(wait), Ok(Some(Errors::UnsupportedVersion.code() as i32)));
+
+            assert!(kafka_admin_MockAdminClient_set_using_raft_controller(admin, true).is_null());
+            kafka_admin_AdminClient_unregister_controller_async(admin, 3, -1, record_unregister_controller, user_data);
+            assert_eq!(rx.recv_timeout(wait), Ok(None));
+            kafka_admin_AdminClient_destroy(admin);
+        }
     }
 
     // -- NewPartitions (input handle) ---------------------------------------
@@ -22752,6 +22940,8 @@ mod tests {
         assert_eq!(describe_transactions_options(-1).timeout_ms(), None);
         assert_eq!(abort_transaction_options(4_200).timeout_ms(), Some(4_200));
         assert_eq!(abort_transaction_options(-1).timeout_ms(), None);
+        assert_eq!(unregister_controller_options(4_250).timeout_ms(), Some(4_250));
+        assert_eq!(unregister_controller_options(-1).timeout_ms(), None);
         assert_eq!(terminate_transaction_options(4_300).timeout_ms(), Some(4_300));
         assert_eq!(terminate_transaction_options(-1).timeout_ms(), None);
         assert_eq!(fence_producers_options(4_400).timeout_ms(), Some(4_400));
