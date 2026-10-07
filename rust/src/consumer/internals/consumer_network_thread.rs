@@ -110,6 +110,7 @@ use crate::common::utils::Time;
 
 use super::ConsumerMembershipManager;
 use super::NetworkClientDelegate;
+use super::RequestManager;
 use super::RequestManagers;
 use super::WakeupTrigger;
 use super::events::ApplicationEventEnvelope;
@@ -612,12 +613,32 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         delegate_guard.poll_default(poll_wait_time_ms, current_time_ms).await;
 
         // ──── Phase 5: refresh cached maximumTimeToWait ────
+        //
+        // Java takes the minimum over `requestManagers.entries()`, which
+        // starts `coordinator → commit → ...`. `RequestManagers::entries()`
+        // skips those two `Arc`-shared slots (see Phase 2), so they are
+        // consulted here explicitly, as Phase 2 polls them explicitly. The
+        // commit manager is the one that matters: its auto-commit timer bounds
+        // the application task's wait so `poll()` submits the event that sends
+        // the auto-commit on time (and, KAFKA-20970 / KAFKA-21010, it returns
+        // the retry backoff rather than an expired timer's 0 while no
+        // coordinator is known). The coordinator manager keeps the trait
+        // default, `i64::MAX`, as in Java. (Before Milestone 16 Phase 3 the
+        // commit manager was never consulted.)
         let mut max_time_to_wait_ms: i64 = i64::MAX;
         {
             let mut rm_guard = match self.request_managers.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            if let Some(coordinator) = rm_guard.coordinator_handle() {
+                max_time_to_wait_ms = max_time_to_wait_ms
+                    .min(RequestManager::maximum_time_to_wait(coordinator.as_ref(), current_time_ms));
+            }
+            if let Some(commit) = rm_guard.commit_handle() {
+                max_time_to_wait_ms =
+                    max_time_to_wait_ms.min(RequestManager::maximum_time_to_wait(commit.as_ref(), current_time_ms));
+            }
             for rm in rm_guard.entries() {
                 let wait_ms = rm.maximum_time_to_wait(current_time_ms);
                 max_time_to_wait_ms = max_time_to_wait_ms.min(wait_ms);
@@ -2460,5 +2481,162 @@ mod tests {
             unsent_count,
             inflight_count
         );
+    }
+
+    // ─── Milestone 16 Phase 3: no busy loop while bootstrapping (KIP-909) ───
+
+    /// The background loop's two waits, asserted by value, for a group
+    /// consumer whose bootstrap resolution has not completed (KIP-909,
+    /// `bootstrap.resolve.timeout.ms > 0`): no broker node is known yet, so
+    /// the FindCoordinator request cannot be sent and the coordinator stays
+    /// unknown. Real coordinator, commit (auto-commit every 100 ms, so its
+    /// timer keeps expiring), heartbeat (a JOINING member with Java's initial
+    /// zero heartbeat interval), offsets and fetch managers run over a client
+    /// with no nodes, which is what the request managers see until resolution
+    /// lands (`least_loaded_node` is empty, Phase 2).
+    ///
+    /// Each iteration must:
+    ///   - poll the network with `retry.backoff.ms` (the delegate's clamp for
+    ///     the unsent FindCoordinator), not 0 — KAFKA-20253's coordinator
+    ///     guard; before it, the in-flight request's elapsed backoff (0)
+    ///     became the poll timeout;
+    ///   - publish `retry.backoff.ms` as the application task's bound
+    ///     (`cachedMaximumTimeToWait`), not 0 — the heartbeat manager
+    ///     (KAFKA-21010: a JOINING member wants to heartbeat now and its
+    ///     interval is 0), the commit manager (KAFKA-20970: the expired
+    ///     auto-commit timer) and the fetch manager (KAFKA-20854: nothing in
+    ///     flight) each give exactly that value.
+    ///
+    /// Before Milestone 16 Phase 3 both values were 0 here, so the background
+    /// task and the application task each spun for the whole resolution
+    /// window.
+    #[tokio::test]
+    async fn run_once_does_not_spin_while_bootstrap_resolution_is_pending() {
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 100;
+        let retry_backoff_ms = config.retry_backoff_ms();
+        assert_eq!(100, retry_backoff_ms);
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(bg_tx));
+
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let membership = Arc::new(ConsumerMembershipManager::new(
+            "g".to_string(),
+            None,
+            None,
+            30_000,
+            None,
+            subs.clone(),
+            None,
+            metadata.clone(),
+            beh.clone(),
+            false,
+            None,
+            time.clone() as Arc<dyn Time>,
+        ));
+        membership.transition_to_joining().unwrap();
+        let heartbeat = crate::consumer::internals::ConsumerHeartbeatRequestManager::new(
+            time.milliseconds(),
+            &config,
+            Arc::clone(&coordinator),
+            subs.clone(),
+            membership.clone(),
+            beh,
+        );
+        let fetch = crate::consumer::internals::FetchRequestManager::new(
+            metadata.clone(),
+            subs.clone(),
+            crate::consumer::internals::FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(crate::consumer::internals::FetchBuffer::new()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
+            crate::consumer::internals::FetchRequestManager::always_available(),
+            crate::consumer::internals::FetchRequestManager::no_auth_failure(),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            retry_backoff_ms,
+        );
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            Some(heartbeat),
+            Some(membership.clone()),
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            Some(fetch),
+        )));
+
+        let counting = make_counting_delegate(&config, metadata.clone());
+        let poll_timeouts = counting.client_for_test_ref().poll_timeouts();
+        let delegate = Arc::new(AsyncMutex::new(counting));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers,
+            Some(membership.clone()),
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+
+        // 2 s of model time in 50 ms steps: the auto-commit timer expires
+        // repeatedly, and the FindCoordinator request stays in flight (its
+        // 30 s request timeout is never reached).
+        for step in 0..40 {
+            thread.run_once().await;
+            assert!(coordinator.coordinator().is_none(), "no broker, so no coordinator");
+            assert_eq!(crate::consumer::internals::MemberState::Joining, membership.state());
+            let last_poll_timeout = *poll_timeouts.lock().unwrap().last().expect("the network was polled");
+            assert_eq!(
+                retry_backoff_ms, last_poll_timeout,
+                "step {step}: the background task must poll the network with retry.backoff.ms, not spin"
+            );
+            assert_eq!(
+                retry_backoff_ms,
+                cached_max_time_to_wait_ms.load(Ordering::Acquire),
+                "step {step}: the application task's wait bound must be retry.backoff.ms, not 0"
+            );
+            time.sleep(50);
+        }
     }
 }
