@@ -133,8 +133,11 @@ trait Display {
 ///
 /// It has no Java counterpart — it is the Rust encoding of the `extends` chain
 /// that [`Error`] flattens away (CLAUDE.md §12.3/§12.4). One method per
-/// **intermediate** class in Java's tree; leaf classes need no predicate,
-/// because they are a single [`Error`] variant or a single error code.
+/// **intermediate** class in Java's tree, then one *class predicate* per
+/// [`Error`] variant whose class is not already among them (CLAUDE.md §3).
+/// Leaf classes get one too: a Java release may add a subclass to any class,
+/// which becomes a new variant here, and a caller testing the predicate keeps
+/// matching it where a variant match would not.
 ///
 /// Every method defaults to `false`, so each concrete error type declares its
 /// ancestry by overriding exactly the predicates that are `true` for it. The
@@ -298,6 +301,925 @@ pub(crate) trait ErrorHierarchy {
     /// [`TransactionalIdAuthorizationError`] and
     /// [`DelegationTokenAuthorizationError`].
     fn is_authorization_error(&self) -> bool {
+        false
+    }
+
+    // -- Class predicates ------------------------------------------------
+    //
+    // One per `Error` variant whose class is not already an intermediate
+    // predicate above (CLAUDE.md §3: every error has its predicate). Each
+    // means "this class or any subclass": a Java subclass added later becomes
+    // a new variant whose payload lists its parent's predicate here too, so a
+    // caller testing the predicate keeps matching it where a variant match
+    // would not. `cargo xtask lint-custom` (`check-error-predicate`) keeps this
+    // list, the `Box` forwarders, the `Error` forwarders and the C exports in
+    // step with the enum.
+
+    /// Whether this error's Java class is, or extends, `java.lang.IllegalArgumentException`.
+    fn is_local_illegal_argument_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends, `java.lang.IllegalStateException`.
+    fn is_local_illegal_state_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends, `java.util.ConcurrentModificationException`.
+    fn is_local_concurrent_modification_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends, `java.util.concurrent.TimeoutException`.
+    fn is_local_timeout_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.AuthorizerNotReadyException`.
+    fn is_authorizer_not_ready_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.BrokerIdNotRegisteredException`.
+    fn is_broker_id_not_registered_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.BrokerNotAvailableException`.
+    fn is_broker_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.producer.BufferExhaustedException`.
+    fn is_producer_buffer_exhausted_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ClusterAuthorizationException`.
+    fn is_cluster_authorization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ConcurrentTransactionsException`.
+    fn is_concurrent_transactions_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ControllerMovedException`.
+    fn is_controller_moved_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CoordinatorLoadInProgressException`.
+    fn is_coordinator_load_in_progress_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CoordinatorNotAvailableException`.
+    fn is_coordinator_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.requests.CorrelationIdMismatchException`.
+    fn is_correlation_id_mismatch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CorruptRecordException`.
+    fn is_corrupt_record_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenAuthorizationException`.
+    fn is_delegation_token_authorization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenDisabledException`.
+    fn is_delegation_token_disabled_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenExpiredException`.
+    fn is_delegation_token_expired_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenNotFoundException`.
+    fn is_delegation_token_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException`.
+    fn is_delegation_token_owner_mismatch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DisconnectException`.
+    fn is_disconnect_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateBrokerRegistrationException`.
+    fn is_duplicate_broker_registration_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateResourceException`.
+    fn is_duplicate_resource_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateSequenceException`.
+    fn is_duplicate_sequence_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateVoterException`.
+    fn is_duplicate_voter_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ElectionNotNeededException`.
+    fn is_election_not_needed_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.EligibleLeadersNotAvailableException`.
+    fn is_eligible_leaders_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FeatureUpdateFailedException`.
+    fn is_feature_update_failed_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedInstanceIdException`.
+    fn is_fenced_instance_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedLeaderEpochException`.
+    fn is_fenced_leader_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedMemberEpochException`.
+    fn is_fenced_member_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedStateEpochException`.
+    fn is_fenced_state_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FetchSessionIdNotFoundException`.
+    fn is_fetch_session_id_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FetchSessionTopicIdException`.
+    fn is_fetch_session_topic_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupAuthorizationException`.
+    fn is_group_authorization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupIdNotFoundException`.
+    fn is_group_id_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupMaxSizeReachedException`.
+    fn is_group_max_size_reached_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupNotEmptyException`.
+    fn is_group_not_empty_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupSubscribedToTopicException`.
+    fn is_group_subscribed_to_topic_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IllegalGenerationException`.
+    fn is_illegal_generation_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IllegalSaslStateException`.
+    fn is_illegal_sasl_state_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentClusterIdException`.
+    fn is_inconsistent_cluster_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentGroupProtocolException`.
+    fn is_inconsistent_group_protocol_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentTopicIdException`.
+    fn is_inconsistent_topic_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentVoterSetException`.
+    fn is_inconsistent_voter_set_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IneligibleReplicaException`.
+    fn is_ineligible_replica_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InterruptException`.
+    fn is_interrupt_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidCommitOffsetSizeException`.
+    fn is_invalid_commit_offset_size_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidFetchSessionEpochException`.
+    fn is_invalid_fetch_session_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidFetchSizeException`.
+    fn is_invalid_fetch_size_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidGroupIdException`.
+    fn is_invalid_group_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPartitionsException`.
+    fn is_invalid_partitions_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPidMappingException`.
+    fn is_invalid_pid_mapping_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPrincipalTypeException`.
+    fn is_invalid_principal_type_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidProducerEpochException`.
+    fn is_invalid_producer_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.InvalidRecordException`.
+    fn is_invalid_record_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRecordStateException`.
+    fn is_invalid_record_state_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRegistrationException`.
+    fn is_invalid_registration_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRegularExpression`.
+    fn is_invalid_regular_expression_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidReplicaAssignmentException`.
+    fn is_invalid_replica_assignment_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidReplicationFactorException`.
+    fn is_invalid_replication_factor_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRequestException`.
+    fn is_invalid_request_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRequiredAcksException`.
+    fn is_invalid_required_acks_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidSessionTimeoutException`.
+    fn is_invalid_session_timeout_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidShareSessionEpochException`.
+    fn is_invalid_share_session_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTimestampException`.
+    fn is_invalid_timestamp_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTopicException`.
+    fn is_invalid_topic_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTxnStateException`.
+    fn is_invalid_txn_state_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTxnTimeoutException`.
+    fn is_invalid_txn_timeout_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidUpdateVersionException`.
+    fn is_invalid_update_version_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidVoterKeyException`.
+    fn is_invalid_voter_key_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.KafkaStorageException`.
+    fn is_kafka_storage_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.LeaderNotAvailableException`.
+    fn is_leader_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ListenerNotFoundException`.
+    fn is_listener_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.LogDirNotFoundException`.
+    fn is_log_dir_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.MemberIdRequiredException`.
+    fn is_member_id_required_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.MismatchedEndpointTypeException`.
+    fn is_mismatched_endpoint_type_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NetworkException`.
+    fn is_network_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NewLeaderElectedException`.
+    fn is_new_leader_elected_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NoReassignmentInProgressException`.
+    fn is_no_reassignment_in_progress_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotControllerException`.
+    fn is_not_controller_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotCoordinatorException`.
+    fn is_not_coordinator_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasException`.
+    fn is_not_enough_replicas_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`.
+    fn is_not_enough_replicas_after_append_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotLeaderOrFollowerException`.
+    fn is_not_leader_or_follower_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetMetadataTooLarge`.
+    fn is_offset_metadata_too_large_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetMovedToTieredStorageException`.
+    fn is_offset_moved_to_tiered_storage_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetNotAvailableException`.
+    fn is_offset_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetOutOfRangeException`.
+    fn is_offset_out_of_range_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OperationNotAttemptedException`.
+    fn is_operation_not_attempted_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PolicyViolationException`.
+    fn is_policy_violation_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PositionOutOfRangeException`.
+    fn is_position_out_of_range_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PreferredLeaderNotAvailableException`.
+    fn is_preferred_leader_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PrincipalDeserializationException`.
+    fn is_principal_deserialization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ProducerFencedException`.
+    fn is_producer_fenced_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.metrics.QuotaViolationException`.
+    fn is_quota_violation_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ReassignmentInProgressException`.
+    fn is_reassignment_in_progress_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RebalanceInProgressException`.
+    fn is_rebalance_in_progress_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RebootstrapRequiredException`.
+    fn is_rebootstrap_required_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordBatchTooLargeException`.
+    fn is_record_batch_too_large_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordDeserializationException`.
+    fn is_record_deserialization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordTooLargeException`.
+    fn is_record_too_large_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.network.InvalidReceiveException`.
+    fn is_invalid_receive_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.config.ConfigException`.
+    fn is_config_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.RetriableCommitFailedException`.
+    fn is_consumer_retriable_commit_failed_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.CommitFailedException`.
+    fn is_consumer_commit_failed_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.NoOffsetForPartitionException`.
+    fn is_consumer_no_offset_for_partition_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.LogTruncationException`.
+    fn is_consumer_log_truncation_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ReplicaNotAvailableException`.
+    fn is_replica_not_available_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ResourceNotFoundException`.
+    fn is_resource_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SaslAuthenticationException`.
+    fn is_sasl_authentication_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.protocol.types.SchemaException`.
+    fn is_schema_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SecurityDisabledException`.
+    fn is_security_disabled_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ShareSessionLimitReachedException`.
+    fn is_share_session_limit_reached_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ShareSessionNotFoundException`.
+    fn is_share_session_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SnapshotNotFoundException`.
+    fn is_snapshot_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SslAuthenticationException`.
+    fn is_ssl_authentication_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StaleBrokerEpochException`.
+    fn is_stale_broker_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StaleMemberEpochException`.
+    fn is_stale_member_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsInvalidTopologyException`.
+    fn is_streams_invalid_topology_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException`.
+    fn is_streams_invalid_topology_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsTopologyFencedException`.
+    fn is_streams_topology_fenced_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TelemetryTooLargeException`.
+    fn is_telemetry_too_large_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ThrottlingQuotaExceededException`.
+    fn is_throttling_quota_exceeded_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicAuthorizationException`.
+    fn is_topic_authorization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicDeletionDisabledException`.
+    fn is_topic_deletion_disabled_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicExistsException`.
+    fn is_topic_exists_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionAbortableException`.
+    fn is_transaction_abortable_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionAbortedException`.
+    fn is_transaction_aborted_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
+    fn is_transaction_coordinator_fenced_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionalIdAuthorizationException`.
+    fn is_transactional_id_authorization_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionalIdNotFoundException`.
+    fn is_transactional_id_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnacceptableCredentialException`.
+    fn is_unacceptable_credential_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownControllerIdException`.
+    fn is_unknown_controller_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownLeaderEpochException`.
+    fn is_unknown_leader_epoch_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownMemberIdException`.
+    fn is_unknown_member_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownProducerIdException`.
+    fn is_unknown_producer_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownServerException`.
+    fn is_unknown_server_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownSubscriptionIdException`.
+    fn is_unknown_subscription_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownTopicIdException`.
+    fn is_unknown_topic_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownTopicOrPartitionException`.
+    fn is_unknown_topic_or_partition_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnreleasedInstanceIdException`.
+    fn is_unreleased_instance_id_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnstableOffsetCommitException`.
+    fn is_unstable_offset_commit_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedAssignorException`.
+    fn is_unsupported_assignor_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedByAuthenticationException`.
+    fn is_unsupported_by_authentication_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedCompressionTypeException`.
+    fn is_unsupported_compression_type_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedEndpointTypeException`.
+    fn is_unsupported_endpoint_type_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedForMessageFormatException`.
+    fn is_unsupported_for_message_format_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedSaslMechanismException`.
+    fn is_unsupported_sasl_mechanism_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedVersionException`.
+    fn is_unsupported_version_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.VoterNotFoundException`.
+    fn is_voter_not_found_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.WakeupException`.
+    fn is_wakeup_error(&self) -> bool {
         false
     }
 }
@@ -608,6 +1530,462 @@ impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     fn is_authorization_error(&self) -> bool {
         (**self).is_authorization_error()
     }
+    fn is_local_illegal_argument_error(&self) -> bool {
+        (**self).is_local_illegal_argument_error()
+    }
+    fn is_local_illegal_state_error(&self) -> bool {
+        (**self).is_local_illegal_state_error()
+    }
+    fn is_local_concurrent_modification_error(&self) -> bool {
+        (**self).is_local_concurrent_modification_error()
+    }
+    fn is_local_timeout_error(&self) -> bool {
+        (**self).is_local_timeout_error()
+    }
+    fn is_authorizer_not_ready_error(&self) -> bool {
+        (**self).is_authorizer_not_ready_error()
+    }
+    fn is_broker_id_not_registered_error(&self) -> bool {
+        (**self).is_broker_id_not_registered_error()
+    }
+    fn is_broker_not_available_error(&self) -> bool {
+        (**self).is_broker_not_available_error()
+    }
+    fn is_producer_buffer_exhausted_error(&self) -> bool {
+        (**self).is_producer_buffer_exhausted_error()
+    }
+    fn is_cluster_authorization_error(&self) -> bool {
+        (**self).is_cluster_authorization_error()
+    }
+    fn is_concurrent_transactions_error(&self) -> bool {
+        (**self).is_concurrent_transactions_error()
+    }
+    fn is_controller_moved_error(&self) -> bool {
+        (**self).is_controller_moved_error()
+    }
+    fn is_coordinator_load_in_progress_error(&self) -> bool {
+        (**self).is_coordinator_load_in_progress_error()
+    }
+    fn is_coordinator_not_available_error(&self) -> bool {
+        (**self).is_coordinator_not_available_error()
+    }
+    fn is_correlation_id_mismatch_error(&self) -> bool {
+        (**self).is_correlation_id_mismatch_error()
+    }
+    fn is_corrupt_record_error(&self) -> bool {
+        (**self).is_corrupt_record_error()
+    }
+    fn is_delegation_token_authorization_error(&self) -> bool {
+        (**self).is_delegation_token_authorization_error()
+    }
+    fn is_delegation_token_disabled_error(&self) -> bool {
+        (**self).is_delegation_token_disabled_error()
+    }
+    fn is_delegation_token_expired_error(&self) -> bool {
+        (**self).is_delegation_token_expired_error()
+    }
+    fn is_delegation_token_not_found_error(&self) -> bool {
+        (**self).is_delegation_token_not_found_error()
+    }
+    fn is_delegation_token_owner_mismatch_error(&self) -> bool {
+        (**self).is_delegation_token_owner_mismatch_error()
+    }
+    fn is_disconnect_error(&self) -> bool {
+        (**self).is_disconnect_error()
+    }
+    fn is_duplicate_broker_registration_error(&self) -> bool {
+        (**self).is_duplicate_broker_registration_error()
+    }
+    fn is_duplicate_resource_error(&self) -> bool {
+        (**self).is_duplicate_resource_error()
+    }
+    fn is_duplicate_sequence_error(&self) -> bool {
+        (**self).is_duplicate_sequence_error()
+    }
+    fn is_duplicate_voter_error(&self) -> bool {
+        (**self).is_duplicate_voter_error()
+    }
+    fn is_election_not_needed_error(&self) -> bool {
+        (**self).is_election_not_needed_error()
+    }
+    fn is_eligible_leaders_not_available_error(&self) -> bool {
+        (**self).is_eligible_leaders_not_available_error()
+    }
+    fn is_feature_update_failed_error(&self) -> bool {
+        (**self).is_feature_update_failed_error()
+    }
+    fn is_fenced_instance_id_error(&self) -> bool {
+        (**self).is_fenced_instance_id_error()
+    }
+    fn is_fenced_leader_epoch_error(&self) -> bool {
+        (**self).is_fenced_leader_epoch_error()
+    }
+    fn is_fenced_member_epoch_error(&self) -> bool {
+        (**self).is_fenced_member_epoch_error()
+    }
+    fn is_fenced_state_epoch_error(&self) -> bool {
+        (**self).is_fenced_state_epoch_error()
+    }
+    fn is_fetch_session_id_not_found_error(&self) -> bool {
+        (**self).is_fetch_session_id_not_found_error()
+    }
+    fn is_fetch_session_topic_id_error(&self) -> bool {
+        (**self).is_fetch_session_topic_id_error()
+    }
+    fn is_group_authorization_error(&self) -> bool {
+        (**self).is_group_authorization_error()
+    }
+    fn is_group_id_not_found_error(&self) -> bool {
+        (**self).is_group_id_not_found_error()
+    }
+    fn is_group_max_size_reached_error(&self) -> bool {
+        (**self).is_group_max_size_reached_error()
+    }
+    fn is_group_not_empty_error(&self) -> bool {
+        (**self).is_group_not_empty_error()
+    }
+    fn is_group_subscribed_to_topic_error(&self) -> bool {
+        (**self).is_group_subscribed_to_topic_error()
+    }
+    fn is_illegal_generation_error(&self) -> bool {
+        (**self).is_illegal_generation_error()
+    }
+    fn is_illegal_sasl_state_error(&self) -> bool {
+        (**self).is_illegal_sasl_state_error()
+    }
+    fn is_inconsistent_cluster_id_error(&self) -> bool {
+        (**self).is_inconsistent_cluster_id_error()
+    }
+    fn is_inconsistent_group_protocol_error(&self) -> bool {
+        (**self).is_inconsistent_group_protocol_error()
+    }
+    fn is_inconsistent_topic_id_error(&self) -> bool {
+        (**self).is_inconsistent_topic_id_error()
+    }
+    fn is_inconsistent_voter_set_error(&self) -> bool {
+        (**self).is_inconsistent_voter_set_error()
+    }
+    fn is_ineligible_replica_error(&self) -> bool {
+        (**self).is_ineligible_replica_error()
+    }
+    fn is_interrupt_error(&self) -> bool {
+        (**self).is_interrupt_error()
+    }
+    fn is_invalid_commit_offset_size_error(&self) -> bool {
+        (**self).is_invalid_commit_offset_size_error()
+    }
+    fn is_invalid_fetch_session_epoch_error(&self) -> bool {
+        (**self).is_invalid_fetch_session_epoch_error()
+    }
+    fn is_invalid_fetch_size_error(&self) -> bool {
+        (**self).is_invalid_fetch_size_error()
+    }
+    fn is_invalid_group_id_error(&self) -> bool {
+        (**self).is_invalid_group_id_error()
+    }
+    fn is_invalid_partitions_error(&self) -> bool {
+        (**self).is_invalid_partitions_error()
+    }
+    fn is_invalid_pid_mapping_error(&self) -> bool {
+        (**self).is_invalid_pid_mapping_error()
+    }
+    fn is_invalid_principal_type_error(&self) -> bool {
+        (**self).is_invalid_principal_type_error()
+    }
+    fn is_invalid_producer_epoch_error(&self) -> bool {
+        (**self).is_invalid_producer_epoch_error()
+    }
+    fn is_invalid_record_error(&self) -> bool {
+        (**self).is_invalid_record_error()
+    }
+    fn is_invalid_record_state_error(&self) -> bool {
+        (**self).is_invalid_record_state_error()
+    }
+    fn is_invalid_registration_error(&self) -> bool {
+        (**self).is_invalid_registration_error()
+    }
+    fn is_invalid_regular_expression_error(&self) -> bool {
+        (**self).is_invalid_regular_expression_error()
+    }
+    fn is_invalid_replica_assignment_error(&self) -> bool {
+        (**self).is_invalid_replica_assignment_error()
+    }
+    fn is_invalid_replication_factor_error(&self) -> bool {
+        (**self).is_invalid_replication_factor_error()
+    }
+    fn is_invalid_request_error(&self) -> bool {
+        (**self).is_invalid_request_error()
+    }
+    fn is_invalid_required_acks_error(&self) -> bool {
+        (**self).is_invalid_required_acks_error()
+    }
+    fn is_invalid_session_timeout_error(&self) -> bool {
+        (**self).is_invalid_session_timeout_error()
+    }
+    fn is_invalid_share_session_epoch_error(&self) -> bool {
+        (**self).is_invalid_share_session_epoch_error()
+    }
+    fn is_invalid_timestamp_error(&self) -> bool {
+        (**self).is_invalid_timestamp_error()
+    }
+    fn is_invalid_topic_error(&self) -> bool {
+        (**self).is_invalid_topic_error()
+    }
+    fn is_invalid_txn_state_error(&self) -> bool {
+        (**self).is_invalid_txn_state_error()
+    }
+    fn is_invalid_txn_timeout_error(&self) -> bool {
+        (**self).is_invalid_txn_timeout_error()
+    }
+    fn is_invalid_update_version_error(&self) -> bool {
+        (**self).is_invalid_update_version_error()
+    }
+    fn is_invalid_voter_key_error(&self) -> bool {
+        (**self).is_invalid_voter_key_error()
+    }
+    fn is_kafka_storage_error(&self) -> bool {
+        (**self).is_kafka_storage_error()
+    }
+    fn is_leader_not_available_error(&self) -> bool {
+        (**self).is_leader_not_available_error()
+    }
+    fn is_listener_not_found_error(&self) -> bool {
+        (**self).is_listener_not_found_error()
+    }
+    fn is_log_dir_not_found_error(&self) -> bool {
+        (**self).is_log_dir_not_found_error()
+    }
+    fn is_member_id_required_error(&self) -> bool {
+        (**self).is_member_id_required_error()
+    }
+    fn is_mismatched_endpoint_type_error(&self) -> bool {
+        (**self).is_mismatched_endpoint_type_error()
+    }
+    fn is_network_error(&self) -> bool {
+        (**self).is_network_error()
+    }
+    fn is_new_leader_elected_error(&self) -> bool {
+        (**self).is_new_leader_elected_error()
+    }
+    fn is_no_reassignment_in_progress_error(&self) -> bool {
+        (**self).is_no_reassignment_in_progress_error()
+    }
+    fn is_not_controller_error(&self) -> bool {
+        (**self).is_not_controller_error()
+    }
+    fn is_not_coordinator_error(&self) -> bool {
+        (**self).is_not_coordinator_error()
+    }
+    fn is_not_enough_replicas_error(&self) -> bool {
+        (**self).is_not_enough_replicas_error()
+    }
+    fn is_not_enough_replicas_after_append_error(&self) -> bool {
+        (**self).is_not_enough_replicas_after_append_error()
+    }
+    fn is_not_leader_or_follower_error(&self) -> bool {
+        (**self).is_not_leader_or_follower_error()
+    }
+    fn is_offset_metadata_too_large_error(&self) -> bool {
+        (**self).is_offset_metadata_too_large_error()
+    }
+    fn is_offset_moved_to_tiered_storage_error(&self) -> bool {
+        (**self).is_offset_moved_to_tiered_storage_error()
+    }
+    fn is_offset_not_available_error(&self) -> bool {
+        (**self).is_offset_not_available_error()
+    }
+    fn is_offset_out_of_range_error(&self) -> bool {
+        (**self).is_offset_out_of_range_error()
+    }
+    fn is_operation_not_attempted_error(&self) -> bool {
+        (**self).is_operation_not_attempted_error()
+    }
+    fn is_policy_violation_error(&self) -> bool {
+        (**self).is_policy_violation_error()
+    }
+    fn is_position_out_of_range_error(&self) -> bool {
+        (**self).is_position_out_of_range_error()
+    }
+    fn is_preferred_leader_not_available_error(&self) -> bool {
+        (**self).is_preferred_leader_not_available_error()
+    }
+    fn is_principal_deserialization_error(&self) -> bool {
+        (**self).is_principal_deserialization_error()
+    }
+    fn is_producer_fenced_error(&self) -> bool {
+        (**self).is_producer_fenced_error()
+    }
+    fn is_quota_violation_error(&self) -> bool {
+        (**self).is_quota_violation_error()
+    }
+    fn is_reassignment_in_progress_error(&self) -> bool {
+        (**self).is_reassignment_in_progress_error()
+    }
+    fn is_rebalance_in_progress_error(&self) -> bool {
+        (**self).is_rebalance_in_progress_error()
+    }
+    fn is_rebootstrap_required_error(&self) -> bool {
+        (**self).is_rebootstrap_required_error()
+    }
+    fn is_record_batch_too_large_error(&self) -> bool {
+        (**self).is_record_batch_too_large_error()
+    }
+    fn is_record_deserialization_error(&self) -> bool {
+        (**self).is_record_deserialization_error()
+    }
+    fn is_record_too_large_error(&self) -> bool {
+        (**self).is_record_too_large_error()
+    }
+    fn is_invalid_receive_error(&self) -> bool {
+        (**self).is_invalid_receive_error()
+    }
+    fn is_config_error(&self) -> bool {
+        (**self).is_config_error()
+    }
+    fn is_consumer_retriable_commit_failed_error(&self) -> bool {
+        (**self).is_consumer_retriable_commit_failed_error()
+    }
+    fn is_consumer_commit_failed_error(&self) -> bool {
+        (**self).is_consumer_commit_failed_error()
+    }
+    fn is_consumer_no_offset_for_partition_error(&self) -> bool {
+        (**self).is_consumer_no_offset_for_partition_error()
+    }
+    fn is_consumer_log_truncation_error(&self) -> bool {
+        (**self).is_consumer_log_truncation_error()
+    }
+    fn is_replica_not_available_error(&self) -> bool {
+        (**self).is_replica_not_available_error()
+    }
+    fn is_resource_not_found_error(&self) -> bool {
+        (**self).is_resource_not_found_error()
+    }
+    fn is_sasl_authentication_error(&self) -> bool {
+        (**self).is_sasl_authentication_error()
+    }
+    fn is_schema_error(&self) -> bool {
+        (**self).is_schema_error()
+    }
+    fn is_security_disabled_error(&self) -> bool {
+        (**self).is_security_disabled_error()
+    }
+    fn is_share_session_limit_reached_error(&self) -> bool {
+        (**self).is_share_session_limit_reached_error()
+    }
+    fn is_share_session_not_found_error(&self) -> bool {
+        (**self).is_share_session_not_found_error()
+    }
+    fn is_snapshot_not_found_error(&self) -> bool {
+        (**self).is_snapshot_not_found_error()
+    }
+    fn is_ssl_authentication_error(&self) -> bool {
+        (**self).is_ssl_authentication_error()
+    }
+    fn is_stale_broker_epoch_error(&self) -> bool {
+        (**self).is_stale_broker_epoch_error()
+    }
+    fn is_stale_member_epoch_error(&self) -> bool {
+        (**self).is_stale_member_epoch_error()
+    }
+    fn is_streams_invalid_topology_error(&self) -> bool {
+        (**self).is_streams_invalid_topology_error()
+    }
+    fn is_streams_invalid_topology_epoch_error(&self) -> bool {
+        (**self).is_streams_invalid_topology_epoch_error()
+    }
+    fn is_streams_topology_fenced_error(&self) -> bool {
+        (**self).is_streams_topology_fenced_error()
+    }
+    fn is_telemetry_too_large_error(&self) -> bool {
+        (**self).is_telemetry_too_large_error()
+    }
+    fn is_throttling_quota_exceeded_error(&self) -> bool {
+        (**self).is_throttling_quota_exceeded_error()
+    }
+    fn is_topic_authorization_error(&self) -> bool {
+        (**self).is_topic_authorization_error()
+    }
+    fn is_topic_deletion_disabled_error(&self) -> bool {
+        (**self).is_topic_deletion_disabled_error()
+    }
+    fn is_topic_exists_error(&self) -> bool {
+        (**self).is_topic_exists_error()
+    }
+    fn is_transaction_abortable_error(&self) -> bool {
+        (**self).is_transaction_abortable_error()
+    }
+    fn is_transaction_aborted_error(&self) -> bool {
+        (**self).is_transaction_aborted_error()
+    }
+    fn is_transaction_coordinator_fenced_error(&self) -> bool {
+        (**self).is_transaction_coordinator_fenced_error()
+    }
+    fn is_transactional_id_authorization_error(&self) -> bool {
+        (**self).is_transactional_id_authorization_error()
+    }
+    fn is_transactional_id_not_found_error(&self) -> bool {
+        (**self).is_transactional_id_not_found_error()
+    }
+    fn is_unacceptable_credential_error(&self) -> bool {
+        (**self).is_unacceptable_credential_error()
+    }
+    fn is_unknown_controller_id_error(&self) -> bool {
+        (**self).is_unknown_controller_id_error()
+    }
+    fn is_unknown_leader_epoch_error(&self) -> bool {
+        (**self).is_unknown_leader_epoch_error()
+    }
+    fn is_unknown_member_id_error(&self) -> bool {
+        (**self).is_unknown_member_id_error()
+    }
+    fn is_unknown_producer_id_error(&self) -> bool {
+        (**self).is_unknown_producer_id_error()
+    }
+    fn is_unknown_server_error(&self) -> bool {
+        (**self).is_unknown_server_error()
+    }
+    fn is_unknown_subscription_id_error(&self) -> bool {
+        (**self).is_unknown_subscription_id_error()
+    }
+    fn is_unknown_topic_id_error(&self) -> bool {
+        (**self).is_unknown_topic_id_error()
+    }
+    fn is_unknown_topic_or_partition_error(&self) -> bool {
+        (**self).is_unknown_topic_or_partition_error()
+    }
+    fn is_unreleased_instance_id_error(&self) -> bool {
+        (**self).is_unreleased_instance_id_error()
+    }
+    fn is_unstable_offset_commit_error(&self) -> bool {
+        (**self).is_unstable_offset_commit_error()
+    }
+    fn is_unsupported_assignor_error(&self) -> bool {
+        (**self).is_unsupported_assignor_error()
+    }
+    fn is_unsupported_by_authentication_error(&self) -> bool {
+        (**self).is_unsupported_by_authentication_error()
+    }
+    fn is_unsupported_compression_type_error(&self) -> bool {
+        (**self).is_unsupported_compression_type_error()
+    }
+    fn is_unsupported_endpoint_type_error(&self) -> bool {
+        (**self).is_unsupported_endpoint_type_error()
+    }
+    fn is_unsupported_for_message_format_error(&self) -> bool {
+        (**self).is_unsupported_for_message_format_error()
+    }
+    fn is_unsupported_sasl_mechanism_error(&self) -> bool {
+        (**self).is_unsupported_sasl_mechanism_error()
+    }
+    fn is_unsupported_version_error(&self) -> bool {
+        (**self).is_unsupported_version_error()
+    }
+    fn is_voter_not_found_error(&self) -> bool {
+        (**self).is_voter_not_found_error()
+    }
+    fn is_wakeup_error(&self) -> bool {
+        (**self).is_wakeup_error()
+    }
 }
 
 impl<T: ErrorMessage + ?Sized> ErrorMessage for Box<T> {
@@ -804,15 +2182,32 @@ error_name_impl! {
     ConsumerRetriableCommitFailedError,
 }
 
-// `IllegalArgumentException`, `IllegalStateException` and
-// `ConcurrentModificationException` are `java.lang` / `java.util` runtime
-// exceptions sitting BESIDE `KafkaException`, not below it. Every predicate is
-// false for them, so each takes the trait's defaults unchanged — the empty impl
-// is the statement that they are outside the hierarchy.
-impl ErrorHierarchy for LocalIllegalArgumentError {}
-impl ErrorHierarchy for LocalIllegalStateError {}
-impl ErrorHierarchy for LocalConcurrentModificationError {}
-impl ErrorHierarchy for LocalTimeoutError {}
+// `IllegalArgumentException`, `IllegalStateException`,
+// `ConcurrentModificationException` and `java.util.concurrent.TimeoutException`
+// are `java.lang` / `java.util` exceptions sitting BESIDE `KafkaException`, not
+// below it. Every Kafka hierarchy predicate is false for them, so each overrides
+// only its own class's predicate — the statement that they are outside the
+// Kafka hierarchy.
+impl ErrorHierarchy for LocalIllegalArgumentError {
+    fn is_local_illegal_argument_error(&self) -> bool {
+        true
+    }
+}
+impl ErrorHierarchy for LocalIllegalStateError {
+    fn is_local_illegal_state_error(&self) -> bool {
+        true
+    }
+}
+impl ErrorHierarchy for LocalConcurrentModificationError {
+    fn is_local_concurrent_modification_error(&self) -> bool {
+        true
+    }
+}
+impl ErrorHierarchy for LocalTimeoutError {
+    fn is_local_timeout_error(&self) -> bool {
+        true
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error — unified enum for polymorphic error handling
@@ -834,10 +2229,14 @@ impl ErrorHierarchy for LocalTimeoutError {}
 /// Java families into one enum is what makes
 /// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
-/// **Classify by variant, not by code.** Java callers write
+/// **Classify by predicate, not by variant or code.** Java callers write
 /// `e instanceof TopicAuthorizationException`; Rust callers write
-/// `matches!(e, Error::TopicAuthorization(_))`, and the `is_*_error()`
-/// predicates stand in for the intermediate classes. There is no public numeric
+/// `e.is_topic_authorization_error()`. Every variant has such a predicate,
+/// and every intermediate Java class has one too. Prefer them to
+/// `matches!(e, Error::TopicAuthorization(_))`. A predicate means "this class
+/// or a subclass", like `instanceof`, so it still matches a subclass a later
+/// Java release adds, whereas a variant match would miss it (CLAUDE.md §3).
+/// There is no public numeric
 /// error code: the wire-level `Errors` enum lives in `common.protocol`, a
 /// package Java marks "not a supported API", so the crate keeps it
 /// `pub(crate)`. The C bindings expose the class as the
@@ -1637,22 +3036,6 @@ impl Error {
         ErrorSource::source(self)
     }
 
-    /// Whether the transaction must be aborted because of this error.
-    ///
-    /// Named for the Java class it tests, per CLAUDE.md §12.4's uniform
-    /// `is_` + class + `_error` shape, even though `TransactionAbortableException`
-    /// is a **leaf**: it has no subclasses, so §10.4 puts no predicate on
-    /// `ErrorHierarchy` for it and this stays an inherent test on the variant.
-    ///
-    /// That is what Java does too — `TransactionManager` compares the code
-    /// (`error == Errors.TRANSACTION_ABORTABLE`, four sites) or tests the class
-    /// (`error.exception() instanceof TransactionAbortableException`,
-    /// `TransactionManager.java:1783`). There is no `txnRequiresAbort` in Java;
-    /// the previous name had no counterpart there.
-    pub fn is_transaction_abortable_error(&self) -> bool {
-        matches!(self, Self::TransactionAbortable(_))
-    }
-
     // -- Hierarchy predicates ----------------------------------------------
     //
     // Java's exception hierarchy is flattened into this enum, so each
@@ -1687,8 +3070,8 @@ impl Error {
     /// **This is not a test for the [`KafkaError`](Self::KafkaError) variant.**
     /// That variant means "a bare `KafkaException`, no subclass"; this asks
     /// "inside the `KafkaException` hierarchy at all", which is true of
-    /// `Timeout`, `TopicAuthorization` and most other variants too. To test the
-    /// variant, match on it.
+    /// `Timeout`, `TopicAuthorization` and most other variants too. Java has no
+    /// `instanceof` test for "a bare `KafkaException` and no subclass" either.
     ///
     /// Beware the polarity difference against [`is_api_error`](Self::is_api_error):
     /// both return `true` for the in-hierarchy case, but they are not the same
@@ -1792,8 +3175,9 @@ impl Error {
     /// `BufferExhaustedException extends TimeoutException`, so
     /// [`ProducerBufferExhausted`](Self::ProducerBufferExhausted) answers `true`
     /// here too — matching Java, where `catch (TimeoutException e)` catches a
-    /// buffer-pool exhaustion. Match the variant if you mean only the timeout
-    /// itself.
+    /// buffer-pool exhaustion. To exclude that case, as a Java caller would with
+    /// a preceding `catch (BufferExhaustedException e)`, also test
+    /// [`is_producer_buffer_exhausted_error`](Self::is_producer_buffer_exhausted_error).
     ///
     /// Nested inside [`is_retriable_error`](Self::is_retriable_error).
     pub fn is_timeout_error(&self) -> bool {
@@ -1962,6 +3346,1399 @@ impl Error {
     /// [`is_invalid_configuration_error`](Self::is_invalid_configuration_error).
     pub fn is_authorization_error(&self) -> bool {
         ErrorHierarchy::is_authorization_error(self)
+    }
+
+    // -- Class predicates ------------------------------------------------
+    //
+    // One per variant, mirroring `ErrorHierarchy`'s class predicates: use these
+    // instead of matching on a variant, so that a subclass a later Java release
+    // adds — a new variant — still answers `true` (CLAUDE.md §3).
+
+    /// Whether this error's Java class is, or extends, `java.lang.IllegalArgumentException`.
+    ///
+    /// Prefer this to matching [`Error::LocalIllegalArgument`](Self::LocalIllegalArgument): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_local_illegal_argument_error(&self) -> bool {
+        ErrorHierarchy::is_local_illegal_argument_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends, `java.lang.IllegalStateException`.
+    ///
+    /// Prefer this to matching [`Error::LocalIllegalState`](Self::LocalIllegalState): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_local_illegal_state_error(&self) -> bool {
+        ErrorHierarchy::is_local_illegal_state_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends, `java.util.ConcurrentModificationException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::LocalConcurrentModification`](Self::LocalConcurrentModification): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_local_concurrent_modification_error(&self) -> bool {
+        ErrorHierarchy::is_local_concurrent_modification_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends, `java.util.concurrent.TimeoutException`.
+    ///
+    /// Prefer this to matching [`Error::LocalTimeout`](Self::LocalTimeout): a variant match misses
+    /// the subclasses a later Java release may add.
+    pub fn is_local_timeout_error(&self) -> bool {
+        ErrorHierarchy::is_local_timeout_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.AuthorizerNotReadyException`.
+    ///
+    /// Prefer this to matching [`Error::AuthorizerNotReady`](Self::AuthorizerNotReady): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_authorizer_not_ready_error(&self) -> bool {
+        ErrorHierarchy::is_authorizer_not_ready_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.BrokerIdNotRegisteredException`.
+    ///
+    /// Prefer this to matching [`Error::BrokerIdNotRegistered`](Self::BrokerIdNotRegistered): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_broker_id_not_registered_error(&self) -> bool {
+        ErrorHierarchy::is_broker_id_not_registered_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.BrokerNotAvailableException`.
+    ///
+    /// Prefer this to matching [`Error::BrokerNotAvailable`](Self::BrokerNotAvailable): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_broker_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_broker_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.producer.BufferExhaustedException`.
+    ///
+    /// Prefer this to matching [`Error::ProducerBufferExhausted`](Self::ProducerBufferExhausted): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_producer_buffer_exhausted_error(&self) -> bool {
+        ErrorHierarchy::is_producer_buffer_exhausted_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ClusterAuthorizationException`.
+    ///
+    /// Prefer this to matching [`Error::ClusterAuthorization`](Self::ClusterAuthorization): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_cluster_authorization_error(&self) -> bool {
+        ErrorHierarchy::is_cluster_authorization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ConcurrentTransactionsException`.
+    ///
+    /// Prefer this to matching [`Error::ConcurrentTransactions`](Self::ConcurrentTransactions): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_concurrent_transactions_error(&self) -> bool {
+        ErrorHierarchy::is_concurrent_transactions_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ControllerMovedException`.
+    ///
+    /// Prefer this to matching [`Error::ControllerMoved`](Self::ControllerMoved): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_controller_moved_error(&self) -> bool {
+        ErrorHierarchy::is_controller_moved_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CoordinatorLoadInProgressException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::CoordinatorLoadInProgress`](Self::CoordinatorLoadInProgress): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_coordinator_load_in_progress_error(&self) -> bool {
+        ErrorHierarchy::is_coordinator_load_in_progress_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CoordinatorNotAvailableException`.
+    ///
+    /// Prefer this to matching [`Error::CoordinatorNotAvailable`](Self::CoordinatorNotAvailable): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_coordinator_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_coordinator_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.requests.CorrelationIdMismatchException`.
+    ///
+    /// Prefer this to matching [`Error::CorrelationIdMismatch`](Self::CorrelationIdMismatch): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_correlation_id_mismatch_error(&self) -> bool {
+        ErrorHierarchy::is_correlation_id_mismatch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.CorruptRecordException`.
+    ///
+    /// Prefer this to matching [`Error::CorruptRecord`](Self::CorruptRecord): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_corrupt_record_error(&self) -> bool {
+        ErrorHierarchy::is_corrupt_record_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenAuthorizationException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::DelegationTokenAuthorization`](Self::DelegationTokenAuthorization): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_delegation_token_authorization_error(&self) -> bool {
+        ErrorHierarchy::is_delegation_token_authorization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenDisabledException`.
+    ///
+    /// Prefer this to matching [`Error::DelegationTokenDisabled`](Self::DelegationTokenDisabled): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_delegation_token_disabled_error(&self) -> bool {
+        ErrorHierarchy::is_delegation_token_disabled_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenExpiredException`.
+    ///
+    /// Prefer this to matching [`Error::DelegationTokenExpired`](Self::DelegationTokenExpired): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_delegation_token_expired_error(&self) -> bool {
+        ErrorHierarchy::is_delegation_token_expired_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::DelegationTokenNotFound`](Self::DelegationTokenNotFound): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_delegation_token_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_delegation_token_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::DelegationTokenOwnerMismatch`](Self::DelegationTokenOwnerMismatch): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_delegation_token_owner_mismatch_error(&self) -> bool {
+        ErrorHierarchy::is_delegation_token_owner_mismatch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DisconnectException`.
+    ///
+    /// Prefer this to matching [`Error::Disconnect`](Self::Disconnect): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_disconnect_error(&self) -> bool {
+        ErrorHierarchy::is_disconnect_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateBrokerRegistrationException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::DuplicateBrokerRegistration`](Self::DuplicateBrokerRegistration): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_duplicate_broker_registration_error(&self) -> bool {
+        ErrorHierarchy::is_duplicate_broker_registration_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateResourceException`.
+    ///
+    /// Prefer this to matching [`Error::DuplicateResource`](Self::DuplicateResource): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_duplicate_resource_error(&self) -> bool {
+        ErrorHierarchy::is_duplicate_resource_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateSequenceException`.
+    ///
+    /// Prefer this to matching [`Error::DuplicateSequence`](Self::DuplicateSequence): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_duplicate_sequence_error(&self) -> bool {
+        ErrorHierarchy::is_duplicate_sequence_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.DuplicateVoterException`.
+    ///
+    /// Prefer this to matching [`Error::DuplicateVoter`](Self::DuplicateVoter): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_duplicate_voter_error(&self) -> bool {
+        ErrorHierarchy::is_duplicate_voter_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ElectionNotNeededException`.
+    ///
+    /// Prefer this to matching [`Error::ElectionNotNeeded`](Self::ElectionNotNeeded): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_election_not_needed_error(&self) -> bool {
+        ErrorHierarchy::is_election_not_needed_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.EligibleLeadersNotAvailableException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::EligibleLeadersNotAvailable`](Self::EligibleLeadersNotAvailable): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_eligible_leaders_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_eligible_leaders_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FeatureUpdateFailedException`.
+    ///
+    /// Prefer this to matching [`Error::FeatureUpdateFailed`](Self::FeatureUpdateFailed): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_feature_update_failed_error(&self) -> bool {
+        ErrorHierarchy::is_feature_update_failed_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedInstanceIdException`.
+    ///
+    /// Prefer this to matching [`Error::FencedInstanceId`](Self::FencedInstanceId): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_fenced_instance_id_error(&self) -> bool {
+        ErrorHierarchy::is_fenced_instance_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedLeaderEpochException`.
+    ///
+    /// Prefer this to matching [`Error::FencedLeaderEpoch`](Self::FencedLeaderEpoch): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_fenced_leader_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_fenced_leader_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedMemberEpochException`.
+    ///
+    /// Prefer this to matching [`Error::FencedMemberEpoch`](Self::FencedMemberEpoch): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_fenced_member_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_fenced_member_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FencedStateEpochException`.
+    ///
+    /// Prefer this to matching [`Error::FencedStateEpoch`](Self::FencedStateEpoch): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_fenced_state_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_fenced_state_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FetchSessionIdNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::FetchSessionIdNotFound`](Self::FetchSessionIdNotFound): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_fetch_session_id_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_fetch_session_id_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.FetchSessionTopicIdException`.
+    ///
+    /// Prefer this to matching [`Error::FetchSessionTopicId`](Self::FetchSessionTopicId): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_fetch_session_topic_id_error(&self) -> bool {
+        ErrorHierarchy::is_fetch_session_topic_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupAuthorizationException`.
+    ///
+    /// Prefer this to matching [`Error::GroupAuthorization`](Self::GroupAuthorization): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_group_authorization_error(&self) -> bool {
+        ErrorHierarchy::is_group_authorization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupIdNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::GroupIdNotFound`](Self::GroupIdNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_group_id_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_group_id_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupMaxSizeReachedException`.
+    ///
+    /// Prefer this to matching [`Error::GroupMaxSizeReached`](Self::GroupMaxSizeReached): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_group_max_size_reached_error(&self) -> bool {
+        ErrorHierarchy::is_group_max_size_reached_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupNotEmptyException`.
+    ///
+    /// Prefer this to matching [`Error::GroupNotEmpty`](Self::GroupNotEmpty): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_group_not_empty_error(&self) -> bool {
+        ErrorHierarchy::is_group_not_empty_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.GroupSubscribedToTopicException`.
+    ///
+    /// Prefer this to matching [`Error::GroupSubscribedToTopic`](Self::GroupSubscribedToTopic): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_group_subscribed_to_topic_error(&self) -> bool {
+        ErrorHierarchy::is_group_subscribed_to_topic_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IllegalGenerationException`.
+    ///
+    /// Prefer this to matching [`Error::IllegalGeneration`](Self::IllegalGeneration): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_illegal_generation_error(&self) -> bool {
+        ErrorHierarchy::is_illegal_generation_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IllegalSaslStateException`.
+    ///
+    /// Prefer this to matching [`Error::IllegalSaslState`](Self::IllegalSaslState): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_illegal_sasl_state_error(&self) -> bool {
+        ErrorHierarchy::is_illegal_sasl_state_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentClusterIdException`.
+    ///
+    /// Prefer this to matching [`Error::InconsistentClusterId`](Self::InconsistentClusterId): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_inconsistent_cluster_id_error(&self) -> bool {
+        ErrorHierarchy::is_inconsistent_cluster_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentGroupProtocolException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::InconsistentGroupProtocol`](Self::InconsistentGroupProtocol): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_inconsistent_group_protocol_error(&self) -> bool {
+        ErrorHierarchy::is_inconsistent_group_protocol_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentTopicIdException`.
+    ///
+    /// Prefer this to matching [`Error::InconsistentTopicId`](Self::InconsistentTopicId): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_inconsistent_topic_id_error(&self) -> bool {
+        ErrorHierarchy::is_inconsistent_topic_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InconsistentVoterSetException`.
+    ///
+    /// Prefer this to matching [`Error::InconsistentVoterSet`](Self::InconsistentVoterSet): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_inconsistent_voter_set_error(&self) -> bool {
+        ErrorHierarchy::is_inconsistent_voter_set_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.IneligibleReplicaException`.
+    ///
+    /// Prefer this to matching [`Error::IneligibleReplica`](Self::IneligibleReplica): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_ineligible_replica_error(&self) -> bool {
+        ErrorHierarchy::is_ineligible_replica_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InterruptException`.
+    ///
+    /// Prefer this to matching [`Error::Interrupt`](Self::Interrupt): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_interrupt_error(&self) -> bool {
+        ErrorHierarchy::is_interrupt_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidCommitOffsetSizeException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidCommitOffsetSize`](Self::InvalidCommitOffsetSize): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_commit_offset_size_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_commit_offset_size_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidFetchSessionEpochException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidFetchSessionEpoch`](Self::InvalidFetchSessionEpoch):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_fetch_session_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_fetch_session_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidFetchSizeException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidFetchSize`](Self::InvalidFetchSize): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_fetch_size_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_fetch_size_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidGroupIdException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidGroupId`](Self::InvalidGroupId): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_group_id_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_group_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPartitionsException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidPartitions`](Self::InvalidPartitions): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_partitions_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_partitions_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPidMappingException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidPidMapping`](Self::InvalidPidMapping): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_pid_mapping_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_pid_mapping_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidPrincipalTypeException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidPrincipalType`](Self::InvalidPrincipalType): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_principal_type_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_principal_type_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidProducerEpochException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidProducerEpoch`](Self::InvalidProducerEpoch): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_producer_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_producer_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.InvalidRecordException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRecord`](Self::InvalidRecord): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_record_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_record_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRecordStateException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRecordState`](Self::InvalidRecordState): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_record_state_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_record_state_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRegistrationException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRegistration`](Self::InvalidRegistration): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_registration_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_registration_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRegularExpression`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRegularExpression`](Self::InvalidRegularExpression):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_regular_expression_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_regular_expression_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidReplicaAssignmentException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidReplicaAssignment`](Self::InvalidReplicaAssignment):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_replica_assignment_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_replica_assignment_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidReplicationFactorException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidReplicationFactor`](Self::InvalidReplicationFactor):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_replication_factor_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_replication_factor_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRequestException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRequest`](Self::InvalidRequest): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_request_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_request_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidRequiredAcksException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidRequiredAcks`](Self::InvalidRequiredAcks): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_required_acks_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_required_acks_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidSessionTimeoutException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidSessionTimeout`](Self::InvalidSessionTimeout): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_session_timeout_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_session_timeout_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidShareSessionEpochException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidShareSessionEpoch`](Self::InvalidShareSessionEpoch):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_share_session_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_share_session_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTimestampException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidTimestamp`](Self::InvalidTimestamp): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_timestamp_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_timestamp_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTopicException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidTopic`](Self::InvalidTopic): a variant match misses
+    /// the subclasses a later Java release may add.
+    pub fn is_invalid_topic_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_topic_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTxnStateException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidTxnState`](Self::InvalidTxnState): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_txn_state_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_txn_state_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidTxnTimeoutException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidTxnTimeout`](Self::InvalidTxnTimeout): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_invalid_txn_timeout_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_txn_timeout_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidUpdateVersionException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidUpdateVersion`](Self::InvalidUpdateVersion): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_invalid_update_version_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_update_version_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.InvalidVoterKeyException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidVoterKey`](Self::InvalidVoterKey): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_voter_key_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_voter_key_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.KafkaStorageException`.
+    ///
+    /// Prefer this to matching [`Error::KafkaStorage`](Self::KafkaStorage): a variant match misses
+    /// the subclasses a later Java release may add.
+    pub fn is_kafka_storage_error(&self) -> bool {
+        ErrorHierarchy::is_kafka_storage_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.LeaderNotAvailableException`.
+    ///
+    /// Prefer this to matching [`Error::LeaderNotAvailable`](Self::LeaderNotAvailable): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_leader_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_leader_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ListenerNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::ListenerNotFound`](Self::ListenerNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_listener_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_listener_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.LogDirNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::LogDirNotFound`](Self::LogDirNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_log_dir_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_log_dir_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.MemberIdRequiredException`.
+    ///
+    /// Prefer this to matching [`Error::MemberIdRequired`](Self::MemberIdRequired): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_member_id_required_error(&self) -> bool {
+        ErrorHierarchy::is_member_id_required_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.MismatchedEndpointTypeException`.
+    ///
+    /// Prefer this to matching [`Error::MismatchedEndpointType`](Self::MismatchedEndpointType): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_mismatched_endpoint_type_error(&self) -> bool {
+        ErrorHierarchy::is_mismatched_endpoint_type_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NetworkException`.
+    ///
+    /// Prefer this to matching [`Error::Network`](Self::Network): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_network_error(&self) -> bool {
+        ErrorHierarchy::is_network_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NewLeaderElectedException`.
+    ///
+    /// Prefer this to matching [`Error::NewLeaderElected`](Self::NewLeaderElected): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_new_leader_elected_error(&self) -> bool {
+        ErrorHierarchy::is_new_leader_elected_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NoReassignmentInProgressException`.
+    ///
+    /// Prefer this to matching [`Error::NoReassignmentInProgress`](Self::NoReassignmentInProgress):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_no_reassignment_in_progress_error(&self) -> bool {
+        ErrorHierarchy::is_no_reassignment_in_progress_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotControllerException`.
+    ///
+    /// Prefer this to matching [`Error::NotController`](Self::NotController): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_not_controller_error(&self) -> bool {
+        ErrorHierarchy::is_not_controller_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotCoordinatorException`.
+    ///
+    /// Prefer this to matching [`Error::NotCoordinator`](Self::NotCoordinator): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_not_coordinator_error(&self) -> bool {
+        ErrorHierarchy::is_not_coordinator_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasException`.
+    ///
+    /// Prefer this to matching [`Error::NotEnoughReplicas`](Self::NotEnoughReplicas): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_not_enough_replicas_error(&self) -> bool {
+        ErrorHierarchy::is_not_enough_replicas_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::NotEnoughReplicasAfterAppend`](Self::NotEnoughReplicasAfterAppend): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_not_enough_replicas_after_append_error(&self) -> bool {
+        ErrorHierarchy::is_not_enough_replicas_after_append_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.NotLeaderOrFollowerException`.
+    ///
+    /// Prefer this to matching [`Error::NotLeaderOrFollower`](Self::NotLeaderOrFollower): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_not_leader_or_follower_error(&self) -> bool {
+        ErrorHierarchy::is_not_leader_or_follower_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetMetadataTooLarge`.
+    ///
+    /// Prefer this to matching [`Error::OffsetMetadataTooLarge`](Self::OffsetMetadataTooLarge): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_offset_metadata_too_large_error(&self) -> bool {
+        ErrorHierarchy::is_offset_metadata_too_large_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetMovedToTieredStorageException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::OffsetMovedToTieredStorage`](Self::OffsetMovedToTieredStorage): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_offset_moved_to_tiered_storage_error(&self) -> bool {
+        ErrorHierarchy::is_offset_moved_to_tiered_storage_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetNotAvailableException`.
+    ///
+    /// Prefer this to matching [`Error::OffsetNotAvailable`](Self::OffsetNotAvailable): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_offset_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_offset_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OffsetOutOfRangeException`.
+    ///
+    /// Prefer this to matching [`Error::OffsetOutOfRange`](Self::OffsetOutOfRange): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_offset_out_of_range_error(&self) -> bool {
+        ErrorHierarchy::is_offset_out_of_range_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.OperationNotAttemptedException`.
+    ///
+    /// Prefer this to matching [`Error::OperationNotAttempted`](Self::OperationNotAttempted): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_operation_not_attempted_error(&self) -> bool {
+        ErrorHierarchy::is_operation_not_attempted_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PolicyViolationException`.
+    ///
+    /// Prefer this to matching [`Error::PolicyViolation`](Self::PolicyViolation): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_policy_violation_error(&self) -> bool {
+        ErrorHierarchy::is_policy_violation_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PositionOutOfRangeException`.
+    ///
+    /// Prefer this to matching [`Error::PositionOutOfRange`](Self::PositionOutOfRange): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_position_out_of_range_error(&self) -> bool {
+        ErrorHierarchy::is_position_out_of_range_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PreferredLeaderNotAvailableException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::PreferredLeaderNotAvailable`](Self::PreferredLeaderNotAvailable): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_preferred_leader_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_preferred_leader_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.PrincipalDeserializationException`.
+    ///
+    /// Prefer this to matching [`Error::PrincipalDeserialization`](Self::PrincipalDeserialization):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_principal_deserialization_error(&self) -> bool {
+        ErrorHierarchy::is_principal_deserialization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ProducerFencedException`.
+    ///
+    /// Prefer this to matching [`Error::ProducerFenced`](Self::ProducerFenced): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_producer_fenced_error(&self) -> bool {
+        ErrorHierarchy::is_producer_fenced_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.metrics.QuotaViolationException`.
+    ///
+    /// Prefer this to matching [`Error::QuotaViolation`](Self::QuotaViolation): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_quota_violation_error(&self) -> bool {
+        ErrorHierarchy::is_quota_violation_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ReassignmentInProgressException`.
+    ///
+    /// Prefer this to matching [`Error::ReassignmentInProgress`](Self::ReassignmentInProgress): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_reassignment_in_progress_error(&self) -> bool {
+        ErrorHierarchy::is_reassignment_in_progress_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RebalanceInProgressException`.
+    ///
+    /// Prefer this to matching [`Error::RebalanceInProgress`](Self::RebalanceInProgress): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_rebalance_in_progress_error(&self) -> bool {
+        ErrorHierarchy::is_rebalance_in_progress_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RebootstrapRequiredException`.
+    ///
+    /// Prefer this to matching [`Error::RebootstrapRequired`](Self::RebootstrapRequired): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_rebootstrap_required_error(&self) -> bool {
+        ErrorHierarchy::is_rebootstrap_required_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordBatchTooLargeException`.
+    ///
+    /// Prefer this to matching [`Error::RecordBatchTooLarge`](Self::RecordBatchTooLarge): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_record_batch_too_large_error(&self) -> bool {
+        ErrorHierarchy::is_record_batch_too_large_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordDeserializationException`.
+    ///
+    /// Prefer this to matching [`Error::RecordDeserialization`](Self::RecordDeserialization): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_record_deserialization_error(&self) -> bool {
+        ErrorHierarchy::is_record_deserialization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.RecordTooLargeException`.
+    ///
+    /// Prefer this to matching [`Error::RecordTooLarge`](Self::RecordTooLarge): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_record_too_large_error(&self) -> bool {
+        ErrorHierarchy::is_record_too_large_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.network.InvalidReceiveException`.
+    ///
+    /// Prefer this to matching [`Error::InvalidReceive`](Self::InvalidReceive): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_invalid_receive_error(&self) -> bool {
+        ErrorHierarchy::is_invalid_receive_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.config.ConfigException`.
+    ///
+    /// Prefer this to matching [`Error::Config`](Self::Config): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_config_error(&self) -> bool {
+        ErrorHierarchy::is_config_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.RetriableCommitFailedException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::ConsumerRetriableCommitFailed`](Self::ConsumerRetriableCommitFailed): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_consumer_retriable_commit_failed_error(&self) -> bool {
+        ErrorHierarchy::is_consumer_retriable_commit_failed_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.CommitFailedException`.
+    ///
+    /// Prefer this to matching [`Error::ConsumerCommitFailed`](Self::ConsumerCommitFailed): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_consumer_commit_failed_error(&self) -> bool {
+        ErrorHierarchy::is_consumer_commit_failed_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.NoOffsetForPartitionException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::ConsumerNoOffsetForPartition`](Self::ConsumerNoOffsetForPartition): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_consumer_no_offset_for_partition_error(&self) -> bool {
+        ErrorHierarchy::is_consumer_no_offset_for_partition_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.clients.consumer.LogTruncationException`.
+    ///
+    /// Prefer this to matching [`Error::ConsumerLogTruncation`](Self::ConsumerLogTruncation): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_consumer_log_truncation_error(&self) -> bool {
+        ErrorHierarchy::is_consumer_log_truncation_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ReplicaNotAvailableException`.
+    ///
+    /// Prefer this to matching [`Error::ReplicaNotAvailable`](Self::ReplicaNotAvailable): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_replica_not_available_error(&self) -> bool {
+        ErrorHierarchy::is_replica_not_available_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ResourceNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::ResourceNotFound`](Self::ResourceNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_resource_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_resource_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SaslAuthenticationException`.
+    ///
+    /// Prefer this to matching [`Error::SaslAuthentication`](Self::SaslAuthentication): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_sasl_authentication_error(&self) -> bool {
+        ErrorHierarchy::is_sasl_authentication_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.protocol.types.SchemaException`.
+    ///
+    /// Prefer this to matching [`Error::Schema`](Self::Schema): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_schema_error(&self) -> bool {
+        ErrorHierarchy::is_schema_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SecurityDisabledException`.
+    ///
+    /// Prefer this to matching [`Error::SecurityDisabled`](Self::SecurityDisabled): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_security_disabled_error(&self) -> bool {
+        ErrorHierarchy::is_security_disabled_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ShareSessionLimitReachedException`.
+    ///
+    /// Prefer this to matching [`Error::ShareSessionLimitReached`](Self::ShareSessionLimitReached):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_share_session_limit_reached_error(&self) -> bool {
+        ErrorHierarchy::is_share_session_limit_reached_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ShareSessionNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::ShareSessionNotFound`](Self::ShareSessionNotFound): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_share_session_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_share_session_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SnapshotNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::SnapshotNotFound`](Self::SnapshotNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_snapshot_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_snapshot_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.SslAuthenticationException`.
+    ///
+    /// Prefer this to matching [`Error::SslAuthentication`](Self::SslAuthentication): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_ssl_authentication_error(&self) -> bool {
+        ErrorHierarchy::is_ssl_authentication_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StaleBrokerEpochException`.
+    ///
+    /// Prefer this to matching [`Error::StaleBrokerEpoch`](Self::StaleBrokerEpoch): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_stale_broker_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_stale_broker_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StaleMemberEpochException`.
+    ///
+    /// Prefer this to matching [`Error::StaleMemberEpoch`](Self::StaleMemberEpoch): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_stale_member_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_stale_member_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsInvalidTopologyException`.
+    ///
+    /// Prefer this to matching [`Error::StreamsInvalidTopology`](Self::StreamsInvalidTopology): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_streams_invalid_topology_error(&self) -> bool {
+        ErrorHierarchy::is_streams_invalid_topology_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::StreamsInvalidTopologyEpoch`](Self::StreamsInvalidTopologyEpoch): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_streams_invalid_topology_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_streams_invalid_topology_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.StreamsTopologyFencedException`.
+    ///
+    /// Prefer this to matching [`Error::StreamsTopologyFenced`](Self::StreamsTopologyFenced): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_streams_topology_fenced_error(&self) -> bool {
+        ErrorHierarchy::is_streams_topology_fenced_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TelemetryTooLargeException`.
+    ///
+    /// Prefer this to matching [`Error::TelemetryTooLarge`](Self::TelemetryTooLarge): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_telemetry_too_large_error(&self) -> bool {
+        ErrorHierarchy::is_telemetry_too_large_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.ThrottlingQuotaExceededException`.
+    ///
+    /// Prefer this to matching [`Error::ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_throttling_quota_exceeded_error(&self) -> bool {
+        ErrorHierarchy::is_throttling_quota_exceeded_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicAuthorizationException`.
+    ///
+    /// Prefer this to matching [`Error::TopicAuthorization`](Self::TopicAuthorization): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_topic_authorization_error(&self) -> bool {
+        ErrorHierarchy::is_topic_authorization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicDeletionDisabledException`.
+    ///
+    /// Prefer this to matching [`Error::TopicDeletionDisabled`](Self::TopicDeletionDisabled): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_topic_deletion_disabled_error(&self) -> bool {
+        ErrorHierarchy::is_topic_deletion_disabled_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TopicExistsException`.
+    ///
+    /// Prefer this to matching [`Error::TopicExists`](Self::TopicExists): a variant match misses
+    /// the subclasses a later Java release may add.
+    pub fn is_topic_exists_error(&self) -> bool {
+        ErrorHierarchy::is_topic_exists_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionAbortableException`.
+    ///
+    /// Prefer this to matching [`Error::TransactionAbortable`](Self::TransactionAbortable): a
+    /// variant match misses the subclasses a later Java release may add.
+    ///
+    /// Java tests this class in two ways: by code (`error == Errors.TRANSACTION_ABORTABLE`,
+    /// four sites in `TransactionManager`) and by class
+    /// (`error.exception() instanceof TransactionAbortableException`,
+    /// `TransactionManager.java:1783`). This predicate is the class test.
+    pub fn is_transaction_abortable_error(&self) -> bool {
+        ErrorHierarchy::is_transaction_abortable_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionAbortedException`.
+    ///
+    /// Prefer this to matching [`Error::TransactionAborted`](Self::TransactionAborted): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_transaction_aborted_error(&self) -> bool {
+        ErrorHierarchy::is_transaction_aborted_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::TransactionCoordinatorFenced`](Self::TransactionCoordinatorFenced): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_transaction_coordinator_fenced_error(&self) -> bool {
+        ErrorHierarchy::is_transaction_coordinator_fenced_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionalIdAuthorizationException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::TransactionalIdAuthorization`](Self::TransactionalIdAuthorization): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_transactional_id_authorization_error(&self) -> bool {
+        ErrorHierarchy::is_transactional_id_authorization_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.TransactionalIdNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::TransactionalIdNotFound`](Self::TransactionalIdNotFound): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_transactional_id_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_transactional_id_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnacceptableCredentialException`.
+    ///
+    /// Prefer this to matching [`Error::UnacceptableCredential`](Self::UnacceptableCredential): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unacceptable_credential_error(&self) -> bool {
+        ErrorHierarchy::is_unacceptable_credential_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownControllerIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownControllerId`](Self::UnknownControllerId): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_unknown_controller_id_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_controller_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownLeaderEpochException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownLeaderEpoch`](Self::UnknownLeaderEpoch): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_unknown_leader_epoch_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_leader_epoch_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownMemberIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownMemberId`](Self::UnknownMemberId): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unknown_member_id_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_member_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownProducerIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownProducerId`](Self::UnknownProducerId): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_unknown_producer_id_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_producer_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownServerException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownServer`](Self::UnknownServer): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unknown_server_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_server_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownSubscriptionIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownSubscriptionId`](Self::UnknownSubscriptionId): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unknown_subscription_id_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_subscription_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownTopicIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownTopicId`](Self::UnknownTopicId): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unknown_topic_id_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_topic_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnknownTopicOrPartitionException`.
+    ///
+    /// Prefer this to matching [`Error::UnknownTopicOrPartition`](Self::UnknownTopicOrPartition): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unknown_topic_or_partition_error(&self) -> bool {
+        ErrorHierarchy::is_unknown_topic_or_partition_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnreleasedInstanceIdException`.
+    ///
+    /// Prefer this to matching [`Error::UnreleasedInstanceId`](Self::UnreleasedInstanceId): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unreleased_instance_id_error(&self) -> bool {
+        ErrorHierarchy::is_unreleased_instance_id_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnstableOffsetCommitException`.
+    ///
+    /// Prefer this to matching [`Error::UnstableOffsetCommit`](Self::UnstableOffsetCommit): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unstable_offset_commit_error(&self) -> bool {
+        ErrorHierarchy::is_unstable_offset_commit_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedAssignorException`.
+    ///
+    /// Prefer this to matching [`Error::UnsupportedAssignor`](Self::UnsupportedAssignor): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_unsupported_assignor_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_assignor_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedByAuthenticationException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::UnsupportedByAuthentication`](Self::UnsupportedByAuthentication): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unsupported_by_authentication_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_by_authentication_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedCompressionTypeException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::UnsupportedCompressionType`](Self::UnsupportedCompressionType): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unsupported_compression_type_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_compression_type_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedEndpointTypeException`.
+    ///
+    /// Prefer this to matching [`Error::UnsupportedEndpointType`](Self::UnsupportedEndpointType): a
+    /// variant match misses the subclasses a later Java release may add.
+    pub fn is_unsupported_endpoint_type_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_endpoint_type_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedForMessageFormatException`.
+    ///
+    /// Prefer this to matching
+    /// [`Error::UnsupportedForMessageFormat`](Self::UnsupportedForMessageFormat): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_unsupported_for_message_format_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_for_message_format_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedSaslMechanismException`.
+    ///
+    /// Prefer this to matching [`Error::UnsupportedSaslMechanism`](Self::UnsupportedSaslMechanism):
+    /// a variant match misses the subclasses a later Java release may add.
+    pub fn is_unsupported_sasl_mechanism_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_sasl_mechanism_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.UnsupportedVersionException`.
+    ///
+    /// Prefer this to matching [`Error::UnsupportedVersion`](Self::UnsupportedVersion): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_unsupported_version_error(&self) -> bool {
+        ErrorHierarchy::is_unsupported_version_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.VoterNotFoundException`.
+    ///
+    /// Prefer this to matching [`Error::VoterNotFound`](Self::VoterNotFound): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_voter_not_found_error(&self) -> bool {
+        ErrorHierarchy::is_voter_not_found_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends,
+    /// `org.apache.kafka.common.errors.WakeupException`.
+    ///
+    /// Prefer this to matching [`Error::Wakeup`](Self::Wakeup): a variant match misses the
+    /// subclasses a later Java release may add.
+    pub fn is_wakeup_error(&self) -> bool {
+        ErrorHierarchy::is_wakeup_error(self)
     }
 }
 
@@ -2568,15 +5345,16 @@ mod tests {
         assert!(matches!(Error::new(Errors::None), Error::KafkaError(_)));
     }
 
-    /// `is_transaction_abortable_error` tests one leaf class, so it is a variant
-    /// match rather than an [`ErrorHierarchy`] predicate.
+    /// `is_transaction_abortable_error` is the class predicate for a leaf class.
+    /// It is still an [`ErrorHierarchy`] method, so that a subclass Java adds
+    /// later answers `true` too.
     ///
     /// Note the confusable neighbour: `TransactionAbortableException` (code 120,
     /// "you may abort and carry on") is a different Java class from
     /// `TransactionAbortedException` (no code, "the transaction was aborted, the
     /// record was not written").
     #[test]
-    fn transaction_abortable_is_a_leaf_variant_test() {
+    fn transaction_abortable_is_a_class_predicate() {
         let abortable = Error::new(Errors::TransactionAbortable);
         assert!(abortable.is_transaction_abortable_error());
         assert_eq!(abortable.error().code(), 120);

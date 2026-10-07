@@ -31,5 +31,6 @@ kafka_error_type! {
     InterruptError,
     extends: [
         is_kafka_error,
+        is_interrupt_error,
     ],
 }

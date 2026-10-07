@@ -131,6 +131,9 @@ impl ErrorHierarchy for InvalidTopicError {
     fn is_invalid_configuration_error(&self) -> bool {
         true
     }
+    fn is_invalid_topic_error(&self) -> bool {
+        true
+    }
 }
 
 impl InvalidTopicError {

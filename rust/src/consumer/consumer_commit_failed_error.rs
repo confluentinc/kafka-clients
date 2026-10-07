@@ -80,6 +80,9 @@ impl ErrorHierarchy for ConsumerCommitFailedError {
     fn is_kafka_error(&self) -> bool {
         true
     }
+    fn is_consumer_commit_failed_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ConsumerCommitFailedError {

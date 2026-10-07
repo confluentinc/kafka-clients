@@ -35,5 +35,6 @@ kafka_error_type! {
         is_retriable_error,
         is_refresh_retriable_error,
         is_invalid_metadata_error,
+        is_fenced_leader_epoch_error,
     ],
 }

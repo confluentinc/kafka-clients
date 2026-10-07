@@ -32,5 +32,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_application_recoverable_error,
+        is_invalid_producer_epoch_error,
     ],
 }

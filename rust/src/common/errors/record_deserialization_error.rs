@@ -195,6 +195,9 @@ impl ErrorHierarchy for RecordDeserializationError {
     fn is_serialization_error(&self) -> bool {
         true
     }
+    fn is_record_deserialization_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for RecordDeserializationError {

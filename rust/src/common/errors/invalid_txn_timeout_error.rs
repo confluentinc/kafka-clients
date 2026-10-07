@@ -31,5 +31,6 @@ kafka_error_type! {
     extends: [
         is_kafka_error,
         is_api_error,
+        is_invalid_txn_timeout_error,
     ],
 }

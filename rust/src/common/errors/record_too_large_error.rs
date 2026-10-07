@@ -140,6 +140,9 @@ impl ErrorHierarchy for RecordTooLargeError {
     fn is_api_error(&self) -> bool {
         true
     }
+    fn is_record_too_large_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for RecordTooLargeError {

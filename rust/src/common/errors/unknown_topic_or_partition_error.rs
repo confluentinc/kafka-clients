@@ -35,5 +35,6 @@ kafka_error_type! {
         is_retriable_error,
         is_refresh_retriable_error,
         is_invalid_metadata_error,
+        is_unknown_topic_or_partition_error,
     ],
 }

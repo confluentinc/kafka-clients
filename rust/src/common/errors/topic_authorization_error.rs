@@ -138,6 +138,9 @@ impl ErrorHierarchy for TopicAuthorizationError {
     fn is_authorization_error(&self) -> bool {
         true
     }
+    fn is_topic_authorization_error(&self) -> bool {
+        true
+    }
 }
 
 impl TopicAuthorizationError {

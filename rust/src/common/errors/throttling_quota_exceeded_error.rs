@@ -97,6 +97,9 @@ impl ErrorHierarchy for ThrottlingQuotaExceededError {
     fn is_retriable_error(&self) -> bool {
         true
     }
+    fn is_throttling_quota_exceeded_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ThrottlingQuotaExceededError {

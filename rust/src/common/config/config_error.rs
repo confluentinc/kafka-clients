@@ -38,6 +38,7 @@ kafka_error_type! {
     ConfigError,
     extends: [
         is_kafka_error,
+        is_config_error,
     ],
 }
 

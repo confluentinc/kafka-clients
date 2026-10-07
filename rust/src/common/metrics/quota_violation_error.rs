@@ -120,6 +120,9 @@ impl ErrorHierarchy for QuotaViolationError {
     fn is_kafka_error(&self) -> bool {
         true
     }
+    fn is_quota_violation_error(&self) -> bool {
+        true
+    }
 }
 
 impl std::fmt::Display for QuotaViolationError {

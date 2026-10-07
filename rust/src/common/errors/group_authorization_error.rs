@@ -137,6 +137,9 @@ impl ErrorHierarchy for GroupAuthorizationError {
     fn is_authorization_error(&self) -> bool {
         true
     }
+    fn is_group_authorization_error(&self) -> bool {
+        true
+    }
 }
 
 impl GroupAuthorizationError {

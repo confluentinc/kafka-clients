@@ -40,5 +40,6 @@ kafka_error_type! {
         is_api_error,
         is_retriable_error,
         is_timeout_error,
+        is_producer_buffer_exhausted_error,
     ],
 }

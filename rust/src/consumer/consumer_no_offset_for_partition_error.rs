@@ -104,6 +104,9 @@ impl ErrorHierarchy for ConsumerNoOffsetForPartitionError {
     fn is_consumer_invalid_offset_error(&self) -> bool {
         true
     }
+    fn is_consumer_no_offset_for_partition_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ConsumerNoOffsetForPartitionError {

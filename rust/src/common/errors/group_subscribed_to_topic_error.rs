@@ -31,5 +31,6 @@ kafka_error_type! {
     extends: [
         is_kafka_error,
         is_api_error,
+        is_group_subscribed_to_topic_error,
     ],
 }

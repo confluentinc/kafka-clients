@@ -120,6 +120,9 @@ impl ErrorHierarchy for ConsumerRetriableCommitFailedError {
     fn is_retriable_error(&self) -> bool {
         true
     }
+    fn is_consumer_retriable_commit_failed_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ConsumerRetriableCommitFailedError {

@@ -123,6 +123,9 @@ impl ErrorHierarchy for ResourceNotFoundError {
     fn is_api_error(&self) -> bool {
         true
     }
+    fn is_resource_not_found_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ResourceNotFoundError {

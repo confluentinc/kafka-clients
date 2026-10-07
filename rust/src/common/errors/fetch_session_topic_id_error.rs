@@ -32,5 +32,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_retriable_error,
+        is_fetch_session_topic_id_error,
     ],
 }

@@ -138,6 +138,9 @@ impl ErrorHierarchy for ConsumerLogTruncationError {
     fn is_consumer_offset_out_of_range_error(&self) -> bool {
         true
     }
+    fn is_consumer_log_truncation_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for ConsumerLogTruncationError {

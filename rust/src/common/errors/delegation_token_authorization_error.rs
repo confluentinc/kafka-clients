@@ -33,5 +33,6 @@ kafka_error_type! {
         is_api_error,
         is_invalid_configuration_error,
         is_authorization_error,
+        is_delegation_token_authorization_error,
     ],
 }

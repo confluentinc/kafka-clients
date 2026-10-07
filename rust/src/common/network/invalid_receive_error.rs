@@ -37,7 +37,8 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// like every other translated `KafkaException` descendant.
 ///
 /// Crate-private although `Error::InvalidReceive` is public: Java's class sits in
-/// `common.network`, which is "not a supported API". Callers match the variant and
+/// `common.network`, which is "not a supported API". Callers test it with
+/// [`Error::is_invalid_receive_error`](crate::common::Error::is_invalid_receive_error) and
 /// use `Display` / `source()`; the payload itself is not reachable by name.
 #[expect(unnameable_types)]
 #[derive(Clone, Debug)]
@@ -77,6 +78,9 @@ impl ErrorCode for InvalidReceiveError {}
 
 impl ErrorHierarchy for InvalidReceiveError {
     fn is_kafka_error(&self) -> bool {
+        true
+    }
+    fn is_invalid_receive_error(&self) -> bool {
         true
     }
 }

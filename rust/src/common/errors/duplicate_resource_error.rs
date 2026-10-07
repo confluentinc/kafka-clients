@@ -123,6 +123,9 @@ impl ErrorHierarchy for DuplicateResourceError {
     fn is_api_error(&self) -> bool {
         true
     }
+    fn is_duplicate_resource_error(&self) -> bool {
+        true
+    }
 }
 
 impl ErrorSource for DuplicateResourceError {
