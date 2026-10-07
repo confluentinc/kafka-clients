@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom()?,
-        Some("lint") => lint()?,
+        Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
         Some("coverage") => coverage()?,
@@ -430,21 +430,40 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn lint() -> anyhow::Result<()> {
+/// Runs every lint step. By default it stops at the first failing step; with
+/// `keep_going` (`cargo xtask lint --keep-going`) it runs every step regardless,
+/// reports each failure, and fails at the end if any step failed. The flag changes
+/// only *whether later steps run*, never what a step enforces: it exists so a step
+/// that is known to fail (e.g. a lint-custom finding owned by a later phase) does
+/// not hide the result of the steps after it.
+fn lint(keep_going: bool) -> anyhow::Result<()> {
+    let mut failures: Vec<String> = Vec::new();
+    let mut step = |name: &str, result: anyhow::Result<()>| -> anyhow::Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if keep_going => {
+                eprintln!("❌ lint step `{name}` failed: {e}");
+                failures.push(format!("{name}: {e}"));
+                Ok(())
+            },
+            Err(e) => Err(e),
+        }
+    };
+
     // Runs first: it is a fast source-only scan, so a violation is reported
     // before paying for three full clippy passes. It covers what clippy cannot:
     // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
     // of its variants and the visibility of public structs' fields.
-    lint_custom::lint_custom()?;
+    step("lint-custom", lint_custom::lint_custom())?;
 
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
     // failures are always real.
-    doc_hygiene()?;
+    step("doc-hygiene", doc_hygiene())?;
 
     // CLAUDE.md §2's import rule, in the one place the compiler cannot enforce it:
     // a file module stays visible inside its own subtree even when declared `mod x;`.
-    module_path_hygiene()?;
+    step("module-path-hygiene", module_path_hygiene())?;
 
     println!("🔍 Running clippy lints...");
 
@@ -458,26 +477,42 @@ fn lint() -> anyhow::Result<()> {
     //
     // `--workspace` covers every member (including `generator`), so no
     // per-crate pass is needed.
-    for pass in [
-        &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ][..],
+    for (name, pass) in [
+        (
+            "clippy (default features)",
+            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
+        ),
+        (
+            "clippy (--all-features)",
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--",
+                "-D",
+                "warnings",
+            ][..],
+        ),
     ] {
-        run_command("cargo", pass)?;
+        step(name, run_command("cargo", pass))?;
     }
 
     // Lint the xtask crate itself. `cargo clippy` from the workspace root only
     // covers the root package, so without this the build tooling — including
     // the `lint-custom` scanner — would escape the lint gate entirely.
-    run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"])?;
+    step(
+        "clippy (xtask)",
+        run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"]),
+    )?;
 
+    if !failures.is_empty() {
+        eprintln!("❌ {} lint step(s) failed:", failures.len());
+        for failure in &failures {
+            eprintln!("   - {failure}");
+        }
+        anyhow::bail!("{} lint step(s) failed", failures.len());
+    }
     println!("✅ No lint issues found!");
     Ok(())
 }
@@ -1097,7 +1132,9 @@ fn print_help() {
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
                     check-no-public-field                 public structs have no `pub` field
-  lint            Run doc-hygiene plus clippy lints (warnings are errors)
+  lint            Run doc-hygiene plus clippy lints (warnings are errors);
+                  `--keep-going` runs every step even after one fails, then
+                  fails if any did
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
   coverage        Run unit test coverage (HTML report)
@@ -1114,7 +1151,7 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask java-deprecated [kafka-ref ...]
   cargo xtask lint-custom
-  cargo xtask lint
+  cargo xtask lint [--keep-going]
   cargo xtask doc-hygiene
   cargo xtask lint-fix
   cargo xtask coverage
