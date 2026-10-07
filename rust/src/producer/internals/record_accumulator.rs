@@ -4451,6 +4451,56 @@ mod tests {
         assert_eq!([7 * number_of_cycles, number_of_cycles, 0], frequencies);
     }
 
+    /// Rust-only (Critic 96 F4): pins the alignment of `partition_ready`'s
+    /// `partition_leader_racks` with `partition_ids`. Java writes a partition's id
+    /// *and* rack before the empty-deque `continue` (`RecordAccumulator.java:720-737`),
+    /// so a partition whose deque has been drained empty keeps its slot: queue size 0
+    /// (never written) and its leader's rack. Here p0 (rack0) is drained empty, p1
+    /// (rack0) holds 2 batches and p2 (rack1) 1, so the in-rack table holds p0 at 0 and
+    /// p1 at 2: `max + 1 = 3`, frequencies 3 + 1, range end 4. Were the rack written
+    /// only for a non-empty deque, p0 would drop out of the table (range end 1). This
+    /// does not depend on the `DashMap` iteration order.
+    #[tokio::test]
+    async fn test_rack_slot_kept_for_drained_in_rack_partition() {
+        let config = PartitionerConfig::new(true, 0, true, "rack0").unwrap();
+        let total_size: i64 = 1024 * 1024;
+        let batch_size = 128;
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let accum =
+            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+
+        let rack_node1 = Node::with_rack(0, "localhost".to_string(), 1111, Some("rack0".to_string()));
+        let rack_node2 = Node::with_rack(1, "localhost".to_string(), 1112, Some("rack1".to_string()));
+        let rack_node3 = Node::with_rack(2, "localhost".to_string(), 1113, Some("rack0".to_string()));
+        let metadata = make_metadata_snapshot(
+            &[rack_node1.clone(), rack_node2, rack_node3],
+            TOPIC,
+            &[(0, Some(0)), (1, Some(2)), (2, Some(1))],
+        );
+        let now = 0;
+
+        let large_value = vec![0u8; batch_size as usize];
+        fill_queues_and_ready(&accum, &metadata, &[1, 2, 1], &large_value, now).await;
+
+        // Drain node 0 only: p0's one batch leaves, and its (now empty) deque stays in
+        // the map.
+        let drained = accum
+            .drain(&metadata, &HashSet::from([rack_node1]), i32::MAX, now)
+            .expect("drain");
+        assert_eq!(1, drained.values().map(Vec::len).sum::<usize>());
+        let tp = |p| TopicPartition::new(TOPIC.to_string(), p);
+        assert_eq!(
+            (0, 2, 1),
+            (accum.deque_size(&tp(0)), accum.deque_size(&tp(1)), accum.deque_size(&tp(2)))
+        );
+
+        accum.ready(&metadata, now);
+        assert_eq!(
+            4,
+            accum.with_built_in_partitioner_for_test(TOPIC, BuiltInPartitioner::load_stats_in_this_rack_range_end)
+        );
+    }
+
     /// `PartitionerConfig`'s constructor check (KAFKA-19193, 165d7ec933): rack
     /// awareness needs a non-blank rack, reported as Java's `ConfigException`.
     #[test]
