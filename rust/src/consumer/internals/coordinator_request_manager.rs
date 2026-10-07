@@ -444,6 +444,21 @@ impl CoordinatorRequestManager {
             let request = Self::make_find_coordinator_request(&self.inner, current_time_ms);
             return PollResult::single(request);
         }
+
+        // KAFKA-20253: when a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the
+        // network thread to poll again immediately which causes a busy spin. Wait instead by returning a
+        // PollResult with a Long.MAX_VALUE backoff. (During KIP-909 bootstrap resolution the FindCoordinator
+        // request stays unsent, hence in flight, for the whole resolution window.)
+        if self
+            .inner
+            .request_state
+            .lock()
+            .expect("request_state poisoned")
+            .request_in_flight()
+        {
+            return PollResult::empty();
+        }
+
         let remaining = self
             .inner
             .request_state
@@ -807,6 +822,39 @@ mod tests {
         let result = manager.poll(RETRY_BACKOFF_MS);
         assert_eq!(1, result.unsent_requests.len());
         assert!(manager.coordinator().is_none());
+    }
+
+    /// Translated from `CoordinatorRequestManagerTest.testNoBusyPollWhileFindCoordinatorRequestInFlight`
+    /// (KAFKA-20253): while a FindCoordinator request is in flight and its
+    /// backoff has already elapsed, poll() must not return
+    /// `time_until_next_poll_ms == 0`, which drives the background task into a
+    /// `NetworkClient::poll(0)` busy-spin. Java asserts `> 0`; the value is
+    /// `PollResult.EMPTY`'s `Long.MAX_VALUE`, asserted exactly here.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testNoBusyPollWhileFindCoordinatorRequestInFlight"
+    )]
+    async fn test_no_busy_poll_while_find_coordinator_request_in_flight() {
+        let mut manager = setup_manager();
+
+        // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        // Advance well past the retry backoff while the request is still in flight.
+        let res2 = manager.poll(60_000);
+        assert_eq!(
+            0,
+            res2.unsent_requests.len(),
+            "no new request should be sent while one is in flight"
+        );
+        assert!(
+            res2.time_until_next_poll_ms > 0,
+            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got {}",
+            res2.time_until_next_poll_ms
+        );
+        assert_eq!(PollResult::WAIT_FOREVER, res2.time_until_next_poll_ms);
+        drop(res);
     }
 
     /// Translated from `CoordinatorRequestManagerTest.testNullGroupIdShouldThrow`.

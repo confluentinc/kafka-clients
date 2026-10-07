@@ -160,9 +160,19 @@ impl AutoCommitState {
     }
 
     /// Java: `remainingMs(currentTimeMs)`. Returns 0 when the timer has
-    /// already expired (no negative values).
+    /// already expired (no negative values) — unless an auto-commit is still
+    /// in flight, see below.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#remainingMs")]
     fn remaining_ms(&self, current_time_ms: i64) -> i64 {
+        // KAFKA-20253: If the auto-commit interval has elapsed but a previous auto-commit is still
+        // in-flight (for example it cannot complete because the coordinator is unavailable after a
+        // failed re-authentication), a new auto-commit cannot be started yet. Returning 0 here would
+        // busy-spin the application thread, since this value feeds AsyncKafkaConsumer.pollForFetches()
+        // via maximumTimeToWait(). Wait for the interval instead; the network thread still wakes on the
+        // in-flight commit's response, which resets this timer.
+        if current_time_ms >= self.expiration_ms && self.has_inflight_commit {
+            return self.auto_commit_interval_ms;
+        }
         (self.expiration_ms - current_time_ms).max(0)
     }
 
@@ -3110,6 +3120,41 @@ mod tests {
         // Signal close — does not change `maximum_time_to_wait`.
         manager.signal_close();
         assert_eq!(manager.maximum_time_to_wait(0), 1_000);
+    }
+
+    /// KAFKA-20253 (`AutoCommitState.remainingMs`; Java adds no test of its
+    /// own): once the interval has elapsed while an auto-commit is still in
+    /// flight, no new auto-commit can start, so the remaining time is the
+    /// interval rather than 0 — a 0 would bound the application task's wait to
+    /// 0 and spin it. With nothing in flight, an expired timer still reads 0.
+    #[test]
+    fn auto_commit_remaining_ms_waits_the_interval_while_a_commit_is_in_flight() {
+        let manager = make_manager(0, true);
+        let set_inflight = |inflight: bool| {
+            let mut guard = manager.inner.state.lock().unwrap();
+            guard.auto_commit.as_mut().unwrap().set_inflight_commit_status(inflight);
+        };
+        let remaining = |now: i64| {
+            manager
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .auto_commit
+                .as_ref()
+                .unwrap()
+                .remaining_ms(now)
+        };
+
+        set_inflight(true);
+        // Not yet expired: the timer's own remaining time.
+        assert_eq!(400, remaining(600));
+        // Expired with a commit in flight: the interval.
+        assert_eq!(1_000, remaining(1_000));
+        assert_eq!(1_000, remaining(5_000));
+        // Expired with nothing in flight: 0, so the next poll commits.
+        set_inflight(false);
+        assert_eq!(0, remaining(5_000));
     }
 
     /// `reset_auto_commit_timer` resets the next-firing time relative to
