@@ -925,6 +925,90 @@ Phase 2 completion notes (agent 92):
   to the Rust test layout), `RequestResponseTest` hunks, and FFI / Python tests.
 - Can run as soon as Phase 2 lands (both edit `KafkaAdminClient`).
 
+Phase 12 completion notes (agent 102):
+
+- **KAFKA-20395 (c274a7348f), unregister controllers.**
+  - Wire: `UnregisterControllerRequest` (+ `Builder`, `super(apiKey)` → `latest_version_enable_unstable_last_version(false)`)
+    and `UnregisterControllerResponse`, wired through every `ConcreteRequest`/`ConcreteResponse` arm (the Phase 0
+    "not currently handled" fallthrough is gone). `getErrorResponse(int, Throwable)` takes the crate `Error`
+    (code from `Errors.forException`, message from `getMessage()`), unlike the `&Errors` convention, because the
+    translated `RequestResponseTest.testUnregisterControllerResponseWithUnknownServerError` asserts the custom
+    message; the dispatcher arm builds the `Error` from its code. `errorCounts` skips NONE, as Java does.
+    Byte-level tests: request body and with-header vectors, response with message / null / default (`""`, the
+    spec has no `"default": "null"`), parse through both dispatchers.
+  - API: `Admin::unregister_controller` (trait default) / `unregister_controller_with_options`; public
+    `UnregisterControllerOptions` / `UnregisterControllerResult`. Call: `LeastLoadedBrokerOrActiveKController`
+    (a broker forwards; the API is forwardable), NONE completes, REQUEST_TIMED_OUT is a `HandleResult::Retry`
+    (Java throws from `handleResponse` into `Call.fail`), everything else logs and fails with the broker message.
+  - `MockAdminClient`: Raft controller → completed, else `UnsupportedVersionException("")`. Java's
+    `Builder.usingRaftController` becomes `set_using_raft_controller` (the `set_feature_levels` precedent).
+  - Bindings: `kafka_admin_AdminClient_unregister_controller` / `_async` with
+    `kafka_admin_AdminClient_unregister_controller_callback_t` (no result handle, the B6 void row),
+    `kafka_admin_MockAdminClient_set_using_raft_controller`; Python `Admin.unregister_controller`,
+    `AsyncAdmin.unregister_controller`, mock mixin `set_using_raft_controller`; gRPC `UnregisterController`
+    (`StatusResponse`) in the proto, the C++ server and both Python servers.
+- **58f63f448e / KAFKA-19663 (3b849ff2bd).** Crate-private `admin::internals::InternalDescribeFeaturesResult`.
+  Rust has no subclassing, so it holds the base by value with `From<..> for DescribeFeaturesResult`;
+  `KafkaAdminClient::describe_features_internal` returns it and the trait method upcasts. Both futures complete
+  from the error-code branch and from `handleFailure`. `DescribeFeaturesResult::new` was already `pub(crate)`
+  (Java's new `protected`), so only its doc changed.
+- **KAFKA-20673 follow-up (cb2f143b0d).** The driver call's `handle_node_unavailable` hook returns `false` once a
+  hard-shutdown time is set (Java tests `hardShutdownTimeMs`, not `closing`). Java has no test; a Rust one fails
+  without the guard with "Cannot accept new calls when AdminClient is closing.".
+- **Phase 2's `enqueue` gap.** `CallSender::call` now checks `tries > maxRetries` first in the enqueue part (after
+  `call()`'s hard-shutdown and `bootstrap.controllers` checks, before the bootstrap failure), failing through
+  `handleTimeoutFailure` with "Exceeded maxRetries after N tries.". `handleTimeoutFailure` moved from the runnable
+  onto `Call`, as in Java. Reached by driver specs re-issued with their `tries`; tested at the boundary, for
+  ordering, and end to end (deleteRecords, `retries=0`).
+- **Recorded skips.**
+  - `KafkaAdminClientTest.testUnregisterBroker*` (6, refactored in c274a7348f): Rust has no `unregisterBroker`
+    at all (a pre-existing gap, not 4.4 delta). The shared `runUnregisterScenario` is translated for the
+    controller arm only; Java's `setNodeApiVersions(UNREGISTER_CONTROLLER, 0, 0)` has no `MockClient` analogue.
+  - `ForwardingAdmin.unregisterController`: Rust has no `ForwardingAdmin`.
+  - `DescribeFeaturesTest.testApiVersions` (clients-integration-tests) needs a `bootstrap.controllers` admin,
+    which the Rust config still rejects; the broker half is covered by the unit tests.
+  - Broker/tool/metadata parts of c274a7348f and 3b849ff2bd (ControllerApis, ClusterControlManager, ClusterTool,
+    MetadataQuorumCommand, KRaftClusterTest): server side, out of scope.
+  - The integration **success** arm of `unregisterController`: Java first shuts down a controller of a 3-node
+    quorum; the harness can stop neither pooled nodes nor controllers. Covered on the mock in Rust, C and Python.
+  - C++ gRPC server handler: not compiled here (no cmake/grpc++ on this host); it mirrors
+    `ForceTerminateTransaction`.
+- **Integration.** New `admin_controllers_test.rs` (3 scenarios × 4 backends) picks its regime from
+  `describeFeatures`' `metadata.version` (level 33 = `IBP_4_4_IV2`): on 4.2.0 every arm is UNSUPPORTED_VERSION; on
+  `4.4.0-rc4` (measured: finalized ≥ 33) the unknown id gives CONTROLLER_ID_NOT_REGISTERED "Controller ID 9999 is
+  not currently registered." and the combined node's own id gives INVALID_REQUEST "Controller cannot unregister
+  itself while it is active.". `__rust`, `__grpc_python`, `__grpc_python_async` green on both brokers (Python
+  arms in `MULTILANG_BACKEND_MODE=native`, which needs `--features ffi` on the test build so the cargo-set dylib
+  path has the FFI symbols); `__grpc_c` not run (no cmake).
+  - `cargo test --features integration-tests --test integration -- admin`: default 4.2.0 82/82 on re-run (first
+    run 81/1: `test_delete_records_nonexistent_partition_fails__rust` failed in cleanup with "Timed out waiting
+    for a node assignment. Call: deleteTopics" under its 8 s API timeout; the module passed 3/3 alone);
+    `4.4.0-rc4` 82/82 on re-run (first run, during the image's cold start, 72/10, all in topic/partition/group
+    setup; each module passed alone).
+- **Gates.** `cargo build` green; `cargo xtask format-check` clean; full `cargo test` 4371 passed / 0 failed / 10
+  ignored (lib 4322 / 3); `cargo xtask lint --keep-going`: lint-custom shows exactly the 15 §5.1 rows (three
+  markers this phase added were fixed in ae43a4bf); every other step clean. C mock suite linked by hand (no
+  cmake): `test_mock_admin` 160/160. Python unit + static: 395 passed, 2 skipped (pre-existing), from a PyPI venv.
+  `make -k verify` (00:01–00:10): fails only `build-c` (`cmake: command not found`, so ctest never ran the new C
+  surface in the gate) and `lint` (the 15 §5.1 rows); the Rust (incl. all-features with Docker), Python and
+  check-bindings arms passed, 4925 tests, 0 failed. DoD #10: N/A (admin is not a per-record path).
+- **Timing log** (2026-10-07/08, local):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts) | 22:40 | 22:49 | 9 |
+  | 1 wire wrappers (1c5fd9ed) | 22:49 | 22:53 | 4 |
+  | 2 Admin API + KafkaAdminClient + mock (19d2fbeb) | 22:53 | 23:07 | 14 |
+  | 3 describeFeatures node API versions (19c84e34) | 23:07 | 23:10 | 3 |
+  | 4 closing guard (a560d9c7) | 23:10 | 23:12 | 2 |
+  | 5 retry budget in enqueue (bb03a2b0) | 23:12 | 23:25 | 13 |
+  | 6 C FFI + C tests (f9b9bde6) | 23:25 | 23:30 | 5 |
+  | 7 Python sync/asyncio (96ea1ec8) | 23:30 | 23:33 | 3 |
+  | 8 gRPC harness + scenarios, both brokers (994979fb) | 23:33 | 23:46 | 13 |
+  | 9 admin integration runs, both brokers | 23:46 | 23:56 | 10 |
+  | 10 gates: format, lint + fix (ae43a4bf), full test | 23:56 | 00:01 | 5 |
+  | 11 `make -k verify` and these notes | 00:01 | 00:15 | 14 |
+
 ### Phase 13 — Close-out (agent 103)
 
 - **D1:** if `4.4.0` final is tagged, re-diff `4.4.0-rc4..4.4.0` across clients and specs. Port any delta,
