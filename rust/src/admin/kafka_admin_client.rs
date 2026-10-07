@@ -832,19 +832,18 @@ impl CallSender {
     /// bootstrap failure (KIP-909) → the task has exited.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#call")]
     fn call(&self, call: Call) {
-        // Java's `enqueue` reads `metadataManager.bootstrapFatalException()` (KIP-909).
-        let bootstrap_error = self.metadata_manager.bootstrap_fatal_error();
         // Java's `call` rejects a call here only once `close()` set a hard-shutdown
-        // time. `closing` is also set when the I/O task exits on its own, which a
-        // permanent bootstrap failure makes it do; such a call reaches Java's
-        // `enqueue`, where the bootstrap failure wins (below).
-        let exited_on_bootstrap_failure = bootstrap_error.is_some()
-            && self
-                .shutdown
-                .hard_shutdown_deadline_ms
-                .load(std::sync::atomic::Ordering::Acquire)
-                == KafkaAdminClient::NO_HARD_SHUTDOWN;
-        if self.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) && !exited_on_bootstrap_failure {
+        // time (`KafkaAdminClient.java:1706-1709`). `closing` alone is not that
+        // signal: the I/O task also sets it when it exits on its own (a permanent
+        // bootstrap failure, or a panic caught in `run`). Such a call reaches
+        // Java's `enqueue`, where the bootstrap failure or the closed channel
+        // ("The AdminClient thread has exited.") answers it, below.
+        if self
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .load(std::sync::atomic::Ordering::Acquire)
+            != KafkaAdminClient::NO_HARD_SHUTDOWN
+        {
             let mut call = call;
             // `new IllegalStateException("Cannot accept new calls when AdminClient
             // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
@@ -878,7 +877,8 @@ impl CallSender {
         // call with that error instead of accepting it. The I/O task has exited
         // by then (`AdminClientRunnable::process_requests`), so without this
         // the call would get "The AdminClient thread has exited." below.
-        if let Some(bootstrap_error) = bootstrap_error {
+        // Java's `enqueue` reads `metadataManager.bootstrapFatalException()` (KIP-909).
+        if let Some(bootstrap_error) = self.metadata_manager.bootstrap_fatal_error() {
             let mut call = call;
             call.handle_failure(&Error::BootstrapResolution(bootstrap_error));
             return;
@@ -7161,11 +7161,15 @@ mod tests {
             "Cannot accept new calls when AdminClient is closing."
         );
 
-        // A task that has exited without a bootstrap failure: the call is failed
-        // with Java's `TimeoutException`, never silently dropped.
-        let (tx, rx) = mpsc::unbounded_channel();
+        // A task that has exited on its own without a bootstrap failure (e.g. a
+        // panic caught in `run`): `fail_all_remaining` set `closing` and closed
+        // the channel, but no `close()` set a hard-shutdown time. Java's `call()`
+        // does not reject; `enqueue` answers with its `TimeoutException`, and the
+        // call is never silently dropped (Critic 92, Issue 5).
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let sender = CallSender::for_test(tx);
-        drop(rx);
+        sender.shutdown.closing.store(true, atomic::Ordering::Release);
+        rx.close();
         let (call, failure) = recording_call("exited");
         sender.call(call);
         let error = failure.lock().unwrap().take().expect("failed");
