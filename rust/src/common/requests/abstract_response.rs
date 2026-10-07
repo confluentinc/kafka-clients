@@ -83,6 +83,7 @@ use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
 use super::TxnOffsetCommitResponse;
+use super::UnregisterControllerResponse;
 use super::UpdateFeaturesResponse;
 use super::WriteTxnMarkersResponse;
 
@@ -216,6 +217,8 @@ pub enum ConcreteResponse {
     DescribeDelegationToken(DescribeDelegationTokenResponse),
     /// An UpdateFeatures response.
     UpdateFeatures(UpdateFeaturesResponse),
+    /// An UnregisterController response.
+    UnregisterController(UnregisterControllerResponse),
     /// A DescribeProducers response.
     DescribeProducers(DescribeProducersResponse),
     /// A DescribeTransactions response.
@@ -279,6 +282,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
             Self::UpdateFeatures(r) => r.api_key(),
+            Self::UnregisterController(r) => r.api_key(),
             Self::DescribeProducers(r) => r.api_key(),
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
@@ -346,6 +350,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::UpdateFeatures(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::UnregisterController(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeProducers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -506,6 +511,9 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::UnregisterController(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::DescribeProducers(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -578,6 +586,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UnregisterController(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
@@ -646,6 +655,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.error_counts(),
             Self::DescribeDelegationToken(r) => r.error_counts(),
             Self::UpdateFeatures(r) => r.error_counts(),
+            Self::UnregisterController(r) => r.error_counts(),
             Self::DescribeProducers(r) => r.error_counts(),
             Self::DescribeTransactions(r) => r.error_counts(),
             Self::WriteTxnMarkers(r) => r.error_counts(),
@@ -706,6 +716,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
             Self::DescribeDelegationToken(r) => r.throttle_time_ms(),
             Self::UpdateFeatures(r) => r.throttle_time_ms(),
+            Self::UnregisterController(r) => r.throttle_time_ms(),
             Self::DescribeProducers(r) => r.throttle_time_ms(),
             Self::DescribeTransactions(r) => r.throttle_time_ms(),
             Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
@@ -765,6 +776,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::UpdateFeatures(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::UnregisterController(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeProducers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -830,6 +842,7 @@ impl ConcreteResponse {
             | Self::DescribeUserScramCredentials(_)
             | Self::AlterUserScramCredentials(_)
             | Self::UpdateFeatures(_)
+            | Self::UnregisterController(_)
             | Self::DescribeProducers(_)
             | Self::DescribeTransactions(_)
             | Self::WriteTxnMarkers(_)
@@ -1065,6 +1078,10 @@ impl ConcreteResponse {
                 let response = UpdateFeaturesResponse::parse(readable, version)?;
                 Ok(Self::UpdateFeatures(response))
             },
+            ApiKeys::UNREGISTER_CONTROLLER => {
+                let response = UnregisterControllerResponse::parse(readable, version)?;
+                Ok(Self::UnregisterController(response))
+            },
             ApiKeys::DESCRIBE_PRODUCERS => {
                 let response = DescribeProducersResponse::parse(readable, version)?;
                 Ok(Self::DescribeProducers(response))
@@ -1162,6 +1179,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
             Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::UnregisterController(r) => write!(f, "{r}"),
             Self::DescribeProducers(r) => write!(f, "{r}"),
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
@@ -1287,6 +1305,7 @@ mod tests {
             (EXPIRE_DELEGATION_TOKEN, crate::ExpireDelegationTokenResponseData),
             (DESCRIBE_DELEGATION_TOKEN, crate::DescribeDelegationTokenResponseData),
             (UPDATE_FEATURES, crate::UpdateFeaturesResponseData),
+            (UNREGISTER_CONTROLLER, crate::UnregisterControllerResponseData),
             (DESCRIBE_PRODUCERS, crate::DescribeProducersResponseData),
             (DESCRIBE_TRANSACTIONS, crate::DescribeTransactionsResponseData),
             (INIT_PRODUCER_ID, crate::InitProducerIdResponseData),

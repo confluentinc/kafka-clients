@@ -148,6 +148,8 @@ pub use add_offsets_to_txn_request::AddOffsetsToTxnRequest;
 pub use add_offsets_to_txn_response::AddOffsetsToTxnResponse;
 pub use add_partitions_to_txn_request::AddPartitionsToTxnRequest;
 pub use add_partitions_to_txn_response::AddPartitionsToTxnResponse;
+pub mod unregister_controller_request;
+mod unregister_controller_response;
 pub mod update_features_request;
 mod update_features_response;
 pub mod write_txn_markers_request;
@@ -272,6 +274,8 @@ pub use txn_offset_commit_request::{
     TxnOffsetCommitRequestBuilderOptionsBuilder,
 };
 pub use txn_offset_commit_response::TxnOffsetCommitResponse;
+pub use unregister_controller_request::UnregisterControllerRequest;
+pub use unregister_controller_response::UnregisterControllerResponse;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest};
 pub use update_features_response::UpdateFeaturesResponse;
 pub use write_txn_markers_request::WriteTxnMarkersRequest;
