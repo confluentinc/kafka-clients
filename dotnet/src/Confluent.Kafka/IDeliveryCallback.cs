@@ -230,8 +230,8 @@ namespace Confluent.Kafka;
 /// that future unread, so no completion is ever read. Each surface has its own site:
 /// <b>Async</b> — on the <b>send-batch thread</b>, between <c>send_batch</c> returning a live future
 /// for that index and the accumulator handing it over. In practice an
-/// <see cref="System.OutOfMemoryException"/> (the pump's queue growing), or a P/Invoke failure from
-/// a later chunk of the same node.
+/// <see cref="System.OutOfMemoryException"/>, whether the pump's enqueue gate is still open or has
+/// already closed, or a P/Invoke failure from a later chunk of the same node.
 /// ⚠ <b>M11/P3.2 (§3B, S3) WIDENED this residual's window and narrowed neither trigger — checked,
 /// not assumed.</b> The hand-over is now one <c>Enqueue</c> per <c>send_batch</c> call rather than
 /// one per record, and it runs after <em>every</em> chunk of the node has been sent (which is what
@@ -244,8 +244,8 @@ namespace Confluent.Kafka;
 /// trigger would have gone away; it does not, and the narrowing is deliberately not written.)
 /// <b>Sync</b> (M11/P4.2) — inside <c>Send</c>, on the caller's thread, between
 /// <c>Producer_send</c> returning the live future and its hand-over to the pump. In practice an
-/// <see cref="System.OutOfMemoryException"/> (the queue entry, or the pump's queue growing). The
-/// future is destroyed unread and <c>Send</c> rethrows.
+/// <see cref="System.OutOfMemoryException"/>, whether the pump's enqueue gate is still open or has
+/// already closed. The future is destroyed unread and <c>Send</c> rethrows.
 /// <para>
 /// ⚠ <b>The async site moved in M11/P3.1 and its shape narrowed with it.</b> While the async
 /// send called the core inline, the window sat inside <c>Send</c> itself — so it surfaced as a
