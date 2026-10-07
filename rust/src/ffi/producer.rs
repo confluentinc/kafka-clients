@@ -143,10 +143,9 @@ use crate::ffi::common::{
     enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
 #[cfg(test)]
-use crate::ffi::common::{
-    kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_is_retriable_error,
-    kafka_common_Error_message,
-};
+use crate::ffi::common::{kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_message};
+#[cfg(test)]
+use crate::ffi::error_predicates::kafka_common_Error_is_retriable_error;
 // PartitionInfoList handle + builder are shared with the consumer FFI so
 // kafka_producer_Producer_partitions_for can return the same opaque type; the
 // group-metadata handle and the offsets-map reader are shared so

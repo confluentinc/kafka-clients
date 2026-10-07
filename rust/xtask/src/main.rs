@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod error_predicates;
 mod java;
 mod lint_custom;
 
@@ -27,6 +28,7 @@ fn main() -> anyhow::Result<()> {
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
         Some("generate-error-codes") => generate_error_codes()?,
+        Some("generate-error-predicates") => error_predicates::generate_error_predicates()?,
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom()?,
@@ -80,6 +82,7 @@ fn format_check() -> anyhow::Result<()> {
 
 fn check_generated() -> anyhow::Result<()> {
     check_error_codes_up_to_date()?;
+    error_predicates::check_error_predicates_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
 
@@ -1089,8 +1092,9 @@ fn print_help() {
         "Tasks:
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
-  check-generated Check generated code formatting and error-code staleness (no changes)
+  check-generated Check generated code formatting and error-code / predicate staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for the multilanguage test harness
+  generate-error-predicates  Regenerate the C exports of Error's predicates (src/ffi/error_predicates.rs)
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
@@ -1112,6 +1116,7 @@ Usage:
   cargo xtask format-check
   cargo xtask check-generated
   cargo xtask generate-error-codes
+  cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
   cargo xtask lint-custom
   cargo xtask lint

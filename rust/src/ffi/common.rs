@@ -695,27 +695,6 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
     unsafe { error_ref(error) }.message_cstring.as_ptr()
 }
 
-/// Returns whether the error is retriable.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is retriable, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_retriable_error()
-}
-
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
 // here. `org.apache.kafka.common.requests` carries the package disclaimer "This
 // package is not a supported Kafka API; the implementation may change without
@@ -723,399 +702,6 @@ pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kaf
 // for such packages. A C caller that needs the classification composes it from
 // the exported predicates (`kafka_common_Error_is_authentication_error`,
 // `kafka_common_Error_is_authorization_error`) and the error code.
-
-/// Returns whether this is a Kafka error rather than a generic programming
-/// error.
-///
-/// `true` for errors originating from Kafka — the protocol error codes, plus
-/// serialization and wakeup. `false` for errors raised by misuse of the client
-/// itself: an invalid argument, an illegal state, or concurrent access from
-/// more than one thread. Mirrors Java's `t instanceof KafkaException` test,
-/// which separates Kafka's own exception hierarchy from the generic
-/// `java.lang` / `java.util` runtime exceptions beside it.
-///
-/// Note this is NOT a test for a specific error kind: most errors are Kafka
-/// errors. Use [`kafka_common_Error_code`] to identify a particular one.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error came from Kafka, `false` if it is a generic
-/// programming error or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_kafka_error()
-}
-
-/// Returns whether the error's Java exception extends `ApiException` — an error the broker can report over the protocol, as opposed to a client-side programming or serialization failure.
-///
-/// Mirrors `Error::is_api_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_api_error()
-}
-
-/// Returns whether the error is retriable AND a metadata/coordinator refresh is what clears it (Java `RefreshRetriableException`).
-///
-/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_refresh_retriable_error()
-}
-
-/// Returns whether the error means the client's cached metadata may be stale (Java `InvalidMetadataException`).
-///
-/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_invalid_metadata_error()
-}
-
-/// Returns whether the error is an authentication failure reported by the broker (Java `AuthenticationException`).
-///
-/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_authentication_error()
-}
-
-/// Returns whether the error is an authorization failure — a missing ACL (Java `AuthorizationException`).
-///
-/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_authorization_error()
-}
-
-/// Returns whether the error's Java class extends `InvalidConfigurationException` — the parent of both the authentication and
-/// authorization families, so a broad classification a C caller cannot make from
-/// the numeric code alone.
-///
-/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_invalid_configuration_error()
-}
-
-/// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
-/// producer or rejoining the group.
-///
-/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_application_recoverable_error()
-}
-
-/// Returns whether the error's Java class extends `InvalidOffsetException` (common.errors).
-///
-/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_invalid_offset_error()
-}
-
-/// Returns whether the error's Java class extends `OutOfOrderSequenceException`.
-///
-/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_out_of_order_sequence_error()
-}
-
-/// Returns whether the error's Java class extends `SerializationException`.
-///
-/// Mirrors `Error::is_serialization_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_serialization_error()
-}
-
-/// Returns whether the error's Java class extends `TimeoutException` (also covers `BufferExhaustedException`).
-///
-/// Mirrors `Error::is_timeout_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_timeout_error()
-}
-
-/// Returns whether the error's Java class extends the consumer package's `InvalidOffsetException`.
-///
-/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_consumer_invalid_offset_error()
-}
-
-/// Returns whether the error's Java class extends the consumer package's `OffsetOutOfRangeException` (also covers
-/// `LogTruncationException`).
-///
-/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_consumer_offset_out_of_range_error()
-}
-
-/// Returns whether the error's Java class extends `TransactionAbortableException` — the transaction may be aborted and retried.
-///
-/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_transaction_abortable_error()
-}
 
 /// Destroys an error handle, freeing all associated resources.
 ///
@@ -2529,6 +2115,115 @@ mod tests {
         }
 
         assert_eq!(seen.len(), 162, "expected 162 distinct error codes");
+    }
+
+    /// One instance of each of the 162 error classes: the owner of every Java code,
+    /// the client-side classes, and the bare `KafkaException`, which reports
+    /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
+    /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
+    fn one_error_per_class() -> Vec<Error> {
+        let coded = (FIRST_CODE..=LAST_CODE).filter_map(|code| Errors::for_code(code).error());
+        let local = client_side_classes().into_iter().map(|(error, _, _)| error);
+        coded.chain(local).chain([Error::kafka_message("m")]).collect()
+    }
+
+    /// `is_` + `payload` snake_cased with a trailing `Error` dropped + `_error`, the
+    /// class-predicate name `cargo xtask lint-custom` (check-error-predicate)
+    /// enforces.
+    fn class_predicate(payload: &str) -> String {
+        let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+        let mut snake = String::new();
+        for (i, c) in base.char_indices() {
+            if c.is_ascii_uppercase() && i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        }
+        format!("is_{snake}_error")
+    }
+
+    /// The predicates for Java's intermediate (non-leaf) classes. Their exact
+    /// coverage is asserted in both directions by the hierarchy tests in
+    /// `common::error` (CLAUDE.md §12.4), so here they are only checked to answer
+    /// `true` for their own class.
+    const INTERMEDIATE_PREDICATES: [&str; 15] = [
+        "is_kafka_error",
+        "is_api_error",
+        "is_retriable_error",
+        "is_refresh_retriable_error",
+        "is_invalid_metadata_error",
+        "is_authentication_error",
+        "is_authorization_error",
+        "is_invalid_configuration_error",
+        "is_application_recoverable_error",
+        "is_invalid_offset_error",
+        "is_out_of_order_sequence_error",
+        "is_serialization_error",
+        "is_timeout_error",
+        "is_consumer_invalid_offset_error",
+        "is_consumer_offset_out_of_range_error",
+    ];
+
+    /// The leaf classes that nonetheless have a Java subclass, as
+    /// `(class predicate, subclass's own predicate)`. Every other leaf predicate is
+    /// `true` for its own class only.
+    const LEAF_SUBCLASSES: [(&str, &str); 1] = [
+        // `CorrelationIdMismatchException extends IllegalStateException`
+        // (`CorrelationIdMismatchException.java:23`).
+        ("is_local_illegal_state_error", "is_correlation_id_mismatch_error"),
+    ];
+
+    /// Every error class has its own C predicate, `kafka_common_Error_<is_x_error>`,
+    /// and each export answers like Java's `instanceof <class>`: `true` for the class
+    /// itself and its subclasses, `false` for every other class (CLAUDE.md §3).
+    ///
+    /// Exercises the generated exports themselves, through the handle a C caller
+    /// holds, against one instance of every class.
+    #[test]
+    fn ffi_every_class_has_its_own_predicate() {
+        let predicates: HashMap<&str, _> = super::super::error_predicates::PREDICATES.iter().copied().collect();
+        let errors: Vec<(String, *mut kafka_common_Error_t)> = one_error_per_class()
+            .into_iter()
+            .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
+            .collect();
+        assert_eq!(errors.len(), 162, "expected one error per class");
+
+        let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
+        assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
+
+        for (own, handle) in &errors {
+            let export = predicates
+                .get(own.as_str())
+                .unwrap_or_else(|| panic!("no C export for `{own}`"));
+            assert!(unsafe { export(*handle) }, "`{own}` is false for its own class");
+        }
+
+        // Every export is either an intermediate predicate or some class's own.
+        for name in predicates.keys() {
+            assert!(
+                owners.contains(name) || INTERMEDIATE_PREDICATES.contains(name),
+                "`{name}` belongs to no error class"
+            );
+        }
+
+        for (name, export) in &predicates {
+            if INTERMEDIATE_PREDICATES.contains(name) {
+                continue;
+            }
+            for (own, handle) in &errors {
+                let expected = own == name || LEAF_SUBCLASSES.contains(&(*name, own.as_str()));
+                assert_eq!(
+                    unsafe { export(*handle) },
+                    expected,
+                    "`{name}` on an instance of the class `{own}` names"
+                );
+            }
+            assert!(!unsafe { export(std::ptr::null()) }, "`{name}` must be false for a null handle");
+        }
+
+        for (_, handle) in errors {
+            unsafe { kafka_common_Error_destroy(handle) };
+        }
     }
 
     /// The 27 Rust-local negatives keep the values they were published with, and
