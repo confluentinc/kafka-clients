@@ -61,6 +61,7 @@ fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(NoDeprecatedTranslation::new()),
         Box::new(PublicAudience::new()),
         Box::new(DynCompatible),
+        Box::new(ErrorPredicate),
     ]
 }
 
@@ -860,11 +861,14 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
     }
 }
 
-/// A type defined by an error macro: its name and the attributes written
-/// inside the macro.
+/// A type defined by an error macro: its name, the attributes written inside
+/// the macro, and the predicates its `extends:` list names.
 struct TypeDef {
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// The `ErrorHierarchy` predicates the type answers `true` to; empty for a
+    /// macro with no `extends:` list.
+    extends: Vec<String>,
 }
 
 /// The type a `kafka_error_type!` / `message_only_error!` invocation defines:
@@ -883,15 +887,34 @@ fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
         .parse_body_with(|input: syn::parse::ParseStream| {
             let attrs = input.call(syn::Attribute::parse_outer)?;
             let ident: syn::Ident = input.parse()?;
-            // The rest of the body (the `extends` list, ..) is not needed.
-            input.step(|cursor| {
+            // Of the rest of the body (`code: ..`, `extends: [..]`), only the
+            // `extends` list is needed.
+            let extends = input.step(|cursor| {
+                let mut extends = Vec::new();
                 let mut rest = *cursor;
-                while let Some((_, next)) = rest.token_tree() {
+                while !rest.eof() {
+                    let list = rest
+                        .ident()
+                        .filter(|(i, _)| i == "extends")
+                        .and_then(|(_, after)| after.punct())
+                        .filter(|(p, _)| p.as_char() == ':')
+                        .and_then(|(_, after)| after.any_group());
+                    if let Some((mut inside, _, _, after)) = list {
+                        while let Some((_, next)) = inside.token_tree() {
+                            if let Some((i, _)) = inside.ident() {
+                                extends.push(i.to_string());
+                            }
+                            inside = next;
+                        }
+                        rest = after;
+                        continue;
+                    }
+                    let Some((_, next)) = rest.token_tree() else { break };
                     rest = next;
                 }
-                Ok(((), rest))
+                Ok((extends, rest))
             })?;
-            Ok(TypeDef { name: ident.to_string(), attrs })
+            Ok(TypeDef { name: ident.to_string(), attrs, extends })
         })
         .ok()
 }
@@ -2485,6 +2508,275 @@ impl Rule for DynCompatible {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule: check-error-predicate
+// ---------------------------------------------------------------------------
+
+/// The module the crate's flat error enum lives in.
+const ERROR_MODULE: [&str; 2] = ["common", "error"];
+
+/// Checks that every variant of `common::Error` has its class predicate
+/// (CLAUDE.md §3, forward compatibility).
+///
+/// Java's `catch (TopicExistsException e)` also catches a subclass a later Kafka
+/// release adds. Here that subclass becomes a new variant, so a caller's
+/// `matches!(e, Error::TopicExists(_))` would miss it, while
+/// `e.is_topic_exists_error()` keeps matching once the new payload lists its
+/// parent's predicate. So users classify with predicates, and every variant needs
+/// one: `is_` + its payload type snake_cased with a trailing `Error` dropped +
+/// `_error` (`TopicExistsError` → `is_topic_exists_error`, `KafkaError` →
+/// `is_kafka_error`).
+///
+/// A predicate is spelled out in several places. Missing any one of them
+/// compiles, but then quietly gives the wrong answer or isn't reachable, so this
+/// rule checks every one:
+///
+///  - a method on `ErrorHierarchy`, so a payload can override it — an inherent
+///    `matches!` could never answer for a future subclass;
+///  - the variant's own payload answering `true`: its `kafka_error_type!` /
+///    `message_only_error!` `extends:` list names it, or its hand-written
+///    `impl ErrorHierarchy` overrides it.
+///
+/// And for every `ErrorHierarchy` method, intermediate classes included:
+///
+///  - a forwarder in `impl ErrorHierarchy for Box<T>` — without it a boxed
+///    payload silently answers the trait's `false`;
+///  - a public forwarder on `Error` calling the trait through UFCS (a method
+///    call would resolve to the inherent method itself and recurse);
+///  - a C export `kafka_common_Error_<predicate>` in `src/ffi` (CLAUDE.md §4).
+///
+/// The rule checks that the predicates exist, not how the crate's own code
+/// classifies errors.
+struct ErrorPredicate;
+
+impl Rule for ErrorPredicate {
+    fn name(&self) -> &'static str {
+        "check-error-predicate"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let path: ModPath = ERROR_MODULE.iter().map(ToString::to_string).collect();
+        let Some(module) = krate.modules.get(&path) else {
+            findings.push(format!("no `{}` module to find `Error` in", ERROR_MODULE.join("::")));
+            return 0;
+        };
+        let file = module.file.display();
+        let Some(error) = module.items.iter().find_map(|item| match item {
+            syn::Item::Enum(e) if e.ident == "Error" => Some(e),
+            _ => None,
+        }) else {
+            findings.push(format!("{file}: no `enum Error`"));
+            return 0;
+        };
+
+        let trait_methods = hierarchy_trait_methods(&module.items);
+        let box_forwarders = hierarchy_impl_methods(&module.items, |ty| ty == "Box");
+        let error_forwarders = error_forwarders(&module.items);
+        let overrides = payload_overrides(krate);
+        let c_exports = c_exports(krate);
+
+        let mut checked = 0usize;
+        for variant in &error.variants {
+            checked += 1;
+            let Some(payload) = variant_payload(variant) else {
+                findings.push(format!(
+                    "{file}: `Error::{}` does not wrap a single payload type",
+                    variant.ident
+                ));
+                continue;
+            };
+            let predicate = class_predicate(&payload);
+            if !trait_methods.contains(&predicate) {
+                findings.push(format!(
+                    "{file}: `Error::{}` has no class predicate: `ErrorHierarchy` declares no `{predicate}`",
+                    variant.ident
+                ));
+            }
+            if !overrides.get(&payload).is_some_and(|preds| preds.contains(&predicate)) {
+                findings.push(format!("{file}: `{payload}` does not answer `true` to its own `{predicate}`"));
+            }
+        }
+        for method in &trait_methods {
+            checked += 1;
+            if !box_forwarders.contains(method) {
+                findings.push(format!("{file}: `impl ErrorHierarchy for Box<T>` does not forward `{method}`"));
+            }
+            if !error_forwarders.contains(method) {
+                findings.push(format!(
+                    "{file}: `Error` has no `pub fn {method}(&self) -> bool` forwarding to `ErrorHierarchy::{method}(self)`"
+                ));
+            }
+            if !c_exports.contains(&format!("kafka_common_Error_{method}")) {
+                findings.push(format!(
+                    "{file}: `{method}` has no C export `kafka_common_Error_{method}` in `ffi`"
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Every `Error` variant needs its class predicate (CLAUDE.md §3), named
+   `is_` + payload type snake_cased without a trailing `Error` + `_error`:
+     1. a default-false `fn is_x_error(&self) -> bool` on `ErrorHierarchy`;
+     2. its forwarder in `impl ErrorHierarchy for Box<T>`;
+     3. `pub fn is_x_error(&self) -> bool { ErrorHierarchy::is_x_error(self) }`
+        on `Error`;
+     4. the payload answering `true`: `is_x_error` in its `extends:` list, or
+        an override in its hand-written `impl ErrorHierarchy` — and in every
+        payload whose Java class extends it;
+     5. the C export, regenerated with `cargo xtask generate-error-predicates`."
+    }
+}
+
+/// `is_` + `payload` snake_cased with a trailing `Error` dropped + `_error`.
+fn class_predicate(payload: &str) -> String {
+    let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+    format!("is_{}_error", java::snake_case(base))
+}
+
+/// The payload type `variant` wraps, looking through a `Box`: `Timeout(TimeoutError)`
+/// and `QuotaViolation(Box<QuotaViolationError>)` give `TimeoutError` and
+/// `QuotaViolationError`.
+fn variant_payload(variant: &syn::Variant) -> Option<String> {
+    let syn::Fields::Unnamed(fields) = &variant.fields else {
+        return None;
+    };
+    let [field] = fields.unnamed.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let mut ty = &field.ty;
+    loop {
+        let syn::Type::Path(p) = ty else { return None };
+        let last = p.path.segments.last()?;
+        if last.ident != "Box" {
+            return Some(last.ident.to_string());
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+            return None;
+        };
+        ty = inner;
+    }
+}
+
+/// Whether `path` names the `ErrorHierarchy` trait, however qualified.
+fn is_hierarchy_path(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|s| s.ident == "ErrorHierarchy")
+}
+
+/// The methods `trait ErrorHierarchy` declares among `items`.
+fn hierarchy_trait_methods(items: &[syn::Item]) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == "ErrorHierarchy" => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| &t.items)
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last path segment of `ty`, if it is a path type.
+fn type_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    p.path.segments.last().map(|s| s.ident.to_string())
+}
+
+/// The methods of the `impl ErrorHierarchy for T` blocks among `items` whose `T`
+/// satisfies `self_ty`.
+fn hierarchy_impl_methods(items: &[syn::Item], self_ty: impl Fn(&str) -> bool) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(i)
+                if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p))
+                    && type_ident(&i.self_ty).is_some_and(|t| self_ty(&t)) =>
+            {
+                Some(i)
+            },
+            _ => None,
+        })
+        .flat_map(|i| &i.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The predicates `Error` forwards publicly: each `pub fn is_x_error(&self) -> bool`
+/// of an inherent `impl Error` whose body calls `ErrorHierarchy::is_x_error`.
+fn error_forwarders(items: &[syn::Item]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for item in items {
+        let syn::Item::Impl(i) = item else { continue };
+        if i.trait_.is_some() || type_ident(&i.self_ty).as_deref() != Some("Error") {
+            continue;
+        }
+        for item in &i.items {
+            let syn::ImplItem::Fn(f) = item else { continue };
+            let name = f.sig.ident.to_string();
+            let returns_bool = matches!(&f.sig.output, syn::ReturnType::Type(_, ty) if compact(&**ty) == "bool");
+            let body = f.block.to_token_stream().to_string().replace(' ', "");
+            let ufcs = body.contains(&format!("ErrorHierarchy::{name}(self)"));
+            if matches!(f.vis, syn::Visibility::Public(_)) && returns_bool && ufcs {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// The predicates each error payload answers `true` to, keyed by payload type:
+/// the `extends:` list of its `kafka_error_type!` / `message_only_error!`, plus
+/// the methods of its hand-written `impl ErrorHierarchy`, from anywhere in the
+/// crate.
+fn payload_overrides(krate: &Crate) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for module in krate.modules.values() {
+        for item in &module.items {
+            match item {
+                syn::Item::Macro(m) => {
+                    if let Some(def) = error_macro_type_def(m) {
+                        out.entry(def.name).or_default().extend(def.extends);
+                    }
+                },
+                syn::Item::Impl(i) if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p)) => {
+                    let Some(ty) = type_ident(&i.self_ty) else { continue };
+                    let methods = i.items.iter().filter_map(|item| match item {
+                        syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    });
+                    out.entry(ty).or_default().extend(methods);
+                },
+                _ => {},
+            }
+        }
+    }
+    out
+}
+
+/// The `#[no_mangle]` functions of the C FFI (`ffi` and its submodules).
+fn c_exports(krate: &Crate) -> BTreeSet<String> {
+    krate
+        .modules
+        .iter()
+        .filter(|(path, _)| path.first().is_some_and(|p| p == "ffi"))
+        .flat_map(|(_, m)| &m.items)
+        .filter_map(|item| match item {
+            syn::Item::Fn(f) if is_no_mangle(&f.attrs) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3143,5 +3435,163 @@ mod no_fixed_size_array_tests {
         // `Source`'s two, `Key`, `pair`, `slices`), and the three trait impls
         // for `Uuid`.
         assert_eq!(checked, 16);
+    }
+}
+
+#[cfg(test)]
+mod error_predicate_tests {
+    use super::*;
+
+    /// A crate whose `Error` has one variant per outcome of
+    /// `check-error-predicate`: two fully wired, then one missing each piece.
+    const FIXTURE_LIB: &str = r#"
+        pub mod common {
+            pub mod error {
+                pub enum Error {
+                    Timeout(TimeoutError),
+                    QuotaViolation(Box<QuotaViolationError>),
+                    Orphan(OrphanError),
+                    Forgetful(ForgetfulError),
+                    Unboxed(UnboxedError),
+                    Recursive(RecursiveError),
+                    Unexported(UnexportedError),
+                }
+
+                pub(crate) trait ErrorHierarchy {
+                    fn is_retriable_error(&self) -> bool { false }
+                    fn is_timeout_error(&self) -> bool { false }
+                    fn is_quota_violation_error(&self) -> bool { false }
+                    fn is_forgetful_error(&self) -> bool { false }
+                    fn is_unboxed_error(&self) -> bool { false }
+                    fn is_recursive_error(&self) -> bool { false }
+                    fn is_unexported_error(&self) -> bool { false }
+                }
+
+                impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
+                    fn is_retriable_error(&self) -> bool { (**self).is_retriable_error() }
+                    fn is_timeout_error(&self) -> bool { (**self).is_timeout_error() }
+                    fn is_quota_violation_error(&self) -> bool { (**self).is_quota_violation_error() }
+                    fn is_forgetful_error(&self) -> bool { (**self).is_forgetful_error() }
+                    fn is_recursive_error(&self) -> bool { (**self).is_recursive_error() }
+                    fn is_unexported_error(&self) -> bool { (**self).is_unexported_error() }
+                }
+
+                impl Error {
+                    pub fn is_retriable_error(&self) -> bool { ErrorHierarchy::is_retriable_error(self) }
+                    pub fn is_timeout_error(&self) -> bool { ErrorHierarchy::is_timeout_error(self) }
+                    pub fn is_quota_violation_error(&self) -> bool { ErrorHierarchy::is_quota_violation_error(self) }
+                    pub fn is_forgetful_error(&self) -> bool { ErrorHierarchy::is_forgetful_error(self) }
+                    pub fn is_unboxed_error(&self) -> bool { ErrorHierarchy::is_unboxed_error(self) }
+                    pub fn is_recursive_error(&self) -> bool { self.is_recursive_error() }
+                    pub fn is_unexported_error(&self) -> bool { ErrorHierarchy::is_unexported_error(self) }
+                }
+
+                kafka_error_type! {
+                    /// Wired through its macro.
+                    TimeoutError,
+                    code: RequestTimedOut,
+                    extends: [is_retriable_error, is_timeout_error,],
+                }
+                kafka_error_type! { OrphanError, code: Orphan, extends: [is_retriable_error,], }
+                kafka_error_type! { ForgetfulError, code: Forgetful, extends: [is_retriable_error,], }
+                kafka_error_type! { UnboxedError, code: Unboxed, extends: [is_unboxed_error,], }
+                kafka_error_type! { RecursiveError, code: Recursive, extends: [is_recursive_error,], }
+                kafka_error_type! { UnexportedError, code: Unexported, extends: [is_unexported_error,], }
+            }
+            pub mod metrics {
+                /// Wired through a hand-written impl, and boxed in its variant.
+                pub struct QuotaViolationError;
+                impl crate::common::error::ErrorHierarchy for QuotaViolationError {
+                    fn is_quota_violation_error(&self) -> bool { true }
+                }
+            }
+        }
+        pub mod ffi {
+            pub mod error_predicates {
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_retriable_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_timeout_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_quota_violation_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_forgetful_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_unboxed_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_recursive_error() -> bool { false }
+                // Not `#[no_mangle]`, so C cannot link it.
+                pub unsafe extern "C" fn kafka_common_Error_is_unexported_error() -> bool { false }
+            }
+        }
+    "#;
+
+    /// The findings over the fixture crate, written to its own temp dir `name`
+    /// because the tests run in parallel.
+    fn run(name: &str) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("xtask-error-predicate-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = ErrorPredicate.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // 7 variants and 7 trait methods.
+        assert_eq!(checked, 14, "{findings:#?}");
+        findings
+    }
+
+    fn with<'a>(findings: &'a [String], needle: &str) -> Vec<&'a str> {
+        findings.iter().filter(|f| f.contains(needle)).map(String::as_str).collect()
+    }
+
+    #[test]
+    fn test_class_predicate_name_drops_a_trailing_error() {
+        assert_eq!(class_predicate("TopicExistsError"), "is_topic_exists_error");
+        assert_eq!(class_predicate("KafkaError"), "is_kafka_error");
+        assert_eq!(
+            class_predicate("InvalidRegularExpression"),
+            "is_invalid_regular_expression_error"
+        );
+        assert_eq!(class_predicate("Error"), "is_error_error");
+    }
+
+    #[test]
+    fn test_wired_predicates_pass() {
+        let findings = run("pass");
+        for wired in [
+            "Timeout",
+            "timeout_error",
+            "retriable_error",
+            "QuotaViolation",
+            "quota_violation_error",
+        ] {
+            assert!(with(&findings, wired).is_empty(), "{wired}: {findings:#?}");
+        }
+    }
+
+    #[test]
+    fn test_each_missing_piece_is_reported() {
+        let findings = run("violations");
+        let fixture = |what: &str| format!("lib.rs: {what}");
+        // Variants in declaration order, then trait methods in name order.
+        let expected = [
+            fixture("`Error::Orphan` has no class predicate: `ErrorHierarchy` declares no `is_orphan_error`"),
+            fixture("`OrphanError` does not answer `true` to its own `is_orphan_error`"),
+            fixture("`ForgetfulError` does not answer `true` to its own `is_forgetful_error`"),
+            fixture(
+                "`Error` has no `pub fn is_recursive_error(&self) -> bool` forwarding to \
+                 `ErrorHierarchy::is_recursive_error(self)`",
+            ),
+            fixture("`impl ErrorHierarchy for Box<T>` does not forward `is_unboxed_error`"),
+            fixture("`is_unexported_error` has no C export `kafka_common_Error_is_unexported_error` in `ffi`"),
+        ];
+        assert_eq!(findings.len(), expected.len(), "{findings:#?}");
+        for (finding, expected) in findings.iter().zip(&expected) {
+            assert!(
+                finding.ends_with(expected.as_str()),
+                "{finding}\n  does not end with\n{expected}"
+            );
+        }
     }
 }

@@ -75,6 +75,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package
     - deprecated API MUST NOT be translated since the first major version of the client. Ensure this is not affecting the ability to implement later some large features that are not implemented at the moment such as the classic consumer group, because of changes to public traits
     - NEVER EVER accept or return a fixed size array from a public interface
+    - Every Error should have the corresponding predicate. Users must use a predicate instead of enum matching to make sure that when we match an error we also match all future subclasses of it in Java client
 4. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
@@ -88,7 +89,10 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       hierarchy predicate from §12.4, e.g. `is_kafka_error` ->
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
-      only way a C caller can classify an error beyond its numeric code.
+      only way a C caller can classify an error beyond its numeric code. The C
+      exports are generated from the predicates on `impl Error` by
+      `cargo xtask generate-error-predicates` (`check-generated` fails when they
+      are stale), never written by hand.
     - Exceptions having additional fields in Java: expose the corresponding C opaque type that can be retrieved from the `kafka_common_Error_t` like `kafka_common_Error_resource_not_found`. In case that error is not that type it returns `NULL`, otherwise the returned pointer can be used to access the additional fields with accessor functions. An example of these types and accessors is `kafka_common_ResourceNotFoundError_t` and `kafka_common_ResourceNotFoundError_resource`.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
@@ -154,7 +158,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
        | `AuthorizationException`    | `is_authorization_error()`     |
 
        These predicates encode Java's `extends` chain, so the family contains
-       ONLY intermediate classes. A Java *static* that classifies an exception is
+       ONLY Java classes. A Java *static* that classifies an exception is
        NOT a predicate on `Error` and MUST NOT be added to this trait — it is
        translated as a free function in the module matching its Java home, taking
        `&Error`. The one such case is fatality: `RequestUtils.isFatalException`
@@ -171,8 +175,23 @@ translate javadoc to rustdoc. Never change the contract of public API.
        mirrors that shape. Being in an API that is not public 
        `common::requests::request_utils::is_fatal_error` is not exposed in C FFI.
 
-       Leaf classes need no predicate — match the `Error` variant or compare the
-       error code instead. Each predicate MUST:
+       Leaf classes get a predicate too (§3): every `Error` variant has its own
+       *class predicate*, named the same way after its payload type
+       (`TopicExistsError` -> `is_topic_exists_error`, `InvalidRegularExpression`
+       -> `is_invalid_regular_expression_error`), meaning Java's `instanceof` —
+       true for the class and for every class that extends it. Users classify
+       with these, not by matching the variant or comparing the code: a subclass
+       a later Java release adds becomes a new variant that a `matches!` misses,
+       while its payload answers `true` to its parent's predicate. So every
+       predicate, leaf or intermediate, is an `ErrorHierarchy` method the payloads
+       override — never an inherent `matches!` — with a `Box<T>` forwarder and a
+       UFCS forwarder on `Error`. `cargo xtask lint-custom`
+       (`check-error-predicate`) enforces each piece, and
+       `ffi_every_class_has_its_own_predicate` checks every class predicate
+       against one instance of every class. The crate's own code may still match
+       variants internally.
+
+       Each intermediate predicate additionally MUST:
          - document the exact set of variants it covers and cite the Java class it
            translates, because a flattened enum gives the reader no other way to
            see the hierarchy;
