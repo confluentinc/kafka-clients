@@ -304,11 +304,17 @@ impl KafkaAdminClient {
             };
             let data = api_versions.data();
             if data.error_code == Errors::None.code() {
+                // An invalid range throws from `createFeatureMetadata` before either
+                // future completes; the throw escapes `handleResponse` into
+                // `Call.fail`, whose `handleFailure` fails both futures. `Retry`
+                // is the crate's translation of that escape.
                 match create_feature_metadata(data) {
-                    Ok(metadata) => resp_handle.complete(metadata),
-                    Err(e) => resp_handle.complete_with_error(e),
+                    Ok(metadata) => {
+                        resp_handle.complete(metadata);
+                        resp_versions_handle.complete(create_node_api_version(data));
+                    },
+                    Err(e) => return HandleResult::Retry(e),
                 };
-                resp_versions_handle.complete(create_node_api_version(data));
             } else {
                 // One exception completes both futures, as Java's does.
                 let error = Error::new(Errors::for_code(data.error_code));
@@ -10443,6 +10449,36 @@ mod tests {
         let err = result.all().get().await.unwrap_err();
         assert!(matches!(err, Error::ControllerIdNotRegistered(_)), "got {err:?}");
         assert_eq!(err.message(), "Controller 7 is not registered.");
+    }
+
+    /// Beyond Java's tests (Critic 102, Issue 2): a feature range that
+    /// `createFeatureMetadata` rejects throws out of `handleResponse` into
+    /// `Call.fail`, so `handleFailure` fails **both** futures with the
+    /// range-constructor error; `nodeApiVersions` must not complete successfully.
+    #[tokio::test]
+    async fn test_describe_features_invalid_range_fails_both_futures() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let mut supported = SupportedFeatureKey::new();
+        supported.set_name("test_feature_1".to_string());
+        supported.set_min_version(5);
+        supported.set_max_version(1);
+        let response = api_versions_response::Builder::new()
+            .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, false, false))
+            .set_supported_features(vec![supported])
+            .set_finalized_features(HashMap::new())
+            .set_finalized_features_epoch(1)
+            .build();
+        runnable.client_mut().prepare_response(ConcreteResponse::ApiVersions(response));
+        let result = admin.describe_features_internal(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
+        pump_until(&mut runnable, 10, |_r| result.node_api_versions().is_done()).await;
+        let expected = "Expected 0 <= minVersion <= maxVersion but received minVersion:5, maxVersion:1.";
+        let err = result.feature_metadata().get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), expected);
+        assert!(result.node_api_versions().is_done(), "nodeApiVersions was left pending");
+        let err = result.node_api_versions().get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
+        assert_eq!(err.message(), expected);
     }
 
     /// Drives `KafkaAdminClientTest.testUpdateFeaturesDuringSuccess` — a
