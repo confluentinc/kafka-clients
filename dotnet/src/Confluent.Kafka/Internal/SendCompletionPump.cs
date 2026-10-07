@@ -251,6 +251,14 @@ internal sealed class SendCompletionPump
     internal bool IsCurrentThread => ReferenceEquals(s_currentPump, this);
 
     /// <summary>
+    /// <b>Test probe</b> (M11/P4.2 S4): this pump's dedicated loop thread, so a test can tell which
+    /// thread a delivery callback ran on and whether teardown joined the loop (a joined thread reports
+    /// <see cref="Thread.IsAlive"/> <see langword="false"/>). Read-only and side-effect-free; nothing in
+    /// the binding reads it.
+    /// </summary>
+    internal Thread LoopThread => _thread;
+
+    /// <summary>
     /// Enqueues <b>one <c>send_batch</c> call's</b> accepted sends as a single completion group
     /// (M11/P3.2 §3B, user decision <b>D2</b>). On the normal path the pump resolves the whole group
     /// in one <c>get_all</c>, completes each awaiter, invokes each supplied delivery callback and
@@ -357,6 +365,8 @@ internal sealed class SendCompletionPump
                 // The pump is torn down: fault + free in place rather than queue into a dead pump.
                 // Each entry bounds its own loops by its Count, never by an array's Length — a group's
                 // tail past it is the caller's compaction slack and holds no handle and no awaiter.
+                // No delivery callback is invoked: recorded residual 1 on IDeliveryCallback, teardown
+                // raced the enqueue.
                 entry.Fault(TeardownException());
                 entry.DestroyFutures();
                 return;

@@ -80,6 +80,9 @@ public sealed class PublicProducerDeliveryCallbackTests
 
     private const string Async = "async";
 
+    // The send-completion pump's thread name — where both flavors' callbacks run (M11/P4.2 D3).
+    private const string PumpThreadName = "confluent-kafka-producer-send-pump";
+
     // ---- 1. Success delivers the REAL metadata ----
 
     [Theory]
@@ -221,17 +224,22 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The sync flavor's equivalent probe: the callback must already have run at the instant the
         // blocking Get returns (M11/P4.2: the probe moved from Send to Get, which is now the wait). A
-        // callback fired after the future completes would make this false or racy.
+        // callback fired after the future completes would make this false or racy. Since M11/P4.2 (D3)
+        // it must also have run on the send-completion pump, not on the thread that called Get (S4, C3).
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         bool invokedAtReturn = false;
+        int getThreadId = 0;
+        List<(int Id, string? Name)> threadsAtReturn = new List<(int, string?)>();
         Task<RecordMetadata> sendTask = Task.Run(() =>
         {
+            getThreadId = Environment.CurrentManagedThreadId;
             RecordMetadata metadata = producer.Send(
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             invokedAtReturn = callback.Completions.Count == 1;
+            threadsAtReturn = callback.Threads;
             return metadata;
         });
 
@@ -239,20 +247,27 @@ public sealed class PublicProducerDeliveryCallbackTests
         await WithTimeout(sendTask);
 
         Assert.True(invokedAtReturn, "the delivery callback had not run when the blocking Get returned");
+        (int Id, string? Name) ran = Assert.Single(threadsAtReturn);
+        Assert.Equal(PumpThreadName, ran.Name);
+        Assert.NotEqual(getThreadId, ran.Id);
     }
 
     [Fact]
     public async Task Ordering_Sync_CallbackRunsBeforeSendThrows()
     {
         // The failure half of the same rule: on a delivery failure the callback fires and THEN Get
-        // throws (Java has already fired on the I/O thread before future.get() unblocks).
+        // throws (Java has already fired on the I/O thread before future.get() unblocks) — and, since
+        // M11/P4.2 (D3), it fired on the send-completion pump, not on the thread that called Get (C3).
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         bool invokedAtThrow = false;
+        int getThreadId = 0;
+        List<(int Id, string? Name)> threadsAtThrow = new List<(int, string?)>();
         Task sendTask = Task.Run(() =>
         {
+            getThreadId = Environment.CurrentManagedThreadId;
             try
             {
                 producer.Send(
@@ -261,6 +276,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             catch (KafkaException)
             {
                 invokedAtThrow = callback.Completions.Count == 1;
+                threadsAtThrow = callback.Threads;
             }
         });
 
@@ -268,6 +284,9 @@ public sealed class PublicProducerDeliveryCallbackTests
         await TestTimeout.Run(() => sendTask, s_deadline);
 
         Assert.True(invokedAtThrow, "the delivery callback had not run when the blocking Get threw");
+        (int Id, string? Name) ran = Assert.Single(threadsAtThrow);
+        Assert.Equal(PumpThreadName, ran.Name);
+        Assert.NotEqual(getThreadId, ran.Id);
     }
 
     // ---- 4. Error path (D5/D6): non-null placeholder metadata + the exception ----
@@ -791,9 +810,11 @@ public sealed class PublicProducerDeliveryCallbackTests
         private readonly List<(RecordMetadata Metadata, KafkaException? Exception)> _completions =
             new List<(RecordMetadata, KafkaException?)>();
 
+        private readonly List<(int Id, string? Name)> _threads = new List<(int, string?)>();
+
         /// <summary>
-        /// A stable snapshot of what the callback has been handed. The async flavor invokes it on
-        /// the pump thread, so both the list and the reads are locked.
+        /// A stable snapshot of what the callback has been handed. Both flavors invoke it on the
+        /// pump thread (the sync one since M11/P4.2, D3), so both the list and the reads are locked.
         /// </summary>
         internal List<(RecordMetadata Metadata, KafkaException? Exception)> Completions
         {
@@ -806,6 +827,21 @@ public sealed class PublicProducerDeliveryCallbackTests
             }
         }
 
+        /// <summary>
+        /// The thread each invocation ran on (managed id and name), index-aligned with
+        /// <see cref="Completions"/> — the C3 probe for "ran on the pump thread" (M11/P4.2 S4).
+        /// </summary>
+        internal List<(int Id, string? Name)> Threads
+        {
+            get
+            {
+                lock (_completions)
+                {
+                    return new List<(int, string?)>(_threads);
+                }
+            }
+        }
+
         public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
         {
             // Assert nothing here — a throw would be swallowed by design, so a failed assertion
@@ -813,6 +849,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             lock (_completions)
             {
                 _completions.Add((metadata, exception));
+                _threads.Add((Environment.CurrentManagedThreadId, Thread.CurrentThread.Name));
             }
         }
     }

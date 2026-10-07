@@ -1053,6 +1053,22 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal long DrainedSendCount => PumpToStop()?.DrainedSendCount ?? 0;
 
     /// <summary>
+    /// <b>Test probe</b> (M11/P4.2 S4, D4): the started send-completion pump's loop thread, or
+    /// <see langword="null"/> when no send ever started a pump. Read-only and side-effect-free: it
+    /// reads the pump through <see cref="PumpToStop"/> (under <see cref="_pumpLock"/>) and starts
+    /// nothing. Like <see cref="DrainedSendCount"/> it is deliberately readable after teardown, when a
+    /// joined pump's thread reports <see cref="Thread.IsAlive"/> <see langword="false"/>.
+    /// </summary>
+    internal Thread? StartedPumpThread => PumpToStop()?.LoopThread;
+
+    /// <summary>
+    /// <b>Test probe</b> (M11/P4.2 S4, D4): whether any send started the send accumulator, and so its
+    /// send-batch thread. Read-only and side-effect-free (through <see cref="AccumulatorToStop"/>);
+    /// readable after teardown, which does not clear the field.
+    /// </summary>
+    internal bool AccumulatorStarted => AccumulatorToStop() is not null;
+
+    /// <summary>
     /// Completes the next pending mock send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>). Mock only; returns <see langword="false"/> if there is no
     /// pending completion. Inherent on the public <c>AsyncMockProducer</c>, not on the interface.
