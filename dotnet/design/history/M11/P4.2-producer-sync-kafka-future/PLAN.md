@@ -826,3 +826,19 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
       - test-dotnet unit 3010/TFM, soak 165/TFM, format clean;
       - Mode A unchanged.
     - The Actor's rule-text proposals 1–5 are already covered by the approved E/F rows. S5b applies the rows **verbatim** and not the proposals.
+  - **S5b** `aab3b7fd` `docs(dotnet): KafkaFuture in the internal docs and the binding rules (M11/P4.2 S5)`. It touches 6 files; every changed `.cs` line is a comment (334 changed, 0 non-comment).
+    - **Part A, internal docs:**
+      - `NativeProducer`: the class doc, `SendViaPump`, the `Send` remarks (the six-step order and residual 4), `DrainedSendCount`, `PumpToStop` (both creators share `EnsurePumpLocked`), `StopPump` / `StopPumpAsync`, and `Close`.
+      - The `SendCompletionPump` class doc: one queue for both entry kinds (D11 (a) / S-4), the latch runs no continuation, and the D9 guard. The `CloseGate` remarks too.
+      - `NativeMethods`: the xmldoc for the singular get / `_destroy`, and the four mock-hook docs.
+      - The `SendAccumulator.FaultNode` site note now names residual 4.
+      - Also fixed because they were stale: the "sync flush only on Dispose" note (sync `Close` uses it too), the `_destroy` call-site list, and a "three call sites" count.
+    - **Part B, rule files:** **E1–E9 and F1–F8 are all applied verbatim, none skipped.** Each row was checked against its PLAN cell with whitespace normalized. For the append-only rows E2, E5, F4 and F8, the old cell is a prefix of the new one. E10 is left for close-out; X1/X2 are not applied.
+      - Two verbatim artefacts are for the user (not changed):
+        - **F1**: the approved spans on diagram lines 250 and 256 are longer than the left column, so their `│` borders now sit at columns 42/50 and 46/54 instead of 37/45. The diagram was already ragged at 35–37.
+        - **E5**: the appended sentence follows the row's existing "…§3 idiom map" with no separator, so it reads "…§3 idiom map The sync `IProducer.Send` returns…".
+    - **Gates:**
+      - build 0W/0E;
+      - Release XML 0 `cref="!:"` on all three TFMs;
+      - test-dotnet: unit 3010/TFM, soak 165/TFM, format clean;
+      - Mode A unchanged.
