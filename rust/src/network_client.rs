@@ -2597,7 +2597,7 @@ mod tests {
         let failure = get_and_clear_failure(&failure).expect("the metadata updater records the failure");
         assert!(
             UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&failure),
-            "expected the UnsupportedProtocolFieldException kind, got {failure:?}"
+            "expected the UnsupportedProtocolField kind, got {failure:?}"
         );
         assert_eq!(0, client.in_flight_request_count());
     }

@@ -226,7 +226,7 @@ pub(crate) fn assert_unsupported_protocol_field(error: &io::Error, expected_mess
     let recovered = Error::UnsupportedVersion(UnsupportedVersionError::from_io_error(error));
     assert!(
         UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&recovered),
-        "expected the UnsupportedProtocolFieldException kind, got {recovered:?}"
+        "expected the UnsupportedProtocolField kind, got {recovered:?}"
     );
     assert_eq!(expected_message, recovered.message());
 }

@@ -314,6 +314,150 @@ Phase 0 completion notes (agent 90):
 - Hot-path note (DoD #10): the reader bounds sit on the receive / response path; confirm there is no new
   per-record allocation.
 
+Phase 1 completion notes (agent 91):
+
+- **D2 moves (KAFKA-20297).** `byte_utils`, `exponential_backoff`, `log_context` and
+  `producer_id_and_epoch` now live in `rust/src/common/utils/internals/`, a `pub(crate)` module whose
+  docs carry the parent package's description of these classes (Java ships no `package-info.java` for
+  `utils.internals`). Every import, the generator's emitted paths and the doc-alias markers use the new
+  package. The 25 §5.1 rows are gone.
+- **Generated-reader hardening (1a770734fe, f66a67fcef).** `MessageUtil` gains
+  `MAX_PREALLOCATED_ARRAY_CAPACITY` / `MAX_ARRAY_LENGTH` / `MAX_TAGGED_FIELD_COUNT`. Every generated array
+  reader (plain and tagged, nullable or not) rejects a length above `MAX_ARRAY_LENGTH` after the
+  remaining-bytes check and pre-allocates at most 1000 elements. Every tagged-field section read (the
+  known-tag path and both unknown-only paths) rejects a negative count, a count above the remaining bytes
+  and a count above `MAX_TAGGED_FIELD_COUNT`, with Java's messages. The count is read as `i32`, as Java's
+  `int`, so the negative guard is reachable.
+  - Tests: `MessageDataGeneratorTest` (3, on emitted source), `MessageTest` (2),
+    `SimpleArraysMessageTest` (4) with the new `generator/test-messages/SimpleKeyedArraysMessage.json`,
+    `RequestHeaderTest` (1), `RequestContextTest` (3).
+  - **DoD #10:** no new allocation. The reader gains two integer compares per array and three per tagged
+    section, and the capacity is `min(length, 1000)`. An array of more than 1000 elements now regrows
+    while it is read; that is per response, not per record (record payloads are a `records` byte field,
+    not an array).
+- **KAFKA-18157 (239a3e4990), PLAN D4.** `UnsupportedProtocolFieldException` is a crate-private
+  `UnsupportedVersionKind` on the existing `UnsupportedVersionError` (`kafka_error_type!` gains an optional
+  `kind:`). Java's class is `common::internals::UnsupportedProtocolFieldError`: its two constructors
+  (`with_options`, with an Options builder per §2's three-parameter cap, and `with_message`) and Java's
+  `instanceof` (`is_unsupported_protocol_field_error`).
+  - **Throw sites ported (13):** CreateTopics ×2, ConsumerGroupHeartbeat, ElectLeaders, FindCoordinator,
+    ListGroups ×2, Metadata ×3, OffsetCommit, OffsetFetch. ListTransactions ×2 is new code: its 4.3.1
+    `DurationFilter` / `TransactionalIdPattern` checks had never been ported.
+  - **Plumbing.** For `instanceof` to work, the error object has to travel as it does in Java. A builder
+    carries it inside its `io::Error` (`UnsupportedVersionError::into_io_error` / `from_io_error`, the
+    `CorrelationIdMismatchError` precedent). `ClientResponse.version_mismatch` holds an
+    `UnsupportedVersionError` instead of a `String`. `NetworkClient`, `NetworkClientDelegate`, `Sender`
+    and the admin runnable pass it on unchanged. `ConsumerHeartbeatRequestManager.handleSpecificFailure`
+    dispatches on the class, keeps the subclass's message, and wraps the cause as Java does.
+  - **CLAUDE.md §12.4: predicate added.** §12.4 says "every **intermediate** (non-leaf) class in Java's
+    error hierarchy MUST be recoverable as a predicate on `Error`". It makes no exception for a class whose
+    subclasses are not public. `UnsupportedVersionException` has subclasses: the new one, and the
+    `NoBatchedFindCoordinatorsException` / `NoBatchedOffsetFetchRequestException` nested in the request
+    classes, so it was already intermediate in 4.3.1. D4 only decides how the *subclass* is represented,
+    and the hidden kind does not make the parent a leaf. So `Error::is_unsupported_version_error()` exists
+    now. It covers exactly the `UnsupportedVersion` variant, every kind included, and nests inside
+    `is_invalid_configuration_error`. It is pinned in both directions:
+    - over every code in `errors.rs`'s `test_hierarchy_predicates_match_java`;
+    - in the nesting tests;
+    - as a new column, with rows for both kinds, in `error.rs`'s `variant_predicates_match_java_hierarchy`.
+
+    Its C twin is `kafka_common_Error_is_unsupported_version_error`. It has a Rust test over every code
+    and lines in `c/tests/test_mock_producer.c`. Python exposes only retriable / fatal /
+    transaction-abortable, so Python has no counterpart to add.
+  - Tests: `UnsupportedProtocolFieldExceptionTest` (3); `NetworkClientTest`
+    `testUnsupportedVersionDuringInternalMetadataRequest`, which now asserts the recorded failure's kind
+    (`TestMetadataUpdater` got a shared failure handle); `ConsumerHeartbeatRequestManagerTest`
+    `testUnsupportedVersionFromClient`, both cases plus two Rust-side ones showing the dispatch is on the
+    class, not the text; `RequestResponseTest.testCreateTopicRequestV3FailsIfNoPartitionsOrReplicas`; a
+    `NetworkClientDelegate` test; exact messages at every ported site.
+- **KAFKA-20828 (63f445aaa9).** `ConcreteResponse::should_client_throttle`, the `AbstractResponse`
+  dispatch, delegates for the 33 types whose Java class overrides the method. For the other 19 it
+  computes the schema default (`throttle_time_ms` present at the version). Those 19 lose their per-type
+  methods: the five Java removed and fourteen Rust stand-ins for the old inherited `false`.
+  ConsumerGroupHeartbeat, OffsetsForLeaderEpoch, UpdateFeatures, DescribeCluster and the quota and
+  transaction describes now throttle as Java 4.4 does. The 5 §5.1 rows are gone.
+  - Test: `RequestResponseTest.testClientThrottlesResponsesWithThrottleTime` over every `ConcreteResponse`
+    type and version (each parsed from its default data). It found a **pre-existing divergence**:
+    `DeleteTopicsResponse` throttled from v1, Java from v2 (`DeleteTopicsResponse.java`, unchanged since
+    4.3.1). Fixed.
+- **KAFKA-20072 (474798afbe).** `Uuid::random_uuid` rejects any base64 string containing `-`;
+  `testRandomUuid` keeps its 100 repetitions.
+- **KafkaMetric `Display` (46ad599a6e).**
+  - Rust has no reflection, so `Measurable` and `Gauge` gain a defaulted `type_name()` (DoD #7).
+    It returns `std::any::type_name` of the implementor. The closure adapters answer `None`, as Java
+    omits lambdas.
+  - Sensor's internal `MeasurableArc` forwards to the stat it shares.
+  - `MetricName`'s `Display` now renders tags as Java's `Map.toString` does (`{k=v}`), not as Rust
+    `Debug`.
+  - Tests: the three `KafkaMetricTest` cases, plus a sensor-registered stat.
+- **ByteUtilsTest split (8b6d31f00c).** `Bytes.increment` / `BYTES_LEXICO_COMPARATOR` moved into the
+  translated `ByteUtils`, so they are translated with it (DoD #2). `Bytes` has no Rust counterpart, so
+  the API takes slices and returns `Vec<u8>`, whose `Ord` is `Bytes`' unsigned lexicographic order.
+  - Tests: `testIncrement`, `testIncrementUpperBoundary`, `testIncrementWithSubmap`,
+    `testBytesLexicographicCases`.
+- **Recorded skips and deviations:**
+  - `ProtocolSerializationTest.testReadArrayLengthAboveMaxIsRejected` /
+    `testReadCompactArrayLengthAboveMaxIsRejected`, and the `ArrayOf` / `CompactArrayOf` half of
+    f66a67fcef: there is no Rust schema reader. `protocol::types::Schema` only describes fields; the
+    generated readers are the only decoders, and they carry the same limits.
+  - `MessageDataGeneratorTest`: Java asserts the `ArrayList`, `BazCollection` and `BamCollection` forms
+    separately. The Rust generator emits every collection as a `Vec`, so the test asserts the one capped
+    form three times.
+  - `RequestContextTest`: `RequestContext` is the broker's view of a request and has no client
+    counterpart. The three cases run against the `ProduceRequestData` reader that
+    `RequestContext.parseRequest` drives. Where Java asserts the `InvalidRequestException`'s cause, they
+    assert the reader's error; where Java asserts only the class, they assert that the read fails.
+  - KAFKA-18157, not ported:
+    - the CreateAcls / DeleteAcls / DescribeAcls v0 guards: v0 was removed in Kafka 4.0
+      (`validVersions` 1-3), the Rust builders already omitted these unreachable guards, and 4.4
+      changes only their exception class;
+    - the Heartbeat / JoinGroup / SyncGroup builders: classic protocol, no Rust builder
+      (consumer-threading §20);
+    - Streams' `InternalTopicManager`: out of scope.
+  - `KafkaMetricTest`:
+    - `testToStringWithStatProvider` asserts the Rust type path
+      (`confluent_kafka::common::metrics::stats::avg::Avg`) where Java names the Java class;
+    - `testToStringWithAnonymousClassProvider` uses `ClosureGauge`: Rust has no anonymous classes, and
+      an inline provider is a closure adapter;
+    - `testConstructorWithNullProvider` stays untranslated: a null provider is unrepresentable.
+  - `ByteUtils`:
+    - `increment` returns `LocalIllegalArgument` where Java throws `IndexOutOfBoundsException`, the
+      crate's precedent for that class (`MockAdminClient`);
+    - the comparator's offset/length overload is the slice method called with sub-slices.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 1 D2 moves | 16:49 | 16:55 | 6 |
+  | 2 reader hardening | 16:55 | 17:03 | 8 |
+  | 3 KAFKA-18157 + predicate + FFI | 17:03 | 17:27 | 24 |
+  | 4 KAFKA-20828 (+ clippy fixup) | 17:27 | 17:32 | 5 |
+  | 5 KAFKA-20072 | 17:32 | 17:33 | 1 |
+  | 6 KafkaMetric Display | 17:33 | 17:36 | 3 |
+  | 7 ByteUtilsTest split | 17:36 | 17:38 | 2 |
+  | 8 gates, notes, `make verify` (11.5 min of it) | 17:38 | 17:56 | 18 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4308 passed, 0 failed, 10 ignored (lib 4259 / 3 ignored, plus 36, 8 and 5 / 7
+    ignored).
+  - `cargo xtask lint`: the custom lint reports exactly the 15 remaining §5.1 rows (Phase 5 2,
+    Phases 7/8 2, Phase 9 1, Phase 11 10), nothing new. The step stops there, so the rest was run one by
+    one, and all pass: `doc-hygiene`, both workspace clippy passes (default and `--all-features`), and
+    the xtask clippy pass.
+  - `make -k verify` (2026-10-07, macOS, 17:43–17:54) fails in three targets:
+    - `build-c`: `cmake: command not found`. Environment: cmake is not installed on this host.
+    - `lint`: the 15 remaining §5.1 rows only, as above. Expected under the §5.1 gate rule.
+    - `test-rust-all-features`: 4486 passed, 17 failed, 3 ignored. All 17 failures are Docker-backed
+      `integration_tests::*` ("failed to list networks": the Docker daemon is not running), an
+      environment issue.
+
+    Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` / format-arity
+    (29 passed), and the soak tests (156 passed).
+  - **Owed:** a Docker-backed run of the integration suite, and a `build-c` / C-test run on a host with
+    cmake. The C test changes (`kafka_common_Error_is_unsupported_version_error`) are therefore
+    compile-checked only through the Rust FFI test.
+
 ### Phase 2 — KIP-909 core: bootstrap DNS resolution (agent 92)
 
 - Translate in tree-diff order:
