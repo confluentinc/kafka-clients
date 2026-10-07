@@ -33,9 +33,8 @@ use crate::common::record::internal::RecordBatch;
 use crate::common::requests::CoordinatorType;
 use crate::common::requests::{
     AddPartitionsToTxnResponse, CommittedOffset, ConcreteResponse, PartitionResponse, RequestBuilder,
-    TransactionResult, TxnOffsetCommitRequestBuilderOptionsBuilder, add_offsets_to_txn_request,
-    add_partitions_to_txn_request, end_txn_request, find_coordinator_request, init_producer_id_request,
-    txn_offset_commit_request,
+    TransactionResult, TxnOffsetCommitRequest, add_offsets_to_txn_request, add_partitions_to_txn_request,
+    end_txn_request, find_coordinator_request, init_producer_id_request, txn_offset_commit_request,
 };
 use crate::common::utils::internals::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
@@ -1756,21 +1755,18 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = txn_offset_commit_request::Builder::with_options(
+        let mut data = TxnOffsetCommitRequestData::new();
+        data
             // `ensureTransactional()` has already run, so the id is present.
-            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
-                .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
-                .set_consumer_group_id(group_metadata.group_id())
-                .set_producer_id(self.producer_id_and_epoch.producer_id)
-                .set_producer_epoch(self.producer_id_and_epoch.epoch)
-                .set_pending_txn_offset_commits(&self.pending_txn_offset_commits)
-                .set_is_transaction_v2_enabled(self.is_transaction_v2_enabled())
-                .set_member_id(group_metadata.member_id().to_string())
-                .set_generation_id(group_metadata.generation_id())
-                .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
-                .build()
-                .expect("TxnOffsetCommitRequestBuilderOptionsBuilder::build: every mandatory parameter is set above"),
-        );
+            .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+            .set_group_id(group_metadata.group_id().to_string())
+            .set_producer_id(self.producer_id_and_epoch.producer_id)
+            .set_producer_epoch(self.producer_id_and_epoch.epoch)
+            .set_member_id(group_metadata.member_id().to_string())
+            .set_generation_id_or_member_epoch(group_metadata.generation_id())
+            .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
+            .set_topics(TxnOffsetCommitRequest::get_topics(&self.pending_txn_offset_commits));
+        let builder = txn_offset_commit_request::Builder::for_topic_names(data, self.is_transaction_v2_enabled());
         let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
         match result {
             Some(result) => TxnRequestHandler::with_result(result, self.retry_backoff_ms, kind),
@@ -5407,7 +5403,7 @@ mod tests {
         if let Some(group_metadata) = group_metadata {
             assert_eq!(data.group_instance_id.as_deref(), group_metadata.group_instance_id());
             assert_eq!(data.member_id, group_metadata.member_id());
-            assert_eq!(data.generation_id, group_metadata.generation_id());
+            assert_eq!(data.generation_id_or_member_epoch, group_metadata.generation_id());
         }
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();

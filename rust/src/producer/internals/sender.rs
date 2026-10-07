@@ -11082,7 +11082,7 @@ mod tests {
             if let Some((group_instance_id, member_id, generation_id)) = &group_metadata {
                 assert_eq!(request.data().group_instance_id.as_deref(), Some(group_instance_id.as_str()));
                 assert_eq!(request.data().member_id, *member_id);
-                assert_eq!(request.data().generation_id, *generation_id);
+                assert_eq!(request.data().generation_id_or_member_epoch, *generation_id);
             }
             true
         });

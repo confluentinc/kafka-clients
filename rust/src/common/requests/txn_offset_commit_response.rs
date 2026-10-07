@@ -367,7 +367,8 @@ mod tests {
             (tp("topic-b", 2), Errors::IllegalGeneration),
         ]);
 
-        for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
+        // Names are on the wire only up to v5 (KIP-1319); v6 carries topic ids.
+        for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=5 {
             let response = TxnOffsetCommitResponse::with_request_throttle_ms_response_data(11, &map);
             let mut concrete = ConcreteResponse::TxnOffsetCommit(response);
             let mut buffer = concrete.serialize(version).expect("serialize");

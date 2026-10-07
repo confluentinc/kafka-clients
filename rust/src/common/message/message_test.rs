@@ -1446,91 +1446,70 @@ fn test_offset_commit_response_versions() {
     }
 }
 
+/// Translated from `MessageTest.testTxnOffsetCommitRequestVersions`
+/// (`@ApiKeyVersionsSource(apiKey = TXN_OFFSET_COMMIT)`, so every version).
+///
+/// Each version's message sets only fields that version carries: group metadata
+/// from v3, the leader epoch from v2, the topic name below v6 and the topic id
+/// from v6 (KIP-1319), so the round trip is exact.
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitRequestVersions")]
 fn test_txn_offset_commit_request_versions() {
-    let group_id = "groupId";
-    let topic_name = "topic";
-    let metadata = "metadata";
-    let txn_id = "transactionalId";
-    let producer_id: i64 = 25;
-    let producer_epoch: i16 = 10;
-    let instance_id = "instance";
-    let member_id = "member";
-    let generation_id: i32 = 1;
-    let partition: i32 = 2;
-    let offset: i64 = 100;
-
-    test_all_message_round_trips(
-        TxnOffsetCommitRequestData::new()
-            .set_group_id(group_id.to_string())
-            .set_transactional_id(txn_id.to_string())
-            .set_producer_id(producer_id)
-            .set_producer_epoch(producer_epoch)
-            .set_topics(vec![
-                TxnOffsetCommitRequestTopic::new()
-                    .set_name(topic_name.to_string())
-                    .set_partitions(vec![
-                        TxnOffsetCommitRequestPartition::new()
-                            .set_partition_index(partition)
-                            .set_committed_metadata(Some(metadata.to_string()))
-                            .set_committed_offset(offset)
-                            .clone(),
-                    ])
-                    .clone(),
-            ]),
-    );
-
     for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-        let mut request_data = TxnOffsetCommitRequestData::new()
-            .set_group_id(group_id.to_string())
-            .set_transactional_id(txn_id.to_string())
-            .set_producer_id(producer_id)
-            .set_producer_epoch(producer_epoch)
-            .set_group_instance_id(Some(instance_id.to_string()))
-            .set_member_id(member_id.to_string())
-            .set_generation_id(generation_id)
+        let mut request = TxnOffsetCommitRequestData::new()
+            .set_group_id("groupId".to_string())
+            .set_transactional_id("transactionalId".to_string())
+            .set_producer_id(25)
+            .set_producer_epoch(10)
+            .set_member_id(if version >= 3 { "member" } else { "" }.to_string())
+            .set_generation_id_or_member_epoch(if version >= 3 { 1 } else { -1 })
+            .set_group_instance_id(if version >= 3 {
+                Some("instance".to_string())
+            } else {
+                None
+            })
             .set_topics(vec![
                 TxnOffsetCommitRequestTopic::new()
-                    .set_name(topic_name.to_string())
+                    .set_topic_id(if version >= 6 {
+                        Uuid::random_uuid()
+                    } else {
+                        Uuid::zero()
+                    })
+                    .set_name(if version < 6 { "topic" } else { "" }.to_string())
                     .set_partitions(vec![
                         TxnOffsetCommitRequestPartition::new()
-                            .set_partition_index(partition)
-                            .set_committed_leader_epoch(10)
-                            .set_committed_metadata(Some(metadata.to_string()))
-                            .set_committed_offset(offset)
+                            .set_partition_index(2)
+                            .set_committed_leader_epoch(if version >= 2 { 10 } else { -1 })
+                            .set_committed_metadata(Some("metadata".to_string()))
+                            .set_committed_offset(100)
                             .clone(),
                     ])
                     .clone(),
             ])
             .clone();
 
-        if version < 2 {
-            request_data.topics_mut()[0].partitions_mut()[0].set_committed_leader_epoch(-1);
-        }
-
-        if version < 3 {
-            // Java test asserts UnsupportedVersionException for versions < 3
-            // because groupInstanceId/memberId/generationId fields don't exist in those versions.
-            // Our generator doesn't produce per-field version validation errors,
-            // so we skip the UVE assertions and test with default values instead.
-            request_data.set_group_instance_id(None);
-            request_data.set_member_id(String::new());
-            request_data.set_generation_id(-1);
-        }
-
-        test_all_message_round_trips_from_version(version, &request_data);
+        let expected = request.clone();
+        test_byte_buffer_round_trip(version, &mut request, &expected);
     }
 }
 
+/// Translated from `MessageTest.testTxnOffsetCommitResponseVersions`
+/// (`@ApiKeyVersionsSource(apiKey = TXN_OFFSET_COMMIT)`): the topic name below v6,
+/// the topic id from v6 (KIP-1319).
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitResponseVersions")]
 fn test_txn_offset_commit_response_versions() {
-    test_all_message_round_trips(
-        TxnOffsetCommitResponseData::new()
+    for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
+        let mut response = TxnOffsetCommitResponseData::new()
+            .set_throttle_time_ms(20)
             .set_topics(vec![
                 TxnOffsetCommitResponseTopic::new()
-                    .set_name("topic".to_string())
+                    .set_topic_id(if version >= 6 {
+                        Uuid::random_uuid()
+                    } else {
+                        Uuid::zero()
+                    })
+                    .set_name(if version < 6 { "topic" } else { "" }.to_string())
                     .set_partitions(vec![
                         TxnOffsetCommitResponsePartition::new()
                             .set_partition_index(1)
@@ -1539,8 +1518,11 @@ fn test_txn_offset_commit_response_versions() {
                     ])
                     .clone(),
             ])
-            .set_throttle_time_ms(20),
-    );
+            .clone();
+
+        let expected = response.clone();
+        test_byte_buffer_round_trip(version, &mut response, &expected);
+    }
 }
 
 #[test]

@@ -267,10 +267,7 @@ pub use sasl_handshake_request::SaslHandshakeRequest;
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use transaction_result::TransactionResult;
-pub use txn_offset_commit_request::{
-    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilderOptions,
-    TxnOffsetCommitRequestBuilderOptionsBuilder,
-};
+pub use txn_offset_commit_request::{CommittedOffset, TxnOffsetCommitRequest};
 pub use txn_offset_commit_response::TxnOffsetCommitResponse;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest};
 pub use update_features_response::UpdateFeaturesResponse;
