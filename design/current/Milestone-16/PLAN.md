@@ -754,6 +754,188 @@ Phase 2 completion notes (agent 92):
 - Busy-loop fixes must be shown not to spin in Rust: assert poll-timer / `maximum_time_to_wait` values;
   don't rely on wall-clock behaviour alone.
 
+Phase 3 completion notes (agent 93):
+
+- **Commits:**
+  - 91dcc787 (KAFKA-20854) + fixup 73d04f5f (lint markers);
+  - 02ac689c (KAFKA-20253, pulled forward: coordinator + auto-commit hunks) + fixup 150f4170 (coordinator
+    forwarder wakes the bg task);
+  - e4bf1523 (KAFKA-20970);
+  - 98e6c919 (KAFKA-21010 + the KAFKA-20253 heartbeat hunk it rewrites);
+  - 7ffcfa5b (the bg loop consults the commit manager);
+  - a269808f (selector drains fired readiness every poll iteration);
+  - plus this notes commit.
+- **What landed:**
+  - KAFKA-20854:
+    - `SubscriptionState::has_fetchable_partitions`.
+    - `AbstractFetch`'s nested `FetchRequestPreparationResult`, returned by `prepare_fetch_requests` and
+      `prepare_close_fetch_session_requests`. Close may always wake the buffer.
+    - The "wake on any response" moved from `handle_fetch_success` to `remove_pending_fetch_request`.
+    - The Phase-26 all-nodes-unfetchable short-circuit computes the same `can_wake` flag as the full path:
+      false with nothing buffered, which is the KIP-909 no-nodes window.
+    - `FetchRequestManager` takes `retry_backoff_ms` and overrides `maximum_time_to_wait`
+      (`retry_backoff_ms` with nothing in flight, else `i64::MAX`).
+    - An empty poll wakes the buffer only on `can_wake`. This replaces the Rust-only "wake when nothing is
+      in flight" guard, which still woke the buffer when no partition was fetchable.
+    - `AsyncKafkaConsumer::poll_for_fetches_timeout_ms` (extracted, Rust-only) gains the "fetchable but
+      unbuffered → retry backoff" branch.
+  - KAFKA-20970 / KAFKA-21010:
+    - `CommitRequestManager::maximum_time_to_wait` returns `retry_backoff_ms` while the coordinator is
+      unknown. KAFKA-20970's interval accessor is added and then removed again, as in Java.
+    - `ConsumerHeartbeatRequestManager::maximum_time_to_wait` has its 4.4 shape:
+      - UNSUBSCRIBED or FATAL → `i64::MAX`;
+      - poll timer expired → 0;
+      - coordinator unknown or `should_skip_heartbeat()` → `HeartbeatRequestState::retry_backoff_ms()`.
+    - `HeartbeatRequestState::retry_backoff_ms()` is new. It reads a new `RequestState::exponential_backoff`
+      accessor, which stands in for Java's protected field.
+  - Bg loop (`ConsumerNetworkThread::run_once` Phase 5):
+    - It now also consults the coordinator and commit handles, which `RequestManagers::entries()` skips.
+    - Java's `entries()` includes both. Before this phase the auto-commit timer never bounded the
+      application's wait, so the 20970/21010 commit fixes would have been unreachable.
+- **Regressions found by `make -k verify` and fixed in this phase:**
+  - `consumer_bounce_test::test_async_close` failed 3/3 (baseline ed2e3ce3: 2/2 passed): "Close took too
+    long 3001".
+    - Cause: the KAFKA-20253 coordinator guard made the bg loop sleep (`i64::MAX`) while FindCoordinator was
+      in flight. The FindCoordinator response is applied by a spawned forwarder *after* the network poll
+      returns (Java applies it inside the poll), and nothing woke the loop afterwards.
+    - Before the guard, the loop's 0 timeout hid this.
+    - Fixed in 150f4170: `CoordinatorRequestManager::completion_notify`, wired to `event_notify` as the
+      commit and fetch managers already are.
+  - Selector stranded fire (a269808f):
+    - `drain_fired_queue` ran only inside the WAIT's `readiness_wait`. Its `select!` is `biased` towards the
+      wakeup `Notify`, so a poll entered with a stored permit returned without draining.
+    - The fired channel then kept `armed_read = true` and was never re-armed or processed. A trace showed a
+      coordinator-channel read fire drained 30 s late, after the channel had closed.
+    - This phase makes it reachable: the application task now pokes the bg task once per `retry.backoff.ms`
+      instead of busy-looping, and the loop no longer polls with timeout 0, whose `process_all` sweep used
+      to read every channel anyway.
+    - `test_fire_not_stranded_when_every_poll_starts_woken` fails at its 5 s timeout without the new drain.
+- **Remaining timing difference (for the Critic):** `test_async_close` now passes but takes ~50 s, against
+  ~20 s at baseline.
+  - Close timings are identical. The extra ~30 s is the group's first ConsumerGroupHeartbeat going
+    unanswered until the 30 s request timeout; the retry succeeds at once.
+  - Broker logs (4.2.0) show the coordinator receiving that heartbeat about 190 ms *before* its
+    `__consumer_offsets-0` followers make their first fetch. The member-join write therefore does not commit
+    in time, and no response comes.
+  - The baseline client reaches the coordinator slightly later and misses that window. The heartbeat bytes
+    are identical.
+  - So this is a broker-side race with the brand-new offsets partition, which the client's new timing hits;
+    it is not a client defect. Under full-suite load the extra 30 s can push `test_async_close`'s 60 s
+    receive bound over (seen once in verify run 2).
+- **How each busy loop is shown fixed, by value:**
+  - Background task, while bootstrapping:
+    - `run_once_does_not_spin_while_bootstrap_resolution_is_pending` runs 40 iterations (50 ms model steps)
+      of a group consumer over a client with no nodes: real coordinator, commit (100 ms auto-commit
+      interval), heartbeat (a JOINING member with zero heartbeat interval), offsets and fetch.
+    - It asserts every network poll timeout == `retry.backoff.ms` (100) and the published
+      `cachedMaximumTimeToWait` == 100.
+    - Teeth-checked: without the KAFKA-20253 coordinator guard the poll timeout is 0 from iteration 2. With
+      the heartbeat returning its (zero) interval, or the commit manager ignoring the coordinator, the bound
+      becomes 0 or the timer's remainder.
+  - Application task:
+    - `test_poll_for_fetches_timeout_bounded_by_retry_backoff` asserts the wait in each state:
+      - nothing assigned (the bootstrapping case), no position, or unbuffered fetchable → 100;
+      - everything buffered → the full timeout;
+      - `maximumTimeToWait` 0 → 0, which the caller turns into an immediate return.
+    - `test_poll_with_manual_assignment_does_not_busy_loop` asserts Java's 500.
+  - Per manager, at Java's values:
+    - FRM: the 8 new tests, plus the pre-4.4 `testEmptyFetchResponseWakesUpBuffer`. They assert
+      `maximum_time_to_wait` (`i64::MAX` / 100) and the buffer's pending-wakeup flag
+      (`FetchBuffer::is_woken_up_for_test`, cfg(test)) instead of Java's blocked-thread joins.
+    - Commit and heartbeat assert `DEFAULT_RETRY_BACKOFF_MS` / `Long.MAX_VALUE` exactly.
+    - Both `...DoesNotSpinDuringRealBootstrapDnsResolution` tests drive a real `NetworkClient` that resolves
+      `unresolvable.invalid` asynchronously until the `BootstrapResolutionError`, asserting `> 0` at each
+      step.
+- **Audit of the bootstrapping wait computation (mode > 0):**
+  - Besides the three fixed managers:
+    - the offsets manager returns `EMPTY` / `with_requests` (`i64::MAX`);
+    - the topic-metadata manager returns Java's one-shot `0` only when it emits a request;
+    - the membership manager returns `EMPTY`;
+    - the real `NetworkClient` caps its selector wait at `maybe_update`'s `reconnect_backoff_ms` (50 ms
+      default) while no node is known.
+  - The network poll is never raced in a `select!`, and no guard is held across an `.await`: the new reads
+    take each std `Mutex` briefly, and the commit manager reads its coordinator before taking its state
+    lock.
+  - **Mode 0:** the bootstrap path is untouched. The wait changes apply in both modes, as in Java.
+- **Recorded skips:**
+  - the `Fetcher.java` hunk (classic consumer);
+  - the `StreamsGroupHeartbeatRequestManager` hunks of 20970/21010 and their tests, and the
+    `ShareHeartbeatRequestManagerTest` hunks of 21010/20253 (consumer-threading §20);
+  - checkstyle suppressions;
+  - the fixture-only `AsyncKafkaConsumerTest` hunks: the `retryBackoffMs` local in `newConsumer`, and the
+    Mockito stub reordering in `testProcessBackgroundEventsWithInitialDelay`, which has no Rust counterpart.
+- **Deviations (DoD #7):**
+  - `FetchRequestPreparationResult` is keyed by node id, with the `Node` alongside.
+  - `poll_for_fetches_timeout_ms` is an extracted helper (Java computes it inline).
+  - The FRM "in flight" set can lag Java's by one iteration: completions are drained by the next
+    `poll(now)`, which the forwarder's `completion_notify` schedules at once.
+  - `CoordinatorRequestManager::completion_notify` exists because the Rust forwarder runs outside the
+    network poll.
+  - Two Rust tests were corrected:
+    - the heartbeat "poll timer expired" test answered through `should_heartbeat_now()`, because the Rust
+      poll timer is unarmed until the first reset (Issue 9); it now arms the timer;
+    - several commit timer tests now wire a known coordinator, as Java's mocks do.
+- **DoD #10: N/A** (per-poll / per-iteration paths, not per record). The extra `buffered_partitions()` in the
+  wait bound and in the short-circuit allocates only when the buffer holds data. The selector drain is one
+  uncontended lock per loop iteration.
+- **For Phase 9:**
+  - KAFKA-20253 (28de22de34) is **done here in full**: its three main hunks and its
+    `ConsumerHeartbeatRequestManagerTest` / `CoordinatorRequestManagerTest` tests (the Share test is
+    skipped). Record it as covered by Phase 3.
+  - The heartbeat `maximum_time_to_wait` is the final 4.4 version.
+  - `AbstractHeartbeatRequestManagerTest.testNoCoordinator`'s 21010 assertion lives in
+    `poll_returns_empty_when_no_coordinator`; the e7b0cb7908 file mapping is still Phase 9's decision.
+  - The heartbeat file lost its stale `cfg_attr(test, expect(dead_code))`.
+  - The heartbeat forwarder has no bg-task wake, unlike the coordinator, commit and fetch forwarders.
+    Phase 9 should check whether its responses wait out the poll timeout.
+- **For Phase 4:**
+  - `NetworkClient::set_mock_time` is now `pub(crate)` (cfg(test)) for the shared fixture
+    `network_client_delegate::bootstrapping_network_client_delegate_for_test`.
+  - The selector's loop now drains fired readiness at its top (a269808f).
+- **For Phase 10:**
+  - The FRM wake semantics and `poll_for_fetches_timeout_ms` changed as described above.
+  - Production's `is_unavailable` closure is still the constant `false` under the pre-existing
+    `FIXME(phase-9-sasl)` in `async_kafka_consumer.rs`, so KAFKA-20854's reconnect-backoff skip is
+    reachable only in tests.
+- **Timing log** (2026-10-07/08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts) | 22:44 | 22:52 | 8 |
+  | 1 KAFKA-20854 with tests (91dcc787) | 22:52 | 23:11 | 19 |
+  | 2 KAFKA-20253 coordinator + auto-commit (02ac689c) | 23:11 | 23:15 | 4 |
+  | 3 KAFKA-20970 with tests (e4bf1523) | 23:15 | 23:20 | 5 |
+  | 4 KAFKA-21010 + 20253 heartbeat, with tests (98e6c919) | 23:20 | 23:25 | 5 |
+  | 5 bg-loop consult + proof test + teeth checks (7ffcfa5b) | 23:25 | 23:31 | 6 |
+  | 6 integration (default + 4.4.0-rc4), format-check, full test, lint + fixup (73d04f5f) | 23:31 | 23:38 | 7 |
+  | 7 `make -k verify` #1 | 23:38 | 23:49 | 11 |
+  | 8 regression bisect + root causes (baseline worktree, tracing, broker logs) | 23:49 | 01:17 | 88 |
+  | 9 fixes 150f4170, a269808f, gates, `make -k verify` #2, re-runs, notes | 01:17 | 01:40 | 23 |
+
+- **Verification (HEAD a269808f):**
+  - `cargo build` passes, and so does `cargo xtask format-check`.
+  - `cargo test`: 4369 passed, 0 failed, 10 ignored (lib 4320 / 3 ignored, plus 36, 8, and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: exactly the 15 §5.1 rows; doc-hygiene, module-path and clippy are clean.
+  - Broker-backed tests:
+    - default 4.2.0 broker, `--test integration -- plaintext_consumer consumer_test base_consumer_test
+      bootstrap_resolution_test consumer_topic_creation_test`: 101 / 101 (run before the two late fixes;
+      the consumer subset was re-run after them inside verify);
+    - `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4 -- bootstrap_resolution_test`: 4 / 4.
+  - `make -k verify` #2 (macOS) fails in three targets:
+    - `build-c`: `cmake: command not found` (environment);
+    - `lint`: the 15 §5.1 rows only;
+    - `test-rust-all-features`: lib 4564 passed. The integration suite had 300 passed and 5 failed, all five
+      under full-suite load: `admin_scram_test::…round_trips__rust`, `consumer_bounce_test::test_async_close`,
+      `consumer_bounce_test::test_async_subscribe_when_topic_unavailable` ("TopicExists"),
+      `consumer_test::test_leader_epoch`, `producer_transactions_test::test_fencing_on_transaction_expiration`.
+      Re-run alone they all pass: 8 / 8 including the whole `consumer_bounce_test` module, 2 ignored.
+
+    Verify #1 had 17 integration failures: 15 in `producer_transactions_test` ("Connection refused" to a dead
+    cluster; a solo re-run still failed its `grpc_*` variants and three Rust tests on timeouts, none of
+    them in code this phase touched), and 2 in `consumer_bounce_test`, one of them the then-real
+    `test_async_close` regression.
+  - Python unit tests: 363 passed, 2 skipped. `check-bindings`: 29 passed. Soak: 156 passed.
+
 ### Phase 4 — KIP-1242 misrouted-connection detection + NetworkClient fixes (agent 94)
 
 - ede01b871e: the `metadata.cluster.check.enable` config in `CommonClientConfigs` and the
