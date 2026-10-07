@@ -89,6 +89,15 @@ impl HeartbeatRequestState {
         self.heartbeat_interval_ms
     }
 
+    /// The initial retry backoff (`retry.backoff.ms`): the exponential
+    /// backoff's starting interval.
+    ///
+    /// Java: `retryBackoffMs()` (KAFKA-21010).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.HeartbeatRequestState#retryBackoffMs")]
+    pub(crate) fn retry_backoff_ms(&self) -> i64 {
+        self.request_state.exponential_backoff().initial_interval()
+    }
+
     /// Resets the heartbeat timer to a full `heartbeat_interval_ms` from
     /// the last observed time.
     ///

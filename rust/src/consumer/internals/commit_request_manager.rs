@@ -176,14 +176,6 @@ impl AutoCommitState {
         (self.expiration_ms - current_time_ms).max(0)
     }
 
-    /// Java: `autoCommitIntervalMs()` (KAFKA-20970).
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#autoCommitIntervalMs"
-    )]
-    fn auto_commit_interval_ms(&self) -> i64 {
-        self.auto_commit_interval_ms
-    }
-
     /// Java: `setInflightCommitStatus(boolean)`.
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#setInflightCommitStatus"
@@ -1707,9 +1699,10 @@ impl RequestManager for CommitRequestManager {
         // If the coordinator is unavailable (e.g. bootstrap DNS resolution is still in progress),
         // falling through to the timer-based remainingMs() would return 0 once the auto-commit interval
         // elapses, since the auto-commit timer remains permanently expired. This would cause both the
-        // application and network threads to busy-spin.
+        // application and network threads to busy-spin. Wait a retry backoff instead of the auto-commit
+        // interval, which may be configured to zero and is consistent with the other request managers.
         if coordinator_unknown {
-            return auto_commit.auto_commit_interval_ms();
+            return self.inner.retry_backoff_ms;
         }
         auto_commit.remaining_ms(current_time_ms)
     }
@@ -3150,24 +3143,30 @@ mod tests {
     }
 
     /// Translated from `CommitRequestManagerTest.testMaximumTimeToWaitWhenCoordinatorUnknownDoesNotSpin`
-    /// (KAFKA-20970): with the coordinator unknown, poll() cannot send the
+    /// (KAFKA-20970, parameterized by KAFKA-21010 over `@ValueSource(longs =
+    /// {0, 5000})`): with the coordinator unknown, poll() cannot send the
     /// auto-commit, so an expired auto-commit timer must not bound the wait to
-    /// 0.
+    /// 0. The auto-commit interval may be configured to zero, so a retry
+    /// backoff is used while the coordinator is unknown, consistently with the
+    /// fetch and heartbeat request managers.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest#testMaximumTimeToWaitWhenCoordinatorUnknownDoesNotSpin"
     )]
     fn test_maximum_time_to_wait_when_coordinator_unknown_does_not_spin() {
-        let (manager, _subs) = make_manager_with_subs_interval(0, true, 100);
-        manager.set_coordinator(Arc::new(CoordinatorRequestManager::new(100, 1_000, GROUP_ID)));
+        for auto_commit_interval in [0, 5_000] {
+            let (manager, _subs) = make_manager_with_subs_interval(0, true, auto_commit_interval);
+            manager.set_coordinator(Arc::new(CoordinatorRequestManager::new(100, 1_000, GROUP_ID)));
 
-        let result = manager.maximum_time_to_wait(100);
+            let result = manager.maximum_time_to_wait(100);
 
-        assert!(
-            result > 0,
-            "maximumTimeToWait must be > 0 when the coordinator is unknown to avoid a busy-spin; got {result}"
-        );
-        assert_eq!(100, result);
+            assert!(
+                result > 0,
+                "maximumTimeToWait must be > 0 when the coordinator is unknown to avoid a busy-spin; got {result}"
+            );
+            // Java's `retryBackoffMs` (100); `test_config` keeps the default `retry.backoff.ms`.
+            assert_eq!(100, result, "auto.commit.interval.ms = {auto_commit_interval}");
+        }
     }
 
     /// Translated from
