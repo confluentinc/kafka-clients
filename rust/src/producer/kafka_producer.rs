@@ -24,7 +24,7 @@
 //! and its four siblings.
 
 use crate::common::requests::TxnOffsetCommitRequest;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1469,8 +1469,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// - A commit-failed error if the commit cannot be retried (e.g. the consumer
     ///   has been kicked out of the group); users should handle this by aborting
     ///   the transaction
-    /// - [`Error::Timeout`] if sending the offsets takes longer than
-    ///   `max.block.ms`
+    /// - [`Error::Timeout`] if the combined time taken for resolving topic metadata
+    ///   and sending the offsets has surpassed `max.block.ms`
+    ///
+    /// The producer first resolves the metadata for the topics in `offsets`
+    /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction")]
     pub async fn send_offsets_to_transaction(
         &self,
@@ -1487,6 +1490,13 @@ impl<K, V> KafkaProducer<K, V> {
             return Ok(());
         }
 
+        // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
+        // ids before the manager builds the request. No manager guard is held
+        // across this await (`producer-transactions.md` §4).
+        let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
+        let wait_ms = self.await_topic_metadata(&topics).await?;
+        let remaining_ms = (self.max_block_ms - wait_ms).max(0);
+
         let result = {
             // `pending_requests` before the manager, per the field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1498,8 +1508,35 @@ impl<K, V> KafkaProducer<K, V> {
         };
         self.wakeup.notify_one();
         result
-            .await_result_timeout(self.max_block_timeout(), Self::SEND_OFFSETS_TIMEOUT_MSG)
+            .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
             .await
+    }
+
+    /// Request a partial metadata refresh for the given topics and await the next
+    /// metadata update (up to `max.block.ms`). Returns the elapsed wait time so the
+    /// caller can subtract it from its own `max.block.ms` budget.
+    ///
+    /// Translated from `KafkaProducer.awaitTopicMetadata(Set<String>)`
+    /// (6208dfc014). Java's no-refresh branch also calls
+    /// `metadata.maybeThrowBootstrapFatalException()`, which belongs to KIP-909
+    /// (PLAN Phase 2) and does not exist on this branch yet.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] (`"Failed to update metadata after <max.block.ms> ms."`)
+    /// if no update arrives in time, or the fatal metadata error / closed-metadata
+    /// error `await_update` reports.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#awaitTopicMetadata")]
+    async fn await_topic_metadata(&self, topics: &HashSet<&str>) -> Result<i64, Error> {
+        let start_nanos = self.time.nanoseconds();
+        let Some(version) = self.metadata.add_with_topics(topics.iter().copied(), self.now_ms()) else {
+            return Ok(0);
+        };
+        self.wakeup.notify_one();
+        self.metadata.await_update(version, self.max_block_ms).await?;
+        let elapsed_nanos = self.time.nanoseconds() - start_nanos;
+        self.producer_metrics.record_metadata_wait(elapsed_nanos);
+        Ok(elapsed_nanos / 1_000_000)
     }
 
     /// Commits the ongoing transaction. This method will flush any unsent records
@@ -4957,6 +4994,25 @@ mod tests {
         ))
     }
 
+    /// `RequestTestUtils.metadataUpdateWithIds(1, Map.of(topic, n), Map.of(topic, id))`,
+    /// or `metadataUpdateWith(1, Map.of(topic, n))` (no ids) when `with_topic_ids` is
+    /// `false`.
+    fn topic_metadata_update(num_partitions: i32, with_topic_ids: bool) -> crate::common::requests::MetadataResponse {
+        let topic_ids = if with_topic_ids {
+            HashMap::from([(TOPIC.to_string(), topic_id())])
+        } else {
+            HashMap::new()
+        };
+        crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &HashMap::from([(TOPIC.to_string(), num_partitions)]),
+            &|_| None,
+            &topic_ids,
+        )
+    }
+
     /// A `KafkaProducer` and the `Sender` that serves it, sharing every piece of
     /// state production shares.
     struct TxnProducerContext {
@@ -4990,6 +5046,21 @@ mod tests {
         }
 
         fn with_options(extra: &[(&str, &str)], num_partitions: i32, transaction_v2: bool) -> Self {
+            Self::with_metadata_seed(extra, num_partitions, transaction_v2, true, true)
+        }
+
+        /// As [`Self::with_options`], choosing how the metadata starts out: whether
+        /// [`TOPIC`] is already in the producer's tracked topic set (`metadata.add`),
+        /// and whether the seeded snapshot carries its topic id. The KIP-1319 tests
+        /// use an untracked topic, as Java's do, so `sendOffsetsToTransaction` has to
+        /// refresh the metadata before it delegates.
+        fn with_metadata_seed(
+            extra: &[(&str, &str)],
+            num_partitions: i32,
+            transaction_v2: bool,
+            track_topic: bool,
+            with_topic_ids: bool,
+        ) -> Self {
             let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9000".to_string())]);
             for (key, value) in extra {
                 props.insert((*key).to_string(), (*value).to_string());
@@ -5021,18 +5092,13 @@ mod tests {
             .expect("these tests always enable idempotence");
             let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
 
-            metadata.add(TOPIC, time.milliseconds());
+            if track_topic {
+                metadata.add(TOPIC, time.milliseconds());
+            }
             // `metadata_update_with_ids` rather than `metadata_update_with`: the produce
             // path stamps the topic id from metadata onto the request, so a response has
             // to carry the same one to be matched back to its batch.
-            let update = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
-                "kafka-cluster",
-                1,
-                &HashMap::new(),
-                &HashMap::from([(TOPIC.to_string(), num_partitions)]),
-                &|_| None,
-                &HashMap::from([(TOPIC.to_string(), topic_id())]),
-            );
+            let update = topic_metadata_update(num_partitions, with_topic_ids);
             metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
             let batch_size = config.batch_size.max(1);
@@ -6485,6 +6551,172 @@ mod tests {
         drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect("commitTransaction");
+    }
+
+    /// What Java's `MockClient.poll` does for metadata (`MockClient.java:327-334`):
+    /// whenever an update is requested, apply `update` — the queued
+    /// `prepareMetadataUpdate` response, or the current snapshot standing in for
+    /// `updateWithCurrentMetadata`. This crate's `MockClient` has no metadata
+    /// updater, so the tests that need one run this beside the operation.
+    async fn with_metadata_responder<T>(
+        metadata: &ProducerMetadata,
+        time: &MockTime,
+        update: &crate::common::requests::MetadataResponse,
+        op: impl std::future::Future<Output = T>,
+    ) -> T {
+        let done = AtomicBool::new(false);
+        let op = async {
+            let out = op.await;
+            done.store(true, Ordering::SeqCst);
+            out
+        };
+        let responder = async {
+            while !done.load(Ordering::SeqCst) {
+                if metadata.update_requested() {
+                    metadata.update_with_current_request_version(update, false, time.milliseconds());
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(op, responder).0
+    }
+
+    /// The shared body of the two KIP-1319 `KafkaProducerTest` cases (6208dfc014,
+    /// with 930ebc5608's frozen `MockTime`): a Transaction V2 producer whose
+    /// metadata does not yet track [`TOPIC`] sends offsets for it. The refresh that
+    /// `sendOffsetsToTransaction` triggers returns `refreshed`; the `TxnOffsetCommit`
+    /// must then be at v6+ and carry the topic id.
+    async fn send_offsets_to_transaction_negotiates_v6(initial_has_topic_id: bool) {
+        let mut ctx = TxnProducerContext::with_metadata_seed(
+            &[("transactional.id", "some.id"), ("max.block.ms", "10000")],
+            1,
+            true,
+            false,
+            initial_has_topic_id,
+        );
+        const GROUP_ID: &str = "group";
+        let node = coordinator_node();
+        let partition = TopicPartition::new(TOPIC.to_string(), 0);
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 1, 5));
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender.client_mut().prepare_response_matcher(
+            Box::new(|request| {
+                let crate::common::requests::AbstractRequest::TxnOffsetCommit(request) = request else {
+                    panic!("expected a TxnOffsetCommit request, got {request}");
+                };
+                assert_eq!(request.data().group_id, GROUP_ID);
+                assert!(
+                    request.version() >= 6,
+                    "Expected TxnOffsetCommit at v6+, got {}",
+                    request.version()
+                );
+                assert_eq!(request.data().topics.len(), 1);
+                assert_eq!(request.data().topics[0].topic_id, topic_id());
+                true
+            }),
+            txn_offsets_commit_response(&[(partition.clone(), Errors::None)]),
+        );
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        ctx.producer.begin_transaction().expect("beginTransaction");
+        assert!(!ctx.metadata.contains_topic(TOPIC), "the topic starts out untracked");
+
+        let refreshed = topic_metadata_update(1, true);
+        let group_metadata = ConsumerGroupMetadataImpl::new(GROUP_ID);
+        let offsets = HashMap::from([(partition, OffsetAndMetadata::new(5).expect("a non-negative offset"))]);
+        let metadata = Arc::clone(&ctx.metadata);
+        let time = Arc::clone(&ctx.time);
+        drive(
+            &mut ctx.sender,
+            with_metadata_responder(
+                &metadata,
+                &time,
+                &refreshed,
+                ctx.producer.send_offsets_to_transaction(offsets, &group_metadata),
+            ),
+        )
+        .await
+        .expect("sendOffsetsToTransaction");
+        assert!(ctx.metadata.contains_topic(TOPIC), "awaitTopicMetadata tracks the topic");
+
+        drive(&mut ctx.sender, ctx.producer.commit_transaction())
+            .await
+            .expect("commitTransaction");
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testSendOffsetsToTransactionNegotiatesV6WhenMetadataKnowsTopicId`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendOffsetsToTransactionNegotiatesV6WhenMetadataKnowsTopicId"
+    )]
+    async fn test_send_offsets_to_transaction_negotiates_v6_when_metadata_knows_topic_id() {
+        send_offsets_to_transaction_negotiates_v6(true).await;
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testSendOffsetsToTransactionTriggersMetadataRefreshThenNegotiatesV6`:
+    /// the initial snapshot has the topic but no id; only the refresh
+    /// `sendOffsetsToTransaction` triggers supplies it.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendOffsetsToTransactionTriggersMetadataRefreshThenNegotiatesV6"
+    )]
+    async fn test_send_offsets_to_transaction_triggers_metadata_refresh_then_negotiates_v6() {
+        send_offsets_to_transaction_negotiates_v6(false).await;
+    }
+
+    /// `awaitTopicMetadata` waits at most `max.block.ms` for the refresh it
+    /// requests, and reports Java's `awaitUpdate` timeout when none arrives.
+    #[tokio::test]
+    async fn test_send_offsets_to_transaction_times_out_waiting_for_topic_metadata() {
+        let mut ctx = TxnProducerContext::with_metadata_seed(
+            &[("transactional.id", "some.id"), ("max.block.ms", "100")],
+            1,
+            true,
+            false,
+            false,
+        );
+        let node = coordinator_node();
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 1, 5));
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        ctx.producer.begin_transaction().expect("beginTransaction");
+
+        let offsets = HashMap::from([(
+            TopicPartition::new(TOPIC.to_string(), 0),
+            OffsetAndMetadata::new(5).expect("a non-negative offset"),
+        )]);
+        let error = drive(
+            &mut ctx.sender,
+            ctx.producer
+                .send_offsets_to_transaction(offsets, &ConsumerGroupMetadataImpl::new("group")),
+        )
+        .await
+        .expect_err("no metadata update arrives");
+        assert!(error.is_timeout_error(), "{error:?}");
+        assert_eq!(error.message(), "Failed to update metadata after 100 ms.");
+        assert!(
+            !ctx.transaction_manager.lock().unwrap().has_pending_offset_commits(),
+            "the manager is not reached when the metadata wait fails"
+        );
     }
 
     /// Translated from `KafkaProducerTest.testMeasureAbortTransactionDuration`
