@@ -20,8 +20,9 @@ namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
 /// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync (serial-blocking)
-/// <see cref="IProducerBackend"/>: <see cref="Send"/> serializes and blocks until acknowledged, returning
-/// the record metadata (Java <c>send(record).get()</c>). Bytes go over <c>&lt;byte[], byte[]&gt;</c> +
+/// <see cref="IProducerBackend"/>: <see cref="Send"/> serializes, sends, and blocks in the returned
+/// <see cref="KafkaFuture{T}"/>'s <c>Get()</c> until acknowledged, returning the record metadata (Java
+/// <c>send(record).get()</c>). Bytes go over <c>&lt;byte[], byte[]&gt;</c> +
 /// <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
 /// </summary>
 internal sealed class V3SyncProducerBackend : IProducerBackend
@@ -35,7 +36,7 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
     public PerfRecordMetadata Send(string topic, byte[]? key, byte[]? value)
     {
-        RecordMetadata meta = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
+        RecordMetadata meta = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)).Get();
         return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
     }
 

@@ -24,12 +24,12 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Public-surface tests for the M11/P4 <b>sync</b> producer SEND path —
-/// <see cref="IProducer.Send(ProducerRecord)"/>, which <b>blocks</b> and returns the
-/// <see cref="RecordMetadata"/> directly (= Java <c>send(record).get()</c>, decision #1) — exercised
+/// <see cref="IProducer.Send(ProducerRecord)"/>, which returns a <see cref="KafkaFuture{T}"/> whose
+/// <c>Get()</c> <b>blocks</b> and returns the <see cref="RecordMetadata"/> (= Java <c>send(record).get()</c>) — exercised
 /// through the public <see cref="MockProducer"/> / <see cref="IProducer"/> surface (PLAN §7). Covers:
 /// the auto-complete send returning the correct metadata; the manual (<c>autoComplete: false</c>)
 /// send driven to success / failure <b>from another thread</b> (the single-owner "another thread
-/// completes" pattern — sync <see cref="Send"/> blocks, so a helper thread resolves it); a non-ASCII
+/// completes" pattern — the sync <c>Get()</c> blocks, so a helper thread resolves it); a non-ASCII
 /// topic round-trip (UTF-8 guard, ffi §A3); and preconditions (before any native call).
 /// </summary>
 /// <remarks>
@@ -60,7 +60,7 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2)),
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -81,7 +81,7 @@ public sealed class PublicSyncProducerSendTests
             RecordMetadata metadata = null!;
             TestTimeout.Run(
                 () => metadata = producer.Send(
-                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0)),
+                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0)).Get(),
                 s_deadline);
 
             Assert.Equal(0, metadata.Partition);
@@ -89,16 +89,16 @@ public sealed class PublicSyncProducerSendTests
         }
     }
 
-    // ---- Manual mock: Send blocks until another thread resolves it ----
+    // ---- Manual mock: Get blocks until another thread resolves it ----
 
     [Fact]
     public async Task Send_ManualComplete_UnblocksAndReturnsMetadata()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        // Send BLOCKS on a worker thread until CompleteNext resolves it from THIS thread.
+        // Send(...).Get() BLOCKS on a worker thread until CompleteNext resolves it from THIS thread.
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -116,12 +116,12 @@ public sealed class PublicSyncProducerSendTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
         // Drive the pending send to a failure from this thread (code + custom message).
         DriveUntilResolved(() => producer.ErrorNext(2, "sync-mock-error"));
 
-        // The blocking Send faults with a flat KafkaException carrying the code AND message (DoD §3,
+        // The blocking Get faults with a flat KafkaException carrying the code AND message (DoD §3,
         // ffi §A5 — assert content, not just the type).
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
@@ -143,7 +143,7 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+                new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
 
         Assert.Equal(topic, metadata.Topic);

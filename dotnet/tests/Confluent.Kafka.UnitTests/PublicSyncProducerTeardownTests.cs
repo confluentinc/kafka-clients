@@ -28,11 +28,11 @@ namespace Confluent.Kafka.UnitTests;
 /// The M11/P4 <b>sync</b> producer teardown (decision #6, ffi §A2): <see cref="IProducer.Close"/>
 /// (graceful sync <c>Producer_close</c>, <b>surfaces</b> a close error) and
 /// <see cref="IDisposable.Dispose"/> (<b>swallows</b> it), both idempotent under a single one-shot
-/// latch. Because a producer used only through the sync surface never starts the send pump (only the
-/// async <see cref="AsyncKafkaProducer.Send"/> does), teardown degenerates to the <b>pump-less</b>
-/// path — <c>StopPump</c> finds no pump and skips only the <em>join</em>. Since M11/P8 (Blocker 2)
-/// the teardown <b>flush</b> is NOT skipped on that path: it is hoisted above the <c>pump is null</c>
-/// return, so a concurrently blocked <see cref="IProducer{TKey, TValue}.Send"/> is released instead of
+/// latch. Since M11/P4.2 (D4, superseding M11/P4 #2) a sync send starts the send pump, so after a
+/// send teardown stops and joins it; a producer that never sent takes the <b>pump-less</b> path —
+/// <c>StopPump</c> finds no pump and skips only the <em>join</em>. Since M11/P8 (Blocker 2) the
+/// teardown <b>flush</b> is NOT skipped on that path: it is hoisted above the <c>pump is null</c>
+/// return. A sender concurrently blocked in <see cref="KafkaFuture{T}.Get"/> is released instead of
 /// stranded. The regressions these tests guard are that teardown <b>returns without hanging</b>, that
 /// it releases a blocked sender, and that it stays idempotent / crash-free.
 /// </summary>
@@ -75,11 +75,11 @@ public sealed class PublicSyncProducerTeardownTests
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // A sync Send does NOT start the pump (it blocks on its own get), so close is still the
-        // pump-less path even after a send.
+        // A sync Send starts the pump (M11/P4.2 D4, superseding M11/P4 #2: its Get is completed there),
+        // so close stops and joins it after a send.
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+            () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
         Assert.Equal(0L, metadata.Offset);
 
@@ -170,13 +170,13 @@ public sealed class PublicSyncProducerTeardownTests
         // flush hoisted, teardown resolves the pending send and the sender is released.
         //
         // This is exactly the cross-thread pattern IProducer documents as intended and safe: one
-        // thread blocked in Send, another driving the mock.
+        // thread blocked in Send(...).Get(), another driving the mock.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
             Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        // Thread A: blocks inside Send until something resolves the pending completion.
+        // Thread A: blocks inside Get until something resolves the pending completion.
         Task<RecordMetadata> blocked = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
         // Wait until the send has actually registered, so Close cannot win the closed latch first
         // (which would make Send throw ObjectDisposedException and prove nothing). HistoryCount is
@@ -205,7 +205,7 @@ public sealed class PublicSyncProducerTeardownTests
     }
 
     // Spins until the mock reports at least one record in its history, i.e. the worker thread's
-    // Producer_send has landed and it is now blocked on the future's get. Bounded by the same
+    // Producer_send has landed and it is now blocked in the future's Get. Bounded by the same
     // deadline every other wait in this file uses.
     private static void WaitUntilSendRegistered(MockProducer<byte[], byte[]> producer)
     {

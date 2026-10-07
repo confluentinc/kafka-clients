@@ -112,8 +112,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly object _pumpLock = new object();
     private SendCompletionPump? _pump;
 
-    // The binding-side send accumulator + its batch thread (M11/P3.1), started lazily with the pump
-    // on the first ASYNC send. A sync-only producer starts neither. Guarded by the same _pumpLock
+    // The binding-side send accumulator + its batch thread (M11/P3.1), started lazily (with the pump,
+    // if absent) on the first ASYNC send. A sync-only producer never starts it. Guarded by the same _pumpLock
     // and the same ordering against the _closed latch, so teardown never races one into existence.
     private SendAccumulator? _accumulator;
 
@@ -623,101 +623,44 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a single record and <b>blocks</b> until the cluster acknowledges it, returning the
-    /// resolved <see cref="RecordMetadata"/> directly (the sync producer's worker; Java
-    /// <c>producer.send(record).get()</c> — M11/P4 decision #1/#2). Runs entirely on the caller's
-    /// thread with <b>no pump / TCS / callback</b>: preconditions → <c>Producer_send</c>
-    /// (call-scoped pinning, the core copies key/value synchronously, ffi §A4) → the <b>blocking</b>
-    /// <c>KafkaFuture_RecordMetadata_get</c> → copy-out → free every handle.
+    /// Sends a single record and returns once the core has <b>accepted</b> it, with a
+    /// <see cref="KafkaFuture{T}"/> for its delivery (the sync producer's worker; Java
+    /// <c>producer.send(record)</c>, which returns a <c>Future</c> — M11/P4.2). This thread never
+    /// reads the completion: the send-completion pump does, and completes the returned future.
     /// </summary>
     /// <remarks>
-    /// <b>Direct sync ABI, not sync-over-async (ffi §A1).</b> The blocking <c>get</c>'s
-    /// <c>block_on</c> runs inside the Rust core's own multi-thread runtime, parking only this
-    /// caller thread (deadlock-free — the Sender keeps running on the runtime's worker pool); it is
-    /// never routed through the async binding API. This is the sync-consumer precedent
-    /// (<c>consumer-threading.md §1.1</c>) applied to the send path — the sync producer starts
-    /// <b>no</b> completion pump (only the async <see cref="SendViaPump"/> does), so a sync-only
-    /// <see cref="NativeProducer"/> spins no background thread and its teardown degenerates to the
-    /// pump-less path (<see cref="Close"/>).
-    /// <para>
-    /// <b>Preconditions (ffi §A5), before any pin / P-Invoke.</b> A closed producer →
-    /// <see cref="ObjectDisposedException"/>. The null-record and serializer-throw preconditions run
-    /// in the generic client's <c>Send</c> skin above this carrier (M11/P5, PLAN §5.3), and the
-    /// null-topic / negative-partition preconditions live in the
-    /// <see cref="ProducerRecord{TKey, TValue}"/> constructor (Java-faithful), so
-    /// <paramref name="record"/> is an already-valid, already-serialized value here. No
-    /// <see cref="System.Threading.CancellationToken"/> (the producer has no <c>wakeup()</c> and the
-    /// sync surface takes none — decision #4).
-    /// </para>
-    /// <para>
-    /// <b>Frees every handle on every path (ffi §A2).</b> The future is destroyed in the outer
-    /// <c>finally</c> (get does not consume it); the metadata in the inner <c>finally</c>; the error
-    /// (on failure) by <see cref="KafkaException.FromHandle(IntPtr)"/>. On the failure branch the
-    /// metadata handle is null (exactly one of metadata / error is non-null), so its
-    /// <see cref="NativeMethods.RecordMetadataDestroy(IntPtr)"/> is a null-safe no-op.
-    /// </para>
-    /// <para>
-    /// <b>Single-owner TEARDOWN (decision #6).</b> Concurrent <see cref="Send"/> itself is
-    /// supported (the core's <c>Mutex</c> serializes, ffi §A1); it is teardown that is one-shot.
-    /// A blocked <see cref="Send"/> plus a concurrent
-    /// <see cref="Dispose"/> from another thread is misuse (like the sync consumer), yet still
-    /// memory-safe: the future is Arc-backed and independent of the producer's lifetime, and
-    /// <c>Producer_destroy</c> tolerates outstanding futures (P3 round-2 finding). The manual-mock
-    /// completion pattern (thread A blocked here, thread B calling
-    /// <see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/>) is the intended cross-thread use
-    /// and is serialized by the core's producer mutex (ffi §A1), exactly as the async pump's
-    /// <c>get_all</c> is unblocked by <c>complete_next</c> today.
-    /// </para>
-    /// <para>
-    /// <b>This is the sync surface's delivery-callback firing site (M14/P1), and it is the SAME
-    /// contract as the pump's — decision D5 spelled out.</b> There is no pump here, so
-    /// <paramref name="delivery"/> is invoked <b>inline on this caller's thread</b>, after the
-    /// blocking <c>get</c> has resolved and <b>before</b> this method returns or throws (decision
-    /// D3). The throw sources are deliberately <em>not</em> equivalent:
-    /// <list type="bullet">
-    /// <item><c>ProducerSendMarshal.Send</c> throwing on the <b>synchronous</b> <c>out_error</c> →
-    /// <b>no callback</b>. Nothing was accepted, and Java's <c>doSend</c> likewise re-throws from
-    /// <c>catch (KafkaException)</c> without invoking the callback
-    /// (<c>KafkaProducer.java:1073-1076</c>). The same holds, further up, for the
-    /// <see cref="ObjectDisposedException"/> here and for the null-record / null-callback /
-    /// serializer preconditions in the public <c>Send</c> skin.</item>
-    /// <item><c>KafkaFuture_RecordMetadata_get</c> returning an error → <b>callback fires</b>, with Java's
-    /// <c>-1</c> placeholder metadata, and <em>then</em> the throw. Java has already fired on the
-    /// I/O thread by the time <c>produceFuture.done()</c> releases the caller's
-    /// <c>future.get()</c>.</item>
-    /// <item>an unexpected managed or native failure in the narrow window <em>between</em> the
-    /// blocking <c>get</c> and <see cref="DeliveryRegistration.Fire"/> → <b>no callback</b>, and the
-    /// record <em>was</em> accepted. This surface's share of <b>recorded residual 3</b>
-    /// (<see cref="IDeliveryCallback"/>), in both of its conditions: the
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/> read of a reported error can fail for
-    /// sub-case (a)'s reason (a completion was in hand), and <c>KafkaFuture_RecordMetadata_get</c> is its
-    /// own separate native entry point, so the P/Invoke itself can fail for sub-case (b)'s reason
-    /// (none was). It is <b>not</b> a separate residual site: there is no batch here to fault
-    /// wholesale, so the throw simply propagates out of this method. The mirror-image window on the
-    /// async surface is <see cref="SendCompletionPump"/>'s batch-fault path.</item>
-    /// </list>
-    /// .NET has <b>no analogue of Java's <c>catch (ApiException)</c> row</b> — "the callback fires
-    /// inline <em>and</em> a failed future is returned without throwing"
-    /// (<c>KafkaProducer.java:1056-1068</c>) — because the core surfaces those failures through the
-    /// record's future, not through the synchronous out-param. That is a deviation forced by the
-    /// ABI, not a choice.
-    /// </para>
+    /// In order: <see cref="ThrowIfClosed"/> → <see cref="EnsurePump"/> → the send's
+    /// <see cref="SyncCompletion{T}"/>, allocated before <c>Producer_send</c> and owned by the pump
+    /// (for the guard on <c>Get</c> from that pump's thread) → <c>Producer_send</c> (call-scoped
+    /// pinning; the core copies key/value synchronously, ffi §A4, so the buffers are reusable on
+    /// return) → <see cref="SendCompletionPump.EnqueueSingle"/>, which takes ownership of the future
+    /// when it returns. If the enqueue throws, the future is destroyed here, unread, and the throw
+    /// propagates (recorded residual 4 on <see cref="IDeliveryCallback"/>). No
+    /// <see cref="System.Threading.CancellationToken"/> on the sync surface (decision #4).
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
     /// <param name="delivery">
     /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
-    /// <c>Send(record)</c> path. See the remarks for exactly which outcomes invoke it.
+    /// <c>Send(record)</c> path. The pump invokes it before it completes the returned future.
     /// </param>
-    /// <returns>The published record's metadata.</returns>
+    /// <returns>The send's delivery handle; its <c>Get()</c> returns the record's metadata.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a synchronous send failure or a delivery failure.</exception>
-    internal RecordMetadata Send(SerializedProducerRecord record, DeliveryRegistration? delivery)
+    /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
+    internal KafkaFuture<RecordMetadata> Send(SerializedProducerRecord record, DeliveryRegistration? delivery)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the null-record + serializer-throw
         // preconditions run in the generic client's Send skin above this carrier (M11/P5,
         // PLAN §5.3), so `record` here is an already-serialized value type; this layer applies only
         // the disposed guard. No CancellationToken on the sync surface (decision #4).
         ThrowIfClosed();
+
+        // D4: the sync surface starts the pump lazily, on its first Send; the pump reads every single.
+        SendCompletionPump pump = EnsurePump();
+
+        // Allocated BEFORE Producer_send, so an allocation failure here throws with nothing accepted.
+        // The owner is the pump: Get() on that pump's own thread for a not-yet-completed send throws
+        // instead of deadlocking (D9).
+        var completion = new SyncCompletion<RecordMetadata>(pump);
 
         // The ABI maps null partition/timestamp to its own -1 sentinels.
         int partition = record.Partition ?? -1;
@@ -732,60 +675,21 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         try
         {
-            // Blocking get on THIS thread (block_on in the core's runtime — deadlock-free, ffi §A1).
-            // On success: metadata non-null, getError null. On failure: metadata null, getError
-            // non-null (exactly one is non-null, per the header).
-            IntPtr metadata = NativeMethods.FutureRecordMetadataGet(future, out IntPtr getError);
-
-            KafkaException? failure = KafkaException.FromHandle(getError);
-            if (failure is not null)
-            {
-                // D5: the completion ARRIVED and reported a failure, so the delivery callback is
-                // owed — fired with Java's -1 placeholder metadata (D2/D6), BEFORE the throw (D3),
-                // exactly as Java has already fired on the I/O thread before the caller's
-                // future.get() unblocks. metadata is null on this branch → nothing to copy out or
-                // free (the future is freed in the outer finally).
-                delivery?.Fire(null, failure);
-                throw failure;
-            }
-
-            RecordMetadata result;
-            try
-            {
-                // Copy every field out (topic before the handle dies, ffi §A3) — the result holds no
-                // native-backed reference.
-                result = RecordMetadataMarshal.CopyOut(metadata);
-            }
-            catch (Exception exception)
-            {
-                // The completion arrived (the send succeeded) but its metadata could not be
-                // marshalled. Symmetric with the pump's marshal-failure site: the callback is still
-                // owed, and the two surfaces report the same FAILURE but not the same object here —
-                // this method's caller gets `exception` raw (`throw;` preserves the original stack),
-                // while Fire coerces it into the KafkaException its signature demands (the original
-                // survives as InnerException). The ONLY path where the two differ; every
-                // KafkaException outcome is passed to both unwrapped.
-                // Note this catch guards CopyOut ONLY — it deliberately
-                // does not enclose the success-path Fire below, so it cannot shadow Fire's own
-                // no-throw guard (ffi §A6 form C: exactly one guard, inside Fire).
-                delivery?.Fire(null, exception);
-                throw;
-            }
-            finally
-            {
-                NativeMethods.RecordMetadataDestroy(metadata);
-            }
-
-            // D3: the callback runs BEFORE this method returns.
-            delivery?.Fire(result, null);
-            return result;
+            // Ownership of `future` transfers to the pump only when this returns normally (it also
+            // returns normally when the gate has closed: the pump then faults the completion and
+            // frees the future itself).
+            pump.EnqueueSingle(future, completion, delivery);
         }
-        finally
+        catch
         {
-            // get does NOT consume the future (ffi §A2) — free it on every path (singular destroy,
-            // no 1-element array).
+            // Recorded residual 4 (IDeliveryCallback): the core accepted the record, but its future
+            // never reached the pump, so nothing will read its completion. Destroy it unread; no
+            // callback.
             NativeMethods.FutureRecordMetadataDestroy(future);
+            throw;
         }
+
+        return new KafkaFuture<RecordMetadata>(completion);
     }
 
     /// <summary>
@@ -982,11 +886,45 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns the send accumulator, starting it — and the completion pump it feeds — on first use
-    /// (lazy: a producer driven only through the sync surface spins neither thread). Refuses to
-    /// start once the producer is closing: the <see cref="ThrowIfClosed"/> under
-    /// <see cref="_pumpLock"/> is ordered against the <see cref="TryBeginClose"/> latch so teardown
-    /// never races a fresh thread into existence (M11/P3 PLAN §6.3).
+    /// Returns the send-completion pump, starting it on first use (D4: the sync <see cref="Send"/>
+    /// starts it lazily, so a send-less producer spins no thread). Refuses to start once the producer
+    /// is closing, with the same lock and latch ordering as <see cref="EnsureAccumulator"/>: both
+    /// create the pump only through <see cref="EnsurePumpLocked"/>.
+    /// </summary>
+    private SendCompletionPump EnsurePump()
+    {
+        SendCompletionPump? pump = Volatile.Read(ref _pump);
+        if (pump is not null)
+        {
+            return pump;
+        }
+
+        lock (_pumpLock)
+        {
+            return EnsurePumpLocked();
+        }
+    }
+
+    /// <summary>
+    /// The pump's single creation site; the caller holds <see cref="_pumpLock"/>. The
+    /// <see cref="ThrowIfClosed"/> under that lock is ordered against the <see cref="TryBeginClose"/>
+    /// latch, so teardown never races a fresh pump into existence (M11/P3 PLAN §6.3).
+    /// </summary>
+    private SendCompletionPump EnsurePumpLocked()
+    {
+        // Re-check the latch under the lock: if teardown won it, refuse (no pump for a closing
+        // producer — teardown would never join its thread).
+        ThrowIfClosed();
+        return _pump ??= new SendCompletionPump();
+    }
+
+    /// <summary>
+    /// Returns the send accumulator, starting it — and, if no sync send has yet, the completion pump
+    /// it feeds — on first use (lazy: a producer driven only through the sync surface never starts
+    /// it). Refuses to start once the producer is closing: the <see cref="ThrowIfClosed"/> under
+    /// <see cref="_pumpLock"/> (in <see cref="EnsurePumpLocked"/>) is ordered against the
+    /// <see cref="TryBeginClose"/> latch so teardown never races a fresh thread into existence
+    /// (M11/P3 PLAN §6.3).
     /// </summary>
     /// <remarks>
     /// The pump is created <b>first</b> and handed to the accumulator, so the accumulator can never
@@ -1003,10 +941,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         lock (_pumpLock)
         {
-            // Re-check the latch under the lock: if teardown won it, refuse (no accumulator for a
-            // closing producer — teardown would never join its thread).
-            ThrowIfClosed();
-            SendCompletionPump pump = _pump ??= new SendCompletionPump();
+            // EnsurePumpLocked re-checks the latch first: if teardown won it, refuse (no accumulator
+            // for a closing producer — teardown would never join its thread).
+            SendCompletionPump pump = EnsurePumpLocked();
 
             // Every accumulator setting comes from the environment, read here. Nothing is taken
             // from the producer's config map (SendAccumulatorSettings.FromEnvironment documents

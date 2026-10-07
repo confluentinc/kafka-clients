@@ -164,30 +164,33 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         try
         {
             ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
-            // BLOCKS on the handler thread until the producer's future resolves (Java
-            // send(record).get(); the sync-consumer-poll precedent). No Task.Run.
+            // Send returns once the core has accepted the record; Get() then BLOCKS on the handler
+            // thread until the producer's future resolves (Java send(record).get(); the
+            // sync-consumer-poll precedent). No Task.Run.
             //
             // This wait is INTENTIONALLY UNBOUNDED (M11/P8 decision D-3 / option S2) — unlike the
             // async servicer, which caps at 120 s, and unlike Python's future.result(timeout=120).
             //
             // Why: the sync surface exposes no cancellation or interruption primitive (the producer
-            // has no wakeup(), so IProducer.Send takes no CancellationToken — M11/P4 decision #4).
-            // The only way to bound it here is to offload onto a pool thread with Task.Run and
-            // WaitAsync, which would (a) break this servicer's stated no-Task.Run contract two lines
-            // up, and (b) leave the abandoned pool thread parked until the send resolves anyway —
-            // buying a structured error at the cost of the very thread-parking it claims to avoid.
+            // has no wakeup(), so IProducer.Send takes no CancellationToken — M11/P4 decision #4 —
+            // and KafkaFuture has no timed Get yet, M11/P4.2 FU-4). The only way to bound it here is
+            // to offload onto a pool thread with Task.Run and WaitAsync, which would (a) break this
+            // servicer's stated no-Task.Run contract above, and (b) leave the abandoned pool thread
+            // parked in Get until the send resolves anyway — buying a structured error at the cost
+            // of the very thread-parking it claims to avoid.
             //
             // Accepted consequence: a permanently stuck send on the SYNC dotnet arm hangs that RPC,
             // and therefore that harness scenario, rather than returning a diagnosable TIMEOUT.
             // Accepted for now; revisit if it is ever observed. This is a recorded deviation from
             // Python and from the async servicer, not an oversight.
             //
-            // On the SYNC surface the delivery callback fires INLINE on this handler thread, before
-            // Send returns (M14/P1) — so by the time the response below is built, the entry is
+            // On the SYNC surface the delivery callback fires on the producer's send-completion
+            // (pump) thread, but BEFORE Get() returns (Java's order: callbacks fire before the future
+            // completes; M11/P4.2) — so by the time the response below is built, the entry is
             // already in _callbackLog.
             RecordMetadata metadata = request.WithCallback
-                ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
-                : producer.Send(record);
+                ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId)).Get()
+                : producer.Send(record).Get();
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
         catch (Exception ex)

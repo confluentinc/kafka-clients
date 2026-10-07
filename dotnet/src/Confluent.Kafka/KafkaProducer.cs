@@ -98,7 +98,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public RecordMetadata Send(ProducerRecord<TKey, TValue> record)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record)
     {
         // Precondition (ffi §A5): null record BEFORE any serialize / P-Invoke.
         if (record is null)
@@ -110,7 +110,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public RecordMetadata Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback)
     {
         // Preconditions (ffi §A5) in Java's own order: the RECORD first — Java's doSend is reached
         // through interceptors.onSend(record), which touches the record before the callback is ever
@@ -138,7 +138,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// validates its own arguments first, so this deliberately does <b>not</b> re-check them (a
     /// second guard would shadow the real one).
     /// </summary>
-    private RecordMetadata SendValidated(ProducerRecord<TKey, TValue> record, IDeliveryCallback? callback)
+    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, IDeliveryCallback? callback)
     {
         // Closed-check BEFORE the serialize (M11/P8, Minor 8), Java-faithful: Java's
         // KafkaProducer.doSend calls throwIfProducerClosed() before serializing the key/value.
@@ -152,7 +152,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
         // Serialize the key/value to bytes on THIS thread (a serializer throw surfaces synchronously
         // as a SerializationException — Java-faithful, and per D5 fires no callback), then forward
-        // the bytes carrier to the blocking send.
+        // the bytes carrier to the native send.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
 

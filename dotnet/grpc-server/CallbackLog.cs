@@ -42,9 +42,8 @@ namespace Confluent.Kafka.GrpcServer;
 /// <em>callback-dispatcher thread</em> (ffi-marshalling.md §B6 — a foreign thread). The
 /// delivery callback is <em>managed-only</em> (ffi-marshalling.md §A6 form C) and fires on
 /// whichever thread reads the send's completion: the producer's <b>send-completion pump
-/// thread</b> on the async servicer, and a gRPC handler thread blocked inside <c>Send</c> on the
-/// sync one — one such thread per concurrent send, since concurrent <c>Send</c> on one
-/// <c>IProducer</c> is supported and unsynchronized. Meanwhile <c>GetCallbackLog</c> is served on
+/// thread</b>, on both the async and the sync servicer (M11/P4.2) — one per producer, and the
+/// servicer hosts several producers, each logging here. Meanwhile <c>GetCallbackLog</c> is served on
 /// a gRPC worker thread, and the thread driving the triggering op is a further context. None of
 /// those are reliably the same thread, so the log needs real synchronization. What the lock covers
 /// is <em>appends arriving from those threads onto this one shared log</em> — the contended state

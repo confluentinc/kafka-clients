@@ -677,10 +677,6 @@ internal sealed class SendCompletionPump
     /// exception and invokes no callback: recorded residual 3 on <see cref="IDeliveryCallback"/>. Why
     /// firing from the fault path is not the fix is stated under that residual.
     /// </para>
-    /// <para>
-    /// Until <c>NativeProducer.Send</c> is switched onto this path (M11/P4.2 S3), the same
-    /// read/fire/complete sequence also runs there, on the caller's thread.
-    /// </para>
     /// </remarks>
     private static void ProcessSingle(PendingSyncSend single)
     {

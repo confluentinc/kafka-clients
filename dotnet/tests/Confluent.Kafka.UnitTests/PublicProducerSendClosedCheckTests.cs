@@ -159,7 +159,7 @@ public sealed class PublicProducerSendClosedCheckTests
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, value);
 
-        RecordMetadata metadata = producer.Send(Record());
+        RecordMetadata metadata = producer.Send(Record()).Get();
 
         Assert.Equal(Topic, metadata.Topic);
         Assert.Equal(1, key.InvocationCount);

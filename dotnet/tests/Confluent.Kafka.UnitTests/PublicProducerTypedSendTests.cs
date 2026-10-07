@@ -52,7 +52,7 @@ public sealed class PublicProducerTypedSendTests
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)),
+            () => metadata = producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -88,7 +88,7 @@ public sealed class PublicProducerTypedSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(
-                Topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 1)),
+                Topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 1)).Get(),
             s_deadline);
 
         Assert.Equal(1, metadata.Partition);
@@ -109,7 +109,7 @@ public sealed class PublicProducerTypedSendTests
         // inverse of the consumer's not-invoked short-circuit), returns null → the absent sentinel.
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: null)),
+            () => metadata = producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: null)).Get(),
             s_deadline);
 
         Assert.Equal(1, keySer.InvocationCount);
@@ -145,7 +145,7 @@ public sealed class PublicProducerTypedSendTests
         // An empty string serializes to a non-null empty byte[] → present-but-empty (distinct from
         // the null → absent case above).
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<string, string>(Topic, value: string.Empty, key: "k")),
+            () => producer.Send(new ProducerRecord<string, string>(Topic, value: string.Empty, key: "k")).Get(),
             s_deadline);
 
         Assert.Equal(1, valueSer.InvocationCount);
@@ -165,10 +165,10 @@ public sealed class PublicProducerTypedSendTests
         // A null long? is a tombstone (serializer invoked → null bytes → absent); a present 0L is a
         // value (serializer invoked → 8 bytes → present). Both invoke the serializer (invoke-on-null).
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<string, long?>(Topic, value: null, key: "k")),
+            () => producer.Send(new ProducerRecord<string, long?>(Topic, value: null, key: "k")).Get(),
             s_deadline);
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<string, long?>(Topic, value: 0L, key: "k")),
+            () => producer.Send(new ProducerRecord<string, long?>(Topic, value: 0L, key: "k")).Get(),
             s_deadline);
 
         Assert.Equal(2, valueSer.InvocationCount);

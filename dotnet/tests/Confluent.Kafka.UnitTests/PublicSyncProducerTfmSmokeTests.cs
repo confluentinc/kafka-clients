@@ -46,7 +46,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -62,7 +62,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -78,7 +78,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(2, "tfm-error"));
 

@@ -67,16 +67,15 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] key = Encoding.UTF8.GetBytes("key");
         byte[] value = Encoding.UTF8.GetBytes("value-original");
 
-        RecordMetadata first = null!;
+        KafkaFuture<RecordMetadata> firstFuture = default;
         TestTimeout.Run(
-            () => first = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
+            () => firstFuture = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
             s_deadline);
-        Assert.Equal(0L, first.Offset);
 
-        // Mutate the caller's buffers AFTER Send returns. The core copied key/value into the batch
-        // synchronously DURING Producer_send (ffi §A4), and sync Send returns only after the send
-        // resolved — so the mutation cannot affect the produced record. A second send reusing the
-        // mutated buffers succeeds independently (proving buffer reuse is safe).
+        // Mutate the caller's buffers AFTER Send returns and BEFORE its Get. The core copied key/value
+        // into the batch synchronously DURING Producer_send (ffi §A4), so the buffers are reusable the
+        // moment Send returns — the mutation cannot affect the produced record. A second send reusing
+        // the mutated buffers succeeds independently (proving buffer reuse is safe).
         for (int i = 0; i < value.Length; i++)
         {
             value[i] = 0xFF;
@@ -87,9 +86,13 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             key[i] = 0xEE;
         }
 
+        RecordMetadata first = null!;
+        TestTimeout.Run(() => first = firstFuture.Get(), s_deadline);
+        Assert.Equal(0L, first.Offset);
+
         RecordMetadata second = null!;
         TestTimeout.Run(
-            () => second = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
+            () => second = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)).Get(),
             s_deadline);
         Assert.Equal(1L, second.Offset);
     }
@@ -134,7 +137,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         for (int i = 0; i < SendCount; i++)
         {
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated per
-            // send, so any value-sized allocation here would come from the send path itself.
+            // send, so any value-sized allocation here would come from the send path itself. The
+            // future is discarded: the measurement is the send itself (its Get is not on this path).
             _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
         }
 

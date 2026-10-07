@@ -27,8 +27,8 @@ namespace Confluent.Kafka.UnitTests;
 /// not on <see cref="IProducer"/>): <see cref="MockProducer.CompleteNext"/> /
 /// <see cref="MockProducer.ErrorNext"/> / <see cref="MockProducer.HistoryCount()"/> /
 /// <see cref="MockProducer.Clear"/> — Java <c>MockProducer</c> / Python <c>_MockProducerMixin</c>
-/// parity, mirroring <c>PublicProducerMockControlTests</c> for the async mock (PLAN §7). Because sync
-/// <see cref="IProducer.Send"/> blocks, the pending-send helpers are driven from a second thread.
+/// parity, mirroring <c>PublicProducerMockControlTests</c> for the async mock (PLAN §7). Because the sync
+/// <see cref="KafkaFuture{T}.Get"/> blocks, the pending-send helpers are driven from a second thread.
 /// </summary>
 public sealed class PublicSyncProducerMockControlTests
 {
@@ -36,7 +36,7 @@ public sealed class PublicSyncProducerMockControlTests
 
     private const string Topic = "sync-mock-control-topic";
 
-    // ---- CompleteNext / ErrorNext (cross-thread: Send blocks, helper resolves) ----
+    // ---- CompleteNext / ErrorNext (cross-thread: Get blocks, helper resolves) ----
 
     [Fact]
     public async Task CompleteNext_ResolvesPendingSend()
@@ -44,7 +44,7 @@ public sealed class PublicSyncProducerMockControlTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -71,7 +71,7 @@ public sealed class PublicSyncProducerMockControlTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(2, "sync-mock-error"));
 
@@ -103,7 +103,7 @@ public sealed class PublicSyncProducerMockControlTests
         {
             int captured = i;
             TestTimeout.Run(
-                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0)),
+                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0)).Get(),
                 s_deadline);
         }
 
@@ -117,7 +117,7 @@ public sealed class PublicSyncProducerMockControlTests
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 
@@ -141,7 +141,7 @@ public sealed class PublicSyncProducerMockControlTests
 
     /// <summary>
     /// Retries <paramref name="drive"/> from the test thread until it resolves the worker thread's
-    /// pending, blocking <see cref="IProducer.Send"/> (returns <see langword="true"/>), or the
+    /// pending send, blocked in <see cref="KafkaFuture{T}.Get"/> (returns <see langword="true"/>), or the
     /// deadline elapses (a fail-fast hang guard). See
     /// <c>PublicSyncProducerSendTests.DriveUntilResolved</c> for why the spin is needed.
     /// </summary>

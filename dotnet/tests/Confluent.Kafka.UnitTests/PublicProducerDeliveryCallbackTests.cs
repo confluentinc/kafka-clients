@@ -35,10 +35,10 @@ namespace Confluent.Kafka.UnitTests;
 /// <remarks>
 /// <para>
 /// <b>Every behavioural test runs against BOTH flavors.</b> The sync and async send paths are
-/// separate code — the sync send blocks on the record's own future, the async one hands it to the
-/// completion pump — so "fixed in one flavor only" is the natural bug here (PLAN §10 risk 6). The
+/// separate code — the sync send hands the pump the record's own future, the async one reaches it
+/// through the send accumulator in batches — so "fixed in one flavor only" is the natural bug here (PLAN §10 risk 6). The
 /// <c>Flavor</c> harness at the bottom normalizes the two into one shape (the sync flavor's
-/// blocking <c>Send</c> runs on a worker thread and its result is surfaced as a
+/// blocking <c>Send(...).Get()</c> runs on a worker thread and its result is surfaced as a
 /// <see cref="Task{TResult}"/>), so each test body is written once and driven twice.
 /// </para>
 /// <para>
@@ -220,7 +220,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task Ordering_Sync_CallbackRunsBeforeSendReturns()
     {
         // The sync flavor's equivalent probe: the callback must already have run at the instant the
-        // blocking Send returns. A deferred / queued invocation would make this false or racy.
+        // blocking Get returns (M11/P4.2: the probe moved from Send to Get, which is now the wait). A
+        // callback fired after the future completes would make this false or racy.
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
@@ -229,7 +230,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task<RecordMetadata> sendTask = Task.Run(() =>
         {
             RecordMetadata metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             invokedAtReturn = callback.Completions.Count == 1;
             return metadata;
         });
@@ -237,13 +238,13 @@ public sealed class PublicProducerDeliveryCallbackTests
         DriveUntilResolved(producer.CompleteNext);
         await WithTimeout(sendTask);
 
-        Assert.True(invokedAtReturn, "the delivery callback had not run when the blocking Send returned");
+        Assert.True(invokedAtReturn, "the delivery callback had not run when the blocking Get returned");
     }
 
     [Fact]
     public async Task Ordering_Sync_CallbackRunsBeforeSendThrows()
     {
-        // The failure half of the same rule: on a delivery failure the callback fires and THEN Send
+        // The failure half of the same rule: on a delivery failure the callback fires and THEN Get
         // throws (Java has already fired on the I/O thread before future.get() unblocks).
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
@@ -255,7 +256,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             try
             {
                 producer.Send(
-                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
+                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             }
             catch (KafkaException)
             {
@@ -266,7 +267,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         DriveUntilResolved(() => producer.ErrorNext(2, "ordering-throw"));
         await TestTimeout.Run(() => sendTask, s_deadline);
 
-        Assert.True(invokedAtThrow, "the delivery callback had not run when the blocking Send threw");
+        Assert.True(invokedAtThrow, "the delivery callback had not run when the blocking Get threw");
     }
 
     // ---- 4. Error path (D5/D6): non-null placeholder metadata + the exception ----
@@ -613,7 +614,26 @@ public sealed class PublicProducerDeliveryCallbackTests
             surface, typeof(ProducerRecord<byte[], byte[]>), typeof(IDeliveryCallback));
 
         Assert.NotNull(method);
-        Assert.Equal(typeof(RecordMetadata), method!.ReturnType);
+
+        // M11/P4.2: the sync send returns Java's Future — a KafkaFuture whose Get() blocks for the
+        // delivery. Pinned by reflection: a statement `producer.Send(r, cb);` compiles against either
+        // shape, so behavioural tests alone do not fix the declared type.
+        Assert.Equal(typeof(KafkaFuture<RecordMetadata>), method!.ReturnType);
+    }
+
+    [Theory]
+    [InlineData(typeof(IProducer<byte[], byte[]>))]
+    [InlineData(typeof(KafkaProducer<byte[], byte[]>))]
+    [InlineData(typeof(MockProducer<byte[], byte[]>))]
+    public void SyncSurfaces_PlainSend_ReturnsKafkaFuture(Type surface)
+    {
+        // The callback-less overload carries the SAME shape as the callback overload above (M11/P4.2):
+        // the two overloads are one Java `send` contract, so they must not drift apart. The sync twin
+        // of AsyncSurfaces_PlainSend_ReturnsTheTwoStageShape.
+        MethodInfo? method = FindSend(surface, typeof(ProducerRecord<byte[], byte[]>));
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(KafkaFuture<RecordMetadata>), method!.ReturnType);
     }
 
     [Theory]
@@ -906,9 +926,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     /// test body is written once and run against both (PLAN §10 risk 6).
     /// </summary>
     /// <remarks>
-    /// The sync flavor's <c>Send</c> <b>blocks</b>, so it is fired on a worker thread and its result
-    /// surfaced as a <see cref="Task{TResult}"/>; awaiting that task therefore means "the blocking
-    /// <c>Send</c> has returned", which is the sync analogue of "the awaiter observed the result".
+    /// The sync flavor's <c>Get</c> <b>blocks</b>, so <c>Send(...).Get()</c> is fired on a worker thread and its
+    /// result surfaced as a <see cref="Task{TResult}"/>; awaiting that task therefore means "the blocking
+    /// <c>Get</c> has returned", which is the sync analogue of "the awaiter observed the result".
     /// <see cref="SendInline"/> is the opposite: it calls <c>Send</c> on the <em>calling</em> thread
     /// so a synchronous precondition throw is directly observable by
     /// <see cref="Assert.Throws{T}(Action)"/>.
@@ -950,11 +970,12 @@ public sealed class PublicProducerDeliveryCallbackTests
 
             internal override Task<RecordMetadata> Send(
                 ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
-                Task.Run(() => _producer.Send(record, callback));
+                Task.Run(() => _producer.Send(record, callback).Get());
 
+            // The future is discarded: every caller asserts a synchronous throw out of Send itself.
             internal override void SendInline(
                 ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>
-                _producer.Send(record, callback!);
+                _ = _producer.Send(record, callback!);
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 

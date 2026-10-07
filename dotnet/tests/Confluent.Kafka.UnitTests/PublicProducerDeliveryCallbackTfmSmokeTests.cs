@@ -70,12 +70,13 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         TestTimeout.Run(
             () => metadata = producer.Send(
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0),
-                callback),
+                callback).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
 
-        // The sync flavor invokes the callback inline, before Send returned.
+        // The sync flavor invokes the callback on the pump thread, before Get returned (M11/P4.2 D3,
+        // superseding M14/P1 D3's inline-on-the-caller).
         Assert.Equal(1, callback.Count);
         Assert.Null(callback.LastException);
         Assert.Equal(Topic, callback.LastMetadata!.Topic);
