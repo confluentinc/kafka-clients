@@ -846,9 +846,11 @@ impl<K, V> KafkaProducer<K, V> {
         // the caller as something for which `is_kafka_error()` is `false`.
         //
         // The `close(Duration.ofMillis(0), true)` half of Java's catch (KAFKA-2121)
-        // has nothing to do here: every fallible step in `new_inner`
-        // precedes the `Selector` / `NetworkClient` / sender-task construction, so
-        // no socket and no spawned task can leak.
+        // matters for one resource only. No socket and no spawned task can leak: the
+        // sender task is spawned by the final, infallible step, and an unconnected
+        // `Selector` / `NetworkClient` dropped on an error owns no socket. But a
+        // configured custom partitioner must be closed (`KafkaProducer.java:1533`),
+        // and `new_inner` does that for every fallible step after it is configured.
         Self::new_inner(config, key_serializer, value_serializer)
             .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
@@ -989,13 +991,14 @@ impl<K, V> KafkaProducer<K, V> {
         //     (matching Java's ordering) and before the `RecordAccumulator`, whose
         //     adaptive-partitioning flag is gated on the partitioner's absence below.
         //
-        //     KAFKA-2121: Java's constructor `catch (Throwable)` closes an
-        //     already-constructed partitioner. Here, `resolve_partitioner` fails
-        //     only before resolving one (a partitioner written for other record
-        //     types), `configure` is infallible, and every other fallible `?` step
-        //     runs *before* this point, so no reachable fallible step follows the
-        //     partitioner's construction; the normal `close()` path is therefore the
-        //     only one, and no close-on-error path is needed.
+        //     KAFKA-2121: Java's constructor `catch (Throwable)` calls
+        //     `close(Duration.ofMillis(0), true)`, which closes an already-configured
+        //     partitioner (`KafkaProducer.java:519-523` -> `:1533`).
+        //     `resolve_partitioner` fails only before resolving one (a partitioner
+        //     written for other record types), and `configure` is infallible. Every
+        //     fallible step *after* this point lives in `build_accumulator`, and its
+        //     error closes the partitioner before propagating, so a step added there
+        //     later is covered too.
         let mut partitioner = config.resolve_partitioner::<K, V>()?;
         if let Some(partitioner) = partitioner.as_mut() {
             let mut configs = config.originals.clone();
@@ -1003,46 +1006,24 @@ impl<K, V> KafkaProducer<K, V> {
             partitioner.configure(&configs);
         }
 
-        // 10. Create BufferPool and RecordAccumulator, threading the shared
-        //    `Arc<Metrics>` and `time` into both (KafkaProducer.java:438
-        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
-        //    As per Kafka configuration documentation, batch.size may be set to 0
-        //    to explicitly disable batching, which in practice uses a batch size of 1.
-        let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(
-            config.buffer_memory,
-            batch_size as usize,
-            Arc::clone(&metrics),
-            Arc::clone(&time),
-            Self::PRODUCER_METRIC_GROUP_NAME,
-        ));
-        let accumulator = Arc::new(RecordAccumulator::with_log_context(
-            batch_size,
+        let accumulator = match Self::build_accumulator(
+            &config,
             compression,
-            config.linger_ms as i32,
-            config.retry_backoff_ms,
-            config.retry_backoff_max_ms,
             delivery_timeout_ms,
-            PartitionerConfig::new(
-                // Java `KafkaProducer.java:428-433`: "There is no need to do work
-                // required for adaptive partitioning, if we use a custom
-                // partitioner." So adaptive partitioning is enabled only when no
-                // custom partitioner is present AND the config opts in.
-                partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
-                config.partitioner_availability_timeout_ms,
-                // KIP-1123 (`KafkaProducer.java:437-438`): passed through whether or
-                // not a custom partitioner is set, as Java does, so a blank
-                // `client.rack` with `partitioner.rack.aware=true` fails construction
-                // either way.
-                config.partitioner_rack_aware,
-                &config.client_rack,
-            )?,
-            Arc::clone(&metrics),
-            Self::PRODUCER_METRIC_GROUP_NAME,
-            buffer_pool,
-            transaction_manager.clone(),
-            log_context.clone(),
-        ));
+            partitioner.is_none(),
+            &metrics,
+            &time,
+            &transaction_manager,
+            &log_context,
+        ) {
+            Ok(accumulator) => accumulator,
+            Err(error) => {
+                if let Some(partitioner) = partitioner.as_ref() {
+                    partitioner.close();
+                }
+                return Err(error);
+            },
+        };
 
         // 11. Wire the produce-throttle-time sensor into the network client.
         //    Java creates the throttle sensor (`Sender.throttleTimeSensor(...)`)
@@ -1077,6 +1058,64 @@ impl<K, V> KafkaProducer<K, V> {
                 .build()
                 .expect("KafkaProducerClientOptionsBuilder::build: every mandatory parameter is set above"),
         ))
+    }
+
+    /// Step 10 of [`new_inner`](Self::new_inner): the `BufferPool` and the
+    /// `RecordAccumulator`, i.e. every fallible constructor step that follows the
+    /// custom partitioner's `configure`. `new_inner` closes the partitioner when this
+    /// returns an error, as Java's constructor `catch` does (KAFKA-2121), so a
+    /// fallible step added after the partitioner belongs here.
+    #[expect(clippy::too_many_arguments)]
+    fn build_accumulator(
+        config: &ProducerConfig,
+        compression: Compression,
+        delivery_timeout_ms: i32,
+        no_custom_partitioner: bool,
+        metrics: &Arc<Metrics>,
+        time: &Arc<dyn Time>,
+        transaction_manager: &Option<Arc<Mutex<TransactionManager>>>,
+        log_context: &LogContext,
+    ) -> Result<Arc<RecordAccumulator>, Error> {
+        // 10. Create BufferPool and RecordAccumulator, threading the shared
+        //    `Arc<Metrics>` and `time` into both (KafkaProducer.java:438
+        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
+        //    As per Kafka configuration documentation, batch.size may be set to 0
+        //    to explicitly disable batching, which in practice uses a batch size of 1.
+        let batch_size = config.batch_size.max(1);
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(metrics),
+            Arc::clone(time),
+            Self::PRODUCER_METRIC_GROUP_NAME,
+        ));
+        Ok(Arc::new(RecordAccumulator::with_log_context(
+            batch_size,
+            compression,
+            config.linger_ms as i32,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            delivery_timeout_ms,
+            PartitionerConfig::new(
+                // Java `KafkaProducer.java:428-433`: "There is no need to do work
+                // required for adaptive partitioning, if we use a custom
+                // partitioner." So adaptive partitioning is enabled only when no
+                // custom partitioner is present AND the config opts in.
+                no_custom_partitioner && config.partitioner_adaptive_partitioning_enable,
+                config.partitioner_availability_timeout_ms,
+                // KIP-1123 (`KafkaProducer.java:450-455`): passed through whether or
+                // not a custom partitioner is set, as Java does, so a blank
+                // `client.rack` with `partitioner.rack.aware=true` fails construction
+                // either way.
+                config.partitioner_rack_aware,
+                &config.client_rack,
+            )?,
+            Arc::clone(metrics),
+            Self::PRODUCER_METRIC_GROUP_NAME,
+            buffer_pool,
+            transaction_manager.clone(),
+            log_context.clone(),
+        )))
     }
 
     /// Builds the [`TransactionManager`] when idempotence is enabled.
@@ -7368,7 +7407,7 @@ mod tests {
     }
 
     /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` and `client.rack` reach the
-    /// accumulator's `PartitionerConfig` (`KafkaProducer.java:437-438`), and a blank
+    /// accumulator's `PartitionerConfig` (`KafkaProducer.java:450-455`), and a blank
     /// rack in rack-aware mode fails construction with `PartitionerConfig`'s
     /// `ConfigException`, wrapped like every other construction failure. Java checks
     /// it even with a custom partitioner, so the `RoundRobinPartitioner` case fails
@@ -7409,6 +7448,34 @@ mod tests {
                 "client.rack must be provided if partitioner.rack.aware is enabled"
             );
         }
+    }
+
+    /// KAFKA-2121 for the KIP-1123 check: a custom partitioner is configured before
+    /// `PartitionerConfig` rejects a blank `client.rack`, so the failed construction
+    /// must close it, as Java's constructor `catch` -> `close(0, true)` does
+    /// (`KafkaProducer.java:519-523` -> `:1533`). Critic 96 F1.
+    #[test]
+    fn test_partitioner_closed_when_construction_fails_after_configure() {
+        let _guard = MockPartitioner::lock_counters();
+        MockPartitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let partitioner: Box<dyn Partitioner<String, String>> = Box::new(MockPartitioner::new());
+            let config = ProducerConfig::new(&guard_props(&[("partitioner.rack.aware", "true")]))
+                .expect("valid config")
+                .set_partitioner(partitioner);
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("rack-aware without client.rack must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer");
+
+            assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
+            assert_eq!(1, MockPartitioner::close_count().load(Ordering::SeqCst));
+        });
+
+        MockPartitioner::reset_counters();
     }
 
     /// Java wraps the whole constructor in `catch (Throwable t)` and rethrows
