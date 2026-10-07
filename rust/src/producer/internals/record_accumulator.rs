@@ -54,17 +54,65 @@ use crate::producer::internals::{InFlightBatchPool, TransactionManager};
 
 /// Partitioner configuration for the built-in partitioner.
 ///
-/// Translated from `RecordAccumulator.PartitionerConfig`.
-#[derive(Clone, Default)]
+/// Translated from `RecordAccumulator.PartitionerConfig`. The fields are private,
+/// as in Java, so the rack check in [`PartitionerConfig::new`] cannot be bypassed.
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$PartitionerConfig")]
 pub struct PartitionerConfig {
-    /// If true, partition switching adapts to broker load, otherwise partition
-    /// switching is random.
-    pub enable_adaptive_partitioning: bool,
-    /// If a broker cannot process produce requests from a partition for the
-    /// specified time, the partition is treated by the partitioner as not
-    /// available. If the timeout is 0, this logic is disabled.
-    pub partition_availability_timeout_ms: i64,
+    enable_adaptive_partitioning: bool,
+    partition_availability_timeout_ms: i64,
+    rack_aware: bool,
+    rack: Arc<str>,
+}
+
+impl PartitionerConfig {
+    /// Partitioner config
+    ///
+    /// # Arguments
+    /// * `enable_adaptive_partitioning` - If it's true, partition switching adapts to broker load,
+    ///   otherwise partition switching is random.
+    /// * `partition_availability_timeout_ms` - If a broker cannot process produce requests from a
+    ///   partition for the specified time, the partition is treated by the partitioner as not
+    ///   available. If the timeout is 0, this logic is disabled.
+    /// * `rack_aware` - Whether the built-in partitioner is configured to be rack-aware.
+    /// * `rack` - The producer rack.
+    ///
+    /// # Errors
+    /// [`Error::Config`] `"client.rack must be provided if partitioner.rack.aware is enabled"`
+    /// when `rack_aware` is set and `rack` is blank (Java's `ConfigException`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$PartitionerConfig#PartitionerConfig")]
+    pub fn new(
+        enable_adaptive_partitioning: bool,
+        partition_availability_timeout_ms: i64,
+        rack_aware: bool,
+        rack: &str,
+    ) -> Result<Self, Error> {
+        if rack_aware && crate::common::utils::Utils::is_blank(Some(rack)) {
+            return Err(Error::config_message(
+                "client.rack must be provided if partitioner.rack.aware is enabled",
+            ));
+        }
+        Ok(Self {
+            enable_adaptive_partitioning,
+            partition_availability_timeout_ms,
+            rack_aware,
+            rack: Arc::from(rack),
+        })
+    }
+}
+
+impl Default for PartitionerConfig {
+    /// Java's no-argument `PartitionerConfig()`: `this(false, 0, false, "")`, which
+    /// cannot fail.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$PartitionerConfig#PartitionerConfig")]
+    fn default() -> Self {
+        Self {
+            enable_adaptive_partitioning: false,
+            partition_availability_timeout_ms: 0,
+            rack_aware: false,
+            rack: Arc::from(""),
+        }
+    }
 }
 
 /// The failure returned by [`RecordAccumulator::append`], carrying the user
@@ -286,6 +334,10 @@ pub struct RecordAccumulator {
     retry_backoff: ExponentialBackoff,
     delivery_timeout_ms: i32,
     partition_availability_timeout_ms: i64,
+    /// `partitioner.rack.aware`, handed to every topic's [`BuiltInPartitioner`].
+    partitioner_rack_aware: bool,
+    /// `client.rack`, shared (not copied) by every topic's [`BuiltInPartitioner`].
+    rack: Arc<str>,
     enable_adaptive_partitioning: bool,
     free: Arc<BufferPool>,
     topic_info_map: DashMap<Arc<str>, Arc<TopicInfo>>,
@@ -321,6 +373,11 @@ pub struct RecordAccumulator {
     ///
     /// Translated from Java's `LogContext logContext` field in `RecordAccumulator`.
     log_context: LogContext,
+    /// Test seam for Java's tests overriding `createBuiltInPartitioner` to return a
+    /// `SequentialPartitioner`: when set, every topic's partitioner draws its
+    /// "random" numbers from this one shared counter (Java's `mockRandom` field).
+    #[cfg(test)]
+    mock_random: Option<Arc<AtomicI32>>,
 }
 
 impl RecordAccumulator {
@@ -463,6 +520,8 @@ impl RecordAccumulator {
             delivery_timeout_ms,
             enable_adaptive_partitioning: partitioner_config.enable_adaptive_partitioning,
             partition_availability_timeout_ms: partitioner_config.partition_availability_timeout_ms,
+            partitioner_rack_aware: partitioner_config.rack_aware,
+            rack: partitioner_config.rack,
             free: buffer_pool,
             topic_info_map: DashMap::new(),
             node_stats: DashMap::new(),
@@ -472,6 +531,8 @@ impl RecordAccumulator {
             nodes_drain_index: Mutex::new(HashMap::new()),
             next_batch_expiry_time_ms: Mutex::new(i64::MAX),
             log_context,
+            #[cfg(test)]
+            mock_random: None,
         }
     }
 
@@ -1178,11 +1239,14 @@ impl RecordAccumulator {
         let cluster = metadata_snapshot.cluster();
         let mut queue_sizes: Option<Vec<i32>> = None;
         let mut partition_ids: Option<Vec<i32>> = None;
+        // Borrowed from the snapshot's leader nodes: no rack string is copied.
+        let mut partition_leader_racks: Option<Vec<Option<&str>>> = None;
 
         if self.enable_adaptive_partitioning && topic_info.batches.len() >= cluster.partitions_for_topic(topic).len() {
             let len = topic_info.batches.len();
             queue_sizes = Some(vec![0; len]);
             partition_ids = Some(vec![0; len]);
+            partition_leader_racks = Some(vec![None; len]);
         }
 
         let mut queue_sizes_index: i32 = -1;
@@ -1200,6 +1264,11 @@ impl RecordAccumulator {
                     && (queue_sizes_index as usize) < pids.len()
                 {
                     pids[queue_sizes_index as usize] = part.partition();
+                }
+                if let (Some(racks), Some(leader_node)) = (&mut partition_leader_racks, leader)
+                    && (queue_sizes_index as usize) < racks.len()
+                {
+                    racks[queue_sizes_index as usize] = leader_node.rack();
                 }
             }
 
@@ -1255,10 +1324,10 @@ impl RecordAccumulator {
         // Update partition load stats.
         let length = (queue_sizes_index + 1) as usize;
         let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
-        if let (Some(qs), Some(pids)) = (&mut queue_sizes, &partition_ids) {
-            partitioner.update_partition_load_stats(Some(qs.as_mut_slice()), pids, length);
+        if let (Some(qs), Some(pids), Some(racks)) = (&mut queue_sizes, &partition_ids, &partition_leader_racks) {
+            partitioner.update_partition_load_stats(Some(qs.as_mut_slice()), pids, racks, length);
         } else {
-            partitioner.update_partition_load_stats(None, &[], 0);
+            partitioner.update_partition_load_stats(None, &[], &[], 0);
         }
 
         next_ready_check_delay_ms
@@ -1667,13 +1736,34 @@ impl RecordAccumulator {
         }
         let topic_arc: Arc<str> = Arc::from(topic);
         let entry = self.topic_info_map.entry(Arc::clone(&topic_arc)).or_insert_with(|| {
-            Arc::new(TopicInfo::new(BuiltInPartitioner::with_log_context(
+            Arc::new(TopicInfo::new(self.create_built_in_partitioner(
+                &self.log_context,
                 &topic_arc,
                 self.batch_size,
-                self.log_context.clone(),
+                self.partitioner_rack_aware,
+                &self.rack,
             )))
         });
         (entry.key().clone(), Arc::clone(entry.value()))
+    }
+
+    /// Creates the built-in partitioner for a topic the accumulator has not seen yet.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#createBuiltInPartitioner")]
+    fn create_built_in_partitioner(
+        &self,
+        log_context: &LogContext,
+        topic: &Arc<str>,
+        sticky_batch_size: i32,
+        rack_aware: bool,
+        rack: &Arc<str>,
+    ) -> BuiltInPartitioner {
+        let partitioner =
+            BuiltInPartitioner::with_log_context(topic, sticky_batch_size, rack_aware, rack, log_context.clone());
+        #[cfg(test)]
+        if let Some(ref mock_random) = self.mock_random {
+            return partitioner.with_mock_random_for_test(Arc::clone(mock_random));
+        }
+        partitioner
     }
 
     /// Deallocate the batch buffer back to the pool.
@@ -1888,6 +1978,37 @@ impl RecordAccumulator {
     #[cfg(test)]
     pub(crate) fn enable_adaptive_partitioning_for_test(&self) -> bool {
         self.enable_adaptive_partitioning
+    }
+
+    /// The rack-awareness settings the accumulator hands to its partitioners.
+    /// Test-only, so a producer-level test can verify the config wiring.
+    #[cfg(test)]
+    pub(crate) fn partitioner_rack_for_test(&self) -> (bool, &str) {
+        (self.partitioner_rack_aware, &self.rack)
+    }
+
+    /// Makes every partitioner created from now on draw its "random" numbers from
+    /// `mock_random`. Test-only: Java's `RecordAccumulatorTest` overrides
+    /// `createBuiltInPartitioner` to return a `SequentialPartitioner` reading its
+    /// shared `mockRandom` field.
+    #[cfg(test)]
+    pub(crate) fn set_mock_random_for_test(&mut self, mock_random: Arc<AtomicI32>) {
+        self.mock_random = Some(mock_random);
+    }
+
+    /// Runs `f` on `topic`'s built-in partitioner. Test-only translation of Java's
+    /// visible-for-testing `getBuiltInPartitioner(topic)`; a closure because the
+    /// partitioner sits behind the topic's lock.
+    #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#getBuiltInPartitioner")]
+    pub(crate) fn with_built_in_partitioner_for_test<R>(
+        &self,
+        topic: &str,
+        f: impl FnOnce(&BuiltInPartitioner) -> R,
+    ) -> R {
+        let topic_info = Arc::clone(self.topic_info_map.get(topic).expect("topic must be known").value());
+        let partitioner = topic_info.built_in_partitioner.lock().unwrap();
+        f(&partitioner)
     }
 
     /// Registers `batch` in the incomplete set as [`Self::append`] would.
@@ -4104,6 +4225,257 @@ mod tests {
                 actual_batch_size
             );
         }
+    }
+
+    /// Appends one record with `UNKNOWN_PARTITION` and returns the partition the
+    /// built-in partitioner chose for it (Java's `AppendCallbacks.setPartition`).
+    async fn append_unknown_partition(accum: &RecordAccumulator, value: &[u8], now: i64, cluster: &Cluster) -> i32 {
+        accum
+            .append(
+                TOPIC,
+                crate::producer::RecordMetadata::UNKNOWN_PARTITION,
+                0,
+                None,
+                Some(value),
+                &[],
+                None,
+                1000, // maxBlockTimeMs
+                now,
+                cluster,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("append must succeed"))
+            .topic_partition
+            .partition()
+    }
+
+    /// Translated from `RecordAccumulatorTest.testUniformBuiltInPartitioner`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testUniformBuiltInPartitioner")]
+    async fn test_uniform_built_in_partitioner() {
+        let mock_random = Arc::new(AtomicI32::new(0));
+
+        let total_size: i64 = 1024 * 1024;
+        let batch_size = 1024; // note that this is also a "sticky" limit for the partitioner
+        let mut accum = create_test_accumulator(batch_size, total_size, Compression::none().build(), 0);
+        accum.set_mock_random_for_test(Arc::clone(&mock_random));
+
+        // Java builds this `Cluster` straight from `asList(part1, part2, part3)`, so the
+        // available partitions are in partition order, which the sequential "random"
+        // numbers index. (A snapshot's cluster view does not promise an order.)
+        let (n1, n2) = (node1(), node2());
+        let part = |partition: i32, leader: &Node| {
+            crate::common::PartitionInfo::new(TOPIC.to_string(), partition, Some(leader.clone()), vec![], vec![])
+        };
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
+            None,
+            vec![n1.clone(), n2.clone()],
+            vec![part(0, &n1), part(1, &n1), part(2, &n2)],
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            None,
+            HashMap::new(),
+        );
+        let (partition1, partition2, partition3) = (0, 1, 2);
+        let now = 0;
+
+        // Produce small record, we should switch to first partition.
+        assert_eq!(partition1, append_unknown_partition(&accum, b"value", now, &cluster).await);
+        assert_eq!(1, mock_random.load(Ordering::Relaxed));
+
+        // Produce large record, we should exceed "sticky" limit, but produce to this partition
+        // as we try to switch after the "sticky" limit is exceeded.  The switch is disabled
+        // because of incomplete batch.
+        let large_value = vec![0u8; batch_size as usize];
+        assert_eq!(partition1, append_unknown_partition(&accum, &large_value, now, &cluster).await);
+        assert_eq!(1, mock_random.load(Ordering::Relaxed));
+
+        // Produce large record, we should switch to next partition as we complete
+        // previous batch and exceeded sticky limit.
+        assert_eq!(partition2, append_unknown_partition(&accum, &large_value, now, &cluster).await);
+        assert_eq!(2, mock_random.load(Ordering::Relaxed));
+
+        // Produce large record, we should switch to next partition as we complete
+        // previous batch and exceeded sticky limit.
+        assert_eq!(partition3, append_unknown_partition(&accum, &large_value, now, &cluster).await);
+        assert_eq!(3, mock_random.load(Ordering::Relaxed));
+
+        // Produce large record, we should switch to next partition as we complete
+        // previous batch and exceeded sticky limit.
+        assert_eq!(partition1, append_unknown_partition(&accum, &large_value, now, &cluster).await);
+        assert_eq!(4, mock_random.load(Ordering::Relaxed));
+    }
+
+    /// Fills each partition of [`TOPIC`] with `queue_sizes[i]` one-record batches
+    /// and lets the accumulator compute the load stats, as
+    /// `testAdaptiveBuiltInPartitioner` does before it starts appending.
+    async fn fill_queues_and_ready(
+        accum: &RecordAccumulator,
+        metadata: &MetadataSnapshot,
+        queue_sizes: &[i32],
+        large_value: &[u8],
+        now: i64,
+    ) {
+        let cluster = metadata.cluster();
+        for (i, &queue_size) in queue_sizes.iter().enumerate() {
+            for _ in 0..queue_size {
+                // Add large records to each partition, so that each record creates a batch.
+                accum
+                    .append(TOPIC, i as i32, 0, None, Some(large_value), &[], None, 1000, now, cluster)
+                    .await
+                    .unwrap_or_else(|_| panic!("append must succeed"));
+            }
+            assert_eq!(
+                queue_size as usize,
+                accum.deque_size(&TopicPartition::new(TOPIC.to_string(), i as i32))
+            );
+        }
+
+        // Let the accumulator generate the probability tables.
+        accum.ready(metadata, now);
+    }
+
+    /// Translated from `RecordAccumulatorTest.testAdaptiveBuiltInPartitioner`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testAdaptiveBuiltInPartitioner")]
+    async fn test_adaptive_built_in_partitioner() {
+        // Mock random number generator with just sequential integer.
+        let mock_random = Arc::new(AtomicI32::new(0));
+
+        // Create accumulator with partitioner config to enable adaptive partitioning.
+        let config = PartitionerConfig::new(true, 100, false, "").unwrap();
+        let total_size: i64 = 1024 * 1024;
+        let batch_size = 128;
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let mut accum =
+            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+        accum.set_mock_random_for_test(Arc::clone(&mock_random));
+
+        let metadata = make_metadata_snapshot(&[node1(), node2()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
+        let cluster = metadata.cluster().clone();
+        let now = 0;
+
+        let large_value = vec![0u8; batch_size as usize];
+        let queue_sizes = [1, 7, 2];
+        let expected_frequencies: Vec<i32> = queue_sizes.iter().map(|q| 8 - q).collect(); // 8 is max(queueSizes) + 1
+        fill_queues_and_ready(&accum, &metadata, &queue_sizes, &large_value, now).await;
+
+        // Prime built-in partitioner so that it'd switch on every record, as switching only
+        // happens after the "sticky" limit is exceeded.
+        append_unknown_partition(&accum, &large_value, now, &cluster).await;
+
+        // Issue a certain number of partition calls to validate that the partitions would be
+        // distributed with frequencies that are reciprocal to the queue sizes.  The number of
+        // iterations is defined by the last element of the cumulative frequency table which is
+        // the sum of all frequencies.  We do 2 cycles, just so it's more than 1.
+        let number_of_cycles = 2;
+        let number_of_iterations = accum
+            .with_built_in_partitioner_for_test(TOPIC, BuiltInPartitioner::load_stats_range_end)
+            * number_of_cycles;
+        let mut frequencies = vec![0; queue_sizes.len()];
+
+        for _ in 0..number_of_iterations {
+            frequencies[append_unknown_partition(&accum, &large_value, now, &cluster).await as usize] += 1;
+        }
+
+        // Verify that frequencies are reciprocal of queue sizes.
+        for i in 0..frequencies.len() {
+            assert_eq!(
+                expected_frequencies[i] * number_of_cycles,
+                frequencies[i],
+                "Partition {} was chosen {} times",
+                i,
+                frequencies[i]
+            );
+        }
+
+        // Test that partitions residing on high-latency nodes don't get switched to.
+        accum.update_node_latency_stats(0, now - 200, true);
+        accum.update_node_latency_stats(0, now, false);
+        accum.ready(&metadata, now);
+
+        // Do one append, because partition gets switched after append.
+        append_unknown_partition(&accum, &large_value, now, &cluster).await;
+
+        let partition3 = 2;
+        for _ in 0..10 {
+            assert_eq!(partition3, append_unknown_partition(&accum, &large_value, now, &cluster).await);
+        }
+    }
+
+    /// Rust-only: `testAdaptiveBuiltInPartitioner` in rack-aware mode, so that
+    /// `partitionReady`'s new `partitionLeaderRacks` array (KIP-1123) is exercised
+    /// end to end: the racks must come from the leader nodes of the metadata
+    /// snapshot. Partitions 0 and 1 lead on the producer's rack, partition 2 does not,
+    /// so only 0 and 1 are chosen, in proportion to the in-rack load stats
+    /// (queue sizes 1 and 7: frequencies 7 and 1). Were the racks not collected, the
+    /// in-rack stats would be empty and partition 2 would be chosen too.
+    #[tokio::test]
+    async fn test_adaptive_built_in_partitioner_with_rack_awareness() {
+        let mock_random = Arc::new(AtomicI32::new(0));
+        let config = PartitionerConfig::new(true, 100, true, "rack0").unwrap();
+        let total_size: i64 = 1024 * 1024;
+        let batch_size = 128;
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let mut accum =
+            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+        accum.set_mock_random_for_test(Arc::clone(&mock_random));
+
+        let rack_node1 = Node::with_rack(0, "localhost".to_string(), 1111, Some("rack0".to_string()));
+        let rack_node2 = Node::with_rack(1, "localhost".to_string(), 1112, Some("rack1".to_string()));
+        let metadata =
+            make_metadata_snapshot(&[rack_node1, rack_node2], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
+        let cluster = metadata.cluster().clone();
+        let now = 0;
+
+        let large_value = vec![0u8; batch_size as usize];
+        fill_queues_and_ready(&accum, &metadata, &[1, 7, 2], &large_value, now).await;
+        // The whole-topic stats are still built (max + 1 = 8: 7 + 1 + 6).
+        assert_eq!(
+            14,
+            accum.with_built_in_partitioner_for_test(TOPIC, BuiltInPartitioner::load_stats_range_end)
+        );
+
+        // Prime built-in partitioner so that it'd switch on every record.
+        append_unknown_partition(&accum, &large_value, now, &cluster).await;
+
+        let number_of_cycles = 2;
+        let in_rack_range_end =
+            accum.with_built_in_partitioner_for_test(TOPIC, BuiltInPartitioner::load_stats_in_this_rack_range_end);
+        assert_eq!(8, in_rack_range_end);
+        let mut frequencies = [0; 3];
+        for _ in 0..in_rack_range_end * number_of_cycles {
+            frequencies[append_unknown_partition(&accum, &large_value, now, &cluster).await as usize] += 1;
+        }
+        assert_eq!([7 * number_of_cycles, number_of_cycles, 0], frequencies);
+    }
+
+    /// `PartitionerConfig`'s constructor check (KAFKA-19193, 165d7ec933): rack
+    /// awareness needs a non-blank rack, reported as Java's `ConfigException`.
+    #[test]
+    fn test_partitioner_config_requires_rack_when_rack_aware() {
+        for blank in ["", " ", "\t\n"] {
+            let error = PartitionerConfig::new(false, 0, true, blank)
+                .err()
+                .expect("a blank rack must be rejected");
+            assert!(matches!(error, Error::Config(_)), "got {error:?}");
+            assert_eq!(
+                error.message(),
+                "client.rack must be provided if partitioner.rack.aware is enabled"
+            );
+        }
+        // A blank rack is fine when not rack-aware, and a rack is fine either way.
+        assert!(PartitionerConfig::new(false, 0, false, "").is_ok());
+        assert!(PartitionerConfig::new(false, 0, true, "rack0").is_ok());
+        assert!(PartitionerConfig::new(false, 0, false, "rack0").is_ok());
+
+        // Java's no-argument constructor: `this(false, 0, false, "")`.
+        let default = PartitionerConfig::default();
+        assert!(!default.enable_adaptive_partitioning);
+        assert_eq!(0, default.partition_availability_timeout_ms);
+        assert!(!default.rack_aware);
+        assert_eq!("", &*default.rack);
     }
 
     /// Translated from `RecordAccumulatorTest.testSplitAndReenqueuePreventInfiniteRecursion`.

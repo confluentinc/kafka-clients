@@ -68,6 +68,13 @@ pub struct ProducerConfig {
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
 
+    /// `client.rack` - A rack identifier for this client. This can be any string
+    /// value which indicates where this client is physically located. It
+    /// corresponds with the broker config `broker.rack`. Default:
+    /// [`ProducerConfig::DEFAULT_CLIENT_RACK`] (`""`). Used by the built-in
+    /// partitioner when `partitioner.rack.aware` is enabled (KIP-1123).
+    pub(crate) client_rack: String,
+
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
@@ -201,6 +208,18 @@ pub struct ProducerConfig {
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
 
+    /// `partitioner.rack.aware` - Controls whether the default partitioner is
+    /// rack-aware. This has no effect when a custom partitioner is used.
+    /// Default: false.
+    ///
+    /// When `client.rack` is specified and `partitioner.rack.aware=true`, the
+    /// sticky partition is chosen from partitions with the leader broker in the
+    /// same rack, if at least one is available. If none are available, it falls
+    /// back on selecting from all available partitions (KIP-1123). Enabling it
+    /// with a blank `client.rack` makes the producer constructor fail with
+    /// `"client.rack must be provided if partitioner.rack.aware is enabled"`.
+    pub(crate) partitioner_rack_aware: bool,
+
     /// `partitioner.type` - Selects the partitioning strategy. Default: `None`
     /// (unset), which uses the built-in default partitioner keyed by IEEE CRC-32
     /// ([`KeyHasher::Crc32`], librdkafka `consistent_random` parity).
@@ -308,6 +327,7 @@ impl Default for ProducerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
@@ -339,6 +359,7 @@ impl Default for ProducerConfig {
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
+            partitioner_rack_aware: false,
             partitioner_type: None,
             partitioner: None,
             transactional_id: None,
@@ -365,6 +386,10 @@ impl ProducerConfig {
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
+    /// Config key: `client.rack`
+    pub const CLIENT_RACK_CONFIG: &'static str = CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack.
+    pub const DEFAULT_CLIENT_RACK: &'static str = CommonClientConfigs::DEFAULT_CLIENT_RACK;
     /// Config key: `batch.size`
     pub const BATCH_SIZE_CONFIG: &'static str = "batch.size";
     /// Config key: `linger.ms`
@@ -419,6 +444,8 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
+    /// Config key: `partitioner.rack.aware`
+    pub const PARTITIONER_RACK_AWARE_CONFIG: &'static str = "partitioner.rack.aware";
     /// Config key: `partitioner.type`
     pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
     /// Accepted `partitioner.type` value selecting the CRC-32 key hash
@@ -491,6 +518,10 @@ impl ProducerConfig {
                 Self::CLIENT_ID_CONFIG => {
                     // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
                     config.client_id = value.trim().to_string();
+                },
+                Self::CLIENT_RACK_CONFIG => {
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_rack = value.trim().to_string();
                 },
                 Self::BATCH_SIZE_CONFIG => {
                     config.batch_size = Self::parse_i32(key, value)?;
@@ -592,6 +623,9 @@ impl ProducerConfig {
                 },
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
+                },
+                Self::PARTITIONER_RACK_AWARE_CONFIG => {
+                    config.partitioner_rack_aware = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_TYPE_CONFIG => {
                     // Only the built-in partitioner types are accepted. The two
@@ -995,6 +1029,8 @@ mod tests {
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
+        assert!(!config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "");
         assert!(config.partitioner_type.is_none());
         // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
         // Java-client murmur2 default.
@@ -1584,6 +1620,37 @@ mod tests {
     /// Java's `KafkaProducerTest.baseProperties()`.
     fn base_properties() -> HashMap<String, String> {
         HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())])
+    }
+
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` is a `Type.BOOLEAN` and the
+    /// producer's `client.rack` a `Type.STRING` (trimmed by `ConfigDef.parseType`),
+    /// defined with the keys and defaults Java's `ProducerConfig` gives them.
+    #[test]
+    fn test_partitioner_rack_aware_and_client_rack() {
+        assert_eq!(ProducerConfig::PARTITIONER_RACK_AWARE_CONFIG, "partitioner.rack.aware");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, "client.rack");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, CommonClientConfigs::CLIENT_RACK_CONFIG);
+        assert_eq!(ProducerConfig::DEFAULT_CLIENT_RACK, "");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "true".to_string());
+        props.insert("client.rack".to_string(), " rack0 ".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+        assert!(config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "rack0");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "yes".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        // Prefix only: Java appends ": Expected value to be either true or false"
+        // (`ConfigDef.parseType`), which the shared `parse_bool` does not (pre-existing,
+        // every boolean key; recorded in the Phase 6 notes).
+        assert!(
+            err.message()
+                .starts_with("Invalid value yes for configuration partitioner.rack.aware"),
+            "unexpected message: {err}"
+        );
     }
 
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {

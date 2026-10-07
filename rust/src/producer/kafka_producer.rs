@@ -1023,14 +1023,20 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
-            PartitionerConfig {
+            PartitionerConfig::new(
                 // Java `KafkaProducer.java:428-433`: "There is no need to do work
                 // required for adaptive partitioning, if we use a custom
                 // partitioner." So adaptive partitioning is enabled only when no
                 // custom partitioner is present AND the config opts in.
-                enable_adaptive_partitioning: partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
-                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-            },
+                partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
+                config.partitioner_availability_timeout_ms,
+                // KIP-1123 (`KafkaProducer.java:437-438`): passed through whether or
+                // not a custom partitioner is set, as Java does, so a blank
+                // `client.rack` with `partitioner.rack.aware=true` fails construction
+                // either way.
+                config.partitioner_rack_aware,
+                &config.client_rack,
+            )?,
             Arc::clone(&metrics),
             Self::PRODUCER_METRIC_GROUP_NAME,
             buffer_pool,
@@ -2750,7 +2756,7 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
@@ -3236,7 +3242,7 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(Metrics::new()),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
             // Room for exactly one batch.
@@ -4370,7 +4376,7 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
             None,
         ));
@@ -4798,7 +4804,7 @@ mod tests {
                 100,
                 1000,
                 120_000,
-                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                PartitionerConfig::new(true, 0, false, "").unwrap(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
@@ -4880,7 +4886,7 @@ mod tests {
                 100,
                 1000,
                 120_000,
-                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                PartitionerConfig::new(true, 0, false, "").unwrap(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
@@ -5117,10 +5123,13 @@ mod tests {
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
                 config.delivery_timeout_ms,
-                PartitionerConfig {
-                    enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
-                    partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-                },
+                PartitionerConfig::new(
+                    config.partitioner_adaptive_partitioning_enable,
+                    config.partitioner_availability_timeout_ms,
+                    config.partitioner_rack_aware,
+                    &config.client_rack,
+                )
+                .unwrap(),
                 Arc::clone(&metrics),
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
                 buffer_pool,
@@ -6885,10 +6894,13 @@ mod tests {
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             config.delivery_timeout_ms,
-            PartitionerConfig {
-                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
-                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-            },
+            PartitionerConfig::new(
+                config.partitioner_adaptive_partitioning_enable,
+                config.partitioner_availability_timeout_ms,
+                config.partitioner_rack_aware,
+                &config.client_rack,
+            )
+            .unwrap(),
             Arc::clone(&metrics),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
             buffer_pool,
@@ -7353,6 +7365,50 @@ mod tests {
     fn from_guard_props(props: &HashMap<String, String>) -> Result<(), Error> {
         let config = ProducerConfig::new(props)?;
         KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer)).map(|_| ())
+    }
+
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` and `client.rack` reach the
+    /// accumulator's `PartitionerConfig` (`KafkaProducer.java:437-438`), and a blank
+    /// rack in rack-aware mode fails construction with `PartitionerConfig`'s
+    /// `ConfigException`, wrapped like every other construction failure. Java checks
+    /// it even with a custom partitioner, so the `RoundRobinPartitioner` case fails
+    /// too.
+    #[tokio::test]
+    async fn test_partitioner_rack_awareness_wiring() {
+        let props = guard_props(&[("partitioner.rack.aware", "true"), ("client.rack", "rack0")]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("a rack-aware producer with a rack constructs");
+        assert_eq!((true, "rack0"), producer.accumulator.partitioner_rack_for_test());
+
+        let props = guard_props(&[("client.rack", "rack0")]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("default config constructs");
+        assert_eq!((false, "rack0"), producer.accumulator.partitioner_rack_for_test());
+
+        for partitioner_type in [None, Some(ProducerConfig::ROUND_ROBIN_PARTITIONER)] {
+            let mut extra = vec![("partitioner.rack.aware", "true")];
+            if let Some(name) = partitioner_type {
+                extra.push(("partitioner.type", name));
+            }
+            let config = ProducerConfig::new(&guard_props(&extra)).expect("valid config");
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("rack-aware without client.rack must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer", "{partitioner_type:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(
+                cause.message(),
+                "client.rack must be provided if partitioner.rack.aware is enabled"
+            );
+        }
     }
 
     /// Java wraps the whole constructor in `catch (Throwable t)` and rethrows

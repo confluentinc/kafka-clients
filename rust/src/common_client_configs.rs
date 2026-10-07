@@ -48,6 +48,19 @@ impl CommonClientConfigs {
     /// [`crate::ClientDnsLookup`].)
     pub const CLIENT_DNS_LOOKUP_CONFIG: &str = "client.dns.lookup";
 
+    /// Config key: `client.rack`
+    ///
+    /// A rack identifier for this client. This can be any string value which
+    /// indicates where this client is physically located. It corresponds with the
+    /// broker config `broker.rack`.
+    ///
+    /// (Text of Java's `CommonClientConfigs.CLIENT_RACK_DOC`, carried as rustdoc
+    /// for the same reason as [`Self::CLIENT_DNS_LOOKUP_CONFIG`]'s.)
+    pub const CLIENT_RACK_CONFIG: &str = "client.rack";
+
+    /// Default value of `client.rack`: no rack.
+    pub const DEFAULT_CLIENT_RACK: &str = "";
+
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 

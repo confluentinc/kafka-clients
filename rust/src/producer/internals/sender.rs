@@ -3163,7 +3163,7 @@ mod tests {
                 accumulator_retry_backoff_ms,
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
-                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                PartitionerConfig::new(true, 0, false, "").unwrap(),
                 buffer_pool
                     .unwrap_or_else(|| Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize))),
                 transaction_manager.clone(),
@@ -3802,7 +3802,7 @@ mod tests {
             RETRY_BACKOFF_MS,
             RETRY_BACKOFF_MS * 10,
             120000, // use long delivery timeout for this test
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(1024 * 1024, 16384)),
             None,
         ));
@@ -4905,7 +4905,7 @@ mod tests {
             0,
             0,
             DELIVERY_TIMEOUT_MS,
-            PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
+            PartitionerConfig::new(false, 42, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             None,
         ));
@@ -8881,7 +8881,7 @@ mod tests {
             0,
             0,
             3000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             Some(Arc::clone(&transaction_manager)),
         ));

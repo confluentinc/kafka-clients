@@ -301,7 +301,7 @@ impl ConsumerConfig {
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
-    pub const CLIENT_RACK_CONFIG: &'static str = "client.rack";
+    pub const CLIENT_RACK_CONFIG: &'static str = crate::CommonClientConfigs::CLIENT_RACK_CONFIG;
 
     /// Config key: `enable.auto.commit`.
     pub const ENABLE_AUTO_COMMIT_CONFIG: &'static str = "enable.auto.commit";
