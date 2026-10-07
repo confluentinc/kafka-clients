@@ -566,6 +566,16 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.metadata_cluster_check_enable = metadata_cluster_check_enable;
     }
 
+    /// Sets the time after which an unanswered metadata attempt makes the
+    /// client rebootstrap. Java passes `rebootstrapTriggerMs` to the full
+    /// `NetworkClient` constructor, which also takes a `MetadataUpdater`
+    /// (`NetworkClient.java:336-358`); [`with_metadata_updater`](Self::with_metadata_updater)
+    /// mirrors the shorter constructor that defaults it to `Long.MAX_VALUE`, so
+    /// it is set after construction here, like the clock below.
+    pub(crate) fn set_rebootstrap_trigger_ms(&mut self, rebootstrap_trigger_ms: i64) {
+        self.rebootstrap_trigger_ms = rebootstrap_trigger_ms;
+    }
+
     /// Replaces the clock, which defaults to [`SystemTime`]. Java passes the
     /// `Time` to the `NetworkClient` constructor; it is set after construction
     /// here, like the throttle-time sensor below.
