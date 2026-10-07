@@ -151,8 +151,17 @@ internal sealed class SendCompletionPump
     internal const int DrainCap =
         SendAccumulatorSettings.DefaultSlotThreshold + SendAccumulatorSettings.SlotCapacityHeadroom;
 
-    // One entry per send_batch CALL (M11/P3.2 §3B.1), not per record: the anchor's completion unit.
-    private readonly ConcurrentQueue<PendingSendBatch> _queue = new ConcurrentQueue<PendingSendBatch>();
+    // One entry per send_batch CALL (M11/P3.2 §3B.1), not per record: the anchor's completion unit —
+    // or, on the sync surface, one entry per sync send (M11/P4.2 S2, D11 (a): the same queue, so one
+    // ordering and one set of teardown paths cover both entry kinds).
+    private readonly ConcurrentQueue<PendingEntry> _queue = new ConcurrentQueue<PendingEntry>();
+
+    // D9 (M11/P4.2): the pump, if any, whose loop runs on the calling thread. RunLoop sets it once, on
+    // the pump's own dedicated thread, and nothing sets it on any other thread — so a caller or a
+    // thread-pool thread always reads null. SyncCompletion reads it (through IsCurrentThread) to refuse
+    // a Get that could never return: on this thread, the latch's completer is this very loop.
+    [ThreadStatic]
+    private static SendCompletionPump? s_currentPump;
 
     // The three marshalling arrays get_all reads and writes, allocated ONCE (§12.3) — the anchor
     // allocates nothing per batch either (its equivalents are fixed-size stack arrays,
@@ -217,7 +226,9 @@ internal sealed class SendCompletionPump
     /// <summary>The number of <c>ProcessBatch</c> passes the pump thread has run.</summary>
     /// <remarks>
     /// One per queued group, except that a group larger than <see cref="DrainCap"/> is split into
-    /// <c>ceil(count / DrainCap)</c> passes (<see cref="ProcessGroup"/>).
+    /// <c>ceil(count / DrainCap)</c> passes (<see cref="ProcessGroup"/>). A sync single
+    /// (<see cref="EnqueueSingle"/>) runs no such pass — it is read with the singular <c>get</c> — so it
+    /// is not counted here.
     /// </remarks>
     internal long ProcessedBatchCount => Interlocked.Read(ref _processedBatches);
 
@@ -226,10 +237,18 @@ internal sealed class SendCompletionPump
 
     /// <summary>
     /// The number of sends — <b>records</b>, not groups — this pump has taken off its queue, i.e.
-    /// the number that reached <see cref="Enqueue"/> while the gate was still <b>open</b>. The
-    /// witness for the M11/P3.1 §3.8 teardown ordering (see <c>_drainedSends</c>).
+    /// the number that reached <see cref="Enqueue"/> (or <see cref="EnqueueSingle"/>, one record each)
+    /// while the gate was still <b>open</b>. The witness for the M11/P3.1 §3.8 teardown ordering (see
+    /// <c>_drainedSends</c>).
     /// </summary>
     internal long DrainedSendCount => Interlocked.Read(ref _drainedSends);
+
+    /// <summary>
+    /// <see langword="true"/> when the calling thread is this pump's own thread — the D9 check
+    /// <see cref="SyncCompletion{T}"/> makes before it blocks (M11/P4.2). Another pump's thread, a
+    /// caller's thread and a thread-pool thread all read <see langword="false"/>.
+    /// </summary>
+    internal bool IsCurrentThread => ReferenceEquals(s_currentPump, this);
 
     /// <summary>
     /// Enqueues <b>one <c>send_batch</c> call's</b> accepted sends as a single completion group
@@ -278,26 +297,73 @@ internal sealed class SendCompletionPump
         IntPtr[] futures,
         TaskCompletionSource<RecordMetadata>[] completions,
         DeliveryRegistration?[] deliveries,
-        int count)
+        int count) =>
+        EnqueueEntry(new PendingSendBatch(futures, completions, deliveries, count));
+
+    /// <summary>
+    /// Enqueues <b>one sync send's</b> accepted future as its own completion entry (M11/P4.2 S2). On the
+    /// normal path the pump reads it with the singular blocking <c>get</c>, invokes the supplied
+    /// delivery callback, completes <paramref name="completion"/> and frees the future
+    /// (<see cref="ProcessSingle"/>); if the gate has already closed (teardown raced this enqueue) the
+    /// send is faulted and its future freed here, synchronously, by the same gate
+    /// <see cref="Enqueue"/> passes through.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One singular <c>get</c> per single, strictly FIFO</b> (decision D1 (a)). A single is never
+    /// coalesced with other singles into a <c>get_all</c>: that call returns only once
+    /// <em>every</em> future in its array resolves, so a coalesced single would wait on whichever sends
+    /// it happened to share a pass with. It shares the queue with <see cref="Enqueue"/>'s groups
+    /// (D11 (a)), so it is read after everything queued before it and before everything queued after.
+    /// </para>
+    /// <para>
+    /// <b>Ownership of <paramref name="future"/> transfers on return, and only on return.</b> If this
+    /// method throws — allocating the entry, or the queue growing, both out-of-memory only — nothing was
+    /// queued and nothing was freed, so the caller still owns the future and must destroy it. That
+    /// throw sits after the core accepted the record and before the pump could read its completion:
+    /// recorded residual 4 on <see cref="IDeliveryCallback"/>, failure between acceptance and handoff.
+    /// </para>
+    /// <para>
+    /// <b>The gate's fault-in-place branch does NOT invoke the delivery callback</b> — recorded residual
+    /// 1 on <see cref="IDeliveryCallback"/>, teardown raced the enqueue. On this branch the record was
+    /// handed to native but nothing will read its completion: the latch is faulted with the teardown
+    /// exception and the future is freed unread, so there is no core outcome for the callback to
+    /// report, and a fabricated one could precede a delivery the core still makes.
+    /// </para>
+    /// </remarks>
+    /// <param name="future">The accepted send's future handle (ownership transfers to the pump on return).</param>
+    /// <param name="completion">The send's latch — completed exactly once, on the pump or here.</param>
+    /// <param name="delivery">
+    /// The user's delivery callback carrier, or <see langword="null"/> on the plain <c>Send(record)</c>
+    /// path.
+    /// </param>
+    internal void EnqueueSingle(
+        IntPtr future,
+        SyncCompletion<RecordMetadata> completion,
+        DeliveryRegistration? delivery) =>
+        EnqueueEntry(new PendingSyncSend(future, completion, delivery));
+
+    /// <summary>
+    /// The enqueue gate <see cref="Enqueue"/> and <see cref="EnqueueSingle"/> share: under
+    /// <c>_stopLock</c>, either queues <paramref name="entry"/> and wakes the loop or — once
+    /// <see cref="CloseGate"/> / <see cref="Stop"/> has closed the gate — faults it with
+    /// <see cref="TeardownException"/> and frees its futures in place, invoking no delivery callback.
+    /// </summary>
+    private void EnqueueEntry(PendingEntry entry)
     {
         lock (_stopLock)
         {
             if (_stopped)
             {
                 // The pump is torn down: fault + free in place rather than queue into a dead pump.
-                // Bounded by `count`, never by Length — the tail past it is the caller's compaction
-                // slack and holds no handle and no awaiter.
-                KafkaException teardown = TeardownException();
-                for (int i = 0; i < count; i++)
-                {
-                    completions[i].TrySetException(teardown);
-                }
-
-                DestroyFutures(futures, count);
+                // Each entry bounds its own loops by its Count, never by an array's Length — a group's
+                // tail past it is the caller's compaction slack and holds no handle and no awaiter.
+                entry.Fault(TeardownException());
+                entry.DestroyFutures();
                 return;
             }
 
-            _queue.Enqueue(new PendingSendBatch(futures, completions, deliveries, count));
+            _queue.Enqueue(entry);
             _signal.Set();
         }
     }
@@ -398,7 +464,9 @@ internal sealed class SendCompletionPump
     /// <c>send_batch</c> group is left unclaimed"; a group the pump has already dequeued is
     /// <em>in flight</em>, and <see cref="Stop"/>'s <c>_thread.Join()</c> is what covers it, since
     /// the loop cannot exit mid-<see cref="ProcessGroup"/>. The <b>record</b> count remains
-    /// <see cref="DrainedSendCount"/>'s job, counted in <see cref="DequeueGroup"/>.
+    /// <see cref="DrainedSendCount"/>'s job, counted in <see cref="DequeueGroup"/>. A sync single
+    /// (M11/P4.2 S2) is an entry in the same queue, so "empty" covers it too, and one already dequeued
+    /// is in flight in the same sense — the loop cannot exit mid-<see cref="ProcessSingle"/> either.
     /// </para>
     /// <para>
     /// <b>Polling rather than a new event.</b> A dedicated "queue went empty" signal would mean a
@@ -472,6 +540,10 @@ internal sealed class SendCompletionPump
 
     private void RunLoop()
     {
+        // D9: mark this dedicated thread as this pump's, for SyncCompletion's Get guard. Set once and
+        // never cleared — the thread runs nothing but this loop and ends when it returns.
+        s_currentPump = this;
+
         while (true)
         {
             _signal.Wait();
@@ -508,15 +580,29 @@ internal sealed class SendCompletionPump
             //
             // Deliberately NOT "call _signal.Set() when items remain": the loop is clearer, is what
             // the anchor does, and does not depend on reasoning about a self-signal racing a Reset.
-            PendingSendBatch? group;
-            while ((group = DequeueGroup()) is not null)
+            PendingEntry? entry;
+            while ((entry = DequeueGroup()) is not null)
             {
                 try
                 {
-                    ProcessGroup(group);
+                    // A sync single (M11/P4.2 S2) is read on its own; anything else is a send_batch
+                    // group, processed exactly as before singles existed.
+                    if (entry is PendingSyncSend single)
+                    {
+                        ProcessSingle(single);
+                    }
+                    else
+                    {
+                        ProcessGroup((PendingSendBatch)entry);
+                    }
                 }
                 catch (Exception exception)
                 {
+                    // A SINGLE that reaches here had its future freed by ProcessSingle's own `finally`
+                    // (it frees on every path out of it, a throw included), so the latch-only fault
+                    // below holds for it too. Its delivery callback is not invoked here — recorded
+                    // residual 3 on IDeliveryCallback; see ProcessSingle's remarks.
+                    //
                     // ProcessGroup already freed every one of the group's future handles on every
                     // one of its own paths (ProcessBatch's `finally`'s destroy_all for the passes it
                     // ran, and ProcessGroup's own `finally` for the tail of a group whose split was
@@ -533,32 +619,125 @@ internal sealed class SendCompletionPump
                     // truly process-corrupting AccessViolation is not catchable by design — the
                     // process terminates; this guards the catchable cases: OOM, or a managed
                     // marshalling throw that escapes ProcessGroup.)
-                    FaultGroupCompletions(group, exception);
+                    FaultGroupCompletions(entry, exception);
                 }
             }
         }
     }
 
     /// <summary>
-    /// Takes the next queued <c>send_batch</c> group, or <see langword="null"/> when the queue is
-    /// empty (lock-free).
+    /// Takes the next queued entry — a <c>send_batch</c> group, or a sync single (M11/P4.2 S2) — or
+    /// <see langword="null"/> when the queue is empty (lock-free).
     /// </summary>
     /// <remarks>
     /// <b>The one point every queued send passes through exactly once</b>, whichever of the two
     /// consumers takes it — <see cref="RunLoop"/>'s group loop or
     /// <see cref="DrainAndFaultRemaining"/> — which is why <c>_drainedSends</c> is counted here.
-    /// It is incremented by the group's <b>record</b> count, never by one per group: see
-    /// <c>_drainedSends</c>.
+    /// It is incremented by the entry's <b>record</b> count — a group's records, one for a single —
+    /// never by one per group: see <c>_drainedSends</c>.
     /// </remarks>
-    private PendingSendBatch? DequeueGroup()
+    private PendingEntry? DequeueGroup()
     {
-        if (!_queue.TryDequeue(out PendingSendBatch? group))
+        if (!_queue.TryDequeue(out PendingEntry? entry))
         {
             return null;
         }
 
-        Interlocked.Add(ref _drainedSends, group.Count);
-        return group;
+        Interlocked.Add(ref _drainedSends, entry.Count);
+        return entry;
+    }
+
+    /// <summary>
+    /// Resolves one sync single (M11/P4.2 S2): blocks on the singular <c>get</c> for its future, copies
+    /// the result out, invokes the delivery callback, completes the latch, and frees the future.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Java's order: the callback runs BEFORE the latch opens.</b>
+    /// <c>ProducerBatch.completeFutureAndFireCallbacks</c> sets the future's value, fires the callbacks,
+    /// and only then calls <c>produceFuture.done()</c> (<c>ProducerBatch.java:303-323</c>), so
+    /// <see cref="DeliveryRegistration.Fire"/> is called before <c>TrySetResult</c> /
+    /// <c>TrySetException</c> on every branch. It is invoked <b>unconditionally</b>, never gated on
+    /// their <c>bool</c> (the async site's decision D7), and it is a total no-throw boundary, so it is
+    /// not wrapped in a second <c>try</c>/<c>catch</c> here.
+    /// </para>
+    /// <para>
+    /// <b>Once the entry is queued, this method owns the future and frees it</b>: the outer
+    /// <c>finally</c>'s singular destroy runs on every path out of it, a throw included. Hence
+    /// <see cref="RunLoop"/>'s <c>catch</c> faults a single's latch and frees nothing.
+    /// </para>
+    /// <para>
+    /// <b>One singular <c>get</c> per single, strictly FIFO</b> (D1 (a)) — see
+    /// <see cref="EnqueueSingle"/>. It blocks this thread only, inside the core's runtime
+    /// (<c>block_on</c>, deadlock-free, ffi §A1), exactly as <c>get_all</c> does for a group.
+    /// </para>
+    /// <para>
+    /// A throw that escapes this method — out of the blocking <c>get</c> itself (a native-side failure,
+    /// e.g. an <see cref="EntryPointNotFoundException"/> against a stale native), or out of reading what
+    /// it reported before the callback is invoked — reaches <see cref="RunLoop"/>'s <c>catch</c>, which
+    /// faults the latch with the pump-failure exception and invokes no callback: recorded residual 3
+    /// on <see cref="IDeliveryCallback"/>. On that path no completion has been turned into a result the
+    /// callback could report; why firing from the fault path is not the fix is stated under that
+    /// residual.
+    /// </para>
+    /// <para>
+    /// Until <c>NativeProducer.Send</c> is switched onto this path (M11/P4.2 S3), the same
+    /// read/fire/complete sequence also runs there, on the caller's thread.
+    /// </para>
+    /// </remarks>
+    private static void ProcessSingle(PendingSyncSend single)
+    {
+        try
+        {
+            // Blocking get on the pump thread. On success: metadata non-null, getError null. On failure:
+            // metadata null, getError non-null (exactly one is non-null, per the header).
+            IntPtr metadata = NativeMethods.FutureRecordMetadataGet(single.Future, out IntPtr getError);
+
+            KafkaException? failure = KafkaException.FromHandle(getError);
+            if (failure is not null)
+            {
+                // The completion ARRIVED and reported a failure, so the delivery callback is owed —
+                // fired with Java's -1 placeholder metadata, BEFORE the latch opens. metadata is null on
+                // this branch → nothing to copy out or free (the future is freed in the outer finally).
+                single.Delivery?.Fire(null, failure);
+                single.Completion.TrySetException(failure);
+                return;
+            }
+
+            RecordMetadata result;
+            try
+            {
+                // Copy every field out (topic before the handle dies, ffi §A3) — the result holds no
+                // native-backed reference.
+                result = RecordMetadataMarshal.CopyOut(metadata);
+            }
+            catch (Exception exception)
+            {
+                // The completion arrived (the send succeeded) but its metadata could not be marshalled.
+                // The callback is still owed, and the two surfaces report the same FAILURE but not the
+                // same object: the latch gets `exception` raw, while Fire coerces it into the
+                // KafkaException its signature demands (the original survives as InnerException).
+                // This catch guards CopyOut alone — it deliberately does not enclose the success-path
+                // Fire below, so it cannot shadow Fire's own no-throw guard (ffi §A6 form C).
+                single.Delivery?.Fire(null, exception);
+                single.Completion.TrySetException(exception);
+                return;
+            }
+            finally
+            {
+                NativeMethods.RecordMetadataDestroy(metadata);
+            }
+
+            // The callback runs BEFORE the latch opens.
+            single.Delivery?.Fire(result, null);
+            single.Completion.TrySetResult(result);
+        }
+        finally
+        {
+            // get does NOT consume the future (ffi §A2) — free it on every path (singular destroy, no
+            // 1-element array).
+            NativeMethods.FutureRecordMetadataDestroy(single.Future);
+        }
     }
 
     /// <summary>
@@ -829,25 +1008,28 @@ internal sealed class SendCompletionPump
     {
         KafkaException? teardown = null;
 
-        PendingSendBatch? group;
-        while ((group = DequeueGroup()) is not null)
+        PendingEntry? entry;
+        while ((entry = DequeueGroup()) is not null)
         {
             teardown ??= TeardownException();
 
-            // Bounded by the group's `Count`, never by its arrays' `Length`: the tail past it is the
-            // accumulator's compaction slack and holds no handle and no awaiter.
-            for (int i = 0; i < group.Count; i++)
-            {
-                group.Completions[i].TrySetException(teardown);
-            }
-
-            DestroyFutures(group.Futures, group.Count);
+            // A group faults every one of its awaiters, bounded by its `Count`, never by its arrays'
+            // `Length` (the tail past it is the accumulator's compaction slack and holds no handle and
+            // no awaiter), and frees its futures via destroy_all.
+            //
+            // A sync single (M11/P4.2 S2) drained here is faulted the same way and its future freed
+            // unread, with no delivery callback — recorded residual 2 on IDeliveryCallback, teardown
+            // drained a still-queued send. Nothing ever read its completion: the loop has exited, and
+            // this drain deliberately makes no blocking read of the core's results.
+            entry.Fault(teardown);
+            entry.DestroyFutures();
         }
     }
 
     /// <summary>
-    /// Faults every TCS in <paramref name="group"/> after a <see cref="ProcessGroup"/> throw — the
-    /// no-hang guard for the group that was in flight when the throw escaped. <b>TCS-only:</b>
+    /// Faults every TCS in <paramref name="entry"/> after a <see cref="ProcessGroup"/> throw — the
+    /// no-hang guard for the group that was in flight when the throw escaped (and, for a sync single,
+    /// its latch after a <see cref="ProcessSingle"/> throw). <b>TCS-only:</b>
     /// <see cref="ProcessBatch"/>'s <c>finally</c> and <see cref="ProcessGroup"/>'s own already
     /// freed every future handle between them, so this must NOT free them again (no double-free).
     /// <see cref="TaskCompletionSource{TResult}.TrySetException(System.Exception)"/> is a no-op on
@@ -878,16 +1060,16 @@ internal sealed class SendCompletionPump
     /// it to say the opposite.
     /// </para>
     /// </remarks>
-    private static void FaultGroupCompletions(PendingSendBatch group, Exception cause)
+    private static void FaultGroupCompletions(PendingEntry entry, Exception cause)
     {
         KafkaException failure = cause as KafkaException
             ?? new KafkaException("The producer send-completion pump failed to process a batch.", cause);
 
-        // Bounded by `Count`, never by `Length` — the tail is compaction slack with no awaiter.
-        for (int i = 0; i < group.Count; i++)
-        {
-            group.Completions[i].TrySetException(failure);
-        }
+        // Awaiters only — no future is freed here. A group bounds this by its `Count`, never by
+        // `Length` (the tail is compaction slack with no awaiter); a sync single (M11/P4.2 S2) faults its
+        // one latch, whose future ProcessSingle's `finally` already freed. A latch the single had
+        // already completed is left as it was (first-wins), exactly like an already-completed TCS.
+        entry.Fault(failure);
     }
 
     private static void DestroyFutures(IntPtr[] futures, int count) =>
@@ -928,7 +1110,7 @@ internal sealed class SendCompletionPump
     /// would turn a per-call allocation into a free-list to reason about for no measured gain.
     /// </para>
     /// </remarks>
-    private sealed class PendingSendBatch
+    private sealed class PendingSendBatch : PendingEntry
     {
         internal PendingSendBatch(
             IntPtr[] futures,
@@ -950,6 +1132,78 @@ internal sealed class SendCompletionPump
         internal DeliveryRegistration?[] Deliveries { get; }
 
         /// <summary>How many leading entries of the three arrays this group holds.</summary>
-        internal int Count { get; }
+        internal override int Count { get; }
+
+        /// <summary>Faults every awaiter, bounded by <see cref="Count"/> (never by <c>Length</c>).</summary>
+        internal override void Fault(Exception exception)
+        {
+            for (int i = 0; i < Count; i++)
+            {
+                Completions[i].TrySetException(exception);
+            }
+        }
+
+        /// <summary>Frees the group's futures with one <c>destroy_all</c>, bounded by <see cref="Count"/>.</summary>
+        internal override void DestroyFutures() => SendCompletionPump.DestroyFutures(Futures, Count);
+    }
+
+    /// <summary>
+    /// One <b>sync</b> send's accepted future awaiting resolution, with its latch and — where the
+    /// caller supplied an <see cref="IDeliveryCallback"/> — the carrier to invoke on completion
+    /// (M11/P4.2 S2). The sync surface's completion unit: always exactly one record.
+    /// </summary>
+    /// <remarks>
+    /// It shares <see cref="PendingEntry"/> and the queue with <see cref="PendingSendBatch"/> (decision
+    /// D11 (a)), so the gate, the pre-stop drain, the terminal drain and the loop's <c>catch</c> are
+    /// the same code for both kinds of entry. A pump serves one kind or the other — each producer
+    /// object owns its own pump (S-4) — but nothing here relies on that.
+    /// </remarks>
+    private sealed class PendingSyncSend : PendingEntry
+    {
+        internal PendingSyncSend(
+            IntPtr future,
+            SyncCompletion<RecordMetadata> completion,
+            DeliveryRegistration? delivery)
+        {
+            Future = future;
+            Completion = completion;
+            Delivery = delivery;
+        }
+
+        /// <summary>The send's future handle; the pump owns and frees it once this entry is queued.</summary>
+        internal IntPtr Future { get; }
+
+        internal SyncCompletion<RecordMetadata> Completion { get; }
+
+        /// <summary>The user's delivery callback carrier, or <see langword="null"/> if there is none.</summary>
+        internal DeliveryRegistration? Delivery { get; }
+
+        /// <summary>Always one: a sync send is a single record.</summary>
+        internal override int Count => 1;
+
+        /// <summary>Faults the latch (a no-op if it is already completed).</summary>
+        internal override void Fault(Exception exception) => Completion.TrySetException(exception);
+
+        /// <summary>Frees the future with the singular destroy (null-safe; no 1-element array).</summary>
+        internal override void DestroyFutures() => NativeMethods.FutureRecordMetadataDestroy(Future);
+    }
+
+    /// <summary>
+    /// A queued completion entry — a <see cref="PendingSendBatch"/> or a <see cref="PendingSyncSend"/>
+    /// (M11/P4.2 S2, decision D11 (a): one queue, one shared base).
+    /// </summary>
+    private abstract class PendingEntry
+    {
+        /// <summary>How many records the entry carries — what <c>_drainedSends</c> is advanced by.</summary>
+        internal abstract int Count { get; }
+
+        /// <summary>
+        /// Faults every awaiter the entry carries with <paramref name="exception"/>. Awaiters only:
+        /// it frees nothing and invokes no delivery callback.
+        /// </summary>
+        internal abstract void Fault(Exception exception);
+
+        /// <summary>Frees every future handle the entry carries. Called only where nothing will read them.</summary>
+        internal abstract void DestroyFutures();
     }
 }
