@@ -741,3 +741,36 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
   - New test `EnsurePump_AfterTheCloseLatch_Throws_AndStartsNoPump`. It disposes a producer that never sent, calls `EnsurePump()`, and asserts the exact `ObjectDisposedException` message and `ObjectName`, that `StartedPumpThread` is null, and that no accumulator exists.
   - C11 test defect: its released-handle branch expected `DangerousAddRef`'s message. On net8.0 and net10.0 the P/Invoke marshaler instead refuses a disposed `SafeProducerHandle` with "Cannot access a disposed object. Object name: '…SafeProducerHandle'.", so a normal run reaching that branch would have failed falsely. The fix accepts that message and keeps `DangerousAddRef`'s, because net462 was not measured. Before the fix, every M14a/M14b red was this check, not the pump assertion; after it, they are the pump assertion. This edit is test-only.
   - Gates: build 0W/0E; test-dotnet unit **3010/TFM**, soak 165/TFM, format clean. One M14b full-suite run on net8.0 also tripped the known R12 heap-budget flake, outside the target; the final gate was green.
+- **Critic 93 pass 2** (two spawns; no code modified):
+  - **(a) S3 `c9813476` + the `93a42813` `NativeProducer` part:** every focus item checked clean.
+    - `Send`'s statement order passes M15 (structural).
+    - Residual 4 frees the future once and unread; the closed gate cannot double-free.
+    - `FutureRecordMetadataGet` has one caller (the pump).
+    - No pump can be created after `PumpToStop`. The `Volatile.Read` fast path is publication-safe, because the ctor ends in `Thread.Start`.
+    - M16: no accumulator-gated return.
+    - S-1 / D11: no `IntPtr`, no box on the send path.
+    - The servicer and `CallbackLog` notes are true, and D-3 is kept.
+    - D12 re-grep (M20): a statement-level sweep of 163 `Send(` statements in 31 files finds 0 bare discards, matching the Actor's 30 + 2.
+    - The §5 guards still guard, and the async suites are unedited.
+    - Mode A holds.
+    - **One finding, C93-2 [low]:** four type-truth claims that S3 missed — `RecordMetadata.cs:21-23` (public summary: "returned by" both `Send`s); `grpc-server/AsyncProducerServiceImpl.cs:42-46` with its twin `ProducerServiceImpl.cs:33`; `PublicProducerFirstStageTests.cs:55`; `PublicSyncProducerSendTests.cs:53`.
+    - Considered and not filed (a user follow-up candidate): concurrent sync senders on different threads can see same-partition callbacks fire out of core-acceptance order. `Producer_send` and `EnqueueSingle` are two steps, and D1 defines FIFO by `Send`-return order. This is not a regression: before S3, sync callbacks ran inline on N caller threads with no cross-thread order.
+  - **(b) S4 `bc5926a5` + `93a42813`:** non-vacuity is confirmed per row (each red lands on the named property); every wait is bounded; the messages are exact; C5 matches Java `KafkaProducer.java:1049-1061`; the A1 definition matches the code; the probes are read-only; C3 keeps the original asserts. 17/17 on both TFMs (read-only run).
+    - **One finding, C93-3 [low]:** C11's closed-handle comment and helper rest on a false runtime claim. On net8.0 and net10.0, `DangerousAddRef` and the P/Invoke marshaler throw the **same** runtime-typed text ("Cannot access a disposed object. Object name: '<handle type>'."). The kept disjunct probes a `SafeWaitHandle`, so it is dead on both test TFMs. Behaviour is correct; the fix is to probe one string from a disposed `SafeProducerHandle`.
+    - **Record corrections (Manager, applied here):** the S4 entry's A1 definition said "on a manual mock". The test uses an **auto-completing** mock, so read the S4 A1 line that way. The S4 "Deviations" and S4m-fixup bullets' claim that the marshaler's message "differs from `DangerousAddRef`'s" is false, per C93-3. The M14a C11 kill rate went from 3/8 to 8/8 across a fixup that only widened the accepted messages. That jump is not explained by the edit; it does not block, because the new seam test grades M14a deterministically.
+  - **S5 stale-narrative list (consolidated; the S5 Actor's input, beyond PLAN §8's S5 row):**
+    - IProducer `:50-66`, `:81-88`, `:147-174`.
+    - KafkaProducer `:36-38`, `:43-44`, `:49-51` (the callback "inline on the calling thread").
+    - MockProducer `:54-55`, `:85`, `:185`, `:197-200` (`ErrorNext` "blocked in Send").
+    - IDeliveryCallback `:34-35`, `:53`, `:88-95`, `:102-103`, `:156-157`, `:289`, `:293`, `:339`.
+      - **`:88-95` has user-safety weight.** It says the sync self-join "does not arise", but since D3/D4 a sync `Dispose` from a callback self-joins the pump (R6 / FU-3).
+    - NativeProducer:
+      - `:52-53`;
+      - `:403`;
+      - `:1128-1131` (`PumpToStop` names only `EnsureAccumulator`);
+      - `:1196-1199` (StopPump "Blocker 2"); the other StopPump comments;
+      - `:1290` (`StopPumpAsync`);
+      - the Dispose docs `:1446-1472`;
+      - `:1490-1491` (`Close()`).
+    - NativeMethods `:2425`, `:2456`, `:2653`, `:2675`, `:2694`, `:2712` ("blocked in Send").
+    - Line numbers are at `638d12b7`; re-grep before editing.
