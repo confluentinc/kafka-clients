@@ -169,17 +169,20 @@ class _ProducerBase:
     ``send`` first tries to hand the record to the Rust producer on the
     calling thread (the ``try_send`` FFI: an append that never waits, with
     the GIL released). When the producer could not take it without waiting --
-    no metadata for the topic yet, ``buffer.memory`` exhausted, or earlier
-    records still queued -- nothing has happened, and ``send`` falls back to
-    queuing the record on the producer's outbox (the ``send_async`` FFI, a
-    channel push), from which a Rust task hands it to the producer; ``send``
-    then waits for that handover, Java's ``send()`` return point. Either way
-    one C callback thread per producer reports completions by invoking a
-    Python callback ``cb(result, error)`` with the GIL held — taking the GIL
-    once per burst of completions rather than once per record. Both the sync
-    :class:`Producer` and the async :class:`AsyncProducer` reuse the same C
-    entry points and differ only in the future type the callback resolves,
-    how, and how the fallback waits (see their respective ``send``).
+    no metadata for the topic yet, or ``buffer.memory`` exhausted -- nothing
+    has happened, and ``send`` falls back to queuing the record on the
+    producer's outbox (the ``send_async`` FFI, a channel push), from which a
+    Rust task hands it to the producer, waiting up to ``max.block.ms`` on a
+    task of the record's own so that concurrent callers wait concurrently;
+    ``send`` then waits for the producer's answer, Java's ``send()`` return
+    point -- and raises its refusal as a :class:`KafkaError`, where Java's
+    ``send()`` throws. Either way one C callback thread per producer reports
+    completions by invoking a Python callback ``cb(result, error)`` with the
+    GIL held — taking the GIL once per burst of completions rather than once
+    per record. Both the sync :class:`Producer` and the async
+    :class:`AsyncProducer` reuse the same C entry points and differ only in
+    the future type the callback resolves, how, and how the fallback waits
+    (see their respective ``send``).
     """
 
     def __init__(self):
@@ -355,6 +358,14 @@ class Producer(_ProducerBase):
                 cancelled or already resolved; exceptions it raises are logged
                 and swallowed.
 
+        Raises:
+            KafkaError: the producer refused the record, where Java's ``send()``
+                throws — closed producer, transaction state (no transaction in
+                progress, a previous fatal error, ...). No ``Future`` is left
+                behind. Java 4.x raises some transaction-state errors only after
+                the record was appended; ``on_delivery`` then still runs once
+                with the record's outcome.
+
         .. warning::
            ``on_delivery`` runs on the producer's completion thread, not on the
            caller's — the same contract as Java, where the callback executes on
@@ -380,28 +391,48 @@ class Producer(_ProducerBase):
             _invoke_on_delivery(on_delivery, metadata, exception)
 
         # Fast path: the producer takes the record on this thread when that
-        # needs no waiting (metadata cached, buffer memory free, nothing queued
-        # ahead of it) -- the common case, and Java's send() return point
-        # reached without a queue or a wait. False means it would have had to
-        # wait, and nothing happened: no callback will fire for this attempt.
-        if _lib.Producer_try_send(self.c_producer, producer_record, cb):
+        # needs no waiting (metadata cached, buffer memory free) -- the common
+        # case, and Java's send() return point reached without a queue or a
+        # wait. False means it would have had to wait, and nothing happened: no
+        # callback will fire for this attempt. Anything else is the producer's
+        # refusal, an error handle to raise where Java's send() throws; `ret`
+        # is cancelled so the delivery callback, if one is still coming, does
+        # not fail a future nobody holds (it still runs `on_delivery`).
+        taken = _lib.Producer_try_send(self.c_producer, producer_record, cb)
+        if taken is True:
             return self._add_future(ret)
+        if taken is not False:
+            ret.cancel()
+            raise KafkaError._from_c(taken)
 
         # Slow path, Java's blocking send(): queue the record on the outbox and
-        # return once the Rust submission task has handed it to the producer. C
-        # queues the record and returns at once; `accepted_cb` fires once from
-        # the dispatcher thread and resolves `accepted`, on which this thread
-        # waits. The wait is Python's own lock wait, so Ctrl+C is handled by
-        # Python. Backpressure is buffer.memory / max.block.ms only; there is
-        # no outbox cap.
+        # return once the producer has settled it -- taken it, or refused it,
+        # in which case the refusal is raised here. C queues the record and
+        # returns at once; `accepted_cb` fires once from the dispatcher thread
+        # with the answer and resolves `accepted`, on which this thread waits.
+        # A record that has to wait (metadata, buffer memory) does so on a Rust
+        # task of its own for up to max.block.ms, so concurrent callers wait
+        # concurrently, as Java threads blocked in send() do. The wait is
+        # Python's own lock wait, so Ctrl+C is handled by Python. Backpressure
+        # is buffer.memory / max.block.ms only; there is no outbox cap.
         accepted = Future()
 
-        def accepted_cb():
-            accepted.set_result(None)
+        def accepted_cb(error):
+            if error:
+                accepted.set_exception(KafkaError._from_c(error))
+            else:
+                accepted.set_result(None)
 
-        already = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
-        if not already:
-            accepted.result()
+        taken = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
+        if taken is None:
+            try:
+                accepted.result()
+            except KafkaError:
+                ret.cancel()
+                raise
+        elif taken is not True:
+            ret.cancel()
+            raise KafkaError._from_c(taken)
         return self._add_future(ret)
 
     def _run_sync(self, submit, resolve):
@@ -601,13 +632,16 @@ class AsyncProducer(_ProducerBase):
     ``await fut`` for the result). It is a coroutine — rather than a plain
     method like the sync :class:`Producer` — so it can suspend on backpressure:
     when the producer cannot take the record at once (no metadata yet, buffer
-    memory exhausted, earlier records still queued) the record is queued and
-    the coroutine ``await``s its handover to the producer, yielding the event
-    loop to the completion drain so a flooding ``await producer.send(...)``
-    loop does not starve completions. In the common case the record is
-    appended on the calling thread without suspending. A run of such sends
-    gives the loop no turn, so ``send`` yields it once every
-    ``_YIELD_EVERY`` sends while completions are waiting to be drained.
+    memory exhausted) the record is queued and the coroutine ``await``s the
+    producer's answer — accepted, or a refusal raised as a :class:`KafkaError`
+    where Java's ``send()`` throws — yielding the event loop to the completion
+    drain so a flooding ``await producer.send(...)`` loop does not starve
+    completions. Records waiting at the same time wait concurrently, each on a
+    Rust task of its own, as Java threads blocked in ``send()`` do. In the
+    common case the record is appended on the calling thread without
+    suspending. A run of such sends gives the loop no turn, so ``send`` yields
+    it once every ``_YIELD_EVERY`` sends while completions are waiting to be
+    drained.
 
     Completions from the C callback thread are marshalled back onto the event
     loop (an ``asyncio.Future`` is not thread-safe).
@@ -662,11 +696,20 @@ class AsyncProducer(_ProducerBase):
         _invoke_on_delivery(on_delivery, metadata, exception)
 
     @staticmethod
-    def _resolve_space(space):
-        """Resolve a space-available future. Runs on the event loop thread
-        (scheduled via call_soon_threadsafe from the Rust dispatcher thread)."""
-        if not space.done():
-            space.set_result(None)
+    def _resolve_accepted(accepted, error):
+        """Resolve the acceptance future of a queued send with the producer's
+        answer: ``error`` is 0 for an accepted record, else an owned error
+        handle for a refused one. Runs on the event loop thread (scheduled via
+        call_soon_threadsafe from the Rust dispatcher thread). The handle is
+        always consumed, also when the awaiting task was cancelled meanwhile."""
+        if accepted.done():
+            if error:
+                _lib.KafkaError_destroy(error)
+            return
+        if error:
+            accepted.set_exception(KafkaError._from_c(error))
+        else:
+            accepted.set_result(None)
 
     def _drain(self):
         """Resolve all buffered completions. Runs on the event loop thread."""
@@ -702,6 +745,14 @@ class AsyncProducer(_ProducerBase):
         Most sends return without suspending. After ``_YIELD_EVERY`` of them
         in a row, while completions are waiting to be drained, ``send``
         yields the event loop once before taking the record.
+
+        Raises:
+            KafkaError: the producer refused the record, where Java's ``send()``
+                throws — closed producer, transaction state (no transaction in
+                progress, a previous fatal error, ...). No future is left
+                behind. Java 4.x raises some transaction-state errors only after
+                the record was appended; ``on_delivery`` then still runs once
+                with the record's outcome.
         """
         # Yield before anything is handed over: a cancellation delivered at
         # this point leaves nothing sent and no future behind. The flag is read
@@ -739,28 +790,49 @@ class AsyncProducer(_ProducerBase):
         # needs no waiting -- the common case, Java's send() return point
         # reached without suspending. False means it would have had to wait,
         # and nothing happened: no callback will fire for this attempt.
-        if _lib.Producer_try_send(self.c_producer, producer_record, cb):
+        # Anything else is the producer's refusal, an error handle to raise
+        # where Java's send() throws; `ret` is cancelled so a delivery callback
+        # still coming does not fail a future nobody holds (it still runs
+        # `on_delivery`).
+        taken = _lib.Producer_try_send(self.c_producer, producer_record, cb)
+        if taken is True:
             self._sends_since_yield += 1
             return self._add_future(ret)
+        if taken is not False:
+            ret.cancel()
+            raise KafkaError._from_c(taken)
 
         # Slow path: queue the record on the outbox and await (yielding the
-        # loop) until the Rust submission task has handed it to the producer --
-        # Java's send() return point. The acceptance callback runs on the Rust
-        # dispatcher thread, so it hops onto the loop via call_soon_threadsafe.
+        # loop) until the producer has settled it -- Java's send() return
+        # point, or its throw, raised here. The acceptance callback runs on the
+        # Rust dispatcher thread, so it hops onto the loop via
+        # call_soon_threadsafe; if the loop is already closed nothing can be
+        # scheduled, and the refusal handle is freed here.
         accepted = loop.create_future()
 
-        def accepted_cb():
+        def accepted_cb(error):
             if not loop.is_closed():
-                loop.call_soon_threadsafe(self._resolve_space, accepted)
+                loop.call_soon_threadsafe(self._resolve_accepted, accepted, error)
+            elif error:
+                _lib.KafkaError_destroy(error)
 
-        already = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
-        self._add_future(ret)
-        if already:
-            self._sends_since_yield += 1
-        else:
-            self._sends_since_yield = 0  # awaiting the handover yields the loop
-            await accepted
-        return ret
+        taken = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
+        if taken is None:
+            # Registered before the wait, so a close() during it still cancels
+            # `ret` with the others.
+            self._add_future(ret)
+            self._sends_since_yield = 0  # awaiting the answer yields the loop
+            try:
+                await accepted
+            except KafkaError:
+                ret.cancel()
+                raise
+            return ret
+        self._sends_since_yield += 1
+        if taken is not True:
+            ret.cancel()
+            raise KafkaError._from_c(taken)
+        return self._add_future(ret)
 
     async def _run_async(self, submit, resolve, free):
         """Submit an async FFI op and ``await`` its completion on the event loop.

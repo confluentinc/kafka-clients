@@ -606,8 +606,32 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // user_data) until its completion is reported, because send_async borrows the
 // record's key/value buffers until the callback fires; that pin is what makes
 // the buffers safe to read while the GIL is released.
-static void space_trampoline(void* ud);  // defined below; also fires the acceptance callbacks
+static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pending, void* ud);
 
+// The slow path of the Python `send`, taken when Producer_try_send would have
+// had to wait: queue the record on the Rust outbox and return at once. The
+// Rust submission task hands it to the producer -- on a task of the record's
+// own when that means waiting up to max.block.ms, so concurrent callers wait
+// concurrently -- and then settles the record: accepted, or refused where
+// Java's send() throws (closed producer, transaction state, ...).
+//
+// Returns True when the producer had already accepted the record by the time
+// this returns (accepted_cb is not kept), None when the answer is still to
+// come -- accepted_cb(error) then fires exactly once, later, from the
+// dispatcher thread, with 0 for an accepted record or an owned error handle
+// (as an int) for a refused one -- or the owned error handle itself when the
+// producer had already refused it. The Python side raises a refusal as a
+// KafkaError built from the handle, which frees it. Sync callers wait for
+// accepted_cb on a concurrent.futures.Future, asyncio callers on a loop
+// Future via call_soon_threadsafe; both waits are Python's own, so Ctrl+C is
+// handled by Python without any polling here.
+//
+// The (record, callback, producer) pin is released by the delivery callback
+// when it reports the completion. A refused record normally has none coming,
+// so the pin is released on the refusal instead -- unless Rust reports the
+// delivery callback as still pending (Java 4.x throws some transaction-state
+// errors only after the record was appended; the callback then still fires
+// once and releases the pin as usual).
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject *record_obj, *complete_cb, *accepted_cb;
@@ -639,6 +663,15 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         return NULL;
     }
 
+    // What the acceptance callback needs: the Python callable and the record
+    // pin it may have to release. Packed before the Rust call, so a failure here
+    // leaves nothing queued.
+    PyObject* acc_ud = PyTuple_Pack(2, accepted_cb, ud);
+    if (acc_ud == NULL) {
+        Py_DECREF(ud);
+        return NULL;
+    }
+
     ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
     kafka_producer_ProducerRecord_t* rs = &record->record_struct;
     kafka_common_Error_t* err = NULL;
@@ -651,7 +684,8 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         send_direct_trampoline, ud, &err);
     Py_END_ALLOW_THREADS
 
-    if (err != NULL) {                 // sync failure: cb will NOT fire
+    if (err != NULL) {                 // sync validation failure: cb will NOT fire
+        Py_DECREF(acc_ud);
         Py_DECREF(ud);
         const char* msg = kafka_common_Error_message(err);
         PyErr_SetString(PyExc_RuntimeError, msg ? msg : "send failed");
@@ -659,34 +693,75 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    // `accepted_cb` fires once from the dispatcher thread when the Rust submission
-    // task has handed the record to the producer (Java's send() return point).
-    // True means it already had (callback not kept); the Python side then skips
-    // its wait. Sync callers block on a concurrent.futures.Future that the
-    // callback resolves, asyncio callers on a loop Future via
-    // call_soon_threadsafe; both waits are Python's own, so Ctrl+C is handled
-    // by Python without any polling here.
-    Py_INCREF(accepted_cb);
-    bool already = kafka_producer_SendAccepted_get_async(acc, space_trampoline, accepted_cb);
+    bool already = kafka_producer_SendAccepted_get_async(acc, accepted_trampoline, acc_ud);
+    if (!already) {
+        // Settled later: accepted_trampoline fires exactly once with the answer.
+        // The handle is only a view on the acceptance state, which lives on with
+        // the queued send.
+        kafka_producer_SendAccepted_destroy(acc);
+        Py_RETURN_NONE;
+    }
+    // Already settled (the callback was not stored): read the answer off the
+    // handle.
+    Py_DECREF(acc_ud);
+    kafka_common_Error_t* refusal = kafka_producer_SendAccepted_take_error(acc);
+    bool callback_pending = kafka_producer_SendAccepted_callback_pending(acc);
     kafka_producer_SendAccepted_destroy(acc);
-    if (already) {
-        Py_DECREF(accepted_cb);
+    if (refusal == NULL) {
         Py_RETURN_TRUE;
     }
-    Py_RETURN_FALSE;
+    if (!callback_pending) {
+        Py_DECREF(ud);                 // refused unseen by any batch: cb will NOT fire
+    }
+    return PyLong_FromVoidPtr(refusal);
+}
+
+// Fires once when the producer has settled a record queued by Producer_send
+// (from the Rust dispatcher thread, or inline from destroy if the producer is
+// torn down first). `ud` is the (accepted_cb, record_pin) tuple packed there.
+// Calls accepted_cb(error): 0 for an accepted record, else the owned error
+// handle as an int for a refused one -- the error Java's send() throws -- which
+// the Python side turns into a KafkaError (freeing the handle). A refused
+// record whose delivery callback is not pending has no completion coming, so
+// its pin is released here.
+static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pending, void* ud) {
+    PyObject* acc_ud = (PyObject*)ud;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* cb = PyTuple_GET_ITEM(acc_ud, 0);
+    if (error != NULL && !callback_pending) {
+        Py_DECREF(PyTuple_GET_ITEM(acc_ud, 1));  // the delivery callback will never release it
+    }
+    PyObject* err_obj = error ? PyLong_FromVoidPtr(error) : PyLong_FromLong(0);
+    PyObject* r = err_obj ? PyObject_CallFunctionObjArgs(cb, err_obj, NULL) : NULL;
+    if (r) {
+        Py_DECREF(r);
+    } else {
+        // Leaks the error handle, if any, rather than risk freeing one the
+        // callee took before failing.
+        PyErr_WriteUnraisable(cb);
+    }
+    Py_XDECREF(err_obj);
+    Py_DECREF(acc_ud);
+    PyGILState_Release(g);
 }
 
 // The fast path of the Python `send`: hand the record to the producer on this
 // thread if that needs no waiting. Returns True when the producer took it (the
 // completion callback will fire exactly once, like a record queued by
-// Producer_send), False when it would have had to wait -- for metadata, for
-// buffer memory, or for records still queued on the outbox ahead of it -- in
-// which case nothing happened, the callback will never fire, and the Python
-// side queues the record with Producer_send instead. Raises on a synchronous
-// validation failure (callback not invoked).
+// Producer_send), False when it would have had to wait -- for metadata or for
+// buffer memory -- in which case nothing happened, the callback will never
+// fire, and the Python side queues the record with Producer_send instead.
+// Records other callers have waiting on the slow path do not hold it up, as
+// one Java thread's send() is not held behind another's wait. Returns the
+// owned error handle (as an int) when the producer refused the record, where
+// Java's send() throws; the Python side raises it as a KafkaError, which frees
+// the handle.
 //
 // Same GIL handling and the same (record, callback, producer) pin as
-// Producer_send; on False the pin is released here since no callback will.
+// Producer_send; on False the pin is released here since no callback will, and
+// likewise on a refusal -- unless Rust reports the delivery callback as still
+// pending (the record had reached a batch before the refusal), in which case
+// that callback releases it as usual.
 static PyObject* py_Producer_try_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject *record_obj, *complete_cb;
@@ -735,23 +810,23 @@ static PyObject* py_Producer_try_send(PyObject* self, PyObject* args) {
     case kafka_producer_TrySendOutcome_WOULD_BLOCK:
         Py_DECREF(ud);             // nothing happened: no callback will release the pin
         Py_RETURN_FALSE;
+    case kafka_producer_TrySendOutcome_ERROR_CALLBACK_PENDING:
+        break;                     // refused after the append: cb still fires and releases the pin
     case kafka_producer_TrySendOutcome_ERROR:
     default:
+        Py_DECREF(ud);             // refused or invalid before any batch: cb will NOT fire
         break;
     }
-    Py_DECREF(ud);                 // sync failure: cb will NOT fire
-    const char* msg = err ? kafka_common_Error_message(err) : NULL;
-    PyErr_SetString(PyExc_RuntimeError, msg ? msg : "send failed");
-    if (err) {
-        kafka_common_Error_destroy(err);
+    if (err == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "send failed");
+        return NULL;
     }
-    return NULL;
+    return PyLong_FromVoidPtr(err);  // raised by the Python side as a KafkaError
 }
 
-// One-shot callback fired by Rust (on its dispatcher thread): either the outbox
-// has room again (on_space_available) or a record was accepted (Producer_send).
-// Calls the Python callable `cb` with no arguments, then drops the reference
-// the registering function took.
+// One-shot callback fired by Rust (on its dispatcher thread) when the outbox
+// has room again (on_space_available). Calls the Python callable `cb` with no
+// arguments, then drops the reference the registering function took.
 static void space_trampoline(void* ud) {
     PyObject* cb = (PyObject*)ud;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -7039,10 +7114,12 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_try_send", py_Producer_try_send, METH_VARARGS,
      "Hand the record to the producer on this thread if that needs no waiting; "
      "return True if it did (callback will fire), False if it would have blocked "
-     "(nothing happened; queue it with Producer_send instead)"},
+     "(nothing happened; queue it with Producer_send instead), or an owned error "
+     "handle (int) if the producer refused it, to raise as a KafkaError"},
     {"Producer_send", py_Producer_send, METH_VARARGS,
      "Queue record on the Rust outbox; return True if the producer already "
-     "accepted it, else False and fire accepted_cb once when it does"},
+     "accepted it, an owned error handle (int) if it already refused it, else "
+     "None and fire accepted_cb(error_int) once when it settles the record"},
     {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
      "Register a callback fired when outbox space frees; returns True if "
      "space is already available"},
