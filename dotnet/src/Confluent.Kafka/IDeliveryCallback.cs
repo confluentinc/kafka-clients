@@ -22,8 +22,9 @@ namespace Confluent.Kafka;
 /// which restore Java's <b>second</b> <c>send</c> signature
 /// (<c>Future&lt;RecordMetadata&gt; send(ProducerRecord, Callback)</c>,
 /// <c>Producer.java:86</c>) — the callback is an <b>additional</b> parameter, not an alternative:
-/// the overload still returns the <see cref="RecordMetadata"/> (sync) / yields the
-/// <see cref="AsyncKafkaFuture{T}"/> (async) the plain overload does.
+/// the overload still returns the <see cref="RecordMetadata"/> (sync) / yields the record's
+/// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery
+/// <see cref="System.Threading.Tasks.Task{TResult}"/> (async), exactly as the plain overload does.
 /// </summary>
 /// <remarks>
 /// <para>

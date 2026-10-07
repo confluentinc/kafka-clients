@@ -51,16 +51,18 @@ namespace Confluent.Kafka;
 /// <b>Send serializes then blocks and returns the metadata directly</b> (= Java
 /// <c>send(record).get()</c>) — not a <see cref="System.Threading.Tasks.Task{TResult}"/>. The key /
 /// value are serialized on the caller's thread before the blocking send; a serializer throw surfaces
-/// synchronously as a <see cref="SerializationException"/>. .NET has only one future type
-/// (<see cref="System.Threading.Tasks.Task{TResult}"/>), which the async
-/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>
-/// already exposes as the <see cref="AsyncKafkaFuture{T}.Get"/> of the <see cref="AsyncKafkaFuture{T}"/>
-/// its first stage yields (a <see cref="System.Threading.Tasks.ValueTask{TResult}"/> that
-/// completes once the record is accepted); a <see cref="System.Threading.Tasks.Task"/>
-/// here would clone the async surface and erase the sync/async split. Callers who want pipelined,
-/// future-returning sends use <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from
-/// Python's sync producer (whose <c>send</c> returns a <c>concurrent.futures.Future</c>) — forced by .NET's
-/// single future type (PLAN §3 decision #1).
+/// synchronously as a <see cref="SerializationException"/>. Java's <c>Future</c> is already provided by the
+/// async
+/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>:
+/// it is the <see cref="AsyncKafkaFuture{T}"/> its first stage yields (a
+/// <see cref="System.Threading.Tasks.ValueTask{TResult}"/> that completes once the record is accepted), whose
+/// <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery <see cref="System.Threading.Tasks.Task{TResult}"/>. A
+/// future-returning <c>Send</c> here — that future, or a <see cref="System.Threading.Tasks.Task"/> — would clone
+/// the async surface and erase the sync/async split, so the synchronous <c>Send</c> returns the
+/// <see cref="RecordMetadata"/>. Callers who want pipelined, future-returning sends use
+/// <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from Python's sync producer (whose
+/// <c>send</c> returns a <c>concurrent.futures.Future</c>): here that future-returning <c>Send</c> already
+/// exists, on the async surface (PLAN §3 decision #1).
 /// </para>
 /// <para>
 /// <b>Both of Java's <c>send</c> signatures are present (M14/P1).</b>

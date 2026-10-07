@@ -65,7 +65,11 @@ namespace Confluent.Kafka;
 /// that completes when the record is <b>accepted</b> under the producer's bound on records not yet handed to its
 /// send-batch thread. Its result is the record's <see cref="AsyncKafkaFuture{T}"/> — Java's
 /// <c>Future&lt;RecordMetadata&gt;</c>; its <see cref="AsyncKafkaFuture{T}.Get"/> is the <b>delivery</b>
-/// <see cref="Task{TResult}"/>. The first stage is usually complete when <c>Send</c> returns; once the bound
+/// <see cref="Task{TResult}"/>. That result is deliberately a named struct over the delivery
+/// <see cref="Task{TResult}"/>, not the plain <see cref="Task{TResult}"/> that Java's futures map to elsewhere in
+/// this binding (the admin client's <c>KafkaFuture&lt;T&gt;</c> → <see cref="Task{TResult}"/>), so that the two
+/// stages of <c>Send</c> are distinguishable (M11/P3.6 decision D7); it costs nothing at runtime — see
+/// <see cref="AsyncKafkaFuture{T}"/>. The first stage is usually complete when <c>Send</c> returns; once the bound
 /// is reached it stays pending until capacity frees. It never parks the calling thread. This is Java's blocking
 /// <c>send()</c> on an async surface, in the Python binding's async <c>send</c> order: append, then wait for space.
 /// <code>
@@ -109,7 +113,9 @@ namespace Confluent.Kafka;
 /// <item><description>Inside <c>await producer.Send(record, token)</c> the two cases look alike: an
 /// <see cref="OperationCanceledException"/> means "not appended" only for an already-canceled token; otherwise the
 /// record is still sent, so <b>retrying after an <see cref="OperationCanceledException"/> can duplicate it</b>. (The
-/// same duplicate-on-retry risk exists at the delivery stage, and in Java's <c>future.get(timeout)</c>.)</description></item>
+/// same duplicate-on-retry risk exists at the delivery stage, and in Java's <c>future.get(timeout)</c>.) Separating
+/// the call from the await tells the two apart — see the example on
+/// <see cref="Send(ProducerRecord{TKey,TValue}, CancellationToken)"/>.</description></item>
 /// <item><description>A caller whose token ends the first stage is not throttled for that send: a short per-send
 /// token while the producer is stuck lets records accumulate, one per token period — as with
 /// <c>asyncio.wait_for</c> in Python, and like a caller that does not await the first stage at all
@@ -175,6 +181,24 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// remarks state the contract in full; it applies to the <b>async</b> surface only.
     /// </para>
     /// </remarks>
+    /// <example>
+    /// <c>await producer.Send(r, ct)</c> gives the same <see cref="OperationCanceledException"/> for "already
+    /// canceled → <b>not appended</b>" and "fired while waiting → <b>still sent</b>"; separating the call from
+    /// the await tells them apart:
+    /// <code>
+    /// ValueTask&lt;AsyncKafkaFuture&lt;RecordMetadata&gt;&gt; send;
+    /// try { send = producer.Send(r, ct); }                          // OCE here: token already canceled → NOT appended
+    /// catch (OperationCanceledException) { throw; }
+    /// AsyncKafkaFuture&lt;RecordMetadata&gt; f;
+    /// try { f = await send; }                                         // OCE here: fired while waiting → appended, STILL SENT
+    /// catch (OperationCanceledException e) when (e.CancellationToken == ct) { /* retrying may duplicate */ throw; }
+    /// RecordMetadata md = await f.Get();                              // OCE here: delivery task canceled → may still be sent
+    /// </code>
+    /// After either later <see cref="OperationCanceledException"/> the key / value buffers stay borrowed until
+    /// the record's delivery callback fires (the
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> overload) or a
+    /// later <see cref="Flush"/> completes successfully (M11/P3.5 91.11; see the remarks above).
+    /// </example>
     /// <param name="record">The record to publish.</param>
     /// <param name="cancellationToken">
     /// Best-effort cancellation of the .NET waits (no native abort — the producer has no
@@ -255,7 +279,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <param name="callback">The delivery callback (non-null).</param>
     /// <param name="cancellationToken">
     /// Best-effort cancellation of the .NET waits, exactly as on
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>. Cancelling a wait does
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, whose example shows how to tell an
+    /// already-canceled token (nothing appended) from one that fired while waiting (still sent). Cancelling a wait does
     /// <b>not</b> cancel the callback obligation: <paramref name="callback"/> still fires when the
     /// core reports the send's completion — including for a send whose first stage the token ended,
     /// whose record is still sent.

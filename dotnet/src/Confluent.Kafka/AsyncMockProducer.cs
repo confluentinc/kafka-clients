@@ -43,8 +43,9 @@ namespace Confluent.Kafka;
 /// send-driving helpers as inherent methods on the concrete type (not on the interface) —
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount()"/> /
 /// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
-/// precedent. With <c>autoComplete: false</c> a send stays pending until
-/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it.
+/// precedent. With <c>autoComplete: false</c> a send's delivery task (its
+/// <see cref="AsyncKafkaFuture{T}.Get"/>) stays pending until <see cref="CompleteNext"/> /
+/// <see cref="ErrorNext"/> resolves it; its first stage (acceptance) does not wait for that.
 /// </para>
 /// <para>
 /// <b>Delivery callbacks come for free, and that is Java-parity (M14/P1 decision D10).</b>
@@ -105,8 +106,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
     /// When <see langword="true"/> (the default), the mock resolves each <c>Send</c>
-    /// automatically. When <see langword="false"/>, a send stays pending until
-    /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it. Flush / close on a mock
+    /// automatically. When <see langword="false"/>, a send's delivery task (its
+    /// <see cref="AsyncKafkaFuture{T}.Get"/>) stays pending until <see cref="CompleteNext"/> /
+    /// <see cref="ErrorNext"/> resolves it. Flush / close on a mock
     /// resolve broker-free regardless of this flag.
     /// </param>
     /// <exception cref="ArgumentNullException">
