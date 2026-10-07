@@ -171,7 +171,7 @@ impl ChunkedByteBufferOutputStream {
     /// `IllegalState` after [`deallocate`](Self::deallocate) or [`close`](Self::close), or when
     /// every attached chunk is full.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#write")]
-    pub(crate) fn write_byte(&mut self, b: u8) -> Result<(), Error> {
+    pub(crate) fn write_with_b(&mut self, b: u8) -> Result<(), Error> {
         self.ensure_not_deallocated()?;
         self.ensure_writable()?;
         let index = self.advance_while_current_chunk_full()?;
@@ -191,7 +191,7 @@ impl ChunkedByteBufferOutputStream {
     /// `IllegalState` after [`deallocate`](Self::deallocate) or [`close`](Self::close), or when
     /// the write exceeds the remaining capacity across the attached chunks.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#write")]
-    pub(crate) fn write_bytes(&mut self, mut bytes: &[u8]) -> Result<(), Error> {
+    pub(crate) fn write_with_bytes(&mut self, mut bytes: &[u8]) -> Result<(), Error> {
         self.ensure_not_deallocated()?;
         self.ensure_writable()?;
         while !bytes.is_empty() {
@@ -394,7 +394,9 @@ impl ChunkedByteBufferOutputStream {
     ///
     /// `IllegalState` after [`deallocate`](Self::deallocate) or after any write;
     /// `IllegalArgument` if `position` exceeds the attached capacity.
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#position")]
+    ///
+    /// This is Java's `position(int)` overload. CLAUDE.md §2 names a setter `set_<field>`, so it
+    /// carries no marker for the name check, which would hold it to `position_with_<params>`.
     pub(crate) fn set_position(&mut self, position: usize) -> Result<(), Error> {
         let current = self.ensure_not_deallocated()?;
         if current != 0 || self.current_chunk_position != 0 {
@@ -501,9 +503,9 @@ impl ChunkedByteBufferOutputStream {
 /// write into the stream the way they write into a `Vec<u8>`.
 ///
 /// `io::Write::write` promises that an error means no bytes were written, so unlike
-/// [`write_bytes`](ChunkedByteBufferOutputStream::write_bytes) it writes only what fits and
+/// [`write_with_bytes`](ChunkedByteBufferOutputStream::write_with_bytes) it writes only what fits and
 /// reports the shortfall as a short write; the error comes on the next call, when no capacity is
-/// left. `write_all` therefore fails exactly where `write_bytes` does, with the same bytes
+/// left. `write_all` therefore fails exactly where `write_with_bytes` does, with the same bytes
 /// written.
 impl io::Write for ChunkedByteBufferOutputStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -512,7 +514,7 @@ impl io::Write for ChunkedByteBufferOutputStream {
         }
         let remaining = self.remaining().map_err(io::Error::other)?;
         let to_write = buf.len().min(remaining.max(1));
-        self.write_bytes(&buf[..to_write]).map_err(io::Error::other)?;
+        self.write_with_bytes(&buf[..to_write]).map_err(io::Error::other)?;
         Ok(to_write)
     }
 
@@ -614,7 +616,7 @@ mod tests {
         let chunk_size = 8;
         let p = pool(64, chunk_size);
         let mut stream = stream(&p, chunk_size, 2);
-        stream.write_bytes(&[1, 2, 3]).unwrap();
+        stream.write_with_bytes(&[1, 2, 3]).unwrap();
 
         stream.deallocate();
 
@@ -627,8 +629,8 @@ mod tests {
         assert_illegal_state(stream.initial_capacity(), DEALLOCATED);
         assert_illegal_state(stream.set_position(1), DEALLOCATED);
         assert_illegal_state(stream.ensure_remaining(1), DEALLOCATED);
-        assert_illegal_state(stream.write_byte(1), DEALLOCATED);
-        assert_illegal_state(stream.write_bytes(&[4]), DEALLOCATED);
+        assert_illegal_state(stream.write_with_b(1), DEALLOCATED);
+        assert_illegal_state(stream.write_with_bytes(&[4]), DEALLOCATED);
         // Java's `write(ByteBuffer)`: the io::Write route.
         let io_err = stream.write(&[5]).unwrap_err();
         assert_eq!(DEALLOCATED, io_message(io_err));
@@ -650,13 +652,13 @@ mod tests {
         let chunk_size = 16;
         let p = pool(64, chunk_size);
         let mut stream = stream(&p, chunk_size, 2);
-        stream.write_bytes(&[1, 2, 3]).unwrap();
+        stream.write_with_bytes(&[1, 2, 3]).unwrap();
 
         // close() closes the stream for appends; any subsequent write must fail.
         stream.close();
 
-        assert_illegal_state(stream.write_byte(1), CLOSED);
-        assert_illegal_state(stream.write_bytes(&[4]), CLOSED);
+        assert_illegal_state(stream.write_with_b(1), CLOSED);
+        assert_illegal_state(stream.write_with_bytes(&[4]), CLOSED);
         assert_eq!(CLOSED, io_message(stream.write(&[5]).unwrap_err()));
         // Attaching more chunks is a write-preparation step, so it is disallowed once closed too.
         let mut extra = vec![vec![0u8; chunk_size]];
@@ -683,7 +685,7 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 1);
 
         let payload = [1u8, 2, 3, 4, 5];
-        stream.write_bytes(&payload).unwrap();
+        stream.write_with_bytes(&payload).unwrap();
 
         stream.close();
         assert_eq!(&payload[..], &stream.buffer().unwrap()[..]);
@@ -701,7 +703,7 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 3);
 
         let payload: Vec<u8> = (0..20).collect();
-        stream.write_bytes(&payload).unwrap();
+        stream.write_with_bytes(&payload).unwrap();
 
         stream.close();
         assert_eq!(&payload[..], &stream.buffer().unwrap()[..]);
@@ -719,9 +721,9 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 2);
 
         assert_eq!(2 * chunk_size, stream.remaining().unwrap());
-        stream.write_bytes(&[0u8; 3]).unwrap();
+        stream.write_with_bytes(&[0u8; 3]).unwrap();
         assert_eq!(2 * chunk_size - 3, stream.remaining().unwrap());
-        stream.write_bytes(&[0u8; 8]).unwrap(); // crosses into chunk 2
+        stream.write_with_bytes(&[0u8; 8]).unwrap(); // crosses into chunk 2
         assert_eq!(chunk_size - 3, stream.remaining().unwrap());
 
         stream.deallocate();
@@ -735,14 +737,14 @@ mod tests {
         let chunk_size = 8;
         let p = pool(64, chunk_size);
         let mut stream = stream(&p, chunk_size, 2);
-        stream.write_bytes(&[1, 2, 3]).unwrap();
+        stream.write_with_bytes(&[1, 2, 3]).unwrap();
 
         // Requesting more than the current chunk's free bytes (5) but no more than the total free
         // bytes across chunks (13) must not skip ahead: the bytes left in the current chunk stay
         // writable.
         stream.ensure_remaining(chunk_size + 1).unwrap();
         assert_eq!(2 * chunk_size - 3, stream.remaining().unwrap());
-        stream.write_bytes(&[4, 5]).unwrap();
+        stream.write_with_bytes(&[4, 5]).unwrap();
         assert_eq!(5, stream.position().unwrap());
         assert_eq!(2 * chunk_size - 5, stream.remaining().unwrap());
 
@@ -765,7 +767,7 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 1);
 
         // Fill the initial chunk.
-        stream.write_bytes(&[0u8; 8]).unwrap();
+        stream.write_with_bytes(&[0u8; 8]).unwrap();
         assert_eq!(0, stream.remaining().unwrap());
 
         // Extend and write more — must land in the new chunk.
@@ -774,7 +776,7 @@ mod tests {
         assert!(extra.is_empty(), "ownership of the added chunks moves to the stream");
         assert_eq!(chunk_size, stream.remaining().unwrap());
 
-        stream.write_bytes(&[9, 9, 9]).unwrap();
+        stream.write_with_bytes(&[9, 9, 9]).unwrap();
         assert_eq!(chunk_size - 3, stream.remaining().unwrap());
 
         stream.deallocate();
@@ -850,7 +852,7 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 3);
         // Write into the first chunk only; chunks 2 and 3 stay unused.
         let payload = [1u8, 2, 3];
-        stream.write_bytes(&payload).unwrap();
+        stream.write_with_bytes(&payload).unwrap();
         assert_eq!(total - 3 * chunk_size as i64, p.available_memory());
 
         // buffer() is only valid once the stream is closed for appends.
@@ -902,18 +904,18 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 2);
 
         assert_illegal_state(
-            stream.write_bytes(&[7u8; 17]),
+            stream.write_with_bytes(&[7u8; 17]),
             "write exceeded the stream's remaining chunk capacity",
         );
         assert_eq!(16, stream.position().unwrap(), "the bytes that fit were written");
         assert_eq!(0, stream.remaining().unwrap());
-        assert_illegal_state(stream.write_byte(1), "write exceeded the stream's remaining chunk capacity");
+        assert_illegal_state(stream.write_with_b(1), "write exceeded the stream's remaining chunk capacity");
         assert!(stream.chunks.iter().all(|c| c.len() == chunk_size), "no chunk grew");
         assert_eq!(2, stream.chunk_count());
 
         // io::Write: a short write while capacity remains, then an error with nothing written.
         let mut io_stream = self::stream(&p, chunk_size, 1);
-        io_stream.write_bytes(&[1, 2, 3, 4, 5]).unwrap();
+        io_stream.write_with_bytes(&[1, 2, 3, 4, 5]).unwrap();
         assert_eq!(3, io_stream.write(&[6u8; 10]).unwrap(), "only what fits is written");
         let err = io_stream.write(&[6u8; 10]).unwrap_err();
         assert_eq!("write exceeded the stream's remaining chunk capacity", io_message(err));
@@ -951,7 +953,7 @@ mod tests {
         assert_eq!(4, stream.position().unwrap());
         assert_eq!(4, stream.remaining().unwrap());
         assert_illegal_state(stream.set_position(1), "position() can only be called before any writes");
-        stream.write_bytes(&[1, 2]).unwrap();
+        stream.write_with_bytes(&[1, 2]).unwrap();
         assert_eq!(6, stream.position().unwrap());
         stream.close();
         assert_eq!(&[0, 0, 0, 0, 1, 2][..], &stream.buffer().unwrap()[..]);
@@ -968,7 +970,7 @@ mod tests {
         let chunk_size = 4;
         let p = pool(32, chunk_size);
         let mut stream = stream(&p, chunk_size, 2);
-        stream.write_bytes(&[1, 2, 3, 4, 5, 6]).unwrap();
+        stream.write_with_bytes(&[1, 2, 3, 4, 5, 6]).unwrap();
         stream.close();
 
         stream.rewrite_buffer(|b| b[0] = 9).unwrap();
@@ -989,7 +991,7 @@ mod tests {
         let p = pool(total, chunk_size);
         {
             let mut stream = stream(&p, chunk_size, 3);
-            stream.write_bytes(&[1, 2, 3]).unwrap();
+            stream.write_with_bytes(&[1, 2, 3]).unwrap();
             assert_eq!(total - 3 * chunk_size as i64, p.available_memory());
         }
         assert_eq!(total, p.available_memory());

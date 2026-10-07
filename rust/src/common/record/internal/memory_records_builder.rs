@@ -374,7 +374,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Mutable access to the underlying output stream; see [`buffer_stream`](Self::buffer_stream).
-    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#bufferStream")]
+    /// Rust-only: Java's single `bufferStream()` returns a mutable object.
     pub(crate) fn buffer_stream_mut(&mut self) -> &mut ByteBufferOutputStream {
         &mut self.buffer_stream
     }
@@ -561,7 +561,7 @@ impl MemoryRecordsBuilder {
                         // Java writes the compressor's output into the chunked stream, which
                         // throws once the attached chunks are full (growth is KAFKA-20579); the
                         // producer rejects compression with the incremental strategy.
-                        if let Err(e) = stream.write_bytes(&compressed_data) {
+                        if let Err(e) = stream.write_with_bytes(&compressed_data) {
                             panic!("Failed to finish compression: {}", e);
                         }
                     },
@@ -2084,7 +2084,7 @@ mod chunked_stream_tests {
         let pool = Arc::new(BufferPool::new_incremental_for_test(64 * CHUNK_SIZE as i64, CHUNK_SIZE));
         let initial = pool.try_allocate_chunks(4 * CHUNK_SIZE as i32).unwrap();
         let mut stream = ChunkedByteBufferOutputStream::new(initial, CHUNK_SIZE, Some(Arc::clone(&pool))).unwrap();
-        stream.write_byte(1).unwrap();
+        stream.write_with_b(1).unwrap();
         let err = MemoryRecordsBuilder::with_buffer_stream(
             ByteBufferOutputStream::Chunked(stream),
             RecordBatch::CURRENT_MAGIC_VALUE,

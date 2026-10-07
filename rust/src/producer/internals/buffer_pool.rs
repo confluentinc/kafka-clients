@@ -680,7 +680,6 @@ impl BufferPool {
     ///
     /// As [`allocate_chunks`](Self::allocate_chunks), with
     /// [`Error::ProducerBufferExhausted`] whenever the memory is not available right now.
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#allocateChunks")]
     pub(crate) fn try_allocate_chunks(&self, total_size: i32) -> Result<Vec<Vec<u8>>, Error> {
         let (num_chunks, memory_required) = self.chunk_request(total_size)?;
         {
@@ -710,7 +709,7 @@ impl BufferPool {
     }
 
     /// The validation `allocateChunks` performs before taking the lock: the mode guard, the
-    /// positive-size check and [`return_error_if_chunks_needed_exceeds_pool`](Self::return_error_if_chunks_needed_exceeds_pool).
+    /// positive-size check and [`return_if_chunks_needed_exceeds_pool`](Self::return_if_chunks_needed_exceeds_pool).
     /// Returns `(num_chunks, memory_required)`.
     fn chunk_request(&self, total_size: i32) -> Result<(usize, i64), Error> {
         if self.allocation_mode != AllocationMode::Incremental {
@@ -728,7 +727,7 @@ impl BufferPool {
         let chunk_size = self.poolable_size as i64;
         let num_chunks = (total_size as i64 + chunk_size - 1) / chunk_size;
         let memory_required = num_chunks * chunk_size;
-        self.return_error_if_chunks_needed_exceeds_pool(total_size, num_chunks, memory_required)?;
+        self.return_if_chunks_needed_exceeds_pool(total_size, num_chunks, memory_required)?;
         Ok((num_chunks as usize, memory_required))
     }
 
@@ -921,7 +920,7 @@ impl BufferPool {
 
     /// Return an error if the request memory rounded up to whole chunks would exceed the pool.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#throwIfChunksNeededExceedsPool")]
-    fn return_error_if_chunks_needed_exceeds_pool(
+    fn return_if_chunks_needed_exceeds_pool(
         &self,
         total_size: i32,
         num_chunks: i64,
