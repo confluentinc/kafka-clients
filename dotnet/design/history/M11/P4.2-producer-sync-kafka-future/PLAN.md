@@ -666,4 +666,10 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
 
 ### 16.1 Slice log
 
-*(Filled in as the slices land.)*
+- **S0 baselines** (Actor 93, at `a1fb6f3e` = `d6ce0512` + this PLAN; no edit, no commit; native rebuilt — it was stale after `2c89c1b4`):
+  - `make -C <repo>/dotnet build-dotnet` → 0 Warning(s) / 0 Error(s).
+  - `make -C <repo>/dotnet test-dotnet` → format clean; unit **2974/TFM** (net8.0, net10.0), soak **165/TFM**, 0 failed. Run 1 hit the R12 flake `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` on net8.0 ("managed memory grew 6397328 bytes across 20000 iterations (budget 2000000)"); its single rerun and two further full runs passed.
+  - `make -C <repo>/dotnet perf-unit-test-dotnet` → **39/TFM**.
+  - `make -C <repo> verify-dotnet-macos-docker` → `test result: ok. 169 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out`. Arms: sync **124**, async **45** (`grep -c -E '^test .*__grpc_dotnet \.\.\. ok$'` / `…__grpc_dotnet_async \.\.\. ok$'`). **Producer arms 31 sync + 31 async** (`grep -c -E '^test .*producer_test.*__grpc_dotnet \.\.\. ok$'`, and the `_async` twin). These replace P3.6's 145 / 38, taken before #206/#212.
+  - `make -C <repo> test-integration-perf-dotnet` → net10.0 Passed 41 / Skipped 2 (the two consumer smokes) / Failed 0; `Producer_Smoke_Sync` confirmed passing by a named rerun (trx 1/1).
+  - Mode A: `internal static extern` 219 + 357; `git diff --stat d6ce0512..HEAD -- . ':!dotnet'` empty.
