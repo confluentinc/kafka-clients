@@ -386,3 +386,21 @@ Named Java classes, packages and version stamps in the rules, checked against 4.
 ## Draft rules notes for later phases
 
 Reserved for the PLAN §2.3 KIP-1332 note (the `ChunkedProducerBatch` fold into `ProducerBatch`, so Critics do not flag the missing type) and any other rule amendments later Milestone-16 phases draft. Phase 0 adds none.
+
+### Drafted amendment (Phase 12, Critic 102): `admin-client.md` §11 is stale
+
+- **Rule text today:** §11 says the only FFI on the branch is the fully synchronous `rust/src/ffi/producer.rs`,
+  that there is no async C API or dispatcher to mirror, and that one must not be invented.
+- **Tree today:** `rust/src/ffi/admin.rs` has both shapes for every admin RPC: `admin_sync_value_op` behind the
+  plain entry points and `admin_async_value_op` behind the `_async` entry points, with completion callbacks
+  named `<Type>_<javaMethod>_callback_t` (CLAUDE.md §4). The consumer and producer FFI have async variants too,
+  and Python has `Admin`/`AsyncAdmin` over them. Phase 12's `kafka_admin_AdminClient_unregister_controller` /
+  `_unregister_controller_async` correctly followed those helpers.
+- **Why it matters:** a Critic applying §11 literally would flag every admin `_async` entry point as an
+  "unreviewed async dispatcher".
+- **Suggested replacement:** drop the branch-state caveat; say that admin bindings follow the in-tree
+  `admin_sync_value_op` / `admin_async_value_op` helpers (the RPC is enqueued on the calling thread; the async
+  callback fires once), use no result handle when Java's result carries only `KafkaFuture<Void>` (the B6 row),
+  and name callbacks per CLAUDE.md §4.
+- **Related, `admin-client.md` §2:** if restated, note that not every enqueue goes through `CallSender::call`:
+  `HandleResult::NewCall` follow-ups are pushed by the I/O task directly (Critic 102 Issue 1).

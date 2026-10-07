@@ -663,8 +663,11 @@ Phase 2 completion notes (agent 92):
 - **For Phase 12 (shared `KafkaAdminClient`):**
   - `AdminClientRunnable` has a `bootstrap_failure_handled` flag. `run_once` returns right after
     `fail_all_pending_calls`, and `process_requests` breaks on the flag.
-  - Every enqueue goes through `CallSender::call`, which reads `metadata_manager.bootstrap_fatal_error()`
-    once at the top; keep that order relative to the closing and controllers checks when adding
+  - Every app-side and driver enqueue goes through `CallSender::call`, which reads
+    `metadata_manager.bootstrap_fatal_error()` once at the top. (Correction, Phase 12 / Critic 102 Issue 1: not
+    *every* enqueue — a handler's `HandleResult::NewCall`, the createTopics / createPartitions / deleteTopics
+    quota-retry follow-ups, is pushed straight into `pending_calls` by the I/O task and skips `call()`'s checks,
+    where Java's follow-ups go through `runnable.call`.) Keep the order; keep that order relative to the closing and controllers checks when adding
     `unregister_controller`. Java's `enqueue` also starts with a `tries > maxRetries` check that the Rust
     enqueue never had (a pre-existing gap, not KIP-909).
   - `fail_all_remaining` closes the call channel before its final drain, so no accepted call is dropped.
@@ -965,8 +968,10 @@ Phase 12 completion notes (agent 102):
     at all (a pre-existing gap, not 4.4 delta). The shared `runUnregisterScenario` is translated for the
     controller arm only; Java's `setNodeApiVersions(UNREGISTER_CONTROLLER, 0, 0)` has no `MockClient` analogue.
   - `ForwardingAdmin.unregisterController`: Rust has no `ForwardingAdmin`.
-  - `DescribeFeaturesTest.testApiVersions` (clients-integration-tests) needs a `bootstrap.controllers` admin,
-    which the Rust config still rejects; the broker half is covered by the unit tests.
+  - `DescribeFeaturesTest.testApiVersions` (clients-integration-tests): the broker half is translated as the
+    in-crate Docker test `src/integration_tests/describe_features_test.rs` (it calls the crate-private
+    `describe_features_internal`). Only the controller half is skipped: it needs a `bootstrap.controllers` admin,
+    which the Rust config still rejects. (Critic 102 Issue 3.)
   - Broker/tool/metadata parts of c274a7348f and 3b849ff2bd (ControllerApis, ClusterControlManager, ClusterTool,
     MetadataQuorumCommand, KRaftClusterTest): server side, out of scope.
   - The integration **success** arm of `unregisterController`: Java first shuts down a controller of a 3-node
@@ -992,6 +997,26 @@ Phase 12 completion notes (agent 102):
   `make -k verify` (00:01–00:10): fails only `build-c` (`cmake: command not found`, so ctest never ran the new C
   surface in the gate) and `lint` (the 15 §5.1 rows); the Rust (incl. all-features with Docker), Python and
   check-bindings arms passed, 4925 tests, 0 failed. DoD #10: N/A (admin is not a per-record path).
+- **Open questions for the human** (from Critic 102; not acted on, Manager decision 2026-10-08):
+  1. **`close(timeout)` does not retry during the grace period** (Critic 102 Issue 1, Medium, pre-existing
+     since M11 `3e84b9bd`, not a Phase 12 regression). `close_with_timeout` stores `shutdown.closing = true` at
+     once; `fail_call` reads it as Java's `runnable.closing` and `should_exit` gates on it. Java's
+     `close(Duration)` (`KafkaAdminClient.java:733-777`) publishes only `hardShutdownTimeMs`; `closing`
+     (`:1209`) is written only in `run()`'s `finally` (`:1551`), so during the grace period `Call.fail`
+     (`:975-979`) still retries via `maybeRetry` (`:1022-1024`), per `Admin.close(Duration)`'s "current
+     operations will be allowed to complete" (`Admin.java:162-165`). The Critic's probe: `unregister_controller`
+     with prepared `[REQUEST_TIMED_OUT, NONE]` gives `Ok` normally but `Err(Timeout)` after `close(60 s)`; Java
+     gives success both times. Related: `HandleResult::NewCall` quota-retry follow-ups bypass `call()`'s
+     hard-shutdown rejection (`:1707-1709`), so Rust keeps retrying what Java fails with "Cannot accept new
+     calls when AdminClient is closing.". **Proposed fix:** gate the I/O task's exit on the hard-shutdown
+     deadline (Java's `curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME`, `:1579-1580`), set `closing` only in
+     `fail_all_remaining` (Java's `finally`), apply `call()`'s hard-shutdown rejection to `NewCall`
+     follow-ups, change the tests that simulate close by storing `closing` to store only the deadline, and
+     translate the probe as a test. It changes close behaviour for every admin RPC, hence the deferral. The
+     `a560d9c7` comment was narrowed to "assigned" meanwhile (fa0bdb52).
+  2. **`unregisterBroker`** is the only member of its family still untranslated (M11 Tier 4 deferral,
+     `design/current/status.md`), though it has `unregisterController`'s shape and shares Java's
+     `runUnregisterScenario`: port it as a follow-up, or keep the deferral?
 - **Timing log** (2026-10-07/08, local):
 
   | Step | Start | End | Minutes |
