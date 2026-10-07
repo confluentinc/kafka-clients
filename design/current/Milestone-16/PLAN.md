@@ -637,10 +637,10 @@ Phase 2 completion notes (agent 92):
   - `determineBootstrapType` runs inside `AdminClientConfig::new`, where the old `fromConfig` logic already
     ran, because the Rust config does not keep `bootstrap.controllers`.
   - `ResolveAddressError` stands for the two Java exceptions of `resolveAddress`.
-  - `CallSender::call`: `shutdown.closing` is also set when the I/O task exits on its own. When it
-    exited on a bootstrap failure and `close()` has not set a hard-shutdown time, the call falls through to
-    the enqueue-side bootstrap check. That gives Java's order: `call()` rejects only on `hardShutdownTimeMs`,
-    then `enqueue` checks `bootstrapEx`.
+  - `CallSender::call` follows Java's order. It rejects with `IllegalState` only when `close()` has set a
+    hard-shutdown time (Java's `hardShutdownTimeMs` check in `call()`), not on `shutdown.closing`, which the
+    I/O task also sets when it exits on its own. After that come the `bootstrap.controllers` endpoint check,
+    the bootstrap failure, and finally the closed channel, which gives Java's `enqueue` `TimeoutException`.
 - **DoD #10: N/A.** The `NetworkClient`, `Metadata` and admin bootstrap paths are per poll and per
   construction, not per record. The only addition to `poll()` in mode 0 is the `is_disabled()` comparison.
 - **For Phase 3 (consumer busy loops):** the consumer's async path works end to end
@@ -705,6 +705,41 @@ Phase 2 completion notes (agent 92):
   - **Owed:** a Docker-backed run of `bootstrap_resolution_test::test_clients_bootstrap_asynchronously_with_positive_timeout`
     and the rest of the integration suite, and a `build-c` / C-test run on a host with cmake. No C or Python
     source changed in this phase.
+- **Review round 1 (COMMENTS.92, all moved to `COMMENTS.DONE.92.md`, 2026-10-07 22:02–22:30 IST):**
+  - **Issue 1 (Medium), fixup 20185de8:** one shared enqueue, `CallSender::call`, so the 14 driver-backed
+    RPCs fail with `BootstrapResolutionError` instead of the retriable "thread has exited" timeout. The
+    channel is closed before the final drain, so every accepted call's future completes. Tests: three
+    driver RPCs in `test_admin_bootstrap_resolution_error_propagated` (each bounded at 5 s, exact message)
+    and `test_call_sender_applies_the_enqueue_checks`.
+  - **Issue 2 (Medium), fixup 253f968d:** the detached resolver thread, the `is_interrupted` check and the
+    bounded `close()` described above. Tests:
+    - `NetworkClient` `close()` with three 5 s lookups in flight: under 3 s;
+    - a runtime drop with a lookup in flight: under 2 s;
+    - the consumer built outside any runtime, as the bindings build it, with `close_with_options(1 s)`:
+      under 5 s (the whole filtered run took 3.2 s; the Critic's probe measured 14 s before);
+    - the producer close plus runtime drop, the C / Python destroy path: under 4 s;
+    - `parse_addresses` stops once interrupted.
+
+    The slow lookups come from a `cfg(test)` host-name seam (`*.slow-dns.kafka.test`), not real DNS.
+  - **Issue 3 (Low), fixup 6b929c66:** the sync-accessor divergence is documented; the `ensure_open` doc is
+    narrowed.
+  - **Issue 4 (Low), fixup fbfe06c7 plus this file:** citations `:1621-1629` and `:790-797` re-checked at
+    4.4.0-rc4; the stale `(AbstractConfig)` sentence and the misplaced `consumer_config.rs` doc comment are
+    fixed.
+  - **Harness, bc66e31e:** `INTEGRATION_TEST_BROKER_TAG` selects the `apache/kafka` tag (default `4.2.0`).
+    Broker runs, against both the default and `4.4.0-rc4` (confirmed via `docker ps`: only
+    `apache/kafka:4.4.0-rc4` containers):
+
+    | Suite | 4.2.0 | 4.4.0-rc4 |
+    |---|---|---|
+    | `--test integration -- bootstrap_resolution_test` | 4 / 4 | 4 / 4 |
+    | `--test integration -- client_rebootstrap_test` | 4 / 4 | 4 / 4 |
+    | `--lib -- integration_tests::` | 31 / 31 | 31 / 31 |
+  - **Round 2 (Issues 5, 6):** `CallSender::call` now rejects with `IllegalState` only when a hard-shutdown
+    time is set, as Java's `call()` does. A task that exited on its own (a panic caught in `run`) therefore
+    yields Java's `TimeoutException("The AdminClient thread has exited.")` at the closed channel, and a
+    bootstrap failure is caught by the next check. Covered in `test_call_sender_applies_the_enqueue_checks`.
+    These review notes now sit inside the Phase 2 section, where they belong; they had been appended after §6.
 
 ### Phase 3 — KIP-909 consumer follow-ups (agent 93)
 
@@ -1001,34 +1036,3 @@ The summary by component:
 Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
 P7+P8 1 (+1 trunk commit for D3), P9 7, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
 Phase 1 review.)
-- **Review round 1 (COMMENTS.92, all moved to `COMMENTS.DONE.92.md`, 2026-10-07 22:02–22:30 IST):**
-  - **Issue 1 (Medium), fixup 20185de8:** one shared enqueue, `CallSender::call`, so the 14 driver-backed
-    RPCs fail with `BootstrapResolutionError` instead of the retriable "thread has exited" timeout. The
-    channel is closed before the final drain, so every accepted call's future completes. Tests: three
-    driver RPCs in `test_admin_bootstrap_resolution_error_propagated` (each bounded at 5 s, exact message)
-    and `test_call_sender_applies_the_enqueue_checks`.
-  - **Issue 2 (Medium), fixup 253f968d:** the detached resolver thread, the `is_interrupted` check and the
-    bounded `close()` described above. Tests:
-    - `NetworkClient` `close()` with three 5 s lookups in flight: under 3 s;
-    - a runtime drop with a lookup in flight: under 2 s;
-    - the consumer built outside any runtime, as the bindings build it, with `close_with_options(1 s)`:
-      under 5 s (the whole filtered run took 3.2 s; the Critic's probe measured 14 s before);
-    - the producer close plus runtime drop, the C / Python destroy path: under 4 s;
-    - `parse_addresses` stops once interrupted.
-
-    The slow lookups come from a `cfg(test)` host-name seam (`*.slow-dns.kafka.test`), not real DNS.
-  - **Issue 3 (Low), fixup 6b929c66:** the sync-accessor divergence is documented; the `ensure_open` doc is
-    narrowed.
-  - **Issue 4 (Low), fixup fbfe06c7 plus this file:** citations `:1621-1629` and `:790-797` re-checked at
-    4.4.0-rc4; the stale `(AbstractConfig)` sentence and the misplaced `consumer_config.rs` doc comment are
-    fixed.
-  - **Harness, bc66e31e:** `INTEGRATION_TEST_BROKER_TAG` selects the `apache/kafka` tag (default `4.2.0`).
-    Broker runs, against both the default and `4.4.0-rc4` (confirmed via `docker ps`: only
-    `apache/kafka:4.4.0-rc4` containers):
-
-    | Suite | 4.2.0 | 4.4.0-rc4 |
-    |---|---|---|
-    | `--test integration -- bootstrap_resolution_test` | 4 / 4 | 4 / 4 |
-    | `--test integration -- client_rebootstrap_test` | 4 / 4 | 4 / 4 |
-    | `--lib -- integration_tests::` | 31 / 31 | 31 / 31 |
-
