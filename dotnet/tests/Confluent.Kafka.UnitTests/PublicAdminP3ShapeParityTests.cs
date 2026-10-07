@@ -1,0 +1,400 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Admin;
+
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// Pins the <b>public shape</b> of M15/P3 Stage 1's surface against the Java classes it
+/// mirrors.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ⚠ <b>C# upcasts and widens silently, so these have to be reflection assertions.</b> A
+/// behavioural test passes equally against <c>Task&lt;Node&gt;</c> and
+/// <c>Task&lt;Node?&gt;</c>, against a property and a method, and against a collection and
+/// a set — M15/P1 shipped three shape defects through a green build, 883 green tests and a
+/// 0-High first review.
+/// </para>
+/// <para>
+/// ⚠ <b>Return-nullability is read from the Java <em>javadoc and body</em>, not the
+/// signature.</b> Java has no nullable-reference annotations. This slice has <b>two</b>
+/// nullable returns and each cites the sentence that decides it:
+/// <c>DescribeClusterResult.authorizedOperations()</c>'s javadoc says the value "will be
+/// non-null if the broker supplied this information, and null otherwise"
+/// (<c>DescribeClusterResult.java:71-73</c>), and <c>controller()</c>'s <em>body</em>
+/// decides the other — <c>KafkaAdminClient.java:2531-2534</c> returns <c>null</c> when the
+/// controller id is <c>NO_CONTROLLER_ID</c>.
+/// </para>
+/// </remarks>
+public sealed class PublicAdminP3ShapeParityTests
+{
+    /// <summary>
+    /// The new RPCs return their <c>*Result</c> <b>synchronously</b> — Java's
+    /// <c>Admin</c> methods do not block, so the <see cref="Task"/> mapping belongs on the
+    /// futures inside the result, never on the method (<c>admin-client.md</c> §1). This is
+    /// DoD §11's spirit for admin.
+    /// </summary>
+    [Fact]
+    public void IAdmin_TheNewRpcsAreSynchronous_WithTheJavaParameterShape()
+    {
+        MethodInfo describeCluster = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeCluster))!;
+        MethodInfo listConfigResources = typeof(IAdmin).GetMethod(nameof(IAdmin.ListConfigResources))!;
+
+        Assert.Equal(typeof(DescribeClusterResult), describeCluster.ReturnType);
+        Assert.Equal(typeof(ListConfigResourcesResult), listConfigResources.ReturnType);
+
+        // describeCluster(DescribeClusterOptions)
+        Assert.Equal(
+            new[] { typeof(DescribeClusterOptions) },
+            describeCluster.GetParameters().Select(parameter => parameter.ParameterType));
+
+        // listConfigResources(Set<ConfigResource.Type>, ListConfigResourcesOptions) —
+        // IReadOnlySet<T> post-dates the netstandard2.0 floor (CLAUDE.md §3's idiom map).
+        Assert.Equal(
+            new[] { typeof(IReadOnlyCollection<ConfigResourceType>), typeof(ListConfigResourcesOptions) },
+            listConfigResources.GetParameters().Select(parameter => parameter.ParameterType));
+
+        foreach (MethodInfo rpc in new[] { describeCluster, listConfigResources })
+        {
+            foreach (ParameterInfo parameter in rpc.GetParameters())
+            {
+                Assert.True(parameter.IsOptional, $"{rpc.Name}.{parameter.Name} must be optional");
+                Assert.Equal(NullableAnnotation.Annotated, NullableFlag(parameter));
+            }
+        }
+
+        // Close remains the ONLY Task-returning member on IAdmin — the P1/P2a/P2b
+        // invariant, re-asserted because new members just landed beside it.
+        Assert.Equal(
+            new[] { nameof(IAdmin.Close) },
+            typeof(IAdmin).GetMethods()
+                .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// <see cref="DescribeClusterResult"/> publishes Java's four accessors as <b>methods</b>
+    /// yielding tasks, three of them nullable.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>The three nullable returns are the point of this test.</b> A binding that read the
+    /// authorized-operations <em>count</em> instead of the gate would still compile against
+    /// a non-nullable <c>Task&lt;IReadOnlyCollection&lt;AclOperation&gt;&gt;</c>, so the
+    /// annotation is what forces the null to remain expressible at all. The cluster id joined
+    /// them in M15/P13.3 (D15): the ABI now returns NULL where Java's <c>clusterId()</c> is null
+    /// (the old-broker <c>Metadata</c> fallback), which no mock can produce — so the
+    /// annotation is the only thing a unit test can pin.
+    /// </remarks>
+    [Fact]
+    public void DescribeClusterResult_PublishesJavasFourAccessors()
+    {
+        MethodInfo nodes = typeof(DescribeClusterResult).GetMethod(
+            nameof(DescribeClusterResult.Nodes), Type.EmptyTypes)!;
+        MethodInfo controller = typeof(DescribeClusterResult).GetMethod(
+            nameof(DescribeClusterResult.Controller), Type.EmptyTypes)!;
+        MethodInfo clusterId = typeof(DescribeClusterResult).GetMethod(
+            nameof(DescribeClusterResult.ClusterId), Type.EmptyTypes)!;
+        MethodInfo authorizedOperations = typeof(DescribeClusterResult).GetMethod(
+            nameof(DescribeClusterResult.AuthorizedOperations), Type.EmptyTypes)!;
+
+        Assert.Equal(typeof(Task<IReadOnlyCollection<Node>>), nodes.ReturnType);
+        Assert.Equal(typeof(Task<Node>), controller.ReturnType);
+        Assert.Equal(typeof(Task<string>), clusterId.ReturnType);
+        Assert.Equal(typeof(Task<IReadOnlyCollection<AclOperation>>), authorizedOperations.ReturnType);
+
+        // ⚠ The nullability under test is the TASK'S VALUE, i.e. position 1 of the
+        // flattened return type — position 0 is the Task itself, which is never null and
+        // is identical for Task<Node> and Task<Node?>. An assertion written against
+        // position 0 here would be green however the value is widened.
+        foreach (MethodInfo accessor in new[] { nodes, controller, clusterId, authorizedOperations })
+        {
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter));
+        }
+
+        // Non-null value: Java's nodes() future always carries one.
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(nodes.ReturnParameter, 1));
+
+        // Nullable values: see the class remarks for the Java citation behind each.
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(controller.ReturnParameter, 1));
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(clusterId.ReturnParameter, 1));
+        Assert.Equal(
+            NullableAnnotation.Annotated, NullableAnnotation.Flag(authorizedOperations.ReturnParameter, 1));
+
+#if NET8_0_OR_GREATER
+        // The same reading through the runtime's own decoder, where it exists (.NET 6+): an
+        // independent check on the hand-rolled one above, for the accessor that changed.
+        NullabilityInfo clusterIdInfo = new NullabilityInfoContext().Create(clusterId.ReturnParameter);
+        Assert.Equal(NullabilityState.NotNull, clusterIdInfo.ReadState);
+        Assert.Equal(NullabilityState.Nullable, Assert.Single(clusterIdInfo.GenericTypeArguments).ReadState);
+        NullabilityInfo nodesInfo = new NullabilityInfoContext().Create(nodes.ReturnParameter);
+        Assert.Equal(NullabilityState.NotNull, Assert.Single(nodesInfo.GenericTypeArguments).ReadState);
+#endif
+
+        // Java's result has no properties and no other accessor.
+        Assert.Empty(typeof(DescribeClusterResult).GetProperties());
+
+        // Java's constructor is package-private; nothing public may build one.
+        Assert.Empty(typeof(DescribeClusterResult).GetConstructors());
+    }
+
+    /// <summary>
+    /// ⚠ <b>There is no public <c>ClusterDescription</c> type (M15/P3 decision D12).</b>
+    /// Java has no such class, so publishing one would be a
+    /// <c>definition-of-done.md</c> §7 violation. The aggregate the four projections derive
+    /// from is <c>internal</c>.
+    /// </summary>
+    /// <remarks>
+    /// The whole public surface of the assembly is swept, not just the two admin
+    /// namespaces, so the type cannot reappear somewhere else and satisfy a narrower check.
+    /// </remarks>
+    [Fact]
+    public void NoPublicClusterDescriptionType_Exists()
+    {
+        Assert.DoesNotContain(
+            typeof(IAdmin).Assembly.GetExportedTypes(),
+            type => type.Name.IndexOf("ClusterDescription", StringComparison.Ordinal) >= 0);
+    }
+
+    /// <summary>
+    /// The list result publishes Java's <b>single</b> accessor, over a <em>collection</em>,
+    /// and invents no second view.
+    /// </summary>
+    [Fact]
+    public void TheListResult_PublishesExactlyJavasSingleAccessor()
+    {
+        MethodInfo configResources = typeof(ListConfigResourcesResult).GetMethod(
+            nameof(ListConfigResourcesResult.All), Type.EmptyTypes)!;
+        Assert.Equal(typeof(Task<IReadOnlyCollection<ConfigResource>>), configResources.ReturnType);
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(configResources.ReturnParameter));
+
+        // Position 1 — the task's VALUE. Java's all() always carries a collection.
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(configResources.ReturnParameter, 1));
+        Assert.Empty(typeof(ListConfigResourcesResult).GetProperties());
+        Assert.Empty(typeof(ListConfigResourcesResult).GetConstructors());
+        Assert.Single(DeclaredPublicMethods(typeof(ListConfigResourcesResult)));
+    }
+
+    /// <summary>
+    /// <see cref="ConfigResourceType"/>'s members carry Java's <c>Type.id()</c> values, not
+    /// C#-assigned ordinals — they cross the ABI as <c>int32_t</c> in <b>both</b>
+    /// directions.
+    /// </summary>
+    [Theory]
+    [InlineData(ConfigResourceType.Unknown, 0)]
+    [InlineData(ConfigResourceType.Topic, 2)]
+    [InlineData(ConfigResourceType.Broker, 4)]
+    [InlineData(ConfigResourceType.BrokerLogger, 8)]
+    [InlineData(ConfigResourceType.ClientMetrics, 16)]
+    [InlineData(ConfigResourceType.Group, 32)]
+    public void ConfigResourceType_CarriesJavasIds(ConfigResourceType type, int id)
+    {
+        Assert.Equal(id, (int)type);
+        Assert.Equal(type, (ConfigResourceType)id);
+    }
+
+    /// <summary>The enum has exactly Java's six members, and no more.</summary>
+    [Fact]
+    public void ConfigResourceType_HasExactlyJavasSixMembers()
+    {
+        Assert.Equal(
+            new[] { "Broker", "BrokerLogger", "ClientMetrics", "Group", "Topic", "Unknown" },
+            Enum.GetNames(typeof(ConfigResourceType)).OrderBy(name => name, StringComparer.Ordinal));
+
+        // The root namespace, beside Node / AclOperation / TopicCollection (D13/D16) — NOT
+        // Confluent.Kafka.Admin, which is where confluent-kafka-dotnet puts its own.
+        Assert.Equal("Confluent.Kafka", typeof(ConfigResourceType).Namespace);
+        Assert.Equal("Confluent.Kafka", typeof(ConfigResource).Namespace);
+    }
+
+    /// <summary>
+    /// <see cref="ConfigResource"/> mirrors Java's constructor and three accessors, and its
+    /// <b>value equality</b> — which Stage 2 keys dictionaries on.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_MirrorsJavasShapeAndValueEquality()
+    {
+        ConstructorInfo only = Assert.Single(typeof(ConfigResource).GetConstructors());
+        Assert.Equal(
+            new[] { typeof(ConfigResourceType), typeof(string) },
+            only.GetParameters().Select(parameter => parameter.ParameterType));
+
+        Assert.Equal(
+            typeof(ConfigResourceType), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Type))!.PropertyType);
+        Assert.Equal(typeof(string), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!.PropertyType);
+        Assert.Equal(typeof(bool), typeof(ConfigResource).GetProperty(nameof(ConfigResource.IsDefault))!.PropertyType);
+        Assert.Equal(
+            NullableAnnotation.NotAnnotated,
+            NullableFlag(typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!));
+
+        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "t");
+        ConfigResource sameTopic = new ConfigResource(ConfigResourceType.Topic, "t");
+        ConfigResource sameNameOtherType = new ConfigResource(ConfigResourceType.Broker, "t");
+        ConfigResource otherName = new ConfigResource(ConfigResourceType.Topic, "u");
+
+        Assert.Equal(topic, sameTopic);
+        Assert.Equal(topic.GetHashCode(), sameTopic.GetHashCode());
+        Assert.NotEqual(topic, sameNameOtherType);
+        Assert.NotEqual(topic, otherName);
+
+        // The dictionary use Stage 2 depends on: distinct keys stay distinct.
+        Dictionary<ConfigResource, int> byResource = new Dictionary<ConfigResource, int>
+        {
+            [topic] = 1,
+            [sameNameOtherType] = 2,
+            [otherName] = 3,
+        };
+        Assert.Equal(3, byResource.Count);
+        Assert.Equal(1, byResource[sameTopic]);
+
+        // isDefault(): the default resource of a type has an EMPTY name (ConfigResource.java:96).
+        Assert.True(new ConfigResource(ConfigResourceType.Broker, string.Empty).IsDefault);
+        Assert.False(topic.IsDefault);
+
+        // Java's constant name, not the .NET member name (M15/P13.4 G2-8, ConfigResource.java:120-122).
+        Assert.Equal("ConfigResource(type=TOPIC, name='t')", topic.ToString());
+        Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.Topic, null!));
+    }
+
+    /// <summary>
+    /// ⚠ <b>A value that is not a defined <see cref="ConfigResourceType"/> member is stored
+    /// as <see cref="ConfigResourceType.Unknown"/></b> (M15/P13.2, finding G2-1) — Java's
+    /// <c>Type.forId</c> fallback (<c>ConfigResource.java:57-59</c>), and what the ABI's
+    /// <c>ConfigResourceType::for_id</c> does to the id before it names the resource back.
+    /// </summary>
+    /// <remarks>
+    /// The rows cover an id past every member (<c>64</c>), ids <em>between</em> members
+    /// (<c>1</c>, <c>3</c>, <c>5</c>), a negative one, one that fits a byte but not a member
+    /// (<c>255</c>), and the extreme.
+    /// </remarks>
+    /// <param name="undefinedId">An <c>int</c> no <see cref="ConfigResourceType"/> member has.</param>
+    [Theory]
+    [InlineData(64)]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(-1)]
+    [InlineData(255)]
+    [InlineData(int.MaxValue)]
+    public void ConfigResource_AnUndefinedType_IsStoredAsUnknown(int undefinedId)
+    {
+        Assert.False(Enum.IsDefined(typeof(ConfigResourceType), (ConfigResourceType)undefinedId));
+
+        ConfigResource resource = new ConfigResource((ConfigResourceType)undefinedId, "x");
+
+        Assert.Equal(ConfigResourceType.Unknown, resource.Type);
+        Assert.Equal("x", resource.Name);
+    }
+
+    /// <summary>
+    /// Every <b>defined</b> member is kept as it is — the normalization touches undefined
+    /// values only, <see cref="ConfigResourceType.Unknown"/> itself included.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_EveryDefinedType_IsPreserved()
+    {
+        ConfigResourceType[] defined = (ConfigResourceType[])Enum.GetValues(typeof(ConfigResourceType));
+        Assert.Equal(6, defined.Length);
+
+        foreach (ConfigResourceType type in defined)
+        {
+            Assert.Equal(type, new ConfigResource(type, "x").Type);
+        }
+    }
+
+    /// <summary>
+    /// ⚠ An undefined type and <see cref="ConfigResourceType.Unknown"/> name the <b>same</b>
+    /// resource — equal, with equal hashes, so one dictionary key — and render as
+    /// <c>UNKNOWN</c> (Java's constant name), since the stored type is what <c>ToString</c>
+    /// prints.
+    /// </summary>
+    [Fact]
+    public void ConfigResource_AnUndefinedType_EqualsAndRendersAsUnknown()
+    {
+        ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
+        ConfigResource unknown = new ConfigResource(ConfigResourceType.Unknown, "x");
+
+        Assert.Equal(unknown, undefined);
+        Assert.Equal(unknown.GetHashCode(), undefined.GetHashCode());
+        Assert.Equal("ConfigResource(type=UNKNOWN, name='x')", undefined.ToString());
+
+        Dictionary<ConfigResource, int> byResource = new Dictionary<ConfigResource, int>
+        {
+            [undefined] = 1,
+            [unknown] = 2,
+        };
+        Assert.Equal(2, Assert.Single(byResource).Value);
+    }
+
+    /// <summary>
+    /// The new options types match Java's fields and defaults exactly, so
+    /// <c>options: null</c> at a call site behaves like a freshly constructed instance.
+    /// </summary>
+    [Fact]
+    public void Options_MatchJavasFieldsAndDefaults()
+    {
+        DescribeClusterOptions cluster = new DescribeClusterOptions();
+        Assert.Null(cluster.TimeoutMs);
+        Assert.False(cluster.IncludeAuthorizedOperations);
+        Assert.False(cluster.IncludeFencedBrokers);
+        AssertOptionNames(
+            typeof(DescribeClusterOptions),
+            nameof(DescribeClusterOptions.IncludeAuthorizedOperations),
+            nameof(DescribeClusterOptions.IncludeFencedBrokers),
+            nameof(cluster.TimeoutMs));
+
+        // Java's ListConfigResourcesOptions declares NO members of its own — it is an empty
+        // subclass of AbstractOptions, so the inherited timeout is the whole surface.
+        ListConfigResourcesOptions configResources = new ListConfigResourcesOptions();
+        Assert.Null(configResources.TimeoutMs);
+        AssertOptionNames(typeof(ListConfigResourcesOptions), nameof(configResources.TimeoutMs));
+
+        foreach (Type type in new[]
+                 {
+                     typeof(DescribeClusterOptions),
+                     typeof(ListConfigResourcesOptions),
+                 })
+        {
+            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
+            Assert.Equal(typeof(int?), timeout.PropertyType);
+            Assert.NotNull(timeout.SetMethod);
+        }
+    }
+
+    /// <summary>
+    /// The type's own public instance methods — <see cref="BindingFlags.DeclaredOnly"/>, so
+    /// <see cref="object"/>'s inherited members do not count towards "exactly one accessor".
+    /// </summary>
+    private static MethodInfo[] DeclaredPublicMethods(Type type) =>
+        type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+    private static void AssertOptionNames(Type optionsType, params string[] expected) =>
+        Assert.Equal(
+            expected.OrderBy(name => name, StringComparer.Ordinal),
+            optionsType.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+
+    private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
+
+    private static byte NullableFlag(ParameterInfo parameter) => NullableAnnotation.Flag(parameter);
+}
