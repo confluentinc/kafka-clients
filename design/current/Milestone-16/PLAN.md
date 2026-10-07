@@ -1135,6 +1135,132 @@ Phase 6 completion notes (agent 96):
 - DoD #10: re-run the hot-path allocation test, and do a throughput A/B on the default `full` path to show
   no regression.
 
+#### Phase 7 completion notes (agent 97)
+
+Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `14eec39c`
+(MemoryRecordsBuilder), `2139ba84` (Java-name fixup of the three).
+
+- **What landed:**
+  - `BufferPool`: `AllocationMode { Full, Incremental }` (`buffer_pool::AllocationMode`, Display
+    `FULL` / `INCREMENTAL`), `with_allocation_mode`, `allocation_mode()`, and the mode guards with
+    Java's messages. `allocate_chunks` is async, takes one FIFO waiter per request, and refunds on
+    timeout, close, a `record_wait_time` error, and (Rust-only) a dropped future (`ChunkWaitGuard`).
+    `try_allocate_chunks` is the sync 0 ms path. Extracted: `await_memory`,
+    `signal_next_waiter_if_memory_available` (renamed from `maybe_signal_next_waiter`),
+    `release_reserved_bytes` (a guard that runs if raw chunk allocation unwinds),
+    `record_buffer_exhausted`, `return_if_chunks_needed_exceeds_pool`, and `allocate_byte_buffer`.
+    `allocate` behaves as before; its wait now goes through `await_memory`.
+  - `ChunkedByteBufferOutputStream` (crate-private, `producer::internals`): chunks are `Box<[u8]>`,
+    so a chunk cannot grow. It stores one write position, not one per chunk; chunks before the current
+    one are always full (see the struct docs). The flatten cache is a `bytes::Bytes`, and in-place
+    header writes go through `rewrite_buffer`. It implements `io::Write` (a short write, then an
+    error). `Drop` returns any chunks still attached.
+  - `MemoryRecordsBuilder` holds a `ByteBufferOutputStream` (`common::utils::internals`, an enum
+    `Single(Vec<u8>)` / `Chunked(..)`). This is the one new type (DoD #7, §2.3).
+- **Recorded skips and deviations:**
+  - No Java test skipped. In `testConstructorRejectsInvalidChunks`, the `null`-list case has no Rust
+    counterpart; the empty list and wrong-capacity cases are translated.
+  - `write(ByteBuffer)` is not a separate method. A slice covers it, through `write_with_bytes` and
+    `io::Write`.
+  - `set_position` (Java `position(int)`) checks capacity before it moves, where Java moves the
+    chunk positions first and then throws. It carries no Java marker, because CLAUDE.md §2's setter
+    name conflicts with the lint's `position_with_<params>`.
+  - `try_allocate_chunks` never enters the waiters queue. Java adds the waiter, times out at 0 ns and
+    removes it, so the outcome is the same. It carries no marker (lint).
+  - The deadline stays on the tokio clock, as `allocate` already does. `await_memory` returns `()`,
+    not the nanos waited.
+  - Recycled free-list chunks are not zeroed. They are `resize(capacity)`, which is a no-op for
+    chunks; this matches Java's `clear()`.
+  - `add_buffers(&mut Vec<Vec<u8>>)` drains only on success, so a caller can refund a refused
+    attach (Java's caller keeps its list for its `finally`).
+  - `ChunkedByteBufferOutputStream::new` drops its chunks on a validation error. That is reachable
+    only with buffers the pool did not allocate.
+  - Builder: chunked plus compression appends the compressed output to the stream at close and
+    panics if the chunks overflow, like the existing "Failed to finish compression" panic. Phase 8
+    must reject compression for the incremental strategy (`KafkaProducer.java:475-480`).
+  - `estimated_bytes_written_after` for magic < 2 spells out `LegacyRecord.recordSize` (14 / 22 +
+    key + value), since `LegacyRecord` is not translated.
+  - `MemoryRecordsBuilder::buffer` is now `&mut self -> Result<&[u8], Error>`, because a chunked
+    stream flattens on the first call. `ProducerBatch::buffer` follows (no callers). The dead
+    Rust-only `buffer_mut` is removed.
+  - §5.1: both shared rows (`ProducerBatch.isWritable`, `RecordAccumulator.recordsBuilder`) are
+    removed by Java in `ProducerBatch` / `RecordAccumulator`, which are Phase 8's half, so **neither is
+    cleared here**. The lint still has exactly the 13 rows.
+- **DoD #10:**
+  - Producer allocation tests: `test_send_allocations_do_not_grow_*`: 2 allocations per steady-state
+    send, before and after. `test_records_allocations_do_not_scale_with_the_record_count`: first
+    `records()` = 1, before and after. Both were measured with a temporary `eprintln` that is not
+    committed.
+  - Throughput uses a temporary release-mode test that is not committed: 20 000 builders x
+    16 KiB, a 10 B key and 100 B values, appended until full and then built, giving 2.72 M records
+    per round, best of 5. Before (dbc609d1): 0.0604 s = **45.07 M rec/s**. After (14eec39c):
+    0.0582 s = **46.73 M rec/s**. No regression.
+  - The chunked path copies once at close (the flatten), and the batch is an O(1) `Bytes` slice of
+    it. The reopen path reuses the flattened allocation when nothing else holds it, and copies
+    otherwise, as the single path re-copies on every close.
+- **Phase 8 API:**
+  - Pool: `BufferPool::with_allocation_mode(memory, batch_size, metrics, time, grp,
+    AllocationMode::Incremental)`, then `pool.allocation_mode()` for the up-front check.
+    - New batch: `pool.allocate_chunks(size: i32, remaining_ms).await -> Result<Vec<Vec<u8>>, Error>`.
+      It does **not** record buffer-exhausted; on `ProducerBufferExhausted` the caller calls
+      `pool.record_buffer_exhausted()`.
+    - Extension: `pool.try_allocate_chunks(size)` (sync).
+    - Unattached chunks go back one by one with `pool.deallocate(chunk)`. A bare `Vec<Vec<u8>>`
+      has **no** Drop refund, so `AppendGuard` must return them itself.
+  - Stream: `ChunkedByteBufferOutputStream::new(chunks, pool.poolable_size(), Some(pool.clone()))?`,
+    then:
+    - `add_buffers(&mut extension_chunks)?`, which drains on success;
+    - `attached_capacity()?`;
+    - `deallocate()` / `deallocate_with_pool(Some(&pool))`.
+    - Dropping a stream refunds its chunks, which covers a cancelled append holding a
+      `NewBatchBuffer`.
+  - Builder: `MemoryRecordsBuilder::with_buffer_stream(ByteBufferOutputStream::Chunked(stream),
+    RecordBatch::CURRENT_MAGIC_VALUE, compression, TimestampType::CreateTime, 0,
+    RecordBatch::NO_TIMESTAMP, NO_PRODUCER_ID, NO_PRODUCER_EPOCH, NO_SEQUENCE, false, false,
+    NO_PARTITION_LEADER_EPOCH, max(batch_size, first_record_size), RecordBatch::NO_TIMESTAMP)?`.
+    - Use `builder.estimated_bytes_written_after(key, value, headers)` for `extensionBytesNeeded`.
+    - `builder.buffer_stream().is_chunked()` is `instanceof`.
+    - `builder.buffer_stream_mut().as_chunked_mut()` returns the stream.
+  - Returning a batch's chunks: `deallocate_buffer` and `deallocate_inflight_buffer` for a chunked
+    batch call `as_chunked_mut().unwrap().deallocate_with_pool(Some(&pool))`.
+    - **Never** use `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a chunked
+      batch: `take_buffer` returns an empty `Vec`, and `initial_capacity()` is the chunk size.
+    - Unused chunks were already released at `close_for_record_appends`.
+- **Timing log** (2026-10-07/08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, Java commit and tests, Rust sources) | 23:58 | 00:09 | 11 |
+  | 1 DoD #10 baseline capture (alloc counts, release bench) | 00:09 | 00:12 | 3 |
+  | 2 `BufferPool` + `BufferPoolChunkAllocationTest`, teeth check, commit | 00:12 | 00:19 | 7 |
+  | 3 `ChunkedByteBufferOutputStream` + its test, commit | 00:19 | 00:22 | 3 |
+  | 4 builder buffer type + builder tests, teeth check, commit | 00:22 | 00:26 | 4 |
+  | 5 DoD #10 after-measure | 00:26 | 00:29 | 3 |
+  | 6 gates (format-check, full test, lint), Java-name fixup | 00:29 | 00:36 | 7 |
+  | 7 producer broker tests (under the lock), stopped waiting on a hung test | 00:38 | 01:19 | 41 |
+  | 8 `make -k verify` | not run | | |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4367 passed, 0 failed, 3 ignored (lib), plus 36, 8 and 5 / 7 ignored.
+  - `cargo xtask lint --keep-going`: exactly the 13 §5.1 rows. Clippy is clean. The first run found 6
+    of this phase's markers misnamed; `2139ba84` fixed them.
+  - `cargo test --features integration-tests --test integration -- producer` (under the broker
+    lock): 92 passed, 0 failed, and 1 did not finish.
+    `producer_transactions_test::test_read_committed_consumer_should_not_see_undecided_data` was
+    still running after 40 minutes.
+    - A `sample` of the test process put its CPU (about 50 %) in the **consumer**
+      `ConsumerNetworkThread::run_once` → `NetworkClientDelegate::poll` → `NetworkClient::poll`
+      (`handle_rebootstrap`, `handle_timed_out_connections`, `maybe_update`), with no
+      producer-builder frames.
+    - The default `full` path is the only one any producer uses, and it runs the pre-Phase-7 code.
+      The other 92 producer tests passed, including every transactional one.
+    - So this looks like a consumer-side busy loop (possibly from the KIP-909 / Phase 2 merge) and
+      not this phase. It is **unverified**: the process could not be stopped from here to re-run
+      the test alone.
+  - `make -k verify`: **not run**. The hung test binary still holds
+    `/private/tmp/claude-501/m16-broker.lock`, and verify needs that lock.
+
 ### Phase 8 — Producer: KIP-1332 part B — accumulator, batch, producer wiring (agent 98)
 
 - `RecordAccumulator` refactor (+164/−64): `topic_info_for`, `partition_changed`, `set_partition`,
